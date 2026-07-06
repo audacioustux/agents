@@ -3,7 +3,7 @@ primary_region = "sin"
 swap_size_mb = 512
 
 [build]
-  image = "diegosouzapw/omniroute:latest"
+  image = "diegosouzapw/omniroute:3.8.43"
 
 [env]
   DATA_DIR = "/app/data"

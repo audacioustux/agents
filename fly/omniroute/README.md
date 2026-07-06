@@ -19,7 +19,7 @@ Import OmniRoute config after deploy; no secrets or provider configs are stored 
 
 ## Runtime
 
-- Image: `diegosouzapw/omniroute:latest`
+- Image: `diegosouzapw/omniroute:3.8.43`
 - Port: `20128`
 - Data volume: `/app/data`
 - Public API: `https://audacioustux-omniroute.fly.dev`

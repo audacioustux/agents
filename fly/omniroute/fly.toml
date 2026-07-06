@@ -1,5 +1,6 @@
 app = "audacioustux-omniroute"
 primary_region = "sin"
+swap_size_mb = 512
 
 [build]
   image = "diegosouzapw/omniroute:latest"

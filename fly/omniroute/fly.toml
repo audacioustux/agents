@@ -2,16 +2,16 @@ app = "audacioustux-omniroute"
 primary_region = "sin"
 
 [build]
-  dockerfile = "Dockerfile"
+  image = "diegosouzapw/omniroute:latest"
 
 [env]
-  DATA_DIR = "/data"
+  DATA_DIR = "/app/data"
   HOSTNAME = "0.0.0.0"
   PORT = "20128"
 
 [[mounts]]
   source = "omniroute_data"
-  destination = "/data"
+  destination = "/app/data"
 
 [http_service]
   internal_port = 20128

@@ -1,6 +1,6 @@
 app = "audacioustux-omniroute"
 primary_region = "sin"
-swap_size_mb = 512
+swap_size_mb = 256
 
 [build]
   image = "diegosouzapw/omniroute:3.8.45"
@@ -24,4 +24,4 @@ swap_size_mb = 512
 [[vm]]
   memory = "1gb"
   cpu_kind = "shared"
-  cpus = 1
+  cpus = 2

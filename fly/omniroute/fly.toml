@@ -1,0 +1,26 @@
+app = "audacioustux-omniroute"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DATA_DIR = "/data"
+  HOSTNAME = "0.0.0.0"
+  PORT = "20128"
+
+[[mounts]]
+  source = "omniroute_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 20128
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

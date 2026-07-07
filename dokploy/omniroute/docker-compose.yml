@@ -1,0 +1,56 @@
+# ──────────────────────────────────────────────────────────────────────
+#  OmniRoute — Dokploy Compose deployment
+#  Single-container base runtime, mirrors the Fly deploy (fly/omniroute).
+#  No Redis: in-memory rate limiting + SQLite quota store is enough for a
+#  single instance (same as Fly). Provider configs/keys are imported at
+#  runtime and persisted to the data volume.
+# ──────────────────────────────────────────────────────────────────────
+
+services:
+  omniroute:
+    image: diegosouzapw/omniroute:3.8.45
+    container_name: omniroute
+    restart: unless-stopped
+    stop_grace_period: 40s
+    env_file: .env
+    environment:
+      - DATA_DIR=/app/data
+      - NODE_ENV=production
+      - PORT=${PORT:-20128}
+      - DASHBOARD_PORT=${PORT:-20128}
+      - HOSTNAME=0.0.0.0
+    volumes:
+      - omniroute-data:/app/data
+    expose:
+      - "20128"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:20128/api/monitoring/health')
+          .then(r=>r.ok?r.json():Promise.reject())
+          .then(j=>process.exit(j.status==='healthy'?0:1))
+          .catch(()=>process.exit(1))
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - dokploy-network
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.routers.omniroute.rule=Host(`omni.tux.bd`)
+      - traefik.http.routers.omniroute.entrypoints=websecure
+      - traefik.http.routers.omniroute.tls.certresolver=letsencrypt
+      - traefik.http.services.omniroute.loadbalancer.server.port=20128
+
+volumes:
+  omniroute-data:
+    name: omniroute-data
+
+networks:
+  dokploy-network:
+    external: true

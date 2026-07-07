@@ -1,0 +1,48 @@
+services:
+  redis:
+    image: redis:8.6.2-alpine
+    container_name: omniroute-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  omniroute:
+    container_name: omniroute
+    depends_on:
+      redis:
+        condition: service_healthy
+    image: diegosouzapw/omniroute:latest-web
+    restart: unless-stopped
+    stop_grace_period: 40s
+    env_file: .env
+    volumes:
+      - omniroute-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - dokploy-network
+    ports:
+      - ${PORT:?}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  dokploy-network:
+    external: true
+
+volumes:
+  omniroute-data:
+  redis-data:

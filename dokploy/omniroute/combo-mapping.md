@@ -191,7 +191,10 @@
 - Context length: `500000`
 - Tags: `vision`, `premium`
 
-1. `cx/gpt-5.5-high`
+1. `cc/claude-sonnet-5`
+2. `vertex/gemini-3.1-pro-preview`
+3. `agy/gemini-3.5-flash-high`
+4. `cx/gpt-5.5-high`
 
 ## best-vision (Best Vision)
 
@@ -199,7 +202,9 @@
 - Context length: `500000`
 - Tags: `vision`, `premium`, `balanced`
 
-1. `cx/gpt-5.5-high`
+1. `vertex/gemini-3.1-pro-preview`
+2. `agy/gemini-3.5-flash-high`
+3. `cx/gpt-5.5-high`
 
 ---
 

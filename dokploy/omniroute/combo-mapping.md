@@ -157,8 +157,11 @@
 - Description: You are a deep reasoning assistant. Think carefully step by step.
 
 1. `cx/gpt-5.5-xhigh`
-2. `zai/glm-5.2`
-3. `cc/claude-opus-4-8`
+2. `cc/claude-opus-4-8`
+3. `zai/glm-5.2`
+4. `cx/gpt-5.5-high`
+5. `zai/glm-5.1`
+6. `cc/claude-sonnet-5`
 
 ## best-reasoning (Best Reasoning)
 
@@ -167,9 +170,10 @@
 - Tags: `reasoning_deep`, `reasoning`, `premium`
 - Description: You are a deep reasoning assistant. Think carefully step by step.
 
-1. `cx/gpt-5.5-high`
-2. `zai/glm-5.1`
-3. `cc/claude-sonnet-5`
+1. `zai/glm-5.2`
+2. `cx/gpt-5.5-high`
+3. `zai/glm-5.1`
+4. `cc/claude-sonnet-5`
 
 ## reasoning (Reasoning)
 
@@ -178,9 +182,8 @@
 - Tags: `reasoning`, `balanced`
 
 1. `cx/gpt-5.5-high`
-2. `zai/glm-5.2`
+2. `zai/glm-5.1`
 3. `cc/claude-sonnet-5`
-4. `vertex/gemini-3.1-pro-preview`
 
 ## pro-vision (Pro Vision)
 

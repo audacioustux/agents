@@ -8,7 +8,7 @@
 
 1. `cc/claude-opus-4-8`
 2. `agy/gemini-3.1-pro-high`
-3. `cx/gpt-5.5-xhigh`
+3. `zai/glm-5.2`
 
 ## best-chat (Best Chat)
 
@@ -19,6 +19,8 @@
 1. `cc/claude-sonnet-5`
 2. `agy/gemini-3.5-flash-high`
 3. `cx/gpt-5.5-high`
+4. `bzl/kimi-k2.6`
+5. `mistral/mistral-large-latest`
 
 ## chat (Chat)
 

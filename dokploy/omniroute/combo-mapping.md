@@ -113,8 +113,8 @@
 - Tags: `fast`, `fast`
 
 1. `cx/gpt-5.3-codex-spark`
-2. `agy/gemini-3.5-flash-high`
-3. `agy/gemini-3.5-flash-medium`
+2. `minimax/MiniMax-M3`
+3. `agy/gemini-3.5-flash-high`
 4. `gh/gemini-3.5-flash`
 
 ## best-fast (Best Fast)
@@ -123,8 +123,8 @@
 - Context length: `500000`
 - Tags: `fast`, `fast`, `balanced`
 
-1. `agy/gemini-3.5-flash-high`
-2. `agy/gemini-3.5-flash-medium`
+1. `minimax/MiniMax-M3`
+2. `agy/gemini-3.5-flash-high`
 3. `gh/gemini-3.5-flash`
 
 ## fast (Fast)
@@ -133,7 +133,7 @@
 - Context length: `500000`
 - Tags: `fast`, `fast`
 
-1. `agy/gemini-3.5-flash-medium`
+1. `agy/gemini-3.5-flash-high`
 2. `gh/gemini-3.5-flash`
 
 ## best-free (Best Free)

@@ -9,6 +9,12 @@
 1. `cc/claude-opus-4-8`
 2. `agy/gemini-3.1-pro-high`
 3. `zai/glm-5.2`
+4. `cc/claude-sonnet-5`
+5. `agy/gemini-3.5-flash-high`
+6. `zai/glm-5.1`
+7. `cx/gpt-5.4`
+8. `bzl/kimi-k2.6`
+9. `mistral/mistral-large-latest`
 
 ## best-chat (Best Chat)
 
@@ -18,9 +24,10 @@
 
 1. `cc/claude-sonnet-5`
 2. `agy/gemini-3.5-flash-high`
-3. `cx/gpt-5.5-high`
-4. `bzl/kimi-k2.6`
-5. `mistral/mistral-large-latest`
+3. `zai/glm-5.1`
+4. `cx/gpt-5.4`
+5. `bzl/kimi-k2.6`
+6. `mistral/mistral-large-latest`
 
 ## chat (Chat)
 
@@ -28,10 +35,9 @@
 - Context length: `500000`
 - Tags: `chat`, `balanced`, `fast`
 
-1. `cc/claude-sonnet-5`
-2. `agy/gemini-3.5-flash-high`
-3. `cx/gpt-5.5-high`
-4. `mistral/mistral-large-latest`
+1. `cx/gpt-5.4`
+2. `bzl/kimi-k2.6`
+3. `mistral/mistral-large-latest`
 
 ## claude-opus (Claude Opus)
 
@@ -40,7 +46,7 @@
 - Tags: `reasoning_deep`, `coding`, `reasoning`, `premium`
 
 1. `cc/claude-opus-4-8`
-2. `bzl/claude-opus-4.7`
+2. `cc/claude-opus-4.7`
 3. `agy/claude-opus-4-6-thinking`
 
 ## claude-sonnet (Claude Sonnet)
@@ -50,8 +56,7 @@
 - Tags: `coding`, `reasoning`, `chat`, `premium`, `balanced`
 
 1. `cc/claude-sonnet-5`
-2. `bzl/claude-sonnet-4.6`
-3. `agy/claude-sonnet-4-6`
+2. `agy/claude-sonnet-4-6`
 
 ## pro-coding (Pro Coding)
 
@@ -62,8 +67,12 @@
   well-documented code.
 
 1. `cc/claude-opus-4-8`
-2. `cx/gpt-5.5-xhigh`
-3. `minimax/MiniMax-M3`
+2. `cx/gpt-5.3-codex-spark`
+3. `cx/gpt-5.5-xhigh`
+4. `cc/claude-sonnet-5`
+5. `cx/gpt-5.5-high`
+6. `minimax/MiniMax-M3`
+7. `mistral/codestral-latest`
 
 ## best-coding (Best Coding)
 
@@ -76,6 +85,7 @@
 1. `cc/claude-sonnet-5`
 2. `cx/gpt-5.5-high`
 3. `minimax/MiniMax-M3`
+4. `mistral/codestral-latest`
 
 ## coding (Coding)
 
@@ -83,10 +93,8 @@
 - Context length: `500000`
 - Tags: `coding`, `balanced`, `fast`, `premium`
 
-1. `cc/claude-sonnet-5`
-2. `cx/gpt-5.5-high`
-3. `minimax/MiniMax-M3`
-4. `mistral/codestral-latest`
+1. `minimax/MiniMax-M3`
+2. `mistral/codestral-latest`
 
 ## best-coding-fast (Best Coding Fast)
 

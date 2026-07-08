@@ -1,34 +1,45 @@
 # OmniRoute on Dokploy
 
-Single-container deployment of the upstream OmniRoute image, mirroring the
-Fly deploy in [`../../fly/omniroute`](../../fly/omniroute). Migrated off Fly;
-data migration is handled manually (import the old `/app/data`).
+Dokploy Compose deployment for OmniRoute using the upstream web image plus Redis.
 
-## Deploy (Dokploy UI)
+## Files
 
-1. Create project → **Create Service → Compose**.
-2. Point it at this repo path (`dokploy/omniroute`) or paste `docker-compose.yml`.
-3. Open the **Environment** tab, paste the contents of `.env.example`, adjust
-   secrets and the domain (`omni.tux.bd`).
-4. Ensure the `dokploy-network` exists (Dokploy creates it by default).
-5. Deploy.
+- `compose.yml` — Dokploy Compose definition.
+- `.env.example` — non-secret runtime defaults; copy to `.env` or paste into Dokploy environment variables.
+- `combo-mapping.md` — live-synced OmniRoute combo inventory, fallback-chain mapping, and configured provider-prefix inventory.
 
-The Traefik labels route `https://omni.tux.bd` → container port `20128`. If
-you prefer, remove the labels and add the domain via Dokploy's **Domains** tab
-instead (Dokploy injects the labels for you).
+## Deploy
+
+1. In Dokploy, create a project and add a Compose service.
+2. Point the service at this repo path: `dokploy/omniroute`.
+3. Use `compose.yml` as the Compose file.
+4. Copy `.env.example` to `.env` or paste the variables into Dokploy.
+5. Ensure the external `dokploy-network` exists.
+6. Deploy.
+
+## Environment
+
+Required non-secret defaults:
+
+```env
+PORT=20128
+HOSTNAME=0.0.0.0
+DATA_DIR=/app/data
+NEXT_PUBLIC_BASE_URL=https://omni.tux.bd
+```
+
+Configure secrets and provider credentials in Dokploy or the OmniRoute UI; do not commit `.env`.
 
 ## Runtime
 
-- Image: `diegosouzapw/omniroute:3.8.45`
-- Port: `20128` (dashboard + API)
-- Data volume: `omniroute-data` → `/app/data`
-- No Redis: in-memory rate limiting + SQLite quota store (same as Fly).
-- Healthcheck: `GET /api/monitoring/health`, expects `status: "healthy"`.
+- Image: `diegosouzapw/omniroute:latest-web`
+- App container: `omniroute`
+- Redis container: `omniroute-redis`
+- Data volume: `omniroute-data` mounted at `/app/data`
+- Redis volume: `redis-data` mounted at `/data`
+- Network: external `dokploy-network`
+- Healthcheck: `node healthcheck.mjs`
 
-## Migration notes
+## Combo mapping
 
-- If importing the Fly `/app/data`, reuse the **same** `JWT_SECRET`,
-  `API_KEY_SECRET`, `STORAGE_ENCRYPTION_KEY`, and `MACHINE_ID_SALT` the Fly
-  instance used. Different keys → encrypted provider credentials/OAuth tokens
-  won't decrypt. Check `fly secrets list` first.
-- Set `BASE_URL` / `NEXT_PUBLIC_BASE_URL` to the new HTTPS domain.
+`combo-mapping.md` is generated from the live OmniRoute deployment and should be refreshed after combo, fallback-chain, provider, or context-window changes.

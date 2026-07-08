@@ -149,6 +149,8 @@
 4. `ollamacloud/minimax-m3`
 5. `nvidia/deepseek-ai/deepseek-v4-pro`
 6. `cerebras/gpt-oss-120b`
+7. `agy/gpt-oss-120b-medium`
+8. `agy/gemini-2.5-pro`
 
 ## pro-reasoning (Pro Reasoning)
 

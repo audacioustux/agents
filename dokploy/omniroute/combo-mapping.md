@@ -46,7 +46,7 @@
 - Tags: `reasoning_deep`, `coding`, `reasoning`, `premium`
 
 1. `cc/claude-opus-4-8`
-2. `cc/claude-opus-4.7`
+2. `bzl/claude-opus-4.7`
 3. `agy/claude-opus-4-6-thinking`
 
 ## claude-sonnet (Claude Sonnet)
@@ -56,7 +56,8 @@
 - Tags: `coding`, `reasoning`, `chat`, `premium`, `balanced`
 
 1. `cc/claude-sonnet-5`
-2. `agy/claude-sonnet-4-6`
+2. `bzl/claude-sonnet-4.6`
+3. `agy/claude-sonnet-4-6`
 
 ## pro-coding (Pro Coding)
 

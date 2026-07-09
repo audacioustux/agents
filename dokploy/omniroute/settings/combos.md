@@ -100,14 +100,13 @@
 
 1. `openrouter/auto`
 2. `bzl/auto:free`
-3. `mistral/devstral-latest`
-4. `ollamacloud/minimax-m3`
-5. `nvidia/deepseek-ai/deepseek-v4-pro`
-6. `cerebras/gpt-oss-120b`
-7. `agy/gpt-oss-120b-medium`
-8. `fmd/gpt-5.4`
-9. `oc/big-pickle`
-10. `groq/openai/gpt-oss-120b`
+3. `oc/big-pickle`
+4. `mistral/devstral-latest`
+5. `fmd/gpt-5.4`
+6. `nvidia/deepseek-ai/deepseek-v4-pro`
+7. `cerebras/gpt-oss-120b`
+8. `agy/gpt-oss-120b-medium`
+9. `groq/openai/gpt-oss-120b`
 
 ## reasoning (Reasoning)
 

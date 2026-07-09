@@ -19,16 +19,7 @@ Dokploy Compose deployment for OmniRoute using the upstream web image plus Redis
 
 ## Environment
 
-Required non-secret defaults:
-
-```env
-PORT=20128
-HOSTNAME=0.0.0.0
-DATA_DIR=/app/data
-NEXT_PUBLIC_BASE_URL=https://omni.tux.bd
-```
-
-Configure secrets and provider credentials in Dokploy or the OmniRoute UI; do not commit `.env`.
+Configure secrets and provider credentials in Dokploy or the OmniRoute UI (follow `.env.example`); do not commit `.env`.
 
 ## Runtime
 

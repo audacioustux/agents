@@ -17,10 +17,6 @@ Dokploy Compose deployment for OmniRoute using the upstream web image plus Redis
 5. Ensure the external `dokploy-network` exists.
 6. Deploy.
 
-## Environment
-
-Configure secrets and provider credentials in Dokploy or the OmniRoute UI (follow `.env.example`); do not commit `.env`.
-
 ## Runtime
 
 - Image: `diegosouzapw/omniroute:latest-web`

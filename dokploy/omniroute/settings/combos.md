@@ -21,10 +21,10 @@
   well-documented code.
 
 1. `cc/claude-sonnet-5`
-2. `cx/gpt-5.3-codex-spark`
-3. `ollamacloud/minimax-m3`
-4. `bzl/minimax-m3`
-5. `minimax/MiniMax-M3`
+2. `ollamacloud/minimax-m3`
+3. `bzl/minimax-m3`
+4. `minimax/MiniMax-M3`
+5. `cx/gpt-5.3-codex-spark`
 6. `cx/gpt-5.5-high`
 7. `mistral/codestral-latest`
 
@@ -39,10 +39,10 @@
 1. `cc/claude-opus-4-8`
 2. `cf/@cf/moonshotai/kimi-k2.7-code`
 3. `cc/claude-sonnet-5`
-4. `cx/gpt-5.3-codex-spark`
-5. `ollamacloud/minimax-m3`
-6. `bzl/minimax-m3`
-7. `minimax/MiniMax-M3`
+4. `ollamacloud/minimax-m3`
+5. `bzl/minimax-m3`
+6. `minimax/MiniMax-M3`
+7. `cx/gpt-5.3-codex-spark`
 8. `cx/gpt-5.5-high`
 9. `mistral/codestral-latest`
 

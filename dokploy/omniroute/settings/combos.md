@@ -9,8 +9,9 @@
 1. `ollamacloud/minimax-m3`
 2. `bzl/minimax-m3`
 3. `minimax/MiniMax-M3`
-4. `cx/gpt-5.5-high`
-5. `mistral/codestral-latest`
+4. `cx/gpt-5.3-codex-spark`
+5. `cx/gpt-5.5-high`
+6. `mistral/codestral-latest`
 
 ## best-coding (Best Coding)
 

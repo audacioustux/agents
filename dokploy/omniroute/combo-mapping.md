@@ -9,37 +9,41 @@
 1. `ollamacloud/minimax-m3`
 2. `bzl/minimax-m3`
 3. `minimax/MiniMax-M3`
-4. `mistral/codestral-latest`
+4. `cx/gpt-5.5-high`
+5. `mistral/codestral-latest`
 
 ## best-coding (Best Coding)
 
 - Strategy: `priority`
 - Context length: `786432`
 - Tags: `coding`, `premium`, `balanced`
-- Description: You are an expert coding assistant. Write clean, efficient, well-documented code.
+- Description: You are an expert coding assistant. Write clean, efficient,
+  well-documented code.
 
 1. `cc/claude-sonnet-5`
-2. `cx/gpt-5.5-high`
+2. `cx/gpt-5.3-codex-spark`
 3. `ollamacloud/minimax-m3`
 4. `bzl/minimax-m3`
 5. `minimax/MiniMax-M3`
-6. `mistral/codestral-latest`
+6. `cx/gpt-5.5-high`
+7. `mistral/codestral-latest`
 
 ## pro-coding (Pro Coding)
 
 - Strategy: `priority`
 - Context length: `786432`
 - Tags: `coding`, `premium`
-- Description: You are an expert coding assistant. Write clean, efficient, well-documented code.
+- Description: You are an expert coding assistant. Write clean, efficient,
+  well-documented code.
 
 1. `cc/claude-opus-4-8`
-2. `cx/gpt-5.3-codex-spark`
-3. `cx/gpt-5.5-xhigh`
-4. `cc/claude-sonnet-5`
-5. `cx/gpt-5.5-high`
-6. `ollamacloud/minimax-m3`
-7. `bzl/minimax-m3`
-8. `minimax/MiniMax-M3`
+2. `cf/@cf/moonshotai/kimi-k2.7-code`
+3. `cc/claude-sonnet-5`
+4. `cx/gpt-5.3-codex-spark`
+5. `ollamacloud/minimax-m3`
+6. `bzl/minimax-m3`
+7. `minimax/MiniMax-M3`
+8. `cx/gpt-5.5-high`
 9. `mistral/codestral-latest`
 
 ## best-coding-fast (Best Coding Fast)
@@ -101,6 +105,9 @@
 5. `nvidia/deepseek-ai/deepseek-v4-pro`
 6. `cerebras/gpt-oss-120b`
 7. `agy/gpt-oss-120b-medium`
+8. `fmd/gpt-5.4`
+9. `oc/big-pickle`
+10. `groq/openai/gpt-oss-120b`
 
 ## reasoning (Reasoning)
 
@@ -120,9 +127,10 @@
 - Description: You are a deep reasoning assistant. Think carefully step by step.
 
 1. `zai/glm-5.2`
-2. `cx/gpt-5.5-high`
-3. `zai/glm-5.1`
-4. `cc/claude-sonnet-5`
+2. `cf/@cf/zai-org/glm-5.2`
+3. `cx/gpt-5.5-high`
+4. `zai/glm-5.1`
+5. `cc/claude-sonnet-5`
 
 ## pro-reasoning (Pro Reasoning)
 
@@ -134,9 +142,10 @@
 1. `cx/gpt-5.5-xhigh`
 2. `cc/claude-opus-4-8`
 3. `zai/glm-5.2`
-4. `cx/gpt-5.5-high`
-5. `zai/glm-5.1`
-6. `cc/claude-sonnet-5`
+4. `cf/@cf/zai-org/glm-5.2`
+5. `cx/gpt-5.5-high`
+6. `zai/glm-5.1`
+7. `cc/claude-sonnet-5`
 
 ## best-vision (Best Vision)
 
@@ -191,12 +200,13 @@
 1. `cc/claude-opus-4-8`
 2. `agy/gemini-3.1-pro-high`
 3. `zai/glm-5.2`
-4. `cc/claude-sonnet-5`
-5. `agy/gemini-3.5-flash-high`
-6. `zai/glm-5.1`
-7. `cx/gpt-5.4`
-8. `bzl/kimi-k2.6`
-9. `mistral/mistral-large-latest`
+4. `cf/@cf/zai-org/glm-5.2`
+5. `cc/claude-sonnet-5`
+6. `agy/gemini-3.5-flash-high`
+7. `zai/glm-5.1`
+8. `cx/gpt-5.4`
+9. `bzl/kimi-k2.6`
+10. `mistral/mistral-large-latest`
 
 ## claude-opus (Claude Opus)
 
@@ -222,7 +232,10 @@
 
 ## Model → providers — normalized model IDs
 
-Grouped by the model id after the first `provider/` prefix, with ASCII case folded only. Punctuation, separators, slashes, versions, and suffixes remain significant: for example, `claude-sonnet-4-6` and `claude-sonnet-4.6` are separate groups.
+Grouped by the model id after the first `provider/` prefix, with ASCII case
+folded only. Punctuation, separators, slashes, versions, and suffixes remain
+significant: for example, `claude-sonnet-4-6` and `claude-sonnet-4.6` are
+separate groups.
 
 Case-only normalized groups in this snapshot:
 
@@ -232,8 +245,11 @@ Case-only normalized groups in this snapshot:
 - `minimax-m2.7` folds: `MiniMax-M2.7`, `minimax-m2.7`
 - `minimax-m3` folds: `MiniMax-M3`, `minimax-m3`
 
+- `@cf/moonshotai/kimi-k2.7-code` →
+- `@cf/zai-org/glm-5.2` →
 - `auto` → `openrouter`
 - `auto:free` → `bzl`
+- `big-pickle` → `oc`
 - `claude-fable-5` → `cc`, `gh`
 - `claude-haiku-4.5` → `bzl`, `gh`
 - `claude-opus-4-6-thinking` → `agy`
@@ -245,7 +261,8 @@ Case-only normalized groups in this snapshot:
 - `claude-sonnet-5` → `cc`, `gh`
 - `codestral-latest` → `mistral`
 - `deepseek-ai/deepseek-v4-pro` → `nvidia`
-- `deepseek-v4-flash (DeepSeek-V4-Flash, deepseek-v4-flash)` → `ollamacloud`, `vertex`
+- `deepseek-v4-flash (DeepSeek-V4-Flash, deepseek-v4-flash)` → `ollamacloud`,
+  `vertex`
 - `deepseek-v4-pro (DeepSeek-V4-Pro, deepseek-v4-pro)` → `ollamacloud`, `vertex`
 - `devstral-latest` → `mistral`
 - `gemini-3-flash-preview` → `bzl`, `vertex`
@@ -268,8 +285,6 @@ Case-only normalized groups in this snapshot:
 - `gpt-oss-120b` → `cerebras`
 - `gpt-oss-120b-medium` → `agy`
 - `kimi-k2.6` → `bzl`, `ollamacloud`
-- `mimo-v2.5` → `bzl`, `mimo`
-- `mimo-v2.5-pro` → `bzl`, `mimo`
 - `minimax-m2.5 (MiniMax-M2.5, minimax-m2.5)` → `bzl`, `minimax`
 - `minimax-m2.7 (MiniMax-M2.7, minimax-m2.7)` → `bzl`, `minimax`, `ollamacloud`
 - `minimax-m3 (MiniMax-M3, minimax-m3)` → `bzl`, `minimax`, `ollamacloud`
@@ -281,7 +296,9 @@ Case-only normalized groups in this snapshot:
 
 ## Provider model inventory — configured connections
 
-Model inventory for configured provider prefixes. The list is de-duplicated across OmniRoute provider-connection model inventories and routable model ids; it is for audit/discovery, not a routing guarantee.
+Model inventory for configured provider prefixes. The list is de-duplicated
+across OmniRoute provider-connection model inventories and routable model ids;
+it is for audit/discovery, not a routing guarantee.
 
 Configured provider prefixes:
 
@@ -294,7 +311,6 @@ Configured provider prefixes:
 - `fmd`
 - `gh`
 - `groq`
-- `mimo`
 - `minimax`
 - `mistral`
 - `nvidia`
@@ -303,9 +319,8 @@ Configured provider prefixes:
 - `openrouter`
 - `vertex`
 - `zai`
-- `zm`
 
-Ignored configured non-LLM connections:
+Ignored configured connections:
 
 - `brave-search`
 - `firecrawl`
@@ -510,12 +525,6 @@ Ignored configured non-LLM connections:
 - `qwen/qwen3-32b`
 - `qwen/qwen3.6-27b`
 
-### mimo
-
-- `mimo-auto`
-- `mimo-v2.5`
-- `mimo-v2.5-pro`
-
 ### minimax
 
 - `MiniMax-M2`
@@ -537,23 +546,128 @@ Ignored configured non-LLM connections:
 
 ### nvidia
 
+- `01-ai/yi-large`
+- `abacusai/dracarys-llama-3.1-70b-instruct`
+- `adept/fuyu-8b`
+- `ai21labs/jamba-1.5-large-instruct`
+- `aisingapore/sea-lion-7b-instruct`
+- `baai/bge-m3`
+- `bigcode/starcoder2-15b`
+- `bytedance/seed-oss-36b-instruct`
+- `databricks/dbrx-instruct`
+- `deepseek-ai/deepseek-coder-6.7b-instruct`
 - `deepseek-ai/deepseek-v4-flash`
 - `deepseek-ai/deepseek-v4-pro`
+- `google/codegemma-1.1-7b`
+- `google/codegemma-7b`
+- `google/deplot`
+- `google/diffusiongemma-26b-a4b-it`
+- `google/gemma-2-2b-it`
+- `google/gemma-2b`
+- `google/gemma-3-12b-it`
+- `google/gemma-3-4b-it`
+- `google/gemma-3n-e2b-it`
+- `google/gemma-3n-e4b-it`
 - `google/gemma-4-31b-it`
+- `google/recurrentgemma-2b`
+- `ibm/granite-3.0-3b-a800m-instruct`
+- `ibm/granite-3.0-8b-instruct`
+- `ibm/granite-34b-code-instruct`
+- `ibm/granite-8b-code-instruct`
+- `meta/codellama-70b`
+- `meta/llama-3.1-70b-instruct`
+- `meta/llama-3.1-8b-instruct`
+- `meta/llama-3.2-11b-vision-instruct`
+- `meta/llama-3.2-1b-instruct`
+- `meta/llama-3.2-3b-instruct`
+- `meta/llama-3.2-90b-vision-instruct`
+- `meta/llama-3.3-70b-instruct`
+- `meta/llama-4-maverick-17b-128e-instruct`
+- `meta/llama-guard-4-12b`
+- `meta/llama2-70b`
+- `microsoft/kosmos-2`
+- `microsoft/phi-3-vision-128k-instruct`
+- `microsoft/phi-3.5-moe-instruct`
+- `microsoft/phi-4-mini-instruct`
+- `microsoft/phi-4-multimodal-instruct`
 - `minimaxai/minimax-m2.7`
+- `minimaxai/minimax-m3`
+- `mistralai/codestral-22b-instruct-v0.1`
 - `mistralai/devstral-2-123b-instruct-2512`
+- `mistralai/ministral-14b-instruct-2512`
+- `mistralai/mistral-7b-instruct-v0.3`
+- `mistralai/mistral-large`
+- `mistralai/mistral-large-2-instruct`
 - `mistralai/mistral-large-3-675b-instruct-2512`
+- `mistralai/mistral-medium-3.5-128b`
+- `mistralai/mistral-nemotron`
 - `mistralai/mistral-small-4-119b-2603`
+- `mistralai/mixtral-8x22b-v0.1`
+- `mistralai/mixtral-8x7b-instruct-v0.1`
 - `moonshotai/kimi-k2.6`
+- `nv-mistralai/mistral-nemo-12b-instruct`
+- `nvidia/ai-synthetic-video-detector`
+- `nvidia/cosmos-reason2-8b`
+- `nvidia/embed-qa-4`
+- `nvidia/gliner-pii`
+- `nvidia/ising-calibration-1-35b-a3b`
+- `nvidia/llama-3.1-nemoguard-8b-content-safety`
+- `nvidia/llama-3.1-nemoguard-8b-topic-control`
+- `nvidia/llama-3.1-nemotron-51b-instruct`
+- `nvidia/llama-3.1-nemotron-70b-instruct`
+- `nvidia/llama-3.1-nemotron-nano-8b-v1`
+- `nvidia/llama-3.1-nemotron-nano-vl-8b-v1`
+- `nvidia/llama-3.1-nemotron-safety-guard-8b-v3`
+- `nvidia/llama-3.1-nemotron-ultra-253b-v1`
+- `nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1`
+- `nvidia/llama-3.2-nv-embedqa-1b-v1`
+- `nvidia/llama-3.3-nemotron-super-49b-v1`
+- `nvidia/llama-3.3-nemotron-super-49b-v1.5`
+- `nvidia/llama-nemotron-embed-1b-v2`
+- `nvidia/llama-nemotron-embed-vl-1b-v2`
+- `nvidia/llama3-chatqa-1.5-70b`
+- `nvidia/mistral-nemo-minitron-8b-8k-instruct`
+- `nvidia/nemoretriever-parse`
+- `nvidia/nemotron-3-content-safety`
+- `nvidia/nemotron-3-nano-30b-a3b`
+- `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning`
 - `nvidia/nemotron-3-super-120b-a12b`
 - `nvidia/nemotron-3-ultra-550b-a55b`
+- `nvidia/nemotron-3.5-content-safety`
+- `nvidia/nemotron-4-340b-instruct`
+- `nvidia/nemotron-4-340b-reward`
+- `nvidia/nemotron-content-safety-reasoning-4b`
+- `nvidia/nemotron-mini-4b-instruct`
+- `nvidia/nemotron-nano-12b-v2-vl`
+- `nvidia/nemotron-nano-3-30b-a3b`
+- `nvidia/nemotron-parse`
+- `nvidia/neva-22b`
+- `nvidia/nv-embed-v1`
+- `nvidia/nv-embedcode-7b-v1`
+- `nvidia/nv-embedqa-e5-v5`
+- `nvidia/nv-embedqa-mistral-7b-v2`
+- `nvidia/nvclip`
+- `nvidia/nvidia-nemotron-nano-9b-v2`
+- `nvidia/riva-translate-4b-instruct`
+- `nvidia/riva-translate-4b-instruct-v1.1`
+- `nvidia/vila`
 - `openai/gpt-oss-120b`
 - `openai/gpt-oss-20b`
+- `qwen/qwen3-next-80b-a3b-instruct`
 - `qwen/qwen3.5-122b-a10b`
 - `qwen/qwen3.5-397b-a17b`
+- `sarvamai/sarvam-m`
+- `snowflake/arctic-embed-l`
 - `stepfun-ai/step-3.5-flash`
 - `stepfun-ai/step-3.7-flash`
+- `stockmark/stockmark-2-100b-instruct`
+- `upstage/solar-10.7b-instruct`
+- `writer/palmyra-creative-122b`
+- `writer/palmyra-fin-70b-32k`
+- `writer/palmyra-med-70b`
+- `writer/palmyra-med-70b-32k`
 - `z-ai/glm-5.2`
+- `zyphra/zamba2-7b-instruct`
 
 ### ollamacloud
 
@@ -680,151 +794,3 @@ Ignored configured non-LLM connections:
 - `glm-5-turbo`
 - `glm-5.1`
 - `glm-5.2`
-
-### zm
-
-- `anthropic/claude-fable-5`
-- `anthropic/claude-fable-5-free`
-- `anthropic/claude-haiku-4.5`
-- `anthropic/claude-opus-4`
-- `anthropic/claude-opus-4.1`
-- `anthropic/claude-opus-4.5`
-- `anthropic/claude-opus-4.6`
-- `anthropic/claude-opus-4.7`
-- `anthropic/claude-opus-4.8`
-- `anthropic/claude-sonnet-4`
-- `anthropic/claude-sonnet-4.5`
-- `anthropic/claude-sonnet-4.6`
-- `anthropic/claude-sonnet-5`
-- `baidu/ernie-5.0-thinking-preview`
-- `baidu/ernie-5.1`
-- `baidu/ernie-x1.1-preview`
-- `bytedance/doubao-seed-1.8`
-- `bytedance/doubao-seed-2.0-code`
-- `bytedance/doubao-seed-2.0-lite`
-- `bytedance/doubao-seed-2.0-mini`
-- `bytedance/doubao-seed-2.0-pro`
-- `bytedance/doubao-seed-2.1-pro`
-- `bytedance/doubao-seed-2.1-turbo`
-- `bytedance/doubao-seed-character`
-- `bytedance/doubao-seed-code`
-- `bytedance/doubao-seed-evolving`
-- `deepseek/deepseek-chat`
-- `deepseek/deepseek-chat-v3.1`
-- `deepseek/deepseek-r1-0528`
-- `deepseek/deepseek-reasoner`
-- `deepseek/deepseek-v3.2`
-- `deepseek/deepseek-v3.2-exp`
-- `deepseek/deepseek-v4-flash`
-- `deepseek/deepseek-v4-pro`
-- `google/gemini-2.5-flash`
-- `google/gemini-2.5-flash-lite`
-- `google/gemini-2.5-pro`
-- `google/gemini-3-flash-preview`
-- `google/gemini-3.1-flash-lite`
-- `google/gemini-3.1-flash-lite-preview`
-- `google/gemini-3.1-pro-preview`
-- `google/gemini-3.5-flash`
-- `google/gemini-embedding-2`
-- `inclusionai/ling-2.6-1t`
-- `inclusionai/ling-2.6-flash`
-- `inclusionai/llada2.1-flash`
-- `inclusionai/ring-2.6-1t`
-- `kuaishou/kat-coder-air-v2.5`
-- `kuaishou/kat-coder-pro-v2`
-- `kuaishou/kat-coder-pro-v2.5`
-- `meituan/longcat-2.0`
-- `meta/llama-3.3-70b-instruct`
-- `meta/llama-4-scout-17b-16e-instruct`
-- `minimax/minimax-m2`
-- `minimax/minimax-m2-her`
-- `minimax/minimax-m2.1`
-- `minimax/minimax-m2.5`
-- `minimax/minimax-m2.5-lightning`
-- `minimax/minimax-m2.7`
-- `minimax/minimax-m2.7-highspeed`
-- `minimax/minimax-m3`
-- `mistralai/mistral-large-2512`
-- `moonshotai/kimi-k2.5`
-- `moonshotai/kimi-k2.6`
-- `moonshotai/kimi-k2.7-code`
-- `moonshotai/kimi-k2.7-code-highspeed`
-- `openai/chat-latest`
-- `openai/gpt-4.1`
-- `openai/gpt-4.1-mini`
-- `openai/gpt-4.1-nano`
-- `openai/gpt-4o`
-- `openai/gpt-4o-mini`
-- `openai/gpt-5`
-- `openai/gpt-5-chat`
-- `openai/gpt-5-codex`
-- `openai/gpt-5-mini`
-- `openai/gpt-5-nano`
-- `openai/gpt-5-pro`
-- `openai/gpt-5.1`
-- `openai/gpt-5.1-chat`
-- `openai/gpt-5.1-codex`
-- `openai/gpt-5.1-codex-mini`
-- `openai/gpt-5.2`
-- `openai/gpt-5.2-chat`
-- `openai/gpt-5.2-codex`
-- `openai/gpt-5.2-pro`
-- `openai/gpt-5.3-chat`
-- `openai/gpt-5.3-codex`
-- `openai/gpt-5.4`
-- `openai/gpt-5.4-mini`
-- `openai/gpt-5.4-nano`
-- `openai/gpt-5.4-pro`
-- `openai/gpt-5.5`
-- `openai/gpt-5.5-pro`
-- `openai/gpt-image-1.5`
-- `openai/gpt-image-2`
-- `openai/o4-mini`
-- `openai/text-embedding-3-large`
-- `openai/text-embedding-3-small`
-- `qwen/qwen3-14b`
-- `qwen/qwen3-235b-a22b-2507`
-- `qwen/qwen3-235b-a22b-thinking-2507`
-- `qwen/qwen3-asr-flash`
-- `qwen/qwen3-coder`
-- `qwen/qwen3-coder-plus`
-- `qwen/qwen3-max`
-- `qwen/qwen3-vl-embedding`
-- `qwen/qwen3-vl-plus`
-- `qwen/qwen3.5-flash`
-- `qwen/qwen3.5-plus`
-- `qwen/qwen3.6-flash`
-- `qwen/qwen3.6-max-preview`
-- `qwen/qwen3.6-plus`
-- `qwen/qwen3.7-max`
-- `qwen/qwen3.7-plus`
-- `sapiens-ai/agnes-2.0-flash`
-- `stepfun/step-3`
-- `stepfun/step-3.5-flash`
-- `stepfun/step-3.7-flash`
-- `stepfun/step-3.7-flash-free`
-- `tencent/hy3`
-- `tencent/hy3-preview`
-- `x-ai/grok-4.1-fast`
-- `x-ai/grok-4.2-fast`
-- `x-ai/grok-4.2-fast-non-reasoning`
-- `x-ai/grok-4.3`
-- `x-ai/grok-4.5`
-- `x-ai/grok-4.5-free`
-- `x-ai/grok-build-0.1`
-- `xiaomi/mimo-v2.5`
-- `xiaomi/mimo-v2.5-pro`
-- `z-ai/glm-4.5`
-- `z-ai/glm-4.5-air`
-- `z-ai/glm-4.6`
-- `z-ai/glm-4.6v`
-- `z-ai/glm-4.6v-flash`
-- `z-ai/glm-4.6v-flash-free`
-- `z-ai/glm-4.7`
-- `z-ai/glm-4.7-flash-free`
-- `z-ai/glm-4.7-flashx`
-- `z-ai/glm-5`
-- `z-ai/glm-5-turbo`
-- `z-ai/glm-5.1`
-- `z-ai/glm-5.2`
-- `z-ai/glm-5v-turbo`

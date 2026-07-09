@@ -1,0 +1,143 @@
+setupVersion: 1
+theme: 
+  dark: dark
+  light: light
+symbolPreset: ascii
+statusLine: 
+  preset: full
+  separator: slash
+  transparent: true
+  sessionAccent: true
+display: 
+  showTokenUsage: false
+  shimmer: kitt
+task: 
+  showResolvedModelBadge: true
+  enableLsp: true
+defaultThinkingLevel: auto
+memory: 
+  backend: "off"
+enabledModels: 
+  - omniroute/pro-chat
+  - omniroute/best-chat
+  - omniroute/chat
+  - omniroute/claude-opus
+  - omniroute/claude-sonnet
+  - omniroute/pro-coding
+  - omniroute/best-coding
+  - omniroute/coding
+  - omniroute/best-coding-fast
+  - omniroute/pro-fast
+  - omniroute/best-fast
+  - omniroute/fast
+  - omniroute/best-free
+  - omniroute/pro-reasoning
+  - omniroute/best-reasoning
+  - omniroute/reasoning
+  - omniroute/pro-vision
+  - omniroute/best-vision
+modelRoles: 
+  default: omniroute/reasoning
+  smol: omniroute/best-fast
+  slow: omniroute/best-reasoning
+  plan: omniroute/pro-reasoning
+  commit: omniroute/best-coding-fast
+  vision: omniroute/pro-vision
+  designer: omniroute/pro-chat
+  task: omniroute/pro-fast
+  advisor: omniroute/pro-chat
+retry: 
+  enabled: true
+  maxRetries: 100
+  baseDelayMs: 10000
+  modelFallback: true
+  fallbackRevertPolicy: cooldown-expiry
+  fallbackChains: 
+    default: 
+      - omniroute/best-reasoning
+      - omniroute/pro-reasoning
+      - omniroute/best-free
+    smol: 
+      - omniroute/fast
+      - omniroute/best-coding-fast
+      - omniroute/best-free
+    commit: 
+      - omniroute/best-coding
+      - omniroute/coding
+      - omniroute/best-free
+    task: 
+      - omniroute/best-fast
+      - omniroute/coding
+      - omniroute/best-free
+    plan: 
+      - omniroute/best-reasoning
+      - omniroute/reasoning
+      - omniroute/pro-coding
+      - omniroute/best-free
+    slow: 
+      - omniroute/reasoning
+      - omniroute/best-free
+    vision: 
+      - omniroute/best-vision
+      - omniroute/best-chat
+      - omniroute/best-free
+    designer: 
+      - omniroute/best-chat
+      - omniroute/chat
+      - omniroute/coding
+      - omniroute/best-free
+    advisor: 
+      - omniroute/best-chat
+      - omniroute/chat
+      - omniroute/best-free
+tui: 
+  tight: false
+advisor: 
+  enabled: true
+  syncBacklog: "3"
+  subagents: false
+features: 
+  unexpectedStopDetection: true
+autolearn: 
+  enabled: true
+lsp: 
+  formatOnWrite: true
+  diagnosticsOnEdit: true
+inspect_image: 
+  enabled: true
+checkpoint: 
+  enabled: true
+github: 
+  enabled: true
+  cache: 
+    enabled: true
+secrets: 
+  enabled: true
+compaction: 
+  thresholdPercent: -1
+  thresholdTokens: 500000
+  handoffSaveToDisk: true
+  idleEnabled: true
+  strategy: snapcompact
+  idleTimeoutSeconds: 1800
+  idleThresholdTokens: 400000
+terminal: 
+  showProgress: true
+snapcompact: 
+  toolResults: false
+interruptMode: immediate
+branchSummary: 
+  enabled: true
+bashInterceptor: 
+  enabled: false
+shellMinimizer: 
+  sourceOutlineLevel: default
+bash: 
+  autoBackground: 
+    enabled: false
+todo: 
+  eager: preferred
+contextPromotion: 
+  enabled: true
+browser: 
+  headless: true

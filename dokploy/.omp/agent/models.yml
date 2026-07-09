@@ -1,0 +1,52 @@
+providers:
+  omniroute:
+    baseUrl: https://omni.tux.bd/v1
+    apiKey: sk-xxx # from Dashboard → API Manager
+    api: openai-completions
+    compat:
+      supportsReasoningEffort: true # OmniRoute understands reasoning_effort
+      supportsDeveloperRole: false # send system role, OmniRoute translates
+    # Explicit list keeps the cache key as bare `omniroute` so enabledModels
+    # validation can resolve `omniroute/<id>` patterns.
+    #
+    # All custom combos are created via OmniRoute's /api/combos.
+    # Mirrors enabledModels in config.yml.
+    models:
+      - id: pro-chat
+        contextWindow: 512000
+      - id: best-chat
+        contextWindow: 512000
+      - id: chat
+        contextWindow: 512000
+      - id: claude-opus
+        contextWindow: 204800
+      - id: claude-sonnet
+        contextWindow: 204800
+      - id: pro-coding
+        contextWindow: 512000
+      - id: best-coding
+        contextWindow: 512000
+      - id: coding
+        contextWindow: 512000
+      - id: best-coding-fast
+        contextWindow: 512000
+      - id: pro-fast
+        contextWindow: 512000
+      - id: best-fast
+        contextWindow: 512000
+      - id: fast
+        contextWindow: 512000
+      - id: best-free
+        contextWindow: 131072
+      - id: pro-reasoning
+        contextWindow: 512000
+      - id: best-reasoning
+        contextWindow: 512000
+      - id: reasoning
+        contextWindow: 512000
+      - id: pro-vision
+        input: [text, image]
+        contextWindow: 512000
+      - id: best-vision
+        input: [text, image]
+        contextWindow: 512000

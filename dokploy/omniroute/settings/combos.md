@@ -99,7 +99,7 @@
 - Tags: `coding`, `chat`, `fast`, `free`
 - Description: You are a helpful coding assistant. Write clean, efficient code.
 
-1. `openrouter/auto`
+1. `openrouter/openrouter/free`
 2. `bzl/auto:free`
 3. `oc/big-pickle`
 4. `mistral/devstral-latest`

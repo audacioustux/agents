@@ -116,8 +116,10 @@
 - Tags: `reasoning`, `balanced`
 
 1. `cx/gpt-5.5-high`
-2. `zai/glm-5.1`
-3. `cc/claude-sonnet-5`
+2. `gh/gpt-5.5`
+3. `zai/glm-5.1`
+4. `cc/claude-sonnet-5`
+5. `gh/claude-sonnet-5`
 
 ## best-reasoning (Best Reasoning)
 
@@ -129,8 +131,10 @@
 1. `zai/glm-5.2`
 2. `cf/@cf/zai-org/glm-5.2`
 3. `cx/gpt-5.5-high`
-4. `zai/glm-5.1`
-5. `cc/claude-sonnet-5`
+4. `gh/gpt-5.5`
+5. `zai/glm-5.1`
+6. `cc/claude-sonnet-5`
+7. `gh/claude-sonnet-5`
 
 ## pro-reasoning (Pro Reasoning)
 
@@ -144,8 +148,10 @@
 3. `zai/glm-5.2`
 4. `cf/@cf/zai-org/glm-5.2`
 5. `cx/gpt-5.5-high`
-6. `zai/glm-5.1`
-7. `cc/claude-sonnet-5`
+6. `gh/gpt-5.5`
+7. `zai/glm-5.1`
+8. `cc/claude-sonnet-5`
+9. `gh/claude-sonnet-5`
 
 ## best-vision (Best Vision)
 

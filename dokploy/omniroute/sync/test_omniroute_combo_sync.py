@@ -149,6 +149,28 @@ class ComboSyncTests(unittest.TestCase):
             repo = Path(tmp)
             self.assertEqual(changed_instance_names(repo, "workflow_dispatch", None, None, "omni.tux.bd"), ["omni.tux.bd"])
 
+    def test_render_markdown_is_deterministic(self):
+        first = render_markdown(self.source_config())
+        second = render_markdown(self.source_config())
+        self.assertEqual(first, second)
+
+    def test_changed_instances_all_discovers_instance_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            instance_dir = repo / "dokploy" / "omniroute" / "settings" / "instances" / "omni.tux.bd"
+            instance_dir.mkdir(parents=True)
+            (instance_dir / "combos.json").write_text(json.dumps(self.source_config()), encoding="utf-8")
+
+            self.assertEqual(changed_instance_names(repo, "workflow_dispatch", None, None, "all"), ["omni.tux.bd"])
+
+    def test_validate_config_rejects_openai_v1_base_url(self):
+        config = self.source_config()
+        config["baseUrl"] = "https://omni.tux.bd/v1"
+
+        errors = validate_instance_config(config, Path("dokploy/omniroute/settings/instances/omni.tux.bd/combos.json"))
+
+        self.assertIn("baseUrl must be the OmniRoute origin, not the OpenAI /v1 endpoint", "\n".join(errors))
+
 
 if __name__ == "__main__":
     unittest.main()

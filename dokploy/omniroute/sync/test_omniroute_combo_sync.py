@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from omniroute_combo_sync import (
+    OmniRouteClient,
     changed_instance_names,
     diff_combo,
     merge_existing_combo,
@@ -170,6 +171,14 @@ class ComboSyncTests(unittest.TestCase):
         errors = validate_instance_config(config, Path("dokploy/omniroute/settings/instances/omni.tux.bd/combos.json"))
 
         self.assertIn("baseUrl must be the OmniRoute origin, not the OpenAI /v1 endpoint", "\n".join(errors))
+
+    def test_client_accepts_wrapped_combo_and_model_lists(self):
+        client = object.__new__(OmniRouteClient)
+        client._request = lambda method, path: {"combos": []} if path == "/api/combos" else {"models": []}
+
+        self.assertEqual(client.get_combos(), [])
+        self.assertEqual(client.get_models(), [])
+
 
 
 if __name__ == "__main__":

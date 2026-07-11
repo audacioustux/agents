@@ -33,16 +33,10 @@ class OmniRouteClient:
         self.api_key = api_key
 
     def get_combos(self) -> list[dict[str, Any]]:
-        result = self._request("GET", "/api/combos")
-        if not isinstance(result, list):
-            raise RuntimeError("GET /api/combos returned non-list JSON")
-        return result
+        return _response_list(self._request("GET", "/api/combos"), "combos", "GET /api/combos")
 
     def get_models(self) -> list[dict[str, Any]]:
-        result = self._request("GET", "/api/models?all=true")
-        if not isinstance(result, list):
-            raise RuntimeError("GET /api/models?all=true returned non-list JSON")
-        return result
+        return _response_list(self._request("GET", "/api/models?all=true"), "models", "GET /api/models?all=true")
 
     def post_combo(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = self._request("POST", "/api/combos", payload)
@@ -85,6 +79,13 @@ class OmniRouteClient:
         except json.JSONDecodeError as error:
             raise RuntimeError(f"{method} {url} returned invalid JSON") from error
 
+
+def _response_list(result: Any, wrapper_key: str, description: str) -> list[dict[str, Any]]:
+    if isinstance(result, dict) and wrapper_key in result:
+        result = result[wrapper_key]
+    if not isinstance(result, list):
+        raise RuntimeError(f"{description} returned non-list JSON")
+    return result
 
 def instance_config_path(config_root: Path, instance: str) -> Path:
     return config_root / instance / "combos.json"

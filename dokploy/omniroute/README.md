@@ -6,7 +6,9 @@ Dokploy Compose deployment for OmniRoute using the upstream web image plus Redis
 
 - `compose.yml` — Dokploy Compose definition.
 - `.env.example` — non-secret runtime defaults; copy to `.env` or paste into Dokploy environment variables.
-- `combo-mapping.md` — live-synced OmniRoute combo inventory, fallback-chain mapping, and configured provider-prefix inventory.
+- `settings/instances/omni.tux.bd/combos.json` — structured combo source for the `omni.tux.bd` OmniRoute instance.
+- `settings/instances/omni.tux.bd/combos.md` — generated combo documentation; do not edit by hand.
+- `sync/` — dependency-free Python tooling used by GitHub Actions to validate, render, dry-run, and apply combo updates.
 
 ## Deploy
 
@@ -27,6 +29,14 @@ Dokploy Compose deployment for OmniRoute using the upstream web image plus Redis
 - Network: external `dokploy-network`
 - Healthcheck: `node healthcheck.mjs`
 
-## Combo mapping
+## Combo sync
 
-`combo-mapping.md` is generated from the live OmniRoute deployment and should be refreshed after combo, fallback-chain, provider, or context-window changes.
+Combo configuration is managed per OmniRoute instance under `settings/instances/<environment>/combos.json`. The directory name is also the GitHub Environment name.
+
+For `omni.tux.bd`, edit `settings/instances/omni.tux.bd/combos.json`. Merges to `main` run `.github/workflows/omniroute-combos.yml`, read the `OMNIROUTE_API_KEY` secret from the `omni.tux.bd` GitHub Environment, dry-run the diff, then apply the declared combo changes through OmniRoute `/api/combos`.
+
+Generated Markdown lives beside the JSON as `combos.md` and is checked in CI with:
+
+```bash
+python dokploy/omniroute/sync/render_combos_md.py --instance omni.tux.bd --check
+```

@@ -111,7 +111,6 @@ combos:
     - agy/gemini-3.5-flash-high
     - cx/gpt-5.5-high
   pro-fast:
-    - cx/gpt-5.3-codex-spark
     - ollamacloud/minimax-m3
     - minimax/MiniMax-M3
     - agy/gemini-3.5-flash-high
@@ -124,6 +123,7 @@ combos:
   fast:
     - agy/gemini-3.5-flash-high
     - gh/gemini-3.5-flash
+    - cx/gpt-5.3-codex-spark
   best-free:
     - oc/big-pickle
     - nvidia/deepseek-ai/deepseek-v4-pro

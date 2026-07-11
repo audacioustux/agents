@@ -1,14 +1,17 @@
 # OmniRoute on Dokploy
 
-Dokploy Compose deployment for OmniRoute using the upstream web image plus Redis.
+Dokploy Compose deployment for OmniRoute using the upstream web image plus
+Redis.
 
 ## Files
 
 - `compose.yml` — Dokploy Compose definition.
-- `.env.example` — non-secret runtime defaults; copy to `.env` or paste into Dokploy environment variables.
-- `settings/instances/omni.tux.bd/combos.json` — structured combo source for the `omni.tux.bd` OmniRoute instance.
-- `settings/instances/omni.tux.bd/combos.md` — generated combo documentation; do not edit by hand.
-- `sync/` — dependency-free Python tooling used by GitHub Actions to validate, render, dry-run, and apply combo updates.
+- `.env.example` — non-secret runtime defaults; copy to `.env` or paste into
+  Dokploy environment variables.
+- `.github/omniroute/combos.yml` — declarative combo model lists for the single
+  `omni.tux.bd` OmniRoute instance.
+- `.github/scripts/sync-omniroute-combos.ts` — Deno/TypeScript sync script used
+  by GitHub Actions for validation, dry-runs, and applies.
 
 ## Deploy
 
@@ -31,12 +34,22 @@ Dokploy Compose deployment for OmniRoute using the upstream web image plus Redis
 
 ## Combo sync
 
-Combo configuration is managed per OmniRoute instance under `settings/instances/<environment>/combos.json`. The directory name is also the GitHub Environment name.
+Combo configuration is managed in `.github/omniroute/combos.yml`. The file
+declares the `https://omni.tux.bd` base URL and each combo's ordered model list.
 
-For `omni.tux.bd`, edit `settings/instances/omni.tux.bd/combos.json`. Merges to `main` run `.github/workflows/omniroute-combos.yml`, read the `OMNIROUTE_API_KEY` secret from the `omni.tux.bd` GitHub Environment, dry-run the diff, then apply the declared combo changes through OmniRoute `/api/combos`.
+Merges to `main` run `.github/workflows/omniroute-combos.yml` with Deno. The
+workflow reads the `OMNIROUTE_API_KEY` secret from the `omni.tux.bd` GitHub
+Environment, runs the script tests, dry-runs the diff, then applies changed
+combo model lists through OmniRoute `/api/combos`.
 
-Generated Markdown lives beside the JSON as `combos.md` and is checked in CI with:
+The sync only manages each combo's ordered `models` list. It preserves live
+combo metadata and retained model-entry metadata, including weighted-combo
+weights. It never creates or deletes combos; unexpected live combo names or
+missing declared combos fail validation instead.
+
+Run the same checks locally with:
 
 ```bash
-python dokploy/omniroute/sync/render_combos_md.py --instance omni.tux.bd --check
+deno test --allow-read --allow-net .github/scripts/sync-omniroute-combos.ts
+deno run --allow-read --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --dry-run
 ```

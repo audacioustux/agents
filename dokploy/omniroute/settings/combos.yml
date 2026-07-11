@@ -1,23 +1,5 @@
 baseUrl: https://omni.tux.bd
 combos:
-  fast:
-    - agy/gemini-3.5-flash-high
-    - gh/gemini-3.5-flash
-  best-free:
-    - bzl/auto:free
-    - oc/big-pickle
-    - mistral/devstral-latest
-    - nvidia/deepseek-ai/deepseek-v4-pro
-    - fmd/gpt-5.4
-    - cerebras/gpt-oss-120b
-    - agy/gpt-oss-120b-medium
-    - groq/openai/gpt-oss-120b
-  coding:
-    - ollamacloud/minimax-m3
-    - bzl/minimax-m3
-    - minimax/MiniMax-M3
-    - cx/gpt-5.5-high
-    - mistral/codestral-latest
   pro-coding:
     - cc/claude-opus-4-8
     - cc/claude-sonnet-5
@@ -26,12 +8,24 @@ combos:
     - minimax/MiniMax-M3
     - cx/gpt-5.5-high
     - mistral/codestral-latest
-  reasoning:
-    - cx/gpt-5.5-high
-    - gh/gpt-5.5
-    - zai/glm-5.1
+  best-coding:
     - cc/claude-sonnet-5
-    - gh/claude-sonnet-5
+    - ollamacloud/minimax-m3
+    - bzl/minimax-m3
+    - minimax/MiniMax-M3
+    - cx/gpt-5.5-high
+    - mistral/codestral-latest
+  coding:
+    - ollamacloud/minimax-m3
+    - bzl/minimax-m3
+    - minimax/MiniMax-M3
+    - cx/gpt-5.5-high
+    - mistral/codestral-latest
+  best-coding-fast:
+    - cx/gpt-5.3-codex-spark
+    - ollamacloud/minimax-m3
+    - bzl/minimax-m3
+    - minimax/MiniMax-M3
   pro-reasoning:
     - cx/gpt-5.5-xhigh
     - cc/claude-opus-4-8
@@ -48,52 +42,12 @@ combos:
     - zai/glm-5.1
     - cc/claude-sonnet-5
     - gh/claude-sonnet-5
-  pro-vision:
-    - cc/claude-sonnet-5
-    - vertex/gemini-3.1-pro-preview
-    - agy/gemini-3.5-flash-high
+  reasoning:
     - cx/gpt-5.5-high
-  best-chat:
-    - cc/claude-sonnet-5
-    - agy/gemini-3.5-flash-high
+    - gh/gpt-5.5
     - zai/glm-5.1
-    - cx/gpt-5.4
-    - bzl/kimi-k2.6
-    - mistral/mistral-large-latest
-  best-coding:
     - cc/claude-sonnet-5
-    - ollamacloud/minimax-m3
-    - bzl/minimax-m3
-    - minimax/MiniMax-M3
-    - cx/gpt-5.5-high
-    - mistral/codestral-latest
-  best-coding-fast:
-    - cx/gpt-5.3-codex-spark
-    - ollamacloud/minimax-m3
-    - bzl/minimax-m3
-    - minimax/MiniMax-M3
-  best-fast:
-    - ollamacloud/minimax-m3
-    - bzl/minimax-m3
-    - minimax/MiniMax-M3
-    - agy/gemini-3.5-flash-high
-    - gh/gemini-3.5-flash
-  best-vision:
-    - vertex/gemini-3.1-pro-preview
-    - agy/gemini-3.5-flash-high
-    - cx/gpt-5.5-high
-  chat:
-    - cx/gpt-5.4
-    - bzl/kimi-k2.6
-    - mistral/mistral-large-latest
-  claude-opus:
-    - cc/claude-opus-4-8
-    - bzl/claude-opus-4.7
-    - agy/claude-opus-4-6-thinking
-  claude-sonnet:
-    - cc/claude-sonnet-5
-    - bzl/claude-sonnet-4.6
-    - agy/claude-sonnet-4-6
+    - gh/claude-sonnet-5
   pro-chat:
     - cc/claude-opus-4-8
     - agy/gemini-3.1-pro-high
@@ -104,6 +58,26 @@ combos:
     - cx/gpt-5.4
     - bzl/kimi-k2.6
     - mistral/mistral-large-latest
+  best-chat:
+    - cc/claude-sonnet-5
+    - agy/gemini-3.5-flash-high
+    - zai/glm-5.1
+    - cx/gpt-5.4
+    - bzl/kimi-k2.6
+    - mistral/mistral-large-latest
+  chat:
+    - cx/gpt-5.4
+    - bzl/kimi-k2.6
+    - mistral/mistral-large-latest
+  pro-vision:
+    - cc/claude-sonnet-5
+    - vertex/gemini-3.1-pro-preview
+    - agy/gemini-3.5-flash-high
+    - cx/gpt-5.5-high
+  best-vision:
+    - vertex/gemini-3.1-pro-preview
+    - agy/gemini-3.5-flash-high
+    - cx/gpt-5.5-high
   pro-fast:
     - cx/gpt-5.3-codex-spark
     - ollamacloud/minimax-m3
@@ -111,3 +85,29 @@ combos:
     - minimax/MiniMax-M3
     - agy/gemini-3.5-flash-high
     - gh/gemini-3.5-flash
+  best-fast:
+    - ollamacloud/minimax-m3
+    - bzl/minimax-m3
+    - minimax/MiniMax-M3
+    - agy/gemini-3.5-flash-high
+    - gh/gemini-3.5-flash
+  fast:
+    - agy/gemini-3.5-flash-high
+    - gh/gemini-3.5-flash
+  best-free:
+    - bzl/auto:free
+    - oc/big-pickle
+    - mistral/devstral-latest
+    - nvidia/deepseek-ai/deepseek-v4-pro
+    - fmd/gpt-5.4
+    - cerebras/gpt-oss-120b
+    - agy/gpt-oss-120b-medium
+    - groq/openai/gpt-oss-120b
+  claude-opus:
+    - cc/claude-opus-4-8
+    - bzl/claude-opus-4.7
+    - agy/claude-opus-4-6-thinking
+  claude-sonnet:
+    - cc/claude-sonnet-5
+    - bzl/claude-sonnet-4.6
+    - agy/claude-sonnet-4-6

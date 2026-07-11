@@ -3,101 +3,55 @@ name: OmniRoute combos
 on:
   pull_request:
     paths:
-      - 'dokploy/omniroute/settings/instances/**/combos.json'
-      - 'dokploy/omniroute/settings/instances/**/combos.md'
-      - 'dokploy/omniroute/sync/**'
-      - '.github/workflows/omniroute-combos.yml'
+      - ".github/omniroute/combos.yml"
+      - ".github/scripts/sync-omniroute-combos.ts"
+      - ".github/workflows/omniroute-combos.yml"
   push:
     branches: [main]
     paths:
-      - 'dokploy/omniroute/settings/instances/**/combos.json'
-      - 'dokploy/omniroute/sync/**'
-      - '.github/workflows/omniroute-combos.yml'
+      - ".github/omniroute/combos.yml"
+      - ".github/scripts/sync-omniroute-combos.ts"
+      - ".github/workflows/omniroute-combos.yml"
   workflow_dispatch:
     inputs:
-      instance:
-        description: 'Instance directory / GitHub Environment name, or all'
-        required: true
-        default: 'omni.tux.bd'
       dry_run:
-        description: 'Plan without applying writes'
+        description: "Plan without applying writes"
         required: true
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    name: Validate combo config
+    name: Validate Deno sync script
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: denoland/setup-deno@v2
         with:
-          python-version: '3.x'
-      - name: Run unit tests
-        run: python -m unittest discover -s dokploy/omniroute/sync -p 'test_*.py'
-      - name: Check generated docs
-        run: |
-          for file in dokploy/omniroute/settings/instances/*/combos.json; do
-            instance="$(basename "$(dirname "$file")")"
-            python dokploy/omniroute/sync/render_combos_md.py --instance "$instance" --check
-          done
+          deno-version: v2.x
+      - name: Run script tests
+        run: deno test --allow-read --allow-net .github/scripts/sync-omniroute-combos.ts
 
-  discover:
-    name: Discover instances to sync
+  sync:
+    name: Sync omni.tux.bd
     if: github.event_name != 'pull_request'
     needs: validate
     runs-on: ubuntu-latest
-    outputs:
-      instances: ${{ steps.instances.outputs.instances }}
-      has_instances: ${{ steps.instances.outputs.has_instances }}
+    environment: omni.tux.bd
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: denoland/setup-deno@v2
         with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-      - id: instances
-        name: Build instance matrix
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          GITHUB_BASE_SHA: ${{ github.event.before }}
-          GITHUB_SHA: ${{ github.sha }}
-          INPUT_INSTANCE: ${{ github.event.inputs.instance || '' }}
-        run: |
-          instances="$(python dokploy/omniroute/sync/list_changed_instances.py)"
-          echo "instances=$instances" >> "$GITHUB_OUTPUT"
-          if [ "$instances" = "[]" ]; then
-            echo "has_instances=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_instances=true" >> "$GITHUB_OUTPUT"
-          fi
-
-  sync:
-    name: Sync ${{ matrix.instance }}
-    if: github.event_name != 'pull_request' && needs.discover.outputs.has_instances == 'true'
-    needs: discover
-    runs-on: ubuntu-latest
-    environment: ${{ matrix.instance }}
-    strategy:
-      fail-fast: false
-      matrix:
-        instance: ${{ fromJson(needs.discover.outputs.instances) }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
+          deno-version: v2.x
       - name: Dry-run combo sync
         env:
           OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
-        run: python dokploy/omniroute/sync/sync_combos.py --instance "${{ matrix.instance }}" --dry-run
+        run: deno run --allow-read --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --dry-run
       - name: Apply combo sync
         if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'
         env:
           OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
-        run: python dokploy/omniroute/sync/sync_combos.py --instance "${{ matrix.instance }}" --apply
+        run: deno run --allow-read --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --apply

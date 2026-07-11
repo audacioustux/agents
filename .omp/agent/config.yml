@@ -37,15 +37,16 @@ enabledModels:
   - omniroute/pro-vision
   - omniroute/best-vision
 modelRoles: 
-  default: omniroute/reasoning
-  smol: omniroute/best-fast
-  slow: omniroute/best-reasoning
-  plan: omniroute/pro-reasoning
-  commit: omniroute/best-coding-fast
-  vision: omniroute/pro-vision
-  designer: omniroute/pro-chat
-  task: omniroute/pro-fast
-  advisor: omniroute/pro-chat
+  default: omniroute/pro-coding:high
+  smol: omniroute/best-coding:high
+  slow: omniroute/pro-reasoning:high
+  plan: omniroute/pro-reasoning:xhigh
+  commit: omniroute/best-coding-fast:medium
+  vision: omniroute/pro-vision:high
+  designer: omniroute/pro-vision:xhigh
+  task: omniroute/best-coding:high
+  advisor: omniroute/best-reasoning:xhigh
+  tiny: omniroute/pro-fast:off
 retry: 
   enabled: true
   maxRetries: 100
@@ -54,42 +55,32 @@ retry:
   fallbackRevertPolicy: cooldown-expiry
   fallbackChains: 
     default: 
-      - omniroute/best-reasoning
-      - omniroute/pro-reasoning
-      - omniroute/best-free
+      - omniroute/best-coding:high
+      - auto/smart:xhigh
     smol: 
-      - omniroute/fast
-      - omniroute/best-coding-fast
-      - omniroute/best-free
-    commit: 
-      - omniroute/best-coding
-      - omniroute/coding
-      - omniroute/best-free
-    task: 
-      - omniroute/best-fast
-      - omniroute/coding
-      - omniroute/best-free
-    plan: 
-      - omniroute/best-reasoning
-      - omniroute/reasoning
-      - omniroute/pro-coding
-      - omniroute/best-free
+      - omniroute/best-coding:high
+      - auto/smart:xhigh
     slow: 
-      - omniroute/reasoning
-      - omniroute/best-free
+      - omniroute/best-reasoning:high
+      - auto/smart:xhigh
+    plan: 
+      - omniroute/best-reasoning:xhigh
+      - auto/smart:xhigh
+    commit: 
+      - omniroute/best-coding:medium
+      - auto/smart:high
     vision: 
-      - omniroute/best-vision
-      - omniroute/best-chat
-      - omniroute/best-free
+      - omniroute/best-vision:high
+      - auto/smart:xhigh
     designer: 
-      - omniroute/best-chat
-      - omniroute/chat
-      - omniroute/coding
-      - omniroute/best-free
+      - omniroute/best-vision:xhigh
+      - auto/smart:xhigh
+    task: 
+      - omniroute/pro-coding:high
+      - auto/smart:xhigh
     advisor: 
-      - omniroute/best-chat
-      - omniroute/chat
-      - omniroute/best-free
+      - omniroute/pro-reasoning:xhigh
+      - auto/smart:xhigh
 tui: 
   tight: false
 advisor: 
@@ -118,7 +109,7 @@ compaction:
   thresholdTokens: 500000
   handoffSaveToDisk: true
   idleEnabled: true
-  strategy: snapcompact
+  strategy: context-full
   idleTimeoutSeconds: 1800
   idleThresholdTokens: 400000
 terminal: 
@@ -138,6 +129,6 @@ bash:
 todo: 
   eager: preferred
 contextPromotion: 
-  enabled: true
+  enabled: false
 browser: 
   headless: true

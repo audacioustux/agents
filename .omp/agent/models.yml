@@ -1,7 +1,7 @@
 providers:
   omniroute:
     baseUrl: https://omni.tux.bd/v1
-    apiKey: sk-xxx # from Dashboard → API Manager
+    apiKey: sk-xxx
     api: openai-completions
     compat:
       supportsReasoningEffort: true # OmniRoute understands reasoning_effort

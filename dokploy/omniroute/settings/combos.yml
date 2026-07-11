@@ -41,6 +41,7 @@ combos:
     - cx/gpt-5.5-high
     - fmd/gpt-5.5
     - gh/gpt-5.5
+    - agy/gemini-3.5-flash-high
     - zai/glm-5.1
     - cc/claude-sonnet-5
     - gh/claude-sonnet-5
@@ -51,6 +52,7 @@ combos:
     - cx/gpt-5.5-high
     - fmd/gpt-5.5
     - gh/gpt-5.5
+    - agy/gemini-3.5-flash-high
     - zai/glm-5.1
     - cc/claude-sonnet-5
     - gh/claude-sonnet-5
@@ -60,29 +62,46 @@ combos:
     - cx/gpt-5.5-high
     - fmd/gpt-5.5
     - gh/gpt-5.5
+    - agy/gemini-3.5-flash-high
     - zai/glm-5.1
     - cc/claude-sonnet-5
     - gh/claude-sonnet-5
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   pro-chat:
+    - cx/gpt-5.5-xhigh
     - cc/claude-opus-4-8
-    - agy/gemini-3.1-pro-high
     - zai/glm-5.2
-    - cc/claude-sonnet-5
+    - cx/gpt-5.5-high
+    - fmd/gpt-5.5
+    - gh/gpt-5.5
     - agy/gemini-3.5-flash-high
     - zai/glm-5.1
-    - cx/gpt-5.4
+    - cc/claude-sonnet-5
+    - gh/claude-sonnet-5
+    - nvidia/deepseek-ai/deepseek-v4-pro
+    - oc/big-pickle
   best-chat:
+    - zai/glm-5.2
+    - cx/gpt-5.5-high
+    - fmd/gpt-5.5
+    - gh/gpt-5.5
+    - agy/gemini-3.5-flash-high
+    - zai/glm-5.1
     - cc/claude-sonnet-5
-    - agy/gemini-3.5-flash-high
-    - zai/glm-5.1
-    - cx/gpt-5.4
+    - gh/claude-sonnet-5
+    - nvidia/deepseek-ai/deepseek-v4-pro
+    - oc/big-pickle
   chat:
-    - cx/gpt-5.4
+    - cx/gpt-5.5-high
+    - fmd/gpt-5.5
+    - gh/gpt-5.5
     - agy/gemini-3.5-flash-high
     - zai/glm-5.1
-    - cx/gpt-5.4
+    - cc/claude-sonnet-5
+    - gh/claude-sonnet-5
+    - nvidia/deepseek-ai/deepseek-v4-pro
+    - oc/big-pickle
   pro-vision:
     - zai/glm-5.2
     - cc/claude-opus-4-8
@@ -91,6 +110,8 @@ combos:
     - agy/gemini-3.5-flash-high
     - cx/gpt-5.5-high
   best-vision:
+    - agy/gemini-pro-agent
+    - vertex/gemini-3.1-pro-preview
     - agy/gemini-3.5-flash-high
     - cx/gpt-5.5-high
   pro-fast:

@@ -457,12 +457,20 @@ Deno.test("default combo config parses actual repo file", async () => {
   ]);
   assertEquals(config.combos.coding, [
     "ollamacloud/minimax-m3",
-    "bzl/minimax-m3",
     "minimax/MiniMax-M3",
     "cx/gpt-5.5-high",
-    "mistral/codestral-latest",
+    "fmd/gpt-5.5",
+    "nvidia/deepseek-ai/deepseek-v4-pro",
+    "oc/big-pickle",
   ]);
-  assertEquals(config.combos["best-free"].includes("bzl/auto:free"), true);
+  assertEquals(config.combos["best-free"], [
+    "oc/big-pickle",
+    "nvidia/deepseek-ai/deepseek-v4-pro",
+    "fmd/gpt-5.4",
+    "cerebras/gpt-oss-120b",
+    "agy/gpt-oss-120b-medium",
+    "groq/openai/gpt-oss-120b",
+  ]);
 });
 
 Deno.test("diffCombo compares only ordered model ids", () => {

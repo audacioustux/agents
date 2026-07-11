@@ -8,7 +8,7 @@ Redis.
 - `compose.yml` — Dokploy Compose definition.
 - `.env.example` — non-secret runtime defaults; copy to `.env` or paste into
   Dokploy environment variables.
-- `.github/omniroute/combos.yml` — declarative combo model lists for the single
+- `settings/combos.yml` — declarative combo model lists for the single
   `omni.tux.bd` OmniRoute instance.
 - `.github/scripts/sync-omniroute-combos.ts` — Deno/TypeScript sync script used
   by GitHub Actions for validation, dry-runs, and applies.
@@ -34,8 +34,9 @@ Redis.
 
 ## Combo sync
 
-Combo configuration is managed in `.github/omniroute/combos.yml`. The file
-declares the `https://omni.tux.bd` base URL and each combo's ordered model list.
+Combo configuration is managed in `dokploy/omniroute/settings/combos.yml`. The
+file declares the `https://omni.tux.bd` base URL and each combo's ordered model
+list.
 
 Merges to `main` run `.github/workflows/omniroute-combos.yml` with Deno. The
 workflow reads the `OMNIROUTE_API_KEY` secret from the `omni.tux.bd` GitHub
@@ -51,5 +52,5 @@ Run the same checks locally with:
 
 ```bash
 deno test --allow-read --allow-net .github/scripts/sync-omniroute-combos.ts
-deno run --allow-read --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --dry-run
+deno run --allow-read=dokploy/omniroute/settings/combos.yml --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --dry-run
 ```

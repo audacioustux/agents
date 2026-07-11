@@ -22,7 +22,7 @@ type ComboClient = {
   putCombo(comboId: string, payload: JsonObject): Promise<unknown>;
 };
 
-const DEFAULT_CONFIG_PATH = ".github/omniroute/combos.yml";
+const DEFAULT_CONFIG_PATH = "dokploy/omniroute/settings/combos.yml";
 const MANAGED_FIELD = "models";
 
 export class OmniRouteClient implements ComboClient {
@@ -435,6 +435,26 @@ Deno.test("default combo config parses actual repo file", async () => {
   const config = parseComboConfig(await Deno.readTextFile(DEFAULT_CONFIG_PATH));
 
   assertEquals(config.baseUrl, "https://omni.tux.bd");
+  assertEquals(Object.keys(config.combos), [
+    "pro-coding",
+    "best-coding",
+    "coding",
+    "best-coding-fast",
+    "pro-reasoning",
+    "best-reasoning",
+    "reasoning",
+    "pro-chat",
+    "best-chat",
+    "chat",
+    "pro-vision",
+    "best-vision",
+    "pro-fast",
+    "best-fast",
+    "fast",
+    "best-free",
+    "claude-opus",
+    "claude-sonnet",
+  ]);
   assertEquals(config.combos.coding, [
     "ollamacloud/minimax-m3",
     "bzl/minimax-m3",

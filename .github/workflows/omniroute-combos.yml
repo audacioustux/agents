@@ -3,13 +3,13 @@ name: OmniRoute combos
 on:
   pull_request:
     paths:
-      - ".github/omniroute/combos.yml"
+      - "dokploy/omniroute/settings/combos.yml"
       - ".github/scripts/sync-omniroute-combos.ts"
       - ".github/workflows/omniroute-combos.yml"
   push:
     branches: [main]
     paths:
-      - ".github/omniroute/combos.yml"
+      - "dokploy/omniroute/settings/combos.yml"
       - ".github/scripts/sync-omniroute-combos.ts"
       - ".github/workflows/omniroute-combos.yml"
   workflow_dispatch:
@@ -49,9 +49,9 @@ jobs:
       - name: Dry-run combo sync
         env:
           OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
-        run: deno run --allow-read --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --dry-run
+        run: deno run --allow-read=dokploy/omniroute/settings/combos.yml --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --dry-run
       - name: Apply combo sync
         if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'
         env:
           OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
-        run: deno run --allow-read --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --apply
+        run: deno run --allow-read=dokploy/omniroute/settings/combos.yml --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --apply

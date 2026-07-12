@@ -27,11 +27,7 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
-    environment:
-      LEAN_CTX_PROXY_TOKEN: ${LEAN_CTX_PROXY_TOKEN}
-      LEAN_CTX_GATEWAY_ADMIN_TOKEN: ${LEAN_CTX_GATEWAY_ADMIN_TOKEN}
-      DATABASE_URL: ${DATABASE_URL}
-      OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY}
+    env_file: .env
     volumes:
       - ../../../files/config.toml:/etc/lean-ctx/config.toml:ro
       - ../../../files/gateway-keys.toml:/etc/lean-ctx/gateway-keys.toml:ro

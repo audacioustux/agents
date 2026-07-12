@@ -6,8 +6,10 @@ Dokploy Compose deployment for the LeanCTX Team Gateway in front of the
 ## Files
 
 - `compose.yml` — Dokploy Compose definition.
-- `Dockerfile` — small image that downloads and SHA-verifies the official
-  LeanCTX `v3.9.7` release binary at build time.
+- `Dockerfile` — small image that installs the LeanCTX release selected by the
+  Dokploy `LEANCTX_VERSION` build arg.
+- `install-leanctx.sh` — downloads and SHA-verifies the official release binary.
+- `setup-image.sh` — installs OS packages, LeanCTX, and the non-root user.
 - `.env.example` — non-secret variable names only; keep real values in Dokploy
   environment variables.
 
@@ -20,8 +22,9 @@ Use the existing `leanctx-gateway` Compose service.
 - Compose path: `dokploy/leanctx-gateway/compose.yml`
 - Build context: `dokploy/leanctx-gateway`
 
-Keep secrets in Dokploy, not Git:
+Configure these in Dokploy env; keep secret values out of Git:
 
+- `LEANCTX_VERSION`
 - `LEAN_CTX_PROXY_TOKEN`
 - `LEAN_CTX_GATEWAY_ADMIN_TOKEN`
 - `POSTGRES_PASSWORD`

@@ -21,8 +21,8 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        LEANCTX_VERSION: "3.9.7"
-    image: leanctx-gateway:v3.9.7
+        LEANCTX_VERSION: ${LEANCTX_VERSION:?set LEANCTX_VERSION}
+    image: leanctx-gateway:${LEANCTX_VERSION:?set LEANCTX_VERSION}
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,7 +1,7 @@
 providers:
   omniroute:
-    baseUrl: https://omni.tux.bd/v1
-    apiKey: sk-xxx
+    baseUrl: https://lean.tux.bd/providers/omniroute/v1
+    apiKey: REDACTED
     api: openai-completions
     compat:
       supportsReasoningEffort: true # OmniRoute understands reasoning_effort
@@ -12,6 +12,8 @@ providers:
     # All custom combos are created via OmniRoute's /api/combos.
     # Mirrors enabledModels in config.yml.
     models:
+      - id: auto/smart
+        contextWindow: 512000
       - id: pro-chat
         contextWindow: 512000
       - id: best-chat

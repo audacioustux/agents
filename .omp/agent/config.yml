@@ -18,6 +18,7 @@ defaultThinkingLevel: auto
 memory: 
   backend: "off"
 enabledModels: 
+  - omniroute/auto/smart:xhigh
   - omniroute/pro-chat
   - omniroute/best-chat
   - omniroute/chat
@@ -56,31 +57,31 @@ retry:
   fallbackChains: 
     default: 
       - omniroute/best-coding:high
-      - auto/smart:xhigh
+      - omniroute/auto/smart:xhigh
     smol: 
       - omniroute/best-coding:high
-      - auto/smart:xhigh
+      - omniroute/auto/smart:xhigh
     slow: 
       - omniroute/best-reasoning:high
-      - auto/smart:xhigh
+      - omniroute/auto/smart:xhigh
     plan: 
       - omniroute/best-reasoning:xhigh
-      - auto/smart:xhigh
+      - omniroute/auto/smart:xhigh
     commit: 
       - omniroute/best-coding:medium
-      - auto/smart:high
+      - omniroute/auto/smart:high
     vision: 
       - omniroute/best-vision:high
-      - auto/smart:xhigh
+      - omniroute/auto/smart:xhigh
     designer: 
       - omniroute/best-vision:xhigh
-      - auto/smart:xhigh
+      - omniroute/auto/smart:xhigh
     task: 
       - omniroute/pro-coding:high
-      - auto/smart:xhigh
+      - omniroute/auto/smart:xhigh
     advisor: 
       - omniroute/pro-reasoning:xhigh
-      - auto/smart:xhigh
+      - omniroute/auto/smart:xhigh
 tui: 
   tight: false
 advisor: 

@@ -18,7 +18,7 @@ defaultThinkingLevel: auto
 memory: 
   backend: "off"
 enabledModels: 
-  - omniroute/auto/smart:xhigh
+  - omniroute/auto/smart
   - omniroute/pro-chat
   - omniroute/best-chat
   - omniroute/chat

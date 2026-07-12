@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: leanctx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: leanctx
+    volumes:
+      - leanctx-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leanctx -d leanctx"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - dokploy-network
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        LEANCTX_VERSION: "3.9.7"
+    image: leanctx-gateway:v3.9.7
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      LEAN_CTX_PROXY_TOKEN: ${LEAN_CTX_PROXY_TOKEN}
+      LEAN_CTX_GATEWAY_ADMIN_TOKEN: ${LEAN_CTX_GATEWAY_ADMIN_TOKEN}
+      DATABASE_URL: ${DATABASE_URL}
+      OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY}
+    volumes:
+      - ../../../files/config.toml:/etc/lean-ctx/config.toml:ro
+      - ../../../files/gateway-keys.toml:/etc/lean-ctx/gateway-keys.toml:ro
+    expose:
+      - "8484"
+      - "8485"
+    networks:
+      - dokploy-network
+
+networks:
+  dokploy-network:
+    external: true
+
+volumes:
+  leanctx-pgdata:

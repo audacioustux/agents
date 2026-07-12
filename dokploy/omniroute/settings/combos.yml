@@ -113,17 +113,25 @@ combos:
   pro-fast:
     - ollamacloud/minimax-m3
     - minimax/MiniMax-M3
-    - agy/gemini-3.5-flash-high
-    - gh/gemini-3.5-flash
-  best-fast:
-    - ollamacloud/minimax-m3
-    - minimax/MiniMax-M3
-    - agy/gemini-3.5-flash-high
-    - gh/gemini-3.5-flash
-  fast:
+    - oc/big-pickle
     - agy/gemini-3.5-flash-high
     - gh/gemini-3.5-flash
     - cx/gpt-5.3-codex-spark
+    - nvidia/deepseek-ai/deepseek-v4-pro
+  best-fast:
+    - ollamacloud/minimax-m3
+    - minimax/MiniMax-M3
+    - oc/big-pickle
+    - agy/gemini-3.5-flash-high
+    - gh/gemini-3.5-flash
+    - cx/gpt-5.3-codex-spark
+    - nvidia/deepseek-ai/deepseek-v4-pro
+  fast:
+    - oc/big-pickle
+    - agy/gemini-3.5-flash-high
+    - gh/gemini-3.5-flash
+    - cx/gpt-5.3-codex-spark
+    - nvidia/deepseek-ai/deepseek-v4-pro
   best-free:
     - oc/big-pickle
     - nvidia/deepseek-ai/deepseek-v4-pro

@@ -6,3 +6,9 @@ sha256_hex = "1344ecec6fd2dc6b27cf85fa0cd6f61f339fb9e3a3b2e75fdd0bc1a3dec4f35f"
 person = "omp-agent@local"
 team = "agents"
 project = "omniroute"
+
+[[keys]]
+sha256_hex = "2eb72cd3139091853917c441f224d8fb2c1bae8c846b29a6afc97636b593f798"
+person = "omp-agent@ashir"
+team = "agents"
+project = "omniroute"

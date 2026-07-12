@@ -21,17 +21,7 @@ services:
     pull_policy: always
     restart: unless-stopped
     stop_grace_period: 40s
-    environment:
-      PORT: ${PORT}
-      HOSTNAME: ${HOSTNAME}
-      DATA_DIR: ${DATA_DIR}
-      NEXT_PUBLIC_BASE_URL: ${NEXT_PUBLIC_BASE_URL}
-      OMNIROUTE_MEMORY_MB: ${OMNIROUTE_MEMORY_MB}
-      NODE_OPTIONS: ${NODE_OPTIONS}
-      OMNIROUTE_CHAT_HEAP_SHED_RATIO: ${OMNIROUTE_CHAT_HEAP_SHED_RATIO}
-      OMNIROUTE_CHAT_LARGE_BODY_BYTES: ${OMNIROUTE_CHAT_LARGE_BODY_BYTES}
-      OMNIROUTE_CHAT_HARD_MAX_BODY_BYTES: ${OMNIROUTE_CHAT_HARD_MAX_BODY_BYTES}
-      OMNIROUTE_MAX_NONSTREAMING_RESPONSE_BYTES: ${OMNIROUTE_MAX_NONSTREAMING_RESPONSE_BYTES}
+    env_file: .env
     volumes:
       - omniroute-data:/app/data
     healthcheck:

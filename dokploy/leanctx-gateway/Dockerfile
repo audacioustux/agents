@@ -10,6 +10,7 @@ RUN setup-image "$LEANCTX_VERSION" "$TARGETARCH"
 
 USER 10001
 ENV LEAN_CTX_CONFIG_DIR=/etc/lean-ctx
+ENV LEAN_CTX_GATEWAY_KEYS=/etc/lean-ctx/gateway-keys.toml
 ENV LEAN_CTX_DATA_DIR=/var/lib/lean-ctx
 EXPOSE 8484 8485
 ENTRYPOINT ["lean-ctx"]

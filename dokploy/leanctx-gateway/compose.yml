@@ -29,8 +29,8 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ../../../files/config.toml:/etc/lean-ctx/config.toml:ro
-      - ../../../files/gateway-keys.toml:/etc/lean-ctx/gateway-keys.toml:ro
+      - ./config.toml:/etc/lean-ctx/config.toml:ro
+      - ./gateway-keys.toml:/etc/lean-ctx/gateway-keys.toml:ro
     expose:
       - "8484"
       - "8485"

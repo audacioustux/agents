@@ -31,18 +31,24 @@ Configure these in Dokploy env; keep secret values out of Git:
 - `DATABASE_URL`
 - `OMNIROUTE_API_KEY`
 
-Keep runtime config/key material in Dokploy file mounts, not Git:
+Runtime config/key material is tracked in this repo because it does not contain
+plaintext provider keys or plaintext gateway keys:
 
-- `config.toml` mounted to `/etc/lean-ctx/config.toml:ro`
-- `gateway-keys.toml` mounted to `/etc/lean-ctx/gateway-keys.toml:ro`
+- `config.toml` references `OMNIROUTE_API_KEY` by environment variable name.
+- `gateway-keys.toml` stores SHA-256 hashes only; plaintext `gk-...` keys are
+  never committed.
 
-The compose file references those mounts through Dokploy's app-level persisted
-`files/` directory from the Git compose working directory:
+The compose file mounts them read-only into the container:
 
 ```yaml
-../../../files/config.toml:/etc/lean-ctx/config.toml:ro
-../../../files/gateway-keys.toml:/etc/lean-ctx/gateway-keys.toml:ro
+./config.toml:/etc/lean-ctx/config.toml:ro
+./gateway-keys.toml:/etc/lean-ctx/gateway-keys.toml:ro
 ```
+
+The image sets:
+
+- `LEAN_CTX_CONFIG_DIR=/etc/lean-ctx`
+- `LEAN_CTX_GATEWAY_KEYS=/etc/lean-ctx/gateway-keys.toml`
 
 ## Public routes
 

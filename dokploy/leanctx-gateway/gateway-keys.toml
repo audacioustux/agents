@@ -1,0 +1,8 @@
+# lean-ctx gateway keys — SHA-256 hashes only, plaintext keys are never stored.
+# Managed by `lean-ctx gateway keys`; manual edits are fine (same format).
+
+[[keys]]
+sha256_hex = "1344ecec6fd2dc6b27cf85fa0cd6f61f339fb9e3a3b2e75fdd0bc1a3dec4f35f"
+person = "omp-agent@local"
+team = "agents"
+project = "omniroute"

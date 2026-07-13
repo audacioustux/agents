@@ -1,6 +1,9 @@
 baseUrl: https://omni.tux.bd
 combos:
   pro-coding:
+    - cx/gpt-5.6-terra-ultra
+    - cx/gpt-5.6-terra-max
+    - cx/gpt-5.6-terra-xhigh
     - cc/claude-opus-4-8
     - cc/claude-sonnet-5
     - gh/claude-sonnet-5
@@ -11,6 +14,8 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   best-coding:
+    - cx/gpt-5.6-terra-max
+    - cx/gpt-5.6-terra-xhigh
     - cc/claude-sonnet-5
     - gh/claude-sonnet-5
     - ollamacloud/minimax-m3
@@ -20,6 +25,7 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   coding:
+    - cx/gpt-5.6-terra-xhigh
     - ollamacloud/minimax-m3
     - minimax/MiniMax-M3
     - cx/gpt-5.5-high
@@ -27,6 +33,7 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   best-coding-fast:
+    - cx/gpt-5.6-terra-high
     - cx/gpt-5.3-codex-spark
     - cerebras/gpt-oss-120b
     - agy/gpt-oss-120b-medium
@@ -35,6 +42,9 @@ combos:
     - minimax/MiniMax-M3
     - oc/big-pickle
   pro-reasoning:
+    - cx/gpt-5.6-sol-ultra
+    - cx/gpt-5.6-sol-max
+    - cx/gpt-5.6-sol-xhigh
     - cx/gpt-5.5-xhigh
     - cc/claude-opus-4-8
     - cx/gpt-5.5-high
@@ -47,6 +57,8 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   best-reasoning:
+    - cx/gpt-5.6-sol-max
+    - cx/gpt-5.6-sol-xhigh
     - cx/gpt-5.5-high
     - fmd/gpt-5.5
     - gh/gpt-5.5
@@ -57,6 +69,7 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   reasoning:
+    - cx/gpt-5.6-sol-xhigh
     - cx/gpt-5.5-high
     - fmd/gpt-5.5
     - gh/gpt-5.5
@@ -67,6 +80,9 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   pro-chat:
+    - cx/gpt-5.6-sol-ultra
+    - cx/gpt-5.6-sol-max
+    - cx/gpt-5.6-sol-xhigh
     - cx/gpt-5.5-xhigh
     - cc/claude-opus-4-8
     - cx/gpt-5.5-high
@@ -79,6 +95,8 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   best-chat:
+    - cx/gpt-5.6-sol-max
+    - cx/gpt-5.6-sol-xhigh
     - cx/gpt-5.5-high
     - fmd/gpt-5.5
     - gh/gpt-5.5
@@ -89,6 +107,7 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   chat:
+    - cx/gpt-5.6-sol-xhigh
     - cx/gpt-5.5-high
     - fmd/gpt-5.5
     - gh/gpt-5.5
@@ -109,6 +128,9 @@ combos:
     - agy/gemini-3.5-flash-high
     - cx/gpt-5.5-high
   pro-fast:
+    - cx/gpt-5.6-terra-high
+    - cx/gpt-5.6-terra-medium
+    - cx/gpt-5.6-terra-low
     - ollamacloud/minimax-m3
     - minimax/MiniMax-M3
     - oc/big-pickle
@@ -117,6 +139,8 @@ combos:
     - cx/gpt-5.3-codex-spark
     - nvidia/deepseek-ai/deepseek-v4-pro
   best-fast:
+    - cx/gpt-5.6-terra-medium
+    - cx/gpt-5.6-terra-low
     - ollamacloud/minimax-m3
     - minimax/MiniMax-M3
     - oc/big-pickle
@@ -125,6 +149,7 @@ combos:
     - cx/gpt-5.3-codex-spark
     - nvidia/deepseek-ai/deepseek-v4-pro
   fast:
+    - cx/gpt-5.6-terra-low
     - oc/big-pickle
     - agy/gemini-3.5-flash-high
     - gh/gemini-3.5-flash

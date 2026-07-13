@@ -16,7 +16,7 @@ Redis.
 ## Deploy
 
 1. In Dokploy, create a project and add a Compose service.
-2. Point the service at this repo path: `dokploy/omniroute`.
+2. Point the service at this repo path: `dokploy/runner-web`.
 3. Use `compose.yml` as the Compose file.
 4. Copy `.env.example` to `.env` or paste the variables into Dokploy.
 5. Ensure the external `dokploy-network` exists.
@@ -34,7 +34,7 @@ Redis.
 
 ## Combo sync
 
-Combo configuration is managed in `dokploy/omniroute/settings/combos.yml`. The
+Combo configuration is managed in `dokploy/runner-web/settings/combos.yml`. The
 file declares the `https://omni.tux.bd` base URL and each combo's ordered model
 list.
 
@@ -52,5 +52,5 @@ Run the same checks locally with:
 
 ```bash
 deno test --allow-read --allow-net .github/scripts/sync-omniroute-combos.ts
-deno run --allow-read=dokploy/omniroute/settings/combos.yml --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --dry-run
+deno run --allow-read=dokploy/runner-web/settings/combos.yml --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --dry-run
 ```

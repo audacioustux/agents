@@ -22,7 +22,7 @@ type ComboClient = {
   putCombo(comboId: string, payload: JsonObject): Promise<unknown>;
 };
 
-const DEFAULT_CONFIG_PATH = "dokploy/omniroute/settings/combos.yml";
+const DEFAULT_CONFIG_PATH = "dokploy/runner-web/settings/combos.yml";
 const MANAGED_FIELD = "models";
 
 export class OmniRouteClient implements ComboClient {

@@ -102,12 +102,10 @@ combos:
     - zai/glm-5.2
     - cc/claude-opus-4-8
     - agy/gemini-pro-agent
-    - vertex/gemini-3.1-pro-preview
     - agy/gemini-3.5-flash-high
     - cx/gpt-5.5-high
   best-vision:
     - agy/gemini-pro-agent
-    - vertex/gemini-3.1-pro-preview
     - agy/gemini-3.5-flash-high
     - cx/gpt-5.5-high
   pro-fast:
@@ -134,8 +132,12 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
   best-free:
     - oc/big-pickle
+    - ollamacloud/minimax-m3
     - nvidia/deepseek-ai/deepseek-v4-pro
-    - fmd/gpt-5.4
+    - fmd/gpt-5.5
+    - agy/gemini-3.5-flash-high
+    - agy/gemini-pro-agent
+    - nvidia/mistralai/mistral-large-3-675b-instruct-2512
     - cerebras/gpt-oss-120b
     - agy/gpt-oss-120b-medium
     - groq/openai/gpt-oss-120b

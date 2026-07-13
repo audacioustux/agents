@@ -432,45 +432,11 @@ combos:
 });
 
 Deno.test("default combo config parses actual repo file", async () => {
+  // Smoke-test only: combos.yml is intentionally human-editable, so this test
+  // must not pin combo names or model ids.
   const config = parseComboConfig(await Deno.readTextFile(DEFAULT_CONFIG_PATH));
 
-  assertEquals(config.baseUrl, "https://omni.tux.bd");
-  assertEquals(Object.keys(config.combos), [
-    "pro-coding",
-    "best-coding",
-    "coding",
-    "best-coding-fast",
-    "pro-reasoning",
-    "best-reasoning",
-    "reasoning",
-    "pro-chat",
-    "best-chat",
-    "chat",
-    "pro-vision",
-    "best-vision",
-    "pro-fast",
-    "best-fast",
-    "fast",
-    "best-free",
-    "claude-opus",
-    "claude-sonnet",
-  ]);
-  assertEquals(config.combos.coding, [
-    "ollamacloud/minimax-m3",
-    "minimax/MiniMax-M3",
-    "cx/gpt-5.5-high",
-    "fmd/gpt-5.5",
-    "nvidia/deepseek-ai/deepseek-v4-pro",
-    "oc/big-pickle",
-  ]);
-  assertEquals(config.combos["best-free"], [
-    "oc/big-pickle",
-    "nvidia/deepseek-ai/deepseek-v4-pro",
-    "fmd/gpt-5.4",
-    "cerebras/gpt-oss-120b",
-    "agy/gpt-oss-120b-medium",
-    "groq/openai/gpt-oss-120b",
-  ]);
+  assertEquals(Object.keys(config.combos).length > 0, true);
 });
 
 Deno.test("diffCombo compares only ordered model ids", () => {

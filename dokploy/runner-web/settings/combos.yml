@@ -1,9 +1,9 @@
 baseUrl: https://omni.tux.bd
 combos:
   pro-coding:
-    - cx/gpt-5.6-terra-ultra
     - cx/gpt-5.6-terra-max
     - cx/gpt-5.6-terra-xhigh
+    - cx/gpt-5.6-terra-high
     - cc/claude-opus-4-8
     - cc/claude-sonnet-5
     - gh/claude-sonnet-5
@@ -14,8 +14,8 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   best-coding:
-    - cx/gpt-5.6-terra-max
     - cx/gpt-5.6-terra-xhigh
+    - cx/gpt-5.6-terra-high
     - cc/claude-sonnet-5
     - gh/claude-sonnet-5
     - ollamacloud/minimax-m3
@@ -25,7 +25,7 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   coding:
-    - cx/gpt-5.6-terra-xhigh
+    - cx/gpt-5.6-terra-high
     - ollamacloud/minimax-m3
     - minimax/MiniMax-M3
     - cx/gpt-5.5-high
@@ -42,9 +42,9 @@ combos:
     - minimax/MiniMax-M3
     - oc/big-pickle
   pro-reasoning:
-    - cx/gpt-5.6-sol-ultra
     - cx/gpt-5.6-sol-max
     - cx/gpt-5.6-sol-xhigh
+    - cx/gpt-5.6-sol-high
     - cx/gpt-5.5-xhigh
     - cc/claude-opus-4-8
     - cx/gpt-5.5-high
@@ -57,8 +57,8 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   best-reasoning:
-    - cx/gpt-5.6-sol-max
     - cx/gpt-5.6-sol-xhigh
+    - cx/gpt-5.6-sol-high
     - cx/gpt-5.5-high
     - fmd/gpt-5.5
     - gh/gpt-5.5
@@ -69,7 +69,7 @@ combos:
     - nvidia/deepseek-ai/deepseek-v4-pro
     - oc/big-pickle
   reasoning:
-    - cx/gpt-5.6-sol-xhigh
+    - cx/gpt-5.6-sol-high
     - cx/gpt-5.5-high
     - fmd/gpt-5.5
     - gh/gpt-5.5

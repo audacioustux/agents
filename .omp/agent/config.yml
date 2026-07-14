@@ -46,7 +46,7 @@ modelRoles:
   vision: omniroute/pro-vision:high
   designer: omniroute/pro-vision:xhigh
   task: omniroute/best-coding:high
-  advisor: omniroute/reasoning:xhigh
+  advisor: omniroute/reasoning:high
   tiny: omniroute/pro-fast:off
 retry: 
   enabled: true

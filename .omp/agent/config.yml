@@ -10,13 +10,13 @@ statusLine:
   sessionAccent: true
 display: 
   showTokenUsage: false
-  shimmer: kitt
+  shimmer: classic
 task: 
   showResolvedModelBadge: true
   enableLsp: true
 defaultThinkingLevel: auto
 memory: 
-  backend: "off"
+  backend: mnemopi
 enabledModels: 
   - omniroute/auto/smart
   - omniroute/pro-chat
@@ -38,16 +38,16 @@ enabledModels:
   - omniroute/pro-vision
   - omniroute/best-vision
 modelRoles: 
-  default: omniroute/pro-coding:xhigh
-  smol: omniroute/coding:off
-  slow: omniroute/best-reasoning:xhigh
-  plan: omniroute/pro-reasoning:xhigh
-  commit: omniroute/best-coding-fast:medium
-  vision: omniroute/pro-vision:high
-  designer: omniroute/pro-vision:xhigh
-  task: omniroute/best-coding:high
-  advisor: omniroute/reasoning:high
-  tiny: omniroute/pro-fast:off
+  default: omniroute/best-chat
+  smol: omniroute/chat
+  slow: omniroute/pro-chat
+  plan: omniroute/pro-reasoning
+  commit: omniroute/best-coding-fast
+  vision: omniroute/best-vision
+  designer: omniroute/pro-vision
+  task: omniroute/pro-coding
+  advisor: omniroute/best-reasoning
+  tiny: omniroute/fast
 retry: 
   enabled: true
   maxRetries: 100
@@ -56,33 +56,33 @@ retry:
   fallbackRevertPolicy: cooldown-expiry
   fallbackChains: 
     default: 
-      - omniroute/best-coding:xhigh
+      - omniroute/chat
     smol: 
-      - omniroute/best-coding:off
-      - omniroute/auto/smart:xhigh
+      - omniroute/fast
+      - omniroute/auto/smart
     slow: 
-      - omniroute/reasoning:xhigh
+      - omniroute/best-chat
     plan: 
-      - omniroute/best-reasoning:xhigh
+      - omniroute/best-reasoning
     commit: 
-      - omniroute/best-coding:medium
-      - omniroute/auto/smart:high
+      - omniroute/best-fast
+      - omniroute/auto/smart
     vision: 
-      - omniroute/best-vision:high
+      - omniroute/best-chat
     designer: 
-      - omniroute/best-vision:xhigh
+      - omniroute/best-vision
     task: 
-      - omniroute/coding:high
+      - omniroute/best-coding
     advisor: 
-      - omniroute/best-reasoning:xhigh
-    tiny:
-      - omniroute/best-fast:off
-      - omniroute/auto/smart:xhigh
+      - omniroute/reasoning
+    tiny: 
+      - omniroute/best-free
+      - omniroute/auto/smart
 tui: 
   tight: false
 advisor: 
   enabled: true
-  syncBacklog: "1"
+  syncBacklog: "off"
   subagents: false
 features: 
   unexpectedStopDetection: true
@@ -129,3 +129,6 @@ contextPromotion:
   enabled: false
 browser: 
   headless: true
+dev: 
+  autoqa: 
+    consent: denied

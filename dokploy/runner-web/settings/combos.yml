@@ -143,7 +143,6 @@ combos:
     - agy/gemini-3.5-flash-high
     - gh/gemini-3.5-flash
     - cx/gpt-5.3-codex-spark
-    - nvidia/deepseek-ai/deepseek-v4-pro
   best-fast:
     - cx/gpt-5.6-luna-high
     - cx/gpt-5.6-luna-medium
@@ -153,14 +152,12 @@ combos:
     - agy/gemini-3.5-flash-high
     - gh/gemini-3.5-flash
     - cx/gpt-5.3-codex-spark
-    - nvidia/deepseek-ai/deepseek-v4-pro
   fast:
     - cx/gpt-5.6-luna-medium
     - oc/big-pickle
     - agy/gemini-3.5-flash-high
     - gh/gemini-3.5-flash
     - cx/gpt-5.3-codex-spark
-    - nvidia/deepseek-ai/deepseek-v4-pro
   best-free:
     - oc/big-pickle
     - ollamacloud/minimax-m3

@@ -30,10 +30,12 @@ combos:
   pro-chat:
     - cc/claude-opus-4-8
     - agy/gemini-pro-agent
+    - agy/claude-opus-4-6-thinking
     - nvidia/z-ai/glm-5.2
     - cx/gpt-5.6-sol-xhigh
   best-chat:
     - nvidia/deepseek-ai/deepseek-v4-pro
+    - agy/claude-sonnet-4-6
     - minimax/MiniMax-M3
     - cc/claude-sonnet-5
     - cx/gpt-5.6-sol-high

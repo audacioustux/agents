@@ -31,15 +31,16 @@ combos:
   pro-chat:
     - cc/claude-opus-4-8
     - agy/gemini-pro-agent
-    - nvidia/deepseek-ai/deepseek-v4-pro
+    - oc/big-pickle
     - cx/gpt-5.6-sol-xhigh
   best-chat:
     - agy/gemini-3.5-flash-high
-    - nvidia/deepseek-ai/deepseek-v4-pro
+    - oc/big-pickle
+    - minimax/MiniMax-M3
     - cx/gpt-5.6-sol-high
   chat:
+    - oc/deepseek-v4-flash-free
     - minimax/MiniMax-M3
-    - nvidia/deepseek-ai/deepseek-v4-pro
     - cx/gpt-5.6-sol-medium
   ###
   pro-vision:

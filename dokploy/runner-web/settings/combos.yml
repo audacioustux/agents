@@ -34,11 +34,11 @@ combos:
     - cx/gpt-5.6-sol-xhigh
   best-chat:
     - nvidia/deepseek-ai/deepseek-v4-pro
-    - agy/gemini-3.5-flash-high
     - minimax/MiniMax-M3
+    - cc/claude-sonnet-5
     - cx/gpt-5.6-sol-high
   chat:
-    - agy/gemini-3.1-flash-lite
+    - agy/gemini-3.5-flash-high
     - oc/deepseek-v4-flash-free
     - cx/gpt-5.6-sol-medium
   ###
@@ -63,6 +63,7 @@ combos:
   best-free:
     - oc/big-pickle
     - ollamacloud/minimax-m3
+    - agy/gemini-3.1-flash-lite
     - nvidia/deepseek-ai/deepseek-v4-pro
     - fmd/gpt-5.5
     - agy/gemini-3.5-flash-high

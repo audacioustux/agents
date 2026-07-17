@@ -31,13 +31,12 @@ combos:
   pro-chat:
     - cc/claude-opus-4-8
     - agy/gemini-pro-agent
-    - agy/gemini-3.5-flash-high
     - cx/gpt-5.6-luna-max
   best-chat:
-    - oc/big-pickle
-    - minimax/MiniMax-M3
-    - agy/gemini-3.5-flash-high
     - cc/claude-sonnet-5
+    - agy/gemini-3.5-flash-high
+    - minimax/MiniMax-M3
+    - oc/big-pickle
     - cx/gpt-5.6-luna-xhigh
   chat:
     - agy/claude-sonnet-4-6

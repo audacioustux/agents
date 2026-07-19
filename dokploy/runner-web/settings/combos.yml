@@ -36,7 +36,6 @@ combos:
     - agy/gemini-3.5-flash-high
     - minimax/MiniMax-M3
     - oc/big-pickle
-    - cc/claude-sonnet-5
     - cx/gpt-5.6-luna-xhigh
   chat:
     - agy/claude-sonnet-4-6

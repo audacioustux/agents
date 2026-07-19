@@ -22,7 +22,7 @@ services:
       dockerfile: Dockerfile
       args:
         LEANCTX_VERSION: ${LEANCTX_VERSION:?set LEANCTX_VERSION}
-    image: leanctx-gateway:${LEANCTX_VERSION:?set LEANCTX_VERSION}
+    image: leanctx:${LEANCTX_VERSION:?set LEANCTX_VERSION}
     depends_on:
       postgres:
         condition: service_healthy
@@ -37,9 +37,29 @@ services:
     networks:
       - dokploy-network
 
+  # Read path — shared multi-repo context/index server (`ctx_*` tools over
+  # MCP + REST/SSE). Distinct from the gateway above: this never touches
+  # model traffic, it serves search/index/memory over the mounted repos.
+  team:
+    image: leanctx:${LEANCTX_VERSION:?set LEANCTX_VERSION}
+    restart: unless-stopped
+    env_file: .env
+    command: ["team", "serve", "--config", "/etc/lean-ctx/team.json"]
+    volumes:
+      - ./team.json:/etc/lean-ctx/team.json:ro
+      - ./repos.conf:/etc/lean-ctx/repos.conf:ro
+      - repos:/srv/repos
+      - teamdata:/var/lib/lean-ctx
+    expose:
+      - "8686"
+    networks:
+      - dokploy-network
+
 networks:
   dokploy-network:
     external: true
 
 volumes:
   pgdata:
+  repos:
+  teamdata:

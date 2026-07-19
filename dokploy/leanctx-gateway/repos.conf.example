@@ -1,0 +1,7 @@
+# One line per workspace: <id> <git-url> <branch>
+# `id` MUST match a `workspaces[].id` in team.json (its `root` MUST be
+# /srv/repos/<id>, e.g. /srv/repos/api below).
+# Copy to repos.conf (gitignored — the actual URLs may embed a deploy token)
+# and bind-mount it next to team.json.
+api https://github.com/example-org/api.git main
+web https://github.com/example-org/web.git main

@@ -5,7 +5,7 @@ version="${1:?usage: setup-image.sh <leanctx-version> [target-arch]}"
 target_arch="${2:-}"
 
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl tar findutils
+apt-get install -y --no-install-recommends ca-certificates curl tar findutils git
 rm -rf /var/lib/apt/lists/*
 
 install-leanctx "$version" "$target_arch"

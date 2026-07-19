@@ -1,6 +1,6 @@
 providers:
   omniroute:
-    baseUrl: https://lean.tux.bd/providers/omniroute/v1
+    baseUrl: https://omni.tux.bd/v1
     apiKey: REDACTED
     api: openai-completions
     compat:

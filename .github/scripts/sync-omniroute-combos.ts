@@ -23,6 +23,7 @@ type ComboClient = {
 
 const DEFAULT_CONFIG_PATH = "dokploy/runner-web/settings/combos.yml";
 const MANAGED_FIELD = "models";
+const OMNIROUTE_ORIGIN = "https://omni.tux.bd";
 
 export class OmniRouteClient implements ComboClient {
   readonly #baseUrl: string;
@@ -509,8 +510,6 @@ Deno.test("syncCombos dry-run validates combos and never writes", async () => {
             }],
           },
         ]),
-      getModels: () =>
-        Promise.resolve([{ provider: "bzl", model: "minimax-m3" }]),
       putCombo: (_id: string, payload: unknown) => {
         writes.push(payload);
         return Promise.resolve({});
@@ -544,8 +543,6 @@ Deno.test("syncCombos apply verifies post-apply state", async () => {
               : [],
           },
         ]),
-      getModels: () =>
-        Promise.resolve([{ provider: "bzl", model: "minimax-m3" }]),
       putCombo: () => {
         applied = true;
         return Promise.resolve({});
@@ -567,8 +564,6 @@ Deno.test("syncCombos rejects undeclared live combo names", async () => {
         },
         {
           getCombos: () => Promise.resolve([]),
-          getModels: () =>
-            Promise.resolve([{ provider: "bzl", model: "minimax-m3" }]),
           putCombo: () => Promise.resolve({}),
         },
         true,
@@ -592,8 +587,6 @@ Deno.test("syncCombos rejects extra live combo names", async () => {
               { id: "combo-1", name: "coding", models: [] },
               { id: "combo-2", name: "unmanaged", models: [] },
             ]),
-          getModels: () =>
-            Promise.resolve([{ provider: "bzl", model: "minimax-m3" }]),
           putCombo: () => Promise.resolve({}),
         },
         true,

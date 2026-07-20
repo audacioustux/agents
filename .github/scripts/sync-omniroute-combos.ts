@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "jsr:@std/assert@1";
+import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
 import { parse as parseYaml } from "jsr:@std/yaml@1";
 
 export type ComboConfig = {
@@ -24,7 +24,8 @@ type ComboClient = {
 
 const DEFAULT_CONFIG_PATH = "dokploy/runner-web/settings/combos.yml";
 const MANAGED_FIELD = "models";
-const LIVE_CATALOG_URL = "https://omni.tux.bd/v1";
+const OMNIROUTE_ORIGIN = "https://omni.tux.bd";
+const LIVE_CATALOG_URL = `${OMNIROUTE_ORIGIN}/v1`;
 
 export class OmniRouteClient implements ComboClient {
   readonly #baseUrl: string;
@@ -105,10 +106,9 @@ export function parseComboConfig(source: string): ComboConfig {
   if (typeof baseUrl !== "string" || baseUrl.trim() === "") {
     throw new Error("baseUrl must be a non-empty string");
   }
-  if (baseUrl.replace(/\/+$/, "").endsWith("/v1")) {
-    throw new Error(
-      "baseUrl must be the OmniRoute origin, not the OpenAI /v1 endpoint",
-    );
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+  if (normalizedBaseUrl !== OMNIROUTE_ORIGIN) {
+    throw new Error(`baseUrl must be ${OMNIROUTE_ORIGIN}`);
   }
   const combos = parsed.combos;
   if (!isObject(combos) || Object.keys(combos).length === 0) {
@@ -483,6 +483,19 @@ Deno.test("default combo config parses actual repo file", async () => {
   assertEquals(Object.keys(config.combos).length > 0, true);
 });
 
+Deno.test("parseComboConfig rejects alternate API origins", () => {
+  assertThrows(
+    () =>
+      parseComboConfig(`
+baseUrl: https://attacker.example
+combos:
+  coding:
+    - provider/model
+`),
+    Error,
+    "baseUrl must be https://omni.tux.bd",
+  );
+});
 Deno.test("diffCombo compares only ordered model ids", () => {
   const diff = diffCombo(
     {
@@ -723,11 +736,11 @@ Deno.test("OmniRouteClient.getModels fetches /v1 and unwraps data", async () => 
       );
     }) as typeof fetch;
 
-    const client = new OmniRouteClient("https://omni.tux.bd", "test-key");
+    const client = new OmniRouteClient(OMNIROUTE_ORIGIN, "test-key");
     const models = await client.getModels();
 
     assertEquals(requestedMethod, "GET");
-    assertEquals(requestedUrl, "https://omni.tux.bd/v1");
+    assertEquals(requestedUrl, `${OMNIROUTE_ORIGIN}/v1`);
     assertEquals(models.map((m) => m.id), [
       "provider/example-model",
     ]);
@@ -735,6 +748,7 @@ Deno.test("OmniRouteClient.getModels fetches /v1 and unwraps data", async () => 
     globalThis.fetch = originalFetch;
   }
 });
+
 if (import.meta.main) {
   Deno.exit(await main());
 }

@@ -18,14 +18,12 @@ type JsonObject = Record<string, unknown>;
 
 type ComboClient = {
   getCombos(): Promise<JsonObject[]>;
-  getModels(): Promise<JsonObject[]>;
   putCombo(comboId: string, payload: JsonObject): Promise<unknown>;
 };
 
 const DEFAULT_CONFIG_PATH = "dokploy/runner-web/settings/combos.yml";
 const MANAGED_FIELD = "models";
 const OMNIROUTE_ORIGIN = "https://omni.tux.bd";
-const LIVE_CATALOG_URL = `${OMNIROUTE_ORIGIN}/v1`;
 
 export class OmniRouteClient implements ComboClient {
   readonly #baseUrl: string;
@@ -41,15 +39,6 @@ export class OmniRouteClient implements ComboClient {
       await this.#request("GET", "/api/combos"),
       "combos",
       "GET /api/combos",
-    );
-  }
-  async getModels(): Promise<JsonObject[]> {
-    // OmniRoute exposes the live model catalog as the OpenAI-compatible
-    // /v1 endpoint. Wrapper is `data` (object: "list"), not `models`.
-    return responseList(
-      await this.#request("GET", "/v1"),
-      "data",
-      "GET /v1",
     );
   }
 
@@ -192,47 +181,12 @@ export function mergeComboModels(
   return merged;
 }
 
-export function validateModelCatalog(
-  config: ComboConfig,
-  catalog: JsonObject[],
-): string[] {
-  const validModels = new Set<string>();
-  for (const row of catalog) {
-    if (typeof row.id === "string") {
-      validModels.add(row.id);
-    }
-    if (typeof row.fullModel === "string") {
-      validModels.add(row.fullModel);
-    }
-    if (typeof row.provider === "string" && typeof row.model === "string") {
-      validModels.add(`${row.provider}/${row.model}`);
-    }
-  }
-
-  const errors: string[] = [];
-  for (const [comboName, models] of Object.entries(config.combos)) {
-    for (const model of models) {
-      if (!validModels.has(model)) {
-        errors.push(`${comboName}: unknown model id ${model}`);
-      }
-    }
-  }
-  return errors;
-}
-
 export async function syncCombos(
   config: ComboConfig,
   client: ComboClient,
   dryRun: boolean,
 ): Promise<ComboDiff[]> {
-  const [liveCombos, catalog] = await Promise.all([
-    client.getCombos(),
-    client.getModels(),
-  ]);
-  const catalogErrors = validateModelCatalog(config, catalog);
-  if (catalogErrors.length > 0) {
-    throw new Error(`invalid combo models:\n${catalogErrors.join("\n")}`);
-  }
+  const liveCombos = await client.getCombos();
 
   const liveByName = new Map<string, JsonObject>();
   for (const liveCombo of liveCombos) {
@@ -313,29 +267,6 @@ function responseList(
   );
 }
 
-async function fetchLiveCatalog(): Promise<JsonObject[]> {
-  const response = await fetch(LIVE_CATALOG_URL, {
-    headers: { Accept: "application/json" },
-  });
-  const body = await response.text();
-  if (!response.ok) {
-    throw new Error(
-      `GET ${LIVE_CATALOG_URL} failed with status ${response.status}: ${body}`,
-    );
-  }
-  let result: unknown;
-  try {
-    result = body.length === 0 ? null : JSON.parse(body);
-  } catch (error) {
-    throw new Error(
-      `GET ${LIVE_CATALOG_URL} returned invalid JSON: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-  }
-  return responseList(result, "data", "GET /v1");
-}
-
 function modelEntry(
   comboName: string,
   position: number,
@@ -403,11 +334,8 @@ async function main(): Promise<number> {
   const args = [...Deno.args];
   const dryRun = args.includes("--dry-run");
   const apply = args.includes("--apply");
-  const validateCatalog = args.includes("--validate-catalog");
-  if ([dryRun, apply, validateCatalog].filter(Boolean).length !== 1) {
-    console.error(
-      "exactly one of --dry-run, --apply, or --validate-catalog is required",
-    );
+  if (dryRun === apply) {
+    console.error("exactly one of --dry-run or --apply is required");
     return 1;
   }
   const configFlag = args.indexOf("--config");
@@ -417,21 +345,6 @@ async function main(): Promise<number> {
   if (configPath === undefined || configPath.length === 0) {
     console.error("--config requires a path");
     return 1;
-  }
-
-  if (validateCatalog) {
-    try {
-      const config = parseComboConfig(await Deno.readTextFile(configPath));
-      const errors = validateModelCatalog(config, await fetchLiveCatalog());
-      if (errors.length > 0) {
-        console.error(`invalid combo models:\n${errors.join("\n")}`);
-        return 1;
-      }
-      return 0;
-    } catch (error) {
-      console.error(error instanceof Error ? error.message : String(error));
-      return 1;
-    }
   }
 
   const apiKey = Deno.env.get("OMNIROUTE_API_KEY");
@@ -579,26 +492,6 @@ Deno.test("mergeComboModels preserves unmanaged fields and retained model metada
   ]);
 });
 
-Deno.test("validateModelCatalog accepts id fullModel and provider/model forms", () => {
-  const errors = validateModelCatalog(
-    {
-      baseUrl: "https://omni.tux.bd",
-      combos: {
-        a: ["direct/id"],
-        b: ["cf/@cf/meta/llama-3.3-70b-instruct"],
-        c: ["gh/claude-sonnet-5"],
-      },
-    },
-    [
-      { id: "direct/id" },
-      { fullModel: "cf/@cf/meta/llama-3.3-70b-instruct" },
-      { provider: "gh", model: "claude-sonnet-5" },
-    ],
-  );
-
-  assertEquals(errors, []);
-});
-
 Deno.test("syncCombos dry-run validates combos and never writes", async () => {
   const writes: unknown[] = [];
   const diffs = await syncCombos(
@@ -617,8 +510,6 @@ Deno.test("syncCombos dry-run validates combos and never writes", async () => {
             }],
           },
         ]),
-      getModels: () =>
-        Promise.resolve([{ provider: "bzl", model: "minimax-m3" }]),
       putCombo: (_id: string, payload: unknown) => {
         writes.push(payload);
         return Promise.resolve({});
@@ -652,8 +543,6 @@ Deno.test("syncCombos apply verifies post-apply state", async () => {
               : [],
           },
         ]),
-      getModels: () =>
-        Promise.resolve([{ provider: "bzl", model: "minimax-m3" }]),
       putCombo: () => {
         applied = true;
         return Promise.resolve({});
@@ -675,8 +564,6 @@ Deno.test("syncCombos rejects undeclared live combo names", async () => {
         },
         {
           getCombos: () => Promise.resolve([]),
-          getModels: () =>
-            Promise.resolve([{ provider: "bzl", model: "minimax-m3" }]),
           putCombo: () => Promise.resolve({}),
         },
         true,
@@ -700,8 +587,6 @@ Deno.test("syncCombos rejects extra live combo names", async () => {
               { id: "combo-1", name: "coding", models: [] },
               { id: "combo-2", name: "unmanaged", models: [] },
             ]),
-          getModels: () =>
-            Promise.resolve([{ provider: "bzl", model: "minimax-m3" }]),
           putCombo: () => Promise.resolve({}),
         },
         true,
@@ -709,44 +594,6 @@ Deno.test("syncCombos rejects extra live combo names", async () => {
     Error,
     "live combo not declared in config: unmanaged",
   );
-});
-
-Deno.test("OmniRouteClient.getModels fetches /v1 and unwraps data", async () => {
-  // Regression: getModels() must hit exactly GET <baseUrl>/v1 and parse the
-  // OpenAI-style { object: "list", data: [...] } envelope. Earlier versions
-  // hit /api/models?all=true with a `models` wrapper, which returned a
-  // smaller catalog than /v1, so an id present only in /v1 was flagged as unknown.
-  const originalFetch = globalThis.fetch;
-  let requestedUrl: string | null = null;
-  let requestedMethod: string | null = null;
-  try {
-    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
-      requestedUrl = typeof input === "string" ? input : input.toString();
-      requestedMethod = (init?.method ?? "GET").toUpperCase();
-      return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            object: "list",
-            data: [
-              { id: "provider/example-model", object: "model" },
-            ],
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
-      );
-    }) as typeof fetch;
-
-    const client = new OmniRouteClient(OMNIROUTE_ORIGIN, "test-key");
-    const models = await client.getModels();
-
-    assertEquals(requestedMethod, "GET");
-    assertEquals(requestedUrl, `${OMNIROUTE_ORIGIN}/v1`);
-    assertEquals(models.map((m) => m.id), [
-      "provider/example-model",
-    ]);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
 });
 
 if (import.meta.main) {

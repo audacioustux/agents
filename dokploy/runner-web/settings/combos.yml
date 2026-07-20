@@ -36,12 +36,12 @@ combos:
     - agy/gemini-3.5-flash-high
     - gh/gemini-3.5-flash
     - minimax/MiniMax-M3
-    - cf/@cf/moonshotai/kimi-k2.7-code
     - oc/big-pickle
     - ollamacloud/minimax-m3
     - cx/gpt-5.6-luna-xhigh
   chat:
     - agy/claude-sonnet-4-6
+    - cf/@cf/moonshotai/kimi-k2.7-code
     - oc/deepseek-v4-flash-free
     - cx/gpt-5.6-luna-high
   ###

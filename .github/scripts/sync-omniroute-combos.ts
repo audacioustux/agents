@@ -9,9 +9,6 @@ export type ComboConfig = {
 export type ComboDiff = {
   name: string;
   action: "update" | "unchanged";
-  changedFields: string[];
-  beforeModels: string[];
-  afterModels: string[];
 };
 
 type JsonObject = Record<string, unknown>;
@@ -22,7 +19,6 @@ type ComboClient = {
 };
 
 const DEFAULT_CONFIG_PATH = "dokploy/runner-web/settings/combos.yml";
-const MANAGED_FIELD = "models";
 const OMNIROUTE_ORIGIN = "https://omni.tux.bd";
 
 export class OmniRouteClient implements ComboClient {
@@ -127,31 +123,16 @@ export function parseComboConfig(source: string): ComboConfig {
   return { baseUrl: baseUrl.replace(/\/+$/, ""), combos: normalizedCombos };
 }
 
-export function semanticModelEntry(entry: JsonObject): JsonObject {
-  const model = entry.model;
-  if (typeof model !== "string") {
-    throw new Error("model entry is missing model");
-  }
-  return { model };
-}
-
 export function diffCombo(liveCombo: JsonObject, models: string[]): ComboDiff {
   const name = stringField(liveCombo, "name");
   const liveModels = arrayField(liveCombo, "models").map((entry) =>
-    semanticModelEntry(objectValue(entry, `${name}.models[]`))
+    stringField(objectValue(entry, `${name}.models[]`), "model")
   );
-  const desiredModels = models.map((model) =>
-    semanticModelEntry(modelEntry(name, 0, model))
-  );
-  const changedFields = jsonStable(liveModels) === jsonStable(desiredModels)
-    ? []
-    : [MANAGED_FIELD];
+  const changed = liveModels.length !== models.length ||
+    liveModels.some((m, i) => m !== models[i]);
   return {
     name,
-    action: changedFields.length === 0 ? "unchanged" : "update",
-    changedFields,
-    beforeModels: liveModels.map((entry) => String(entry.model)),
-    afterModels: models,
+    action: changed ? "update" : "unchanged",
   };
 }
 
@@ -184,7 +165,6 @@ export function mergeComboModels(
 export async function syncCombos(
   config: ComboConfig,
   client: ComboClient,
-  dryRun: boolean,
 ): Promise<ComboDiff[]> {
   const liveCombos = await client.getCombos();
 
@@ -210,10 +190,6 @@ export async function syncCombos(
       throw new Error(`declared combo not found: ${comboName}`);
     }
     diffs.push(diffCombo(liveCombo, models));
-  }
-
-  if (dryRun) {
-    return diffs;
   }
 
   for (const diff of diffs) {
@@ -242,7 +218,7 @@ export async function syncCombos(
     }
     const diff = diffCombo(liveCombo, models);
     if (diff.action !== "unchanged") {
-      failures.push(`${comboName}: ${diff.changedFields.join(", ")}`);
+      failures.push(`${comboName}: models mismatch`);
     }
   }
   if (failures.length > 0) {
@@ -290,19 +266,6 @@ function slugModelId(model: string): string {
     .toLowerCase();
 }
 
-function jsonStable(value: unknown): string {
-  return JSON.stringify(value, (_key, nested) => {
-    if (!isObject(nested) || Array.isArray(nested)) {
-      return nested;
-    }
-    return Object.fromEntries(
-      Object.entries(nested).sort(([left], [right]) =>
-        left.localeCompare(right)
-      ),
-    );
-  });
-}
-
 function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -332,12 +295,6 @@ function arrayField(object: JsonObject, field: string): unknown[] {
 
 async function main(): Promise<number> {
   const args = [...Deno.args];
-  const dryRun = args.includes("--dry-run");
-  const apply = args.includes("--apply");
-  if (dryRun === apply) {
-    console.error("exactly one of --dry-run or --apply is required");
-    return 1;
-  }
   const configFlag = args.indexOf("--config");
   const configPath = configFlag >= 0
     ? args[configFlag + 1]
@@ -358,9 +315,8 @@ async function main(): Promise<number> {
     const diffs = await syncCombos(
       config,
       new OmniRouteClient(config.baseUrl, apiKey),
-      dryRun,
     );
-    console.log(JSON.stringify({ dryRun, changes: diffs }, null, 2));
+    console.log(JSON.stringify({ changes: diffs }, null, 2));
     return 0;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
@@ -409,6 +365,7 @@ combos:
     "baseUrl must be https://omni.tux.bd",
   );
 });
+
 Deno.test("diffCombo compares only ordered model ids", () => {
   const diff = diffCombo(
     {
@@ -433,7 +390,6 @@ Deno.test("diffCombo compares only ordered model ids", () => {
   );
 
   assertEquals(diff.action, "unchanged");
-  assertEquals(diff.changedFields, []);
 });
 
 Deno.test("mergeComboModels preserves unmanaged fields and retained model metadata", () => {
@@ -492,38 +448,7 @@ Deno.test("mergeComboModels preserves unmanaged fields and retained model metada
   ]);
 });
 
-Deno.test("syncCombos dry-run validates combos and never writes", async () => {
-  const writes: unknown[] = [];
-  const diffs = await syncCombos(
-    { baseUrl: "https://omni.tux.bd", combos: { coding: ["bzl/minimax-m3"] } },
-    {
-      getCombos: () =>
-        Promise.resolve([
-          {
-            id: "combo-1",
-            name: "coding",
-            models: [{
-              kind: "model",
-              model: "ollamacloud/minimax-m3",
-              providerId: "ollamacloud",
-              weight: 0,
-            }],
-          },
-        ]),
-      putCombo: (_id: string, payload: unknown) => {
-        writes.push(payload);
-        return Promise.resolve({});
-      },
-    },
-    true,
-  );
-
-  assertEquals(writes, []);
-  assertEquals(diffs[0].action, "update");
-  assertEquals(diffs[0].changedFields, ["models"]);
-});
-
-Deno.test("syncCombos apply verifies post-apply state", async () => {
+Deno.test("syncCombos verifies post-apply state", async () => {
   let applied = false;
   const diffs = await syncCombos(
     { baseUrl: "https://omni.tux.bd", combos: { coding: ["bzl/minimax-m3"] } },
@@ -548,7 +473,6 @@ Deno.test("syncCombos apply verifies post-apply state", async () => {
         return Promise.resolve({});
       },
     },
-    false,
   );
 
   assertEquals(diffs[0].action, "update");
@@ -566,7 +490,6 @@ Deno.test("syncCombos rejects undeclared live combo names", async () => {
           getCombos: () => Promise.resolve([]),
           putCombo: () => Promise.resolve({}),
         },
-        true,
       ),
     Error,
     "declared combo not found: missing",
@@ -589,7 +512,6 @@ Deno.test("syncCombos rejects extra live combo names", async () => {
             ]),
           putCombo: () => Promise.resolve({}),
         },
-        true,
       ),
     Error,
     "live combo not declared in config: unmanaged",

@@ -6,11 +6,6 @@ on:
       - "dokploy/runner-web/settings/combos.yml"
       - ".github/scripts/sync-omniroute-combos.ts"
       - ".github/workflows/omniroute-combos.yml"
-  pull_request_target:
-    paths:
-      - "dokploy/runner-web/settings/combos.yml"
-      - ".github/scripts/sync-omniroute-combos.ts"
-      - ".github/workflows/omniroute-combos.yml"
   push:
     branches: [main]
     paths:
@@ -51,64 +46,6 @@ jobs:
             --allow-net \
             .github/scripts/sync-omniroute-combos.ts \
             --validate-catalog
-
-  pr-combo-comment:
-    name: Comment proposed combo patch
-    if: github.event_name == 'pull_request_target'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-    steps:
-      - name: Upsert proposed config patch comment
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const marker = "<!-- omniroute-combo-patch -->";
-            const path = "dokploy/runner-web/settings/combos.yml";
-            const { owner, repo } = context.repo;
-            const files = await github.paginate(
-              github.rest.pulls.listFiles,
-              { owner, repo, pull_number: context.issue.number, per_page: 100 },
-            );
-            const comboFiles = files.filter((file) => file.filename === path);
-            const filesUrl = `https://github.com/${owner}/${repo}/pull/${context.issue.number}/files`;
-            let content;
-            if (comboFiles.length === 0) {
-              content = `No ${path} patch found. See [PR files](${filesUrl}).`;
-            } else if (comboFiles.some((file) => !file.patch)) {
-              content = `The ${path} patch is too large or binary for an inline comment. See [PR files](${filesUrl}).`;
-            } else {
-              content = comboFiles.map((file) => file.patch).join("\n\n");
-              if (!content) content = `(no changes)\n\nSee [PR files](${filesUrl}).`;
-            }
-            let body = `${marker}\n### Proposed combo patch\n\nThis is the proposed combos.yml patch relative to main; main remains the deployment source of truth.\n\n\`\`\`diff\n${content}\n\`\`\``;
-            if (body.length > 65000) {
-              body = `${marker}\n### Proposed combo patch\n\nThis is the proposed combos.yml patch relative to main; main remains the deployment source of truth.\n\n\`\`\`diff\n${content.slice(0, 64000)}\n... (truncated)\n\`\`\``;
-            }
-            const comments = await github.paginate(
-              github.rest.issues.listComments,
-              { owner, repo, issue_number: context.issue.number, per_page: 100 },
-            );
-            const existing = comments.find((comment) =>
-              comment.user?.login === "github-actions[bot]" &&
-              comment.body?.includes(marker)
-            );
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner,
-                repo,
-                comment_id: existing.id,
-                body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: context.issue.number,
-                body,
-              });
-            }
 
   sync:
     name: Sync omni.tux.bd

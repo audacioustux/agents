@@ -10,12 +10,10 @@ combos:
   coding:
     - cx/gpt-5.6-terra-high
     - minimax/MiniMax-M3
-    - agy/gemini-3.5-flash-high
-  ###
+    - gh/gemini-3.5-flash
   best-coding-fast:
     - cx/gpt-5.6-luna-xhigh
-    - agy/gemini-3.5-flash-high
-  ###
+    - gh/gemini-3.5-flash
   pro-reasoning:
     - cx/gpt-5.6-sol-max
     - cc/claude-fable-5
@@ -27,15 +25,13 @@ combos:
     - cc/claude-sonnet-5
     - agy/gemini-pro-agent
     - agy/claude-opus-4-6-thinking
-  ###
   pro-chat:
     - cc/claude-opus-4-8
     - agy/gemini-pro-agent
     - cx/gpt-5.6-luna-max
   best-chat:
-    - agy/gemini-3.5-flash-high
+    - gh/gemini-3.5-flash
     - minimax/MiniMax-M3
-    - ollamacloud/minimax-m3
     - cf/@cf/moonshotai/kimi-k2.7-code
     - oc/big-pickle
     - cx/gpt-5.6-luna-xhigh
@@ -43,36 +39,31 @@ combos:
     - agy/claude-sonnet-4-6
     - oc/deepseek-v4-flash-free
     - cx/gpt-5.6-luna-high
-  ###
   pro-vision:
     - cx/gpt-5.6-sol-high
     - agy/gemini-pro-agent
   best-vision:
     - cx/gpt-5.6-sol-medium
-    - agy/gemini-3.5-flash-high
-  ###
+    - gh/gemini-3.5-flash
   pro-fast:
     - cx/gpt-5.6-luna-max
   best-fast:
     - cx/gpt-5.6-luna-xhigh
-    - agy/gemini-3.5-flash-high
+    - gh/gemini-3.5-flash
   fast:
     - cx/gpt-5.6-luna-high
     - cx/gpt-5.3-codex-spark
-  ###
   best-free:
     - oc/big-pickle
-    - ollamacloud/minimax-m3
     - agy/gemini-3.1-flash-lite
     - nvidia/deepseek-ai/deepseek-v4-pro
-    - fmd/gpt-5.5
     - cf/@cf/moonshotai/kimi-k2.7-code
-    - agy/gemini-3.5-flash-high
+    - cx/gpt-5.5
+    - cf/@cf/openai/gpt-oss-120b
     - agy/gemini-pro-agent
     - nvidia/mistralai/mistral-large-3-675b-instruct-2512
     - cerebras/gpt-oss-120b
     - agy/gpt-oss-120b-medium
-    - groq/openai/gpt-oss-120b
   claude-opus:
     - cc/claude-opus-4-8
     - agy/claude-opus-4-6-thinking

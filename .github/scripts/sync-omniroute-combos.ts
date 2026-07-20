@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "jsr:@std/assert@1";
+import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
 import { parse as parseYaml } from "jsr:@std/yaml@1";
 
 export type ComboConfig = {
@@ -24,6 +24,8 @@ type ComboClient = {
 
 const DEFAULT_CONFIG_PATH = "dokploy/runner-web/settings/combos.yml";
 const MANAGED_FIELD = "models";
+const OMNIROUTE_ORIGIN = "https://omni.tux.bd";
+const LIVE_CATALOG_URL = `${OMNIROUTE_ORIGIN}/v1`;
 
 export class OmniRouteClient implements ComboClient {
   readonly #baseUrl: string;
@@ -41,12 +43,13 @@ export class OmniRouteClient implements ComboClient {
       "GET /api/combos",
     );
   }
-
   async getModels(): Promise<JsonObject[]> {
+    // OmniRoute exposes the live model catalog as the OpenAI-compatible
+    // /v1 endpoint. Wrapper is `data` (object: "list"), not `models`.
     return responseList(
-      await this.#request("GET", "/api/models?all=true"),
-      "models",
-      "GET /api/models?all=true",
+      await this.#request("GET", "/v1"),
+      "data",
+      "GET /v1",
     );
   }
 
@@ -103,10 +106,9 @@ export function parseComboConfig(source: string): ComboConfig {
   if (typeof baseUrl !== "string" || baseUrl.trim() === "") {
     throw new Error("baseUrl must be a non-empty string");
   }
-  if (baseUrl.replace(/\/+$/, "").endsWith("/v1")) {
-    throw new Error(
-      "baseUrl must be the OmniRoute origin, not the OpenAI /v1 endpoint",
-    );
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+  if (normalizedBaseUrl !== OMNIROUTE_ORIGIN) {
+    throw new Error(`baseUrl must be ${OMNIROUTE_ORIGIN}`);
   }
   const combos = parsed.combos;
   if (!isObject(combos) || Object.keys(combos).length === 0) {
@@ -311,6 +313,29 @@ function responseList(
   );
 }
 
+async function fetchLiveCatalog(): Promise<JsonObject[]> {
+  const response = await fetch(LIVE_CATALOG_URL, {
+    headers: { Accept: "application/json" },
+  });
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `GET ${LIVE_CATALOG_URL} failed with status ${response.status}: ${body}`,
+    );
+  }
+  let result: unknown;
+  try {
+    result = body.length === 0 ? null : JSON.parse(body);
+  } catch (error) {
+    throw new Error(
+      `GET ${LIVE_CATALOG_URL} returned invalid JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  return responseList(result, "data", "GET /v1");
+}
+
 function modelEntry(
   comboName: string,
   position: number,
@@ -378,8 +403,11 @@ async function main(): Promise<number> {
   const args = [...Deno.args];
   const dryRun = args.includes("--dry-run");
   const apply = args.includes("--apply");
-  if (dryRun === apply) {
-    console.error("exactly one of --dry-run or --apply is required");
+  const validateCatalog = args.includes("--validate-catalog");
+  if ([dryRun, apply, validateCatalog].filter(Boolean).length !== 1) {
+    console.error(
+      "exactly one of --dry-run, --apply, or --validate-catalog is required",
+    );
     return 1;
   }
   const configFlag = args.indexOf("--config");
@@ -390,6 +418,22 @@ async function main(): Promise<number> {
     console.error("--config requires a path");
     return 1;
   }
+
+  if (validateCatalog) {
+    try {
+      const config = parseComboConfig(await Deno.readTextFile(configPath));
+      const errors = validateModelCatalog(config, await fetchLiveCatalog());
+      if (errors.length > 0) {
+        console.error(`invalid combo models:\n${errors.join("\n")}`);
+        return 1;
+      }
+      return 0;
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      return 1;
+    }
+  }
+
   const apiKey = Deno.env.get("OMNIROUTE_API_KEY");
   if (apiKey === undefined || apiKey.length === 0) {
     console.error("OMNIROUTE_API_KEY is required");
@@ -439,6 +483,19 @@ Deno.test("default combo config parses actual repo file", async () => {
   assertEquals(Object.keys(config.combos).length > 0, true);
 });
 
+Deno.test("parseComboConfig rejects alternate API origins", () => {
+  assertThrows(
+    () =>
+      parseComboConfig(`
+baseUrl: https://attacker.example
+combos:
+  coding:
+    - provider/model
+`),
+    Error,
+    "baseUrl must be https://omni.tux.bd",
+  );
+});
 Deno.test("diffCombo compares only ordered model ids", () => {
   const diff = diffCombo(
     {
@@ -652,6 +709,44 @@ Deno.test("syncCombos rejects extra live combo names", async () => {
     Error,
     "live combo not declared in config: unmanaged",
   );
+});
+
+Deno.test("OmniRouteClient.getModels fetches /v1 and unwraps data", async () => {
+  // Regression: getModels() must hit exactly GET <baseUrl>/v1 and parse the
+  // OpenAI-style { object: "list", data: [...] } envelope. Earlier versions
+  // hit /api/models?all=true with a `models` wrapper, which returned a
+  // smaller catalog than /v1, so an id present only in /v1 was flagged as unknown.
+  const originalFetch = globalThis.fetch;
+  let requestedUrl: string | null = null;
+  let requestedMethod: string | null = null;
+  try {
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      requestedUrl = typeof input === "string" ? input : input.toString();
+      requestedMethod = (init?.method ?? "GET").toUpperCase();
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            object: "list",
+            data: [
+              { id: "provider/example-model", object: "model" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    }) as typeof fetch;
+
+    const client = new OmniRouteClient(OMNIROUTE_ORIGIN, "test-key");
+    const models = await client.getModels();
+
+    assertEquals(requestedMethod, "GET");
+    assertEquals(requestedUrl, `${OMNIROUTE_ORIGIN}/v1`);
+    assertEquals(models.map((m) => m.id), [
+      "provider/example-model",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 if (import.meta.main) {

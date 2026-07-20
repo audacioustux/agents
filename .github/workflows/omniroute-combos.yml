@@ -26,23 +26,38 @@ permissions:
 jobs:
   validate:
     name: Validate Deno sync script
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
       - name: Run script tests
         run: deno test --allow-read --allow-net .github/scripts/sync-omniroute-combos.ts
+      - name: Validate combo models against live catalog
+        run: |
+          deno run \
+            --allow-read=dokploy/runner-web/settings/combos.yml \
+            --allow-net \
+            .github/scripts/sync-omniroute-combos.ts \
+            --validate-catalog
 
   sync:
     name: Sync omni.tux.bd
-    if: github.event_name != 'pull_request'
-    needs: validate
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     environment: omni.tux.bd
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x

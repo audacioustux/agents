@@ -24,4 +24,4 @@ jobs:
       - name: Apply combo sync
         env:
           OMNIROUTE_API_KEY: ${{ secrets.OMNIROUTE_API_KEY }}
-        run: deno run --allow-read=dokploy/runner-web/settings/combos.yml --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --apply
+        run: deno run --allow-read=dokploy/runner-web/settings/combos.yml --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts

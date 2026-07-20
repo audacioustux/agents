@@ -1,5 +1,6 @@
 baseUrl: https://omni.tux.bd
 # smoke-fixture for trusted commenter validation
+# idempotency retest line
 combos:
   pro-coding:
     - cx/gpt-5.6-terra-max

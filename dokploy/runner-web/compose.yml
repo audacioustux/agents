@@ -6,6 +6,12 @@ services:
     volumes:
       - redis-data:/data
     command: redis-server --save 60 1 --loglevel warning
+    deploy:
+      resources:
+        reservations:
+          memory: 256M
+        limits:
+          memory: 256M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s

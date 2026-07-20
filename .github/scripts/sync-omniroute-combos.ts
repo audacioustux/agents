@@ -24,6 +24,7 @@ type ComboClient = {
 
 const DEFAULT_CONFIG_PATH = "dokploy/runner-web/settings/combos.yml";
 const MANAGED_FIELD = "models";
+const LIVE_CATALOG_URL = "https://omni.tux.bd/v1";
 
 export class OmniRouteClient implements ComboClient {
   readonly #baseUrl: string;
@@ -41,7 +42,6 @@ export class OmniRouteClient implements ComboClient {
       "GET /api/combos",
     );
   }
-
   async getModels(): Promise<JsonObject[]> {
     // OmniRoute exposes the live model catalog as the OpenAI-compatible
     // /v1 endpoint. Wrapper is `data` (object: "list"), not `models`.
@@ -313,6 +313,29 @@ function responseList(
   );
 }
 
+async function fetchLiveCatalog(): Promise<JsonObject[]> {
+  const response = await fetch(LIVE_CATALOG_URL, {
+    headers: { Accept: "application/json" },
+  });
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `GET ${LIVE_CATALOG_URL} failed with status ${response.status}: ${body}`,
+    );
+  }
+  let result: unknown;
+  try {
+    result = body.length === 0 ? null : JSON.parse(body);
+  } catch (error) {
+    throw new Error(
+      `GET ${LIVE_CATALOG_URL} returned invalid JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  return responseList(result, "data", "GET /v1");
+}
+
 function modelEntry(
   comboName: string,
   position: number,
@@ -380,8 +403,11 @@ async function main(): Promise<number> {
   const args = [...Deno.args];
   const dryRun = args.includes("--dry-run");
   const apply = args.includes("--apply");
-  if (dryRun === apply) {
-    console.error("exactly one of --dry-run or --apply is required");
+  const validateCatalog = args.includes("--validate-catalog");
+  if ([dryRun, apply, validateCatalog].filter(Boolean).length !== 1) {
+    console.error(
+      "exactly one of --dry-run, --apply, or --validate-catalog is required",
+    );
     return 1;
   }
   const configFlag = args.indexOf("--config");
@@ -392,6 +418,22 @@ async function main(): Promise<number> {
     console.error("--config requires a path");
     return 1;
   }
+
+  if (validateCatalog) {
+    try {
+      const config = parseComboConfig(await Deno.readTextFile(configPath));
+      const errors = validateModelCatalog(config, await fetchLiveCatalog());
+      if (errors.length > 0) {
+        console.error(`invalid combo models:\n${errors.join("\n")}`);
+        return 1;
+      }
+      return 0;
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      return 1;
+    }
+  }
+
   const apiKey = Deno.env.get("OMNIROUTE_API_KEY");
   if (apiKey === undefined || apiKey.length === 0) {
     console.error("OMNIROUTE_API_KEY is required");
@@ -660,8 +702,7 @@ Deno.test("OmniRouteClient.getModels fetches /v1 and unwraps data", async () => 
   // Regression: getModels() must hit exactly GET <baseUrl>/v1 and parse the
   // OpenAI-style { object: "list", data: [...] } envelope. Earlier versions
   // hit /api/models?all=true with a `models` wrapper, which returned a
-  // smaller catalog than /v1, so any id only present in /v1 (e.g.
-  // cf/@cf/moonshotai/kimi-k2.7-code) was flagged as unknown.
+  // smaller catalog than /v1, so an id present only in /v1 was flagged as unknown.
   const originalFetch = globalThis.fetch;
   let requestedUrl: string | null = null;
   let requestedMethod: string | null = null;
@@ -674,7 +715,7 @@ Deno.test("OmniRouteClient.getModels fetches /v1 and unwraps data", async () => 
           JSON.stringify({
             object: "list",
             data: [
-              { id: "cf/@cf/moonshotai/kimi-k2.7-code", object: "model" },
+              { id: "provider/example-model", object: "model" },
             ],
           }),
           { status: 200, headers: { "content-type": "application/json" } },
@@ -688,7 +729,7 @@ Deno.test("OmniRouteClient.getModels fetches /v1 and unwraps data", async () => 
     assertEquals(requestedMethod, "GET");
     assertEquals(requestedUrl, "https://omni.tux.bd/v1");
     assertEquals(models.map((m) => m.id), [
-      "cf/@cf/moonshotai/kimi-k2.7-code",
+      "provider/example-model",
     ]);
   } finally {
     globalThis.fetch = originalFetch;

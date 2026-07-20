@@ -43,10 +43,12 @@ export class OmniRouteClient implements ComboClient {
   }
 
   async getModels(): Promise<JsonObject[]> {
+    // OmniRoute exposes the live model catalog as the OpenAI-compatible
+    // /v1 endpoint. Wrapper is `data` (object: "list"), not `models`.
     return responseList(
-      await this.#request("GET", "/api/models?all=true"),
-      "models",
-      "GET /api/models?all=true",
+      await this.#request("GET", "/v1"),
+      "data",
+      "GET /v1",
     );
   }
 
@@ -654,6 +656,44 @@ Deno.test("syncCombos rejects extra live combo names", async () => {
   );
 });
 
+Deno.test("OmniRouteClient.getModels fetches /v1 and unwraps data", async () => {
+  // Regression: getModels() must hit exactly GET <baseUrl>/v1 and parse the
+  // OpenAI-style { object: "list", data: [...] } envelope. Earlier versions
+  // hit /api/models?all=true with a `models` wrapper, which returned a
+  // smaller catalog than /v1, so any id only present in /v1 (e.g.
+  // cf/@cf/moonshotai/kimi-k2.7-code) was flagged as unknown.
+  const originalFetch = globalThis.fetch;
+  let requestedUrl: string | null = null;
+  let requestedMethod: string | null = null;
+  try {
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      requestedUrl = typeof input === "string" ? input : input.toString();
+      requestedMethod = (init?.method ?? "GET").toUpperCase();
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            object: "list",
+            data: [
+              { id: "cf/@cf/moonshotai/kimi-k2.7-code", object: "model" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    }) as typeof fetch;
+
+    const client = new OmniRouteClient("https://omni.tux.bd", "test-key");
+    const models = await client.getModels();
+
+    assertEquals(requestedMethod, "GET");
+    assertEquals(requestedUrl, "https://omni.tux.bd/v1");
+    assertEquals(models.map((m) => m.id), [
+      "cf/@cf/moonshotai/kimi-k2.7-code",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 if (import.meta.main) {
   Deno.exit(await main());
 }

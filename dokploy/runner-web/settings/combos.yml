@@ -36,6 +36,7 @@ combos:
     - agy/gemini-3.5-flash-high
     - minimax/MiniMax-M3
     - ollamacloud/minimax-m3
+    - cf/@cf/moonshotai/kimi-k2.7-code
     - oc/big-pickle
     - cx/gpt-5.6-luna-xhigh
   chat:
@@ -65,6 +66,7 @@ combos:
     - agy/gemini-3.1-flash-lite
     - nvidia/deepseek-ai/deepseek-v4-pro
     - fmd/gpt-5.5
+    - cf/@cf/moonshotai/kimi-k2.7-code
     - agy/gemini-3.5-flash-high
     - agy/gemini-pro-agent
     - nvidia/mistralai/mistral-large-3-675b-instruct-2512

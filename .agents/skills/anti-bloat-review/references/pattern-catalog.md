@@ -1,4 +1,4 @@
-# Bloat Pattern Catalog
+# Anti-Bloat Pattern Catalog
 
 Use this reference after the initial review identifies a concrete symptom or during a systemic audit. Patterns describe decay shapes, not syntax. Do not report a match without evidence, consequence, and a disposition.
 

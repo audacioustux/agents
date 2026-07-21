@@ -1,9 +1,9 @@
 ---
-name: reviewing-bloat
+name: anti-bloat-review
 description: Use when reviewing or changing code, configuration, schemas, tests, infrastructure, migrations, or generated changes that show duplication, patchwork, convention drift, unclear ownership, hidden coupling, or complexity growing faster than capability.
 ---
 
-# Reviewing Bloat
+# Anti-Bloat Review
 
 ## Role
 

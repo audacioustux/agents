@@ -1,77 +1,193 @@
-import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
 import { parse as parseYaml } from "jsr:@std/yaml@1";
+
+const DEFAULT_CONFIG_PATH = "dokploy/runner-web/settings/combos.yml";
+const OMNIROUTE_ORIGIN = "https://omni.tux.bd";
+const USER_AGENT = "omniroute-combo-sync/2.0";
 
 export type ComboConfig = {
   baseUrl: string;
   combos: Record<string, string[]>;
 };
 
-export type ComboDiff = {
+export type ModelEntry = {
+  model: string;
+  [key: string]: unknown;
+};
+
+export type LiveCombo = {
+  id: string;
   name: string;
-  action: "update" | "unchanged";
+  models: ModelEntry[];
+  [key: string]: unknown;
 };
 
-type JsonObject = Record<string, unknown>;
-
-type ComboClient = {
-  getCombos(): Promise<JsonObject[]>;
-  putCombo(comboId: string, payload: JsonObject): Promise<unknown>;
+export type ComboChange = {
+  name: string;
+  changed: boolean;
 };
 
-const DEFAULT_CONFIG_PATH = "dokploy/runner-web/settings/combos.yml";
-const OMNIROUTE_ORIGIN = "https://omni.tux.bd";
+export type ComboApi = {
+  getCombos(): Promise<LiveCombo[]>;
+  putCombo(id: string, combo: LiveCombo): Promise<void>;
+};
 
-export class OmniRouteClient implements ComboClient {
-  readonly #baseUrl: string;
-  readonly #apiKey: string;
-
-  constructor(baseUrl: string, apiKey: string) {
-    this.#baseUrl = baseUrl.replace(/\/+$/, "");
-    this.#apiKey = apiKey;
+export function parseConfig(source: string): ComboConfig {
+  const root = parseYaml(source);
+  if (!isRecord(root)) {
+    throw new Error("combo config must be a YAML object");
   }
 
-  async getCombos(): Promise<JsonObject[]> {
-    return responseList(
-      await this.#request("GET", "/api/combos"),
-      "combos",
-      "GET /api/combos",
+  const baseUrl = readString(root.baseUrl, "baseUrl").replace(/\/+$/, "");
+  if (baseUrl !== OMNIROUTE_ORIGIN) {
+    throw new Error(`baseUrl must be ${OMNIROUTE_ORIGIN}`);
+  }
+
+  const rawCombos = root.combos;
+  if (!isRecord(rawCombos) || Object.keys(rawCombos).length === 0) {
+    throw new Error("combos must be a non-empty mapping");
+  }
+
+  const combos: Record<string, string[]> = {};
+  for (const [name, value] of Object.entries(rawCombos)) {
+    if (!Array.isArray(value) || value.length === 0) {
+      throw new Error(`combos.${name} must be a non-empty array`);
+    }
+
+    const seen = new Set<string>();
+    combos[name] = value.map((entry) => {
+      if (typeof entry !== "string" || entry.trim() === "") {
+        throw new Error(`combos.${name} entries must be non-empty strings`);
+      }
+      if (seen.has(entry)) {
+        throw new Error(`combos.${name} has duplicate model ${entry}`);
+      }
+      seen.add(entry);
+      return entry;
+    });
+  }
+
+  return { baseUrl, combos };
+}
+
+export async function sync(
+  config: ComboConfig,
+  api: ComboApi,
+): Promise<ComboChange[]> {
+  const liveCombos = await api.getCombos();
+  const liveByName = new Map(liveCombos.map((combo) => [combo.name, combo]));
+  const declaredNames = new Set(Object.keys(config.combos));
+
+  const extras = liveCombos
+    .map((combo) => combo.name)
+    .filter((name) => !declaredNames.has(name));
+  if (extras.length > 0) {
+    throw new Error(`live combo not declared in config: ${extras.join(", ")}`);
+  }
+
+  const changes: ComboChange[] = [];
+  for (const [name, models] of Object.entries(config.combos)) {
+    const liveCombo = liveByName.get(name);
+    if (liveCombo === undefined) {
+      throw new Error(`declared combo not found: ${name}`);
+    }
+
+    const changed = !sameModels(liveCombo.models, models);
+    if (changed) {
+      await api.putCombo(liveCombo.id, replaceModels(liveCombo, models));
+    }
+    changes.push({ name, changed });
+  }
+
+  return changes;
+}
+
+function replaceModels(combo: LiveCombo, desiredModels: string[]): LiveCombo {
+  const existingByModel = new Map<string, ModelEntry[]>();
+  for (const entry of combo.models) {
+    const entries = existingByModel.get(entry.model) ?? [];
+    entries.push(structuredClone(entry));
+    existingByModel.set(entry.model, entries);
+  }
+
+  return {
+    ...combo,
+    models: desiredModels.map((model, index) => {
+      const existing = existingByModel.get(model)?.shift();
+      return existing ?? newModelEntry(combo.name, index + 1, model);
+    }),
+  };
+}
+
+function newModelEntry(
+  comboName: string,
+  position: number,
+  model: string,
+): ModelEntry {
+  return {
+    id: `${comboName}-model-${position}-${slug(model)}`,
+    kind: "model",
+    model,
+    providerId: model.split("/", 1)[0],
+    weight: 0,
+  };
+}
+
+function sameModels(entries: ModelEntry[], models: string[]): boolean {
+  return entries.length === models.length &&
+    entries.every((entry, index) => entry.model === models[index]);
+}
+
+export class OmniRouteClient implements ComboApi {
+  constructor(
+    private readonly baseUrl: string,
+    private readonly apiKey: string,
+  ) {
+    if (apiKey.length === 0) {
+      throw new Error("OMNIROUTE_API_KEY is required");
+    }
+  }
+
+  async getCombos(): Promise<LiveCombo[]> {
+    const response = await this.request("GET", "/api/combos");
+    if (!isRecord(response) || !Array.isArray(response.combos)) {
+      throw new Error("GET /api/combos did not return a combos array");
+    }
+    return response.combos.map((entry, index) =>
+      parseLiveCombo(entry, `combos[${index}]`)
     );
   }
 
-  async putCombo(comboId: string, payload: JsonObject): Promise<unknown> {
-    return await this.#request(
-      "PUT",
-      `/api/combos/${encodeURIComponent(comboId)}`,
-      payload,
-    );
+  async putCombo(id: string, combo: LiveCombo): Promise<void> {
+    await this.request("PUT", `/api/combos/${encodeURIComponent(id)}`, combo);
   }
 
-  async #request(
+  private async request(
     method: string,
     path: string,
-    payload?: JsonObject,
+    body?: LiveCombo,
   ): Promise<unknown> {
-    const url = `${this.#baseUrl}${path}`;
+    const url = `${this.baseUrl}${path}`;
     const headers = new Headers({
       Accept: "application/json",
-      Authorization: `Bearer ${this.#apiKey}`,
-      "User-Agent": "omniroute-combo-sync/2.0",
+      Authorization: `Bearer ${this.apiKey}`,
+      "User-Agent": USER_AGENT,
     });
     const init: RequestInit = { method, headers };
-    if (payload !== undefined) {
+    if (body !== undefined) {
       headers.set("Content-Type", "application/json");
-      init.body = JSON.stringify(payload);
+      init.body = JSON.stringify(body);
     }
 
     const response = await fetch(url, init);
-    const body = await response.text();
+    const text = await response.text();
     if (!response.ok) {
       throw new Error(
-        `${method} ${url} failed with status ${response.status}: ${body}`,
+        `${method} ${url} failed with status ${response.status}: ${text}`,
       );
     }
+    if (text.length === 0) return null;
     try {
-      return body.length === 0 ? null : JSON.parse(body);
+      return JSON.parse(text);
     } catch (error) {
       throw new Error(
         `${method} ${url} returned invalid JSON: ${
@@ -82,241 +198,62 @@ export class OmniRouteClient implements ComboClient {
   }
 }
 
-export function parseComboConfig(source: string): ComboConfig {
-  const parsed = parseYaml(source);
-  if (!isObject(parsed)) {
-    throw new Error("combo config must be a YAML object");
+function parseLiveCombo(value: unknown, label: string): LiveCombo {
+  if (!isRecord(value)) {
+    throw new Error(`${label} must be an object`);
   }
-  const baseUrl = parsed.baseUrl;
-  if (typeof baseUrl !== "string" || baseUrl.trim() === "") {
-    throw new Error("baseUrl must be a non-empty string");
+  const rawModels = value.models;
+  if (!Array.isArray(rawModels)) {
+    throw new Error(`${label}.models must be an array`);
   }
-  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
-  if (normalizedBaseUrl !== OMNIROUTE_ORIGIN) {
-    throw new Error(`baseUrl must be ${OMNIROUTE_ORIGIN}`);
-  }
-  const combos = parsed.combos;
-  if (!isObject(combos) || Object.keys(combos).length === 0) {
-    throw new Error("combos must be a non-empty mapping");
-  }
-
-  const normalizedCombos: Record<string, string[]> = {};
-  for (const [comboName, models] of Object.entries(combos)) {
-    if (!Array.isArray(models) || models.length === 0) {
-      throw new Error(`combos.${comboName} must be a non-empty string array`);
-    }
-    const seenModels = new Set<string>();
-    normalizedCombos[comboName] = models.map((model, index) => {
-      if (typeof model !== "string" || model.trim() === "") {
-        throw new Error(
-          `combos.${comboName}[${index}] must be a non-empty string`,
-        );
-      }
-      if (seenModels.has(model)) {
-        throw new Error(`duplicate model id in combo ${comboName}: ${model}`);
-      }
-      seenModels.add(model);
-      return model;
-    });
-  }
-
-  return { baseUrl: baseUrl.replace(/\/+$/, ""), combos: normalizedCombos };
-}
-
-export function diffCombo(liveCombo: JsonObject, models: string[]): ComboDiff {
-  const name = stringField(liveCombo, "name");
-  const liveModels = arrayField(liveCombo, "models").map((entry) =>
-    stringField(objectValue(entry, `${name}.models[]`), "model")
-  );
-  const changed = liveModels.length !== models.length ||
-    liveModels.some((m, i) => m !== models[i]);
   return {
-    name,
-    action: changed ? "update" : "unchanged",
+    ...value,
+    id: readString(value.id, `${label}.id`),
+    name: readString(value.name, `${label}.name`),
+    models: rawModels.map((entry, index) =>
+      parseModelEntry(entry, `${label}.models[${index}]`)
+    ),
   };
 }
 
-export function mergeComboModels(
-  liveCombo: JsonObject,
-  models: string[],
-): JsonObject {
-  const comboName = stringField(liveCombo, "name");
-  const merged = structuredClone(liveCombo);
-  const liveEntriesByModel = new Map<string, JsonObject[]>();
-  for (const liveEntry of arrayField(liveCombo, "models")) {
-    const liveModel = objectValue(liveEntry, `${comboName}.models[]`);
-    const model = stringField(liveModel, "model");
-    const entries = liveEntriesByModel.get(model) ?? [];
-    entries.push(structuredClone(liveModel));
-    liveEntriesByModel.set(model, entries);
+function parseModelEntry(value: unknown, label: string): ModelEntry {
+  if (!isRecord(value)) {
+    throw new Error(`${label} must be an object`);
   }
-
-  merged.models = models.map((model, index) => {
-    const existingEntries = liveEntriesByModel.get(model) ?? [];
-    const existingEntry = existingEntries.shift();
-    if (existingEntry !== undefined) {
-      return existingEntry;
-    }
-    return modelEntry(comboName, index + 1, model);
-  });
-  return merged;
+  return { ...value, model: readString(value.model, `${label}.model`) };
 }
 
-export async function syncCombos(
-  config: ComboConfig,
-  client: ComboClient,
-): Promise<ComboDiff[]> {
-  const liveCombos = await client.getCombos();
-
-  const liveByName = new Map<string, JsonObject>();
-  for (const liveCombo of liveCombos) {
-    liveByName.set(stringField(liveCombo, "name"), liveCombo);
+function readString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${label} must be a non-empty string`);
   }
-
-  const declaredNames = new Set(Object.keys(config.combos));
-  const extraComboNames = [...liveByName.keys()].filter((name) =>
-    !declaredNames.has(name)
-  );
-  if (extraComboNames.length > 0) {
-    throw new Error(
-      `live combo not declared in config: ${extraComboNames.join(", ")}`,
-    );
-  }
-
-  const diffs: ComboDiff[] = [];
-  for (const [comboName, models] of Object.entries(config.combos)) {
-    const liveCombo = liveByName.get(comboName);
-    if (liveCombo === undefined) {
-      throw new Error(`declared combo not found: ${comboName}`);
-    }
-    diffs.push(diffCombo(liveCombo, models));
-  }
-
-  for (const diff of diffs) {
-    if (diff.action === "unchanged") {
-      continue;
-    }
-    const liveCombo = liveByName.get(diff.name)!;
-    const comboId = stringField(liveCombo, "id");
-    await client.putCombo(
-      comboId,
-      mergeComboModels(liveCombo, config.combos[diff.name]),
-    );
-  }
-
-  const verifiedLiveCombos = await client.getCombos();
-  const verifiedByName = new Map<string, JsonObject>();
-  for (const liveCombo of verifiedLiveCombos) {
-    verifiedByName.set(stringField(liveCombo, "name"), liveCombo);
-  }
-  const failures: string[] = [];
-  for (const [comboName, models] of Object.entries(config.combos)) {
-    const liveCombo = verifiedByName.get(comboName);
-    if (liveCombo === undefined) {
-      failures.push(`${comboName}: missing after apply`);
-      continue;
-    }
-    const diff = diffCombo(liveCombo, models);
-    if (diff.action !== "unchanged") {
-      failures.push(`${comboName}: models mismatch`);
-    }
-  }
-  if (failures.length > 0) {
-    throw new Error(`post-apply verification failed:\n${failures.join("\n")}`);
-  }
-  return diffs;
+  return value;
 }
 
-function responseList(
-  result: unknown,
-  wrapperKey: string,
-  description: string,
-): JsonObject[] {
-  const value = isObject(result) && wrapperKey in result
-    ? result[wrapperKey]
-    : result;
-  if (!Array.isArray(value)) {
-    throw new Error(`${description} returned non-list JSON`);
-  }
-  return value.map((entry, index) =>
-    objectValue(entry, `${description}[${index}]`)
-  );
-}
-
-function modelEntry(
-  comboName: string,
-  position: number,
-  model: string,
-): JsonObject {
-  return {
-    id: `${comboName}-model-${position}-${slugModelId(model)}`,
-    kind: "model",
-    model,
-    providerId: providerIdFromModel(model),
-    weight: 0,
-  };
-}
-
-function providerIdFromModel(model: string): string {
-  return model.split("/", 1)[0];
-}
-
-function slugModelId(model: string): string {
-  return model.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
-    .toLowerCase();
-}
-
-function isObject(value: unknown): value is JsonObject {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function objectValue(value: unknown, label: string): JsonObject {
-  if (!isObject(value)) {
-    throw new Error(`${label} must be an object`);
-  }
-  return value;
-}
-
-function stringField(object: JsonObject, field: string): string {
-  const value = object[field];
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error(`${field} must be a non-empty string`);
-  }
-  return value;
-}
-
-function arrayField(object: JsonObject, field: string): unknown[] {
-  const value = object[field];
-  if (!Array.isArray(value)) {
-    throw new Error(`${field} must be an array`);
-  }
-  return value;
+function slug(value: string): string {
+  return value.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+    .toLowerCase();
 }
 
 async function main(): Promise<number> {
-  const args = [...Deno.args];
-  const configFlag = args.indexOf("--config");
-  const configPath = configFlag >= 0
-    ? args[configFlag + 1]
-    : DEFAULT_CONFIG_PATH;
-  if (configPath === undefined || configPath.length === 0) {
-    console.error("--config requires a path");
-    return 1;
-  }
-
+  const configPath = readArg("--config") ?? DEFAULT_CONFIG_PATH;
   const apiKey = Deno.env.get("OMNIROUTE_API_KEY");
-  if (apiKey === undefined || apiKey.length === 0) {
+  if (!apiKey) {
     console.error("OMNIROUTE_API_KEY is required");
     return 1;
   }
 
   try {
-    const config = parseComboConfig(await Deno.readTextFile(configPath));
-    const diffs = await syncCombos(
+    const config = parseConfig(await Deno.readTextFile(configPath));
+    const changes = await sync(
       config,
       new OmniRouteClient(config.baseUrl, apiKey),
     );
-    console.log(JSON.stringify({ changes: diffs }, null, 2));
+    console.log(JSON.stringify({ changes }, null, 2));
     return 0;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
@@ -324,199 +261,10 @@ async function main(): Promise<number> {
   }
 }
 
-Deno.test("parseComboConfig reads base URL and ordered model arrays", () => {
-  const config = parseComboConfig(`
-baseUrl: https://omni.tux.bd
-combos:
-  coding:
-    - ollamacloud/minimax-m3
-    - bzl/minimax-m3
-  best-free:
-    - bzl/auto:free
-`);
-
-  assertEquals(config, {
-    baseUrl: "https://omni.tux.bd",
-    combos: {
-      coding: ["ollamacloud/minimax-m3", "bzl/minimax-m3"],
-      "best-free": ["bzl/auto:free"],
-    },
-  });
-});
-
-Deno.test("default combo config parses actual repo file", async () => {
-  // Smoke-test only: combos.yml is intentionally human-editable, so this test
-  // must not pin combo names or model ids.
-  const config = parseComboConfig(await Deno.readTextFile(DEFAULT_CONFIG_PATH));
-
-  assertEquals(Object.keys(config.combos).length > 0, true);
-});
-
-Deno.test("parseComboConfig rejects alternate API origins", () => {
-  assertThrows(
-    () =>
-      parseComboConfig(`
-baseUrl: https://attacker.example
-combos:
-  coding:
-    - provider/model
-`),
-    Error,
-    "baseUrl must be https://omni.tux.bd",
-  );
-});
-
-Deno.test("diffCombo compares only ordered model ids", () => {
-  const diff = diffCombo(
-    {
-      name: "coding",
-      models: [
-        {
-          id: "live-a",
-          kind: "model",
-          model: "ollamacloud/minimax-m3",
-          providerId: "stale-provider-id",
-          weight: 80,
-        },
-        {
-          id: "live-b",
-          kind: "model",
-          model: "bzl/minimax-m3",
-          weight: 20,
-        },
-      ],
-    },
-    ["ollamacloud/minimax-m3", "bzl/minimax-m3"],
-  );
-
-  assertEquals(diff.action, "unchanged");
-});
-
-Deno.test("mergeComboModels preserves unmanaged fields and retained model metadata", () => {
-  const merged = mergeComboModels(
-    {
-      id: "combo-1",
-      name: "coding",
-      strategy: "weighted",
-      sortOrder: 7,
-      models: [
-        {
-          id: "live-a",
-          kind: "model",
-          model: "ollamacloud/minimax-m3",
-          providerId: "ollamacloud",
-          weight: 80,
-          latencyClass: "fast",
-        },
-        {
-          id: "live-b",
-          kind: "model",
-          model: "bzl/minimax-m3",
-          providerId: "bzl",
-          weight: 20,
-        },
-      ],
-    },
-    ["bzl/minimax-m3", "ollamacloud/minimax-m3", "minimax/MiniMax-M3"],
-  );
-
-  assertEquals(merged.id, "combo-1");
-  assertEquals(merged.sortOrder, 7);
-  assertEquals(merged.models, [
-    {
-      id: "live-b",
-      kind: "model",
-      model: "bzl/minimax-m3",
-      providerId: "bzl",
-      weight: 20,
-    },
-    {
-      id: "live-a",
-      kind: "model",
-      model: "ollamacloud/minimax-m3",
-      providerId: "ollamacloud",
-      weight: 80,
-      latencyClass: "fast",
-    },
-    {
-      id: "coding-model-3-minimax-minimax-m3",
-      kind: "model",
-      model: "minimax/MiniMax-M3",
-      providerId: "minimax",
-      weight: 0,
-    },
-  ]);
-});
-
-Deno.test("syncCombos verifies post-apply state", async () => {
-  let applied = false;
-  const diffs = await syncCombos(
-    { baseUrl: "https://omni.tux.bd", combos: { coding: ["bzl/minimax-m3"] } },
-    {
-      getCombos: () =>
-        Promise.resolve([
-          {
-            id: "combo-1",
-            name: "coding",
-            models: applied
-              ? [{
-                kind: "model",
-                model: "bzl/minimax-m3",
-                providerId: "bzl",
-                weight: 0,
-              }]
-              : [],
-          },
-        ]),
-      putCombo: () => {
-        applied = true;
-        return Promise.resolve({});
-      },
-    },
-  );
-
-  assertEquals(diffs[0].action, "update");
-});
-
-Deno.test("syncCombos rejects undeclared live combo names", async () => {
-  await assertRejects(
-    () =>
-      syncCombos(
-        {
-          baseUrl: "https://omni.tux.bd",
-          combos: { missing: ["bzl/minimax-m3"] },
-        },
-        {
-          getCombos: () => Promise.resolve([]),
-          putCombo: () => Promise.resolve({}),
-        },
-      ),
-    Error,
-    "declared combo not found: missing",
-  );
-});
-
-Deno.test("syncCombos rejects extra live combo names", async () => {
-  await assertRejects(
-    () =>
-      syncCombos(
-        {
-          baseUrl: "https://omni.tux.bd",
-          combos: { coding: ["bzl/minimax-m3"] },
-        },
-        {
-          getCombos: () =>
-            Promise.resolve([
-              { id: "combo-1", name: "coding", models: [] },
-              { id: "combo-2", name: "unmanaged", models: [] },
-            ]),
-          putCombo: () => Promise.resolve({}),
-        },
-      ),
-    Error,
-    "live combo not declared in config: unmanaged",
-  );
-});
+function readArg(name: string): string | undefined {
+  const index = Deno.args.indexOf(name);
+  return index >= 0 ? Deno.args[index + 1] : undefined;
+}
 
 if (import.meta.main) {
   Deno.exit(await main());

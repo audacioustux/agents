@@ -196,3 +196,49 @@ Deno.test("OmniRouteClient: requests the combos endpoint with bearer auth", asyn
     globalThis.fetch = originalFetch;
   }
 });
+
+Deno.test("OmniRouteClient: putCombo sends PUT request with full combo body and bearer auth", async () => {
+  let reqUrl = "";
+  let reqMethod = "";
+  let reqBody = "";
+  let authHeader = "";
+  const originalFetch = globalThis.fetch;
+
+  try {
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      reqUrl = input.toString();
+      reqMethod = init?.method ?? "";
+      reqBody = (init?.body as string) ?? "";
+      const headers = new Headers(init?.headers);
+      authHeader = headers.get("Authorization") ?? "";
+      return Promise.resolve(
+        new Response(JSON.stringify({ success: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    }) as typeof fetch;
+
+    const client = new OmniRouteClient(
+      "https://omni.tux.bd",
+      "test-secret-key",
+    );
+    const payload: LiveCombo = {
+      id: "combo-123",
+      name: "coding",
+      strategy: "weighted",
+      models: [
+        { id: "m1", model: "a", providerId: "p1", weight: 50 },
+      ],
+    };
+
+    await client.putCombo("combo-123", payload);
+
+    assertEquals(reqUrl, "https://omni.tux.bd/api/combos/combo-123");
+    assertEquals(reqMethod, "PUT");
+    assertEquals(authHeader, "Bearer test-secret-key");
+    assertEquals(JSON.parse(reqBody), payload);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

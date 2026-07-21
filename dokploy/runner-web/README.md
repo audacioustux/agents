@@ -11,7 +11,8 @@ Redis.
 - `settings/combos.yml` — declarative combo model lists for the single
   `omni.tux.bd` OmniRoute instance.
 - `.github/scripts/sync-omniroute-combos.ts` — Deno/TypeScript sync script used
-  by GitHub Actions for validation, dry-runs, and applies.
+  by GitHub Actions for applies.
+- `.github/scripts/sync-omniroute-combos.test.ts` — unit tests for the sync script.
 
 ## Deploy
 
@@ -38,19 +39,18 @@ Combo configuration is managed in `dokploy/runner-web/settings/combos.yml`. The
 file declares the `https://omni.tux.bd` base URL and each combo's ordered model
 list.
 
-Merges to `main` run `.github/workflows/omniroute-combos.yml` with Deno. The
+Pushes to `main` run `.github/workflows/omniroute-combos.yml` with Deno. The
 workflow reads the `OMNIROUTE_API_KEY` secret from the `omni.tux.bd` GitHub
-Environment, runs the script tests, dry-runs the diff, then applies changed
-combo model lists through OmniRoute `/api/combos`.
+Environment and applies changed combo model lists through OmniRoute `/api/combos`.
 
 The sync only manages each combo's ordered `models` list. It preserves live
 combo metadata and retained model-entry metadata, including weighted-combo
 weights. It never creates or deletes combos; unexpected live combo names or
-missing declared combos fail validation instead.
+missing declared combos cause sync to fail.
 
-Run the same checks locally with:
+Run tests or sync locally with:
 
 ```bash
-deno test --allow-read --allow-net .github/scripts/sync-omniroute-combos.ts
-deno run --allow-read=dokploy/runner-web/settings/combos.yml --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts --dry-run
+deno test --allow-read --allow-net .github/scripts/sync-omniroute-combos.test.ts
+deno run --allow-read=dokploy/runner-web/settings/combos.yml --allow-net --allow-env=OMNIROUTE_API_KEY .github/scripts/sync-omniroute-combos.ts
 ```

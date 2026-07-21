@@ -11,6 +11,14 @@ Review the repository as a system, not just the changed lines. Maintainability p
 
 Applies to code, configuration, schemas, tests, infrastructure, migrations, generated changes, and documentation.
 
+## Purpose and coverage
+
+The taxonomy is for compression, not enumeration: use it to explain scattered symptoms through the smallest defensible set of root causes, not to produce one finding for every matching label.
+
+If a concrete pattern does not fit an existing category, name it explicitly rather than forcing it into a nearby label or dropping it; note the taxonomy gap for future expansion.
+
+A deliberately deferred pattern is still worth naming. Give it evidence, impact, and a `flag only` disposition with the reason it is out of scope for the current change.
+
 ## Set the scope
 
 | Mode | Inspect |

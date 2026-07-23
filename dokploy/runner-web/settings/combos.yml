@@ -30,18 +30,18 @@ combos:
   ###
   pro-chat:
     - cc/claude-opus-4-8
-    - cx/gpt-5.6-terra-xhigh
+    - cx/gpt-5.6-sol-xhigh
     - agy/gemini-pro-agent
   best-chat:
     - cc/claude-sonnet-5
-    - cx/gpt-5.6-terra-high
-    - agy/gemini-3.5-flash-high
-    - gh/gemini-3.5-flash
+    - cx/gpt-5.6-terra-xhigh
     - minimax/MiniMax-M3
+    - gh/gemini-3.5-flash
     - oc/big-pickle
     - ollamacloud/minimax-m3
   chat:
-    - cx/gpt-5.6-terra-medium
+    - agy/gemini-3.5-flash-high
+    - cx/gpt-5.6-luna-xhigh
     - agy/claude-sonnet-4-6
     - cf/@cf/moonshotai/kimi-k2.7-code
     - oc/deepseek-v4-flash-free

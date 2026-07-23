@@ -29,10 +29,11 @@ combos:
     - agy/claude-opus-4-6-thinking
   ###
   pro-chat:
-    - cx/gpt-5.6-terra-xhigh
     - cc/claude-opus-4-8
+    - cx/gpt-5.6-terra-xhigh
     - agy/gemini-pro-agent
   best-chat:
+    - cc/claude-sonnet-5
     - cx/gpt-5.6-terra-high
     - agy/gemini-3.5-flash-high
     - gh/gemini-3.5-flash

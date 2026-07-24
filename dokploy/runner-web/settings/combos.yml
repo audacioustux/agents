@@ -24,8 +24,8 @@ combos:
     - cc/claude-opus-4-8
   reasoning:
     - cx/gpt-5.6-sol-high
-    - cc/claude-sonnet-5
     - agy/gemini-pro-agent
+    - cc/claude-sonnet-5
     - agy/claude-opus-4-6-thinking
   ###
   pro-chat:

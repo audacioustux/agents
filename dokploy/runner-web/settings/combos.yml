@@ -2,7 +2,7 @@ baseUrl: https://omni.tux.bd
 combos:
   pro-coding:
     - cx/gpt-5.6-terra-max
-    - cc/claude-opus-4-8
+    - cc/claude-opus-5
   best-coding:
     - cx/gpt-5.6-terra-xhigh
     - cc/claude-sonnet-5
@@ -21,7 +21,7 @@ combos:
     - cc/claude-fable-5
   best-reasoning:
     - cx/gpt-5.6-sol-xhigh
-    - cc/claude-opus-4-8
+    - cc/claude-opus-5
   reasoning:
     - cx/gpt-5.6-sol-high
     - agy/gemini-pro-agent
@@ -29,7 +29,7 @@ combos:
     - agy/claude-opus-4-6-thinking
   ###
   pro-chat:
-    - cc/claude-opus-4-8
+    - cc/claude-opus-5
     - cx/gpt-5.6-sol-xhigh
     - agy/gemini-pro-agent
   best-chat:
@@ -76,7 +76,7 @@ combos:
     - agy/gpt-oss-120b-medium
     - groq/openai/gpt-oss-120b
   claude-opus:
-    - cc/claude-opus-4-8
+    - cc/claude-opus-5
     - agy/claude-opus-4-6-thinking
   claude-sonnet:
     - cc/claude-sonnet-5

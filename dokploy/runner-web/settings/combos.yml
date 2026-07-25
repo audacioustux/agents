@@ -35,11 +35,11 @@ combos:
   best-chat:
     - cc/claude-sonnet-5
     - minimax/MiniMax-M3
+    - gh/claude-sonnet-5
     - cf/@cf/moonshotai/kimi-k2.7-code
-    - agy/gemini-3.6-flash-high
-    - gh/gemini-3.6-flash
     - cx/gpt-5.6-terra-xhigh
   chat:
+    - agy/gemini-3.6-flash-high
     - agy/claude-sonnet-4-6
     - oc/big-pickle
     - ollamacloud/minimax-m3

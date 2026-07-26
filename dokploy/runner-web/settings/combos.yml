@@ -8,7 +8,6 @@ combos:
   coding:
     - gh/claude-sonnet-5
     - agy/gemini-3.6-flash-high
-    - agy/claude-sonnet-4-6
   ###
   best-coding-fast:
     - cf/@cf/moonshotai/kimi-k2.7-code
@@ -25,7 +24,9 @@ combos:
   ###
   pro-chat:
     - cc/claude-opus-5
-    # - cx/gpt-5.6-sol-xhigh
+    - cx/gpt-5.6-sol-max
+    - agy/gemini-pro-agent
+    - minimax/MiniMax-M3
   best-chat:
     - cc/claude-sonnet-5
     - minimax/MiniMax-M3
@@ -33,31 +34,35 @@ combos:
     # - cf/@cf/moonshotai/kimi-k2.7-code
     # - cx/gpt-5.6-terra-xhigh
   chat:
+    - oc/big-pickle
     - gh/claude-sonnet-5
     - agy/gemini-3.6-flash-high
+    - agy/gemini-pro-agent
     - agy/claude-sonnet-4-6
     # - oc/big-pickle
     # - ollamacloud/minimax-m3
     # - nvidia/minimaxai/minimax-m3
     # - oc/deepseek-v4-flash-free
     # - cx/gpt-5.6-luna-xhigh
+    # - agy/claude-sonnet-4-6
   ###
   pro-vision:
-    - cc/claude-opus-5
+    - cc/claude-fable-5
     # - cx/gpt-5.6-sol-high
     # - agy/gemini-pro-agent
   best-vision:
-    - gh/claude-sonnet-5
+    - cc/claude-opus-5
   #   - cx/gpt-5.6-sol-medium
   #   - agy/gemini-3.6-flash-high
   ###
   pro-fast:
-    - cx/gpt-5.6-luna-max
+    - cc/claude-sonnet-5
   best-fast:
-    - cx/gpt-5.6-luna-xhigh
+    - gh/claude-sonnet-5
     - agy/gemini-3.6-flash-high
   fast:
-    - cx/gpt-5.6-luna-high
+    - cerebras/gpt-oss-120b
+    - agy/gemini-3.1-flash-lite
   ###
   best-free:
     - oc/big-pickle

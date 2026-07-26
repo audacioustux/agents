@@ -1,41 +1,37 @@
 baseUrl: https://omni.tux.bd
 combos:
   pro-coding:
-    - cx/gpt-5.6-terra-max
     - cc/claude-opus-5
-  best-coding:
-    - cx/gpt-5.6-terra-xhigh
-    - cc/claude-sonnet-5
-    - agy/gemini-pro-agent
-  coding:
-    - cx/gpt-5.6-terra-high
     - minimax/MiniMax-M3
+  best-coding:
+    - cc/claude-sonnet-5
+    - cf/@cf/moonshotai/kimi-k2.7-code
+  coding:
     - agy/gemini-3.6-flash-high
   ###
   best-coding-fast:
-    - cx/gpt-5.6-luna-xhigh
+    - cc/claude-sonnet-5
     - agy/gemini-3.6-flash-high
   ###
   pro-reasoning:
-    - cx/gpt-5.6-sol-max
     - cc/claude-fable-5
+    - cx/gpt-5.6-sol-max
   best-reasoning:
-    - cx/gpt-5.6-sol-xhigh
     - cc/claude-opus-5
+    - cx/gpt-5.6-sol-xhigh
   reasoning:
+    - cc/claude-sonnet-5
     - cx/gpt-5.6-sol-high
     - agy/gemini-pro-agent
-    - cc/claude-sonnet-5
-    - agy/claude-opus-4-6-thinking
   ###
   pro-chat:
     - cc/claude-opus-5
-    - agy/gemini-pro-agent
     - cx/gpt-5.6-sol-xhigh
   best-chat:
     - cc/claude-sonnet-5
     - minimax/MiniMax-M3
     - gh/claude-sonnet-5
+    - agy/gemini-pro-agent
     - cf/@cf/moonshotai/kimi-k2.7-code
     - cx/gpt-5.6-terra-xhigh
   chat:

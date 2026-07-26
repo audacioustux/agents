@@ -2,53 +2,54 @@ baseUrl: https://omni.tux.bd
 combos:
   pro-coding:
     - cc/claude-opus-5
-    - minimax/MiniMax-M3
   best-coding:
     - cc/claude-sonnet-5
-    - cf/@cf/moonshotai/kimi-k2.7-code
+    - minimax/MiniMax-M3
   coding:
+    - gh/claude-sonnet-5
     - agy/gemini-3.6-flash-high
+    - agy/claude-sonnet-4-6
   ###
   best-coding-fast:
-    - cc/claude-sonnet-5
+    - cf/@cf/moonshotai/kimi-k2.7-code
     - agy/gemini-3.6-flash-high
   ###
   pro-reasoning:
-    - cc/claude-fable-5
     - cx/gpt-5.6-sol-max
   best-reasoning:
     - cc/claude-opus-5
-    - cx/gpt-5.6-sol-xhigh
   reasoning:
     - cc/claude-sonnet-5
-    - cx/gpt-5.6-sol-high
-    - agy/gemini-pro-agent
+    # - cx/gpt-5.6-sol-high
+    # - agy/gemini-pro-agent
   ###
   pro-chat:
     - cc/claude-opus-5
-    - cx/gpt-5.6-sol-xhigh
+    # - cx/gpt-5.6-sol-xhigh
   best-chat:
     - cc/claude-sonnet-5
     - minimax/MiniMax-M3
-    - gh/claude-sonnet-5
-    - agy/gemini-pro-agent
-    - cf/@cf/moonshotai/kimi-k2.7-code
-    - cx/gpt-5.6-terra-xhigh
+    # - agy/gemini-pro-agent
+    # - cf/@cf/moonshotai/kimi-k2.7-code
+    # - cx/gpt-5.6-terra-xhigh
   chat:
+    - gh/claude-sonnet-5
     - agy/gemini-3.6-flash-high
     - agy/claude-sonnet-4-6
-    - oc/big-pickle
-    - ollamacloud/minimax-m3
-    - nvidia/minimaxai/minimax-m3
-    - oc/deepseek-v4-flash-free
-    - cx/gpt-5.6-luna-xhigh
+    # - oc/big-pickle
+    # - ollamacloud/minimax-m3
+    # - nvidia/minimaxai/minimax-m3
+    # - oc/deepseek-v4-flash-free
+    # - cx/gpt-5.6-luna-xhigh
   ###
   pro-vision:
-    - cx/gpt-5.6-sol-high
-    - agy/gemini-pro-agent
+    - cc/claude-opus-5
+    # - cx/gpt-5.6-sol-high
+    # - agy/gemini-pro-agent
   best-vision:
-    - cx/gpt-5.6-sol-medium
-    - agy/gemini-3.6-flash-high
+    - gh/claude-sonnet-5
+  #   - cx/gpt-5.6-sol-medium
+  #   - agy/gemini-3.6-flash-high
   ###
   pro-fast:
     - cx/gpt-5.6-luna-max
@@ -57,7 +58,6 @@ combos:
     - agy/gemini-3.6-flash-high
   fast:
     - cx/gpt-5.6-luna-high
-    - cx/gpt-5.3-codex-spark
   ###
   best-free:
     - oc/big-pickle

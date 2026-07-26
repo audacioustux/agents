@@ -65,8 +65,8 @@ combos:
   best-vision:
     models:
       - cc/claude-opus-5
-      #   - cx/gpt-5.6-sol-medium
-      #   - agy/gemini-3.6-flash-high
+      # - cx/gpt-5.6-sol-medium
+      # - agy/gemini-3.6-flash-high
   ###
   pro-fast:
     models:

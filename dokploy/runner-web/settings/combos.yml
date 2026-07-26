@@ -45,11 +45,11 @@ combos:
       # - cx/gpt-5.6-terra-xhigh
   chat:
     models:
-      - oc/big-pickle
       - gh/claude-sonnet-5
-      - agy/gemini-3.6-flash-high
       - agy/gemini-pro-agent
+      - agy/gemini-3.6-flash-high
       - agy/claude-sonnet-4-6
+      - oc/big-pickle
       # - oc/big-pickle
       # - ollamacloud/minimax-m3
       # - nvidia/minimaxai/minimax-m3

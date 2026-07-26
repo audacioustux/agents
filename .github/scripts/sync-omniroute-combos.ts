@@ -4,9 +4,20 @@ const DEFAULT_CONFIG_PATH = "dokploy/runner-web/settings/combos.yml";
 const OMNIROUTE_ORIGIN = "https://omni.tux.bd";
 const USER_AGENT = "omniroute-combo-sync/2.0";
 
+// --- Types ---------------------------------------------------------------
+
+/** Strategies combos.yml is allowed to set. Other live strategies (e.g. the
+ * OmniRoute-default "weighted") are left untouched unless declared here. */
+export type ComboStrategy = "priority" | "fusion";
+
+export type ComboDeclaration = {
+  strategy?: ComboStrategy;
+  models: string[];
+};
+
 export type ComboConfig = {
   baseUrl: string;
-  combos: Record<string, string[]>;
+  combos: Record<string, ComboDeclaration>;
 };
 
 export type ModelEntry = {
@@ -17,6 +28,7 @@ export type ModelEntry = {
 export type LiveCombo = {
   id: string;
   name: string;
+  strategy?: string;
   models: ModelEntry[];
   [key: string]: unknown;
 };
@@ -30,6 +42,8 @@ export type ComboApi = {
   getCombos(): Promise<LiveCombo[]>;
   putCombo(id: string, combo: LiveCombo): Promise<void>;
 };
+
+// --- Config parsing --------------------------------------------------------
 
 export function parseConfig(source: string): ComboConfig {
   const root = parseYaml(source);
@@ -47,27 +61,61 @@ export function parseConfig(source: string): ComboConfig {
     throw new Error("combos must be a non-empty mapping");
   }
 
-  const combos: Record<string, string[]> = {};
+  const combos: Record<string, ComboDeclaration> = {};
   for (const [name, value] of Object.entries(rawCombos)) {
-    if (!Array.isArray(value) || value.length === 0) {
-      throw new Error(`combos.${name} must be a non-empty array`);
-    }
-
-    const seen = new Set<string>();
-    combos[name] = value.map((entry) => {
-      if (typeof entry !== "string" || entry.trim() === "") {
-        throw new Error(`combos.${name} entries must be non-empty strings`);
-      }
-      if (seen.has(entry)) {
-        throw new Error(`combos.${name} has duplicate model ${entry}`);
-      }
-      seen.add(entry);
-      return entry;
-    });
+    combos[name] = parseComboDeclaration(name, value);
   }
 
   return { baseUrl, combos };
 }
+
+/** Accepts either the plain-array shorthand (no strategy override) or
+ * `{ strategy?, models }` for combos that also want to set a strategy. */
+function parseComboDeclaration(
+  name: string,
+  value: unknown,
+): ComboDeclaration {
+  if (Array.isArray(value)) {
+    return { models: parseModelList(name, value) };
+  }
+  if (!isRecord(value) || !("models" in value)) {
+    throw new Error(
+      `combos.${name} must be a model list or { strategy?, models }`,
+    );
+  }
+
+  const models = parseModelList(name, value.models);
+  return value.strategy === undefined
+    ? { models }
+    : { strategy: parseStrategy(name, value.strategy), models };
+}
+
+function parseStrategy(name: string, value: unknown): ComboStrategy {
+  if (value !== "priority" && value !== "fusion") {
+    throw new Error(`combos.${name}.strategy must be "priority" or "fusion"`);
+  }
+  return value;
+}
+
+function parseModelList(name: string, value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`combos.${name} must be a non-empty array`);
+  }
+
+  const seen = new Set<string>();
+  return value.map((entry) => {
+    if (typeof entry !== "string" || entry.trim() === "") {
+      throw new Error(`combos.${name} entries must be non-empty strings`);
+    }
+    if (seen.has(entry)) {
+      throw new Error(`combos.${name} has duplicate model ${entry}`);
+    }
+    seen.add(entry);
+    return entry;
+  });
+}
+
+// --- Sync engine -----------------------------------------------------------
 
 export async function sync(
   config: ComboConfig,
@@ -85,15 +133,21 @@ export async function sync(
   }
 
   const changes: ComboChange[] = [];
-  for (const [name, models] of Object.entries(config.combos)) {
+  for (const [name, declaration] of Object.entries(config.combos)) {
     const liveCombo = liveByName.get(name);
     if (liveCombo === undefined) {
       throw new Error(`declared combo not found: ${name}`);
     }
 
-    const changed = !sameModels(liveCombo.models, models);
+    const changed = isChanged(liveCombo, declaration);
     if (changed) {
-      await api.putCombo(liveCombo.id, replaceModels(liveCombo, models));
+      await api.putCombo(liveCombo.id, {
+        ...liveCombo,
+        ...(declaration.strategy !== undefined
+          ? { strategy: declaration.strategy }
+          : {}),
+        models: replaceModels(liveCombo, declaration.models),
+      });
     }
     changes.push({ name, changed });
   }
@@ -101,7 +155,20 @@ export async function sync(
   return changes;
 }
 
-function replaceModels(combo: LiveCombo, desiredModels: string[]): LiveCombo {
+function isChanged(live: LiveCombo, declaration: ComboDeclaration): boolean {
+  const modelsChanged = !sameModels(live.models, declaration.models);
+  const strategyChanged = declaration.strategy !== undefined &&
+    live.strategy !== declaration.strategy;
+  return modelsChanged || strategyChanged;
+}
+
+/** Rebuilds the ordered model list, reusing each live entry's metadata
+ * (e.g. weighted-combo weights) by model name and creating fresh entries
+ * for newly added models. */
+function replaceModels(
+  combo: LiveCombo,
+  desiredModels: string[],
+): ModelEntry[] {
   const existingByModel = new Map<string, ModelEntry[]>();
   for (const entry of combo.models) {
     const entries = existingByModel.get(entry.model) ?? [];
@@ -109,13 +176,10 @@ function replaceModels(combo: LiveCombo, desiredModels: string[]): LiveCombo {
     existingByModel.set(entry.model, entries);
   }
 
-  return {
-    ...combo,
-    models: desiredModels.map((model, index) => {
-      const existing = existingByModel.get(model)?.shift();
-      return existing ?? newModelEntry(combo.name, index + 1, model);
-    }),
-  };
+  return desiredModels.map((model, index) => {
+    const existing = existingByModel.get(model)?.shift();
+    return existing ?? newModelEntry(combo.name, index + 1, model);
+  });
 }
 
 function newModelEntry(
@@ -136,6 +200,8 @@ function sameModels(entries: ModelEntry[], models: string[]): boolean {
   return entries.length === models.length &&
     entries.every((entry, index) => entry.model === models[index]);
 }
+
+// --- HTTP client -------------------------------------------------------------
 
 export class OmniRouteClient implements ComboApi {
   constructor(
@@ -198,6 +264,8 @@ export class OmniRouteClient implements ComboApi {
   }
 }
 
+// --- Live combo parsing ------------------------------------------------------
+
 function parseLiveCombo(value: unknown, label: string): LiveCombo {
   if (!isRecord(value)) {
     throw new Error(`${label} must be an object`);
@@ -210,6 +278,9 @@ function parseLiveCombo(value: unknown, label: string): LiveCombo {
     ...value,
     id: readString(value.id, `${label}.id`),
     name: readString(value.name, `${label}.name`),
+    strategy: value.strategy === undefined
+      ? undefined
+      : readString(value.strategy, `${label}.strategy`),
     models: rawModels.map((entry, index) =>
       parseModelEntry(entry, `${label}.models[${index}]`)
     ),
@@ -238,6 +309,8 @@ function slug(value: string): string {
   return value.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
     .toLowerCase();
 }
+
+// --- CLI entrypoint ----------------------------------------------------------
 
 async function main(): Promise<number> {
   const configPath = readArg("--config") ?? DEFAULT_CONFIG_PATH;

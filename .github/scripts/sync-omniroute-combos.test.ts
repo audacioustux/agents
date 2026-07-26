@@ -15,14 +15,19 @@ combos:
     - bzl/minimax-m3
   best-free:
     - bzl/auto:free
+  fusion-combo:
+    strategy: fusion
+    models:
+      - bzl/auto:free
 `;
 
 Deno.test("parseConfig: accepts a normal config", () => {
   assertEquals(parseConfig(VALID_YAML), {
     baseUrl: "https://omni.tux.bd",
     combos: {
-      coding: ["ollamacloud/minimax-m3", "bzl/minimax-m3"],
-      "best-free": ["bzl/auto:free"],
+      coding: { models: ["ollamacloud/minimax-m3", "bzl/minimax-m3"] },
+      "best-free": { models: ["bzl/auto:free"] },
+      "fusion-combo": { strategy: "fusion", models: ["bzl/auto:free"] },
     },
   });
 });
@@ -46,6 +51,28 @@ Deno.test("parseConfig: rejects empty or duplicate model lists", () => {
       parseConfig("baseUrl: https://omni.tux.bd\ncombos:\n  coding: [a, a]\n"),
     Error,
     "combos.coding has duplicate model a",
+  );
+});
+
+Deno.test("parseConfig: rejects an unsupported strategy", () => {
+  assertThrows(
+    () =>
+      parseConfig(
+        "baseUrl: https://omni.tux.bd\ncombos:\n  coding:\n    strategy: weighted\n    models: [a]\n",
+      ),
+    Error,
+    'combos.coding.strategy must be "priority" or "fusion"',
+  );
+});
+
+Deno.test("parseConfig: rejects an object declaration without models", () => {
+  assertThrows(
+    () =>
+      parseConfig(
+        "baseUrl: https://omni.tux.bd\ncombos:\n  coding:\n    strategy: priority\n",
+      ),
+    Error,
+    "combos.coding must be a model list or { strategy?, models }",
   );
 });
 
@@ -92,8 +119,8 @@ Deno.test("sync: skips untouched combos and updates changed combos while preserv
   const config: ComboConfig = {
     baseUrl: "https://omni.tux.bd",
     combos: {
-      coding: ["ollamacloud/minimax-m3"], // unchanged
-      "best-free": ["bzl/auto:free", "new/model"], // changed
+      coding: { models: ["ollamacloud/minimax-m3"] }, // unchanged
+      "best-free": { models: ["bzl/auto:free", "new/model"] }, // changed
     },
   };
 
@@ -104,12 +131,43 @@ Deno.test("sync: skips untouched combos and updates changed combos while preserv
   ]);
   assertEquals(puts.length, 1);
   assertEquals(puts[0].id, "2");
-  assertEquals(puts[0].combo.strategy, "weighted");
+  assertEquals(puts[0].combo.strategy, "weighted"); // no strategy declared: preserved
   assertEquals(puts[0].combo.models.length, 2);
   assertEquals(puts[0].combo.models[0].model, "bzl/auto:free");
   assertEquals(puts[0].combo.models[0].weight, 100); // metadata preserved
   assertEquals(puts[0].combo.models[1].model, "new/model");
   assertEquals(puts[0].combo.models[1].weight, 0); // new entry defaults
+});
+
+Deno.test("sync: applies a declared strategy and treats a strategy-only change as changed", async () => {
+  const puts: { id: string; combo: LiveCombo }[] = [];
+  const api = {
+    getCombos: () =>
+      Promise.resolve([
+        {
+          id: "1",
+          name: "coding",
+          strategy: "weighted",
+          models: [{ id: "c1", model: "a" }],
+        },
+      ]),
+    putCombo: (id: string, combo: LiveCombo) => {
+      puts.push({ id, combo });
+      return Promise.resolve();
+    },
+  };
+
+  const config: ComboConfig = {
+    baseUrl: "https://omni.tux.bd",
+    combos: {
+      coding: { strategy: "priority", models: ["a"] }, // same models, new strategy
+    },
+  };
+
+  const changes = await sync(config, api);
+  assertEquals(changes, [{ name: "coding", changed: true }]);
+  assertEquals(puts.length, 1);
+  assertEquals(puts[0].combo.strategy, "priority");
 });
 
 Deno.test("sync: rejects when a declared combo is missing live", async () => {
@@ -119,7 +177,10 @@ Deno.test("sync: rejects when a declared combo is missing live", async () => {
   };
   await assertRejects(
     () =>
-      sync({ baseUrl: "https://omni.tux.bd", combos: { missing: ["x"] } }, api),
+      sync({
+        baseUrl: "https://omni.tux.bd",
+        combos: { missing: { models: ["x"] } },
+      }, api),
     Error,
     "declared combo not found: missing",
   );
@@ -136,7 +197,10 @@ Deno.test("sync: rejects unmanaged live combos", async () => {
   };
   await assertRejects(
     () =>
-      sync({ baseUrl: "https://omni.tux.bd", combos: { coding: ["x"] } }, api),
+      sync({
+        baseUrl: "https://omni.tux.bd",
+        combos: { coding: { models: ["x"] } },
+      }, api),
     Error,
     "live combo not declared in config: unmanaged",
   );

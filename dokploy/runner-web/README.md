@@ -36,17 +36,38 @@ Redis.
 ## Combo sync
 
 Combo configuration is managed in `dokploy/runner-web/settings/combos.yml`. The
-file declares the `https://omni.tux.bd` base URL and each combo's ordered model
-list.
+file declares the `https://omni.tux.bd` base URL and each combo's declaration,
+either as a plain model list:
+
+```yaml
+combos:
+  coding:
+    - cc/claude-sonnet-5
+```
+
+or, to also set the combo's strategy, as an object:
+
+```yaml
+combos:
+  coding:
+    strategy: priority
+    models:
+      - cc/claude-sonnet-5
+```
+
+`strategy` only accepts `priority` or `fusion`; other live strategies (e.g.
+OmniRoute's default `weighted`) can't be set from here. Omitting `strategy`
+leaves the combo's live strategy untouched.
 
 Pushes to `main` run `.github/workflows/omniroute-combos.yml` with Deno. The
 workflow reads the `OMNIROUTE_API_KEY` secret from the `omni.tux.bd` GitHub
-Environment and applies changed combo model lists through OmniRoute `/api/combos`.
+Environment and applies changed combos through OmniRoute `/api/combos`.
 
-The sync only manages each combo's ordered `models` list. It preserves live
-combo metadata and retained model-entry metadata, including weighted-combo
-weights. It never creates or deletes combos; unexpected live combo names or
-missing declared combos cause sync to fail.
+The sync manages each combo's ordered `models` list and, when declared, its
+`strategy`. It preserves all other live combo metadata and retained
+model-entry metadata, including weighted-combo weights. It never creates or
+deletes combos; unexpected live combo names or missing declared combos cause
+sync to fail.
 
 Run tests or sync locally with:
 

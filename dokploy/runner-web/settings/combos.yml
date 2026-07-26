@@ -23,10 +23,12 @@ combos:
     # - agy/gemini-pro-agent
   ###
   pro-chat:
-    - cc/claude-opus-5
-    - cx/gpt-5.6-sol-max
-    - agy/gemini-pro-agent
-    - minimax/MiniMax-M3
+    strategy: fusion
+    models:
+      - cc/claude-opus-5
+      - cx/gpt-5.6-sol-max
+      - agy/gemini-pro-agent
+      - minimax/MiniMax-M3
   best-chat:
     - cc/claude-sonnet-5
     - minimax/MiniMax-M3

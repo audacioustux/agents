@@ -1,26 +1,33 @@
 baseUrl: https://omni.tux.bd
 combos:
   pro-coding:
-    - cc/claude-opus-5
+    models:
+      - cc/claude-opus-5
   best-coding:
-    - cc/claude-sonnet-5
-    - minimax/MiniMax-M3
+    models:
+      - cc/claude-sonnet-5
+      - minimax/MiniMax-M3
   coding:
-    - gh/claude-sonnet-5
-    - agy/gemini-3.6-flash-high
+    models:
+      - gh/claude-sonnet-5
+      - agy/gemini-3.6-flash-high
   ###
   best-coding-fast:
-    - cf/@cf/moonshotai/kimi-k2.7-code
-    - agy/gemini-3.6-flash-high
+    models:
+      - cf/@cf/moonshotai/kimi-k2.7-code
+      - agy/gemini-3.6-flash-high
   ###
   pro-reasoning:
-    - cc/claude-fable-5
+    models:
+      - cc/claude-fable-5
   best-reasoning:
-    - cc/claude-opus-5
+    models:
+      - cc/claude-opus-5
   reasoning:
-    - cc/claude-sonnet-5
-    # - cx/gpt-5.6-sol-high
-    # - agy/gemini-pro-agent
+    models:
+      - cc/claude-sonnet-5
+      # - cx/gpt-5.6-sol-high
+      # - agy/gemini-pro-agent
   ###
   pro-chat:
     strategy: fusion
@@ -30,59 +37,69 @@ combos:
       - agy/gemini-pro-agent
       - minimax/MiniMax-M3
   best-chat:
-    - cc/claude-sonnet-5
-    - minimax/MiniMax-M3
-    # - agy/gemini-pro-agent
-    # - cf/@cf/moonshotai/kimi-k2.7-code
-    # - cx/gpt-5.6-terra-xhigh
+    models:
+      - cc/claude-sonnet-5
+      - minimax/MiniMax-M3
+      # - agy/gemini-pro-agent
+      # - cf/@cf/moonshotai/kimi-k2.7-code
+      # - cx/gpt-5.6-terra-xhigh
   chat:
-    - oc/big-pickle
-    - gh/claude-sonnet-5
-    - agy/gemini-3.6-flash-high
-    - agy/gemini-pro-agent
-    - agy/claude-sonnet-4-6
-    # - oc/big-pickle
-    # - ollamacloud/minimax-m3
-    # - nvidia/minimaxai/minimax-m3
-    # - oc/deepseek-v4-flash-free
-    # - cx/gpt-5.6-luna-xhigh
-    # - agy/claude-sonnet-4-6
+    models:
+      - oc/big-pickle
+      - gh/claude-sonnet-5
+      - agy/gemini-3.6-flash-high
+      - agy/gemini-pro-agent
+      - agy/claude-sonnet-4-6
+      # - oc/big-pickle
+      # - ollamacloud/minimax-m3
+      # - nvidia/minimaxai/minimax-m3
+      # - oc/deepseek-v4-flash-free
+      # - cx/gpt-5.6-luna-xhigh
+      # - agy/claude-sonnet-4-6
   ###
   pro-vision:
-    - cc/claude-fable-5
-    # - cx/gpt-5.6-sol-high
-    # - agy/gemini-pro-agent
+    models:
+      - cc/claude-fable-5
+      # - cx/gpt-5.6-sol-high
+      # - agy/gemini-pro-agent
   best-vision:
-    - cc/claude-opus-5
-  #   - cx/gpt-5.6-sol-medium
-  #   - agy/gemini-3.6-flash-high
+    models:
+      - cc/claude-opus-5
+      #   - cx/gpt-5.6-sol-medium
+      #   - agy/gemini-3.6-flash-high
   ###
   pro-fast:
-    - cc/claude-sonnet-5
+    models:
+      - cc/claude-sonnet-5
   best-fast:
-    - gh/claude-sonnet-5
-    - agy/gemini-3.6-flash-high
+    models:
+      - gh/claude-sonnet-5
+      - agy/gemini-3.6-flash-high
   fast:
-    - cerebras/gpt-oss-120b
-    - agy/gemini-3.1-flash-lite
+    models:
+      - cerebras/gpt-oss-120b
+      - agy/gemini-3.1-flash-lite
   ###
   best-free:
-    - oc/big-pickle
-    - ollamacloud/minimax-m3
-    - agy/gemini-3.1-flash-lite
-    - nvidia/deepseek-ai/deepseek-v4-pro
-    - fmd/gpt-5.5
-    - cf/@cf/moonshotai/kimi-k2.7-code
-    - agy/gemini-3.6-flash-high
-    - agy/gemini-pro-agent
-    - nvidia/mistralai/mistral-large-3-675b-instruct-2512
-    - cerebras/gpt-oss-120b
-    - agy/gpt-oss-120b-medium
-    - groq/openai/gpt-oss-120b
+    models:
+      - oc/big-pickle
+      - ollamacloud/minimax-m3
+      - agy/gemini-3.1-flash-lite
+      - nvidia/deepseek-ai/deepseek-v4-pro
+      - fmd/gpt-5.5
+      - cf/@cf/moonshotai/kimi-k2.7-code
+      - agy/gemini-3.6-flash-high
+      - agy/gemini-pro-agent
+      - nvidia/mistralai/mistral-large-3-675b-instruct-2512
+      - cerebras/gpt-oss-120b
+      - agy/gpt-oss-120b-medium
+      - groq/openai/gpt-oss-120b
   claude-opus:
-    - cc/claude-opus-5
-    - agy/claude-opus-4-6-thinking
+    models:
+      - cc/claude-opus-5
+      - agy/claude-opus-4-6-thinking
   claude-sonnet:
-    - cc/claude-sonnet-5
-    - gh/claude-sonnet-5
-    - agy/claude-sonnet-4-6
+    models:
+      - cc/claude-sonnet-5
+      - gh/claude-sonnet-5
+      - agy/claude-sonnet-4-6

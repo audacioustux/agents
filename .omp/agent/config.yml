@@ -1,22 +1,27 @@
 setupVersion: 1
 theme: 
-  dark: dark
-  light: light
-symbolPreset: ascii
+  dark: dark-catppuccin
+  light: light-catppuccin
+symbolPreset: nerd
 statusLine: 
   preset: full
   separator: slash
   transparent: true
   sessionAccent: true
+  compactThinkingLevel: false
 display: 
   showTokenUsage: false
   shimmer: classic
 task: 
   showResolvedModelBadge: true
   enableLsp: true
+  maxRecursionDepth: 3
+  eager: preferred
+  isolation: 
+    commits: ai
 defaultThinkingLevel: auto
 memory: 
-  backend: mnemopi
+  backend: "off"
 enabledModels: 
   - omniroute/auto/smart
   - omniroute/pro-chat
@@ -42,7 +47,7 @@ modelRoles:
   smol: omniroute/chat
   slow: omniroute/pro-chat
   plan: omniroute/pro-reasoning
-  commit: omniroute/best-coding-fast
+  commit: omniroute/best-fast
   vision: omniroute/best-vision
   designer: omniroute/pro-vision
   task: omniroute/pro-coding
@@ -56,33 +61,38 @@ retry:
   fallbackRevertPolicy: cooldown-expiry
   fallbackChains: 
     default: 
-      - omniroute/chat
+      - omniroute/best-reasoning
     smol: 
-      - omniroute/fast
+      - omniroute/best-chat
+      - omniroute/best-free
       - omniroute/auto/smart
     slow: 
-      - omniroute/best-chat
+      - omniroute/pro-reasoning
     plan: 
-      - omniroute/best-reasoning
+      - omniroute/pro-chat
     commit: 
-      - omniroute/best-fast
+      - omniroute/best-coding-fast
+      - omniroute/best-free
       - omniroute/auto/smart
     vision: 
-      - omniroute/best-chat
+      - omniroute/pro-vision
     designer: 
       - omniroute/best-vision
     task: 
       - omniroute/best-coding
     advisor: 
-      - omniroute/reasoning
+      - omniroute/best-chat
     tiny: 
+      - omniroute/best-fast
       - omniroute/best-free
       - omniroute/auto/smart
 tui: 
   tight: false
+  hyperlinks: auto
+  imeSafeCursor: true
 advisor: 
   enabled: true
-  syncBacklog: "off"
+  syncBacklog: "1"
   subagents: false
 features: 
   unexpectedStopDetection: true
@@ -103,16 +113,14 @@ secrets:
   enabled: true
 compaction: 
   thresholdPercent: -1
-  thresholdTokens: 500000
+  thresholdTokens: -1
   handoffSaveToDisk: true
   idleEnabled: true
-  strategy: context-full
+  strategy: snapcompact
   idleTimeoutSeconds: 1800
   idleThresholdTokens: 400000
 terminal: 
   showProgress: true
-snapcompact: 
-  toolResults: false
 interruptMode: immediate
 branchSummary: 
   enabled: true
@@ -123,12 +131,24 @@ shellMinimizer:
 bash: 
   autoBackground: 
     enabled: false
+  enabled: true
 todo: 
   eager: preferred
 contextPromotion: 
   enabled: false
 browser: 
   headless: true
+  enabled: true
 dev: 
-  autoqa: 
-    consent: denied
+  autoqaConsent: denied
+providers: 
+  autoThinkingModel: online
+personality: default
+glob: 
+  enabled: true
+grep: 
+  enabled: true
+astEdit: 
+  enabled: true
+astGrep: 
+  enabled: true%                                                                                                    

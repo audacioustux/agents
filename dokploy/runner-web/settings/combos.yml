@@ -37,7 +37,6 @@ combos:
       - cc/claude-opus-5
       - cx/gpt-5.6-sol-xhigh
       - agy/gemini-pro-agent
-      - minimax/MiniMax-M3
   best-chat:
     models:
       - cc/claude-sonnet-5

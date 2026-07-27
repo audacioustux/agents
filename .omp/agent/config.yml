@@ -50,7 +50,7 @@ modelRoles:
   commit: omniroute/best-fast
   vision: omniroute/best-vision
   designer: omniroute/pro-vision
-  task: omniroute/pro-coding
+  task: omniroute/best-coding
   advisor: omniroute/best-reasoning
   tiny: omniroute/fast
 retry: 
@@ -79,7 +79,7 @@ retry:
     designer: 
       - omniroute/best-vision
     task: 
-      - omniroute/best-coding
+      - omniroute/best-chat
     advisor: 
       - omniroute/best-chat
     tiny: 
@@ -116,7 +116,7 @@ compaction:
   thresholdTokens: -1
   handoffSaveToDisk: true
   idleEnabled: true
-  strategy: snapcompact
+  strategy: context-full
   idleTimeoutSeconds: 1800
   idleThresholdTokens: 400000
 terminal: 
@@ -151,4 +151,4 @@ grep:
 astEdit: 
   enabled: true
 astGrep: 
-  enabled: true%                                                                                                    
+  enabled: true

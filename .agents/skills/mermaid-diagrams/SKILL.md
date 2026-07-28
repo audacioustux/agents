@@ -7,7 +7,7 @@ description: Use when creating, reviewing, or fixing a Mermaid diagram embedded 
 
 ## Role
 
-Covers writing, reviewing, and fixing a Mermaid diagram once you're using one: choosing the right diagram type, structuring it so it stays readable, and avoiding known parse pitfalls. This skill does not decide whether Mermaid is required over other formats — that's the consuming repo's call. If the current repo has its own `docs/conventions/diagramming.md` (or equivalent), treat it as canonical and this skill as a portable baseline for the mechanics; re-read the repo doc if its guidance differs, since Mermaid's supported types evolve and any such table is a point-in-time snapshot.
+Covers writing, reviewing, and fixing a Mermaid diagram once you're using one: choosing the right diagram type, structuring it so it stays readable, and avoiding known parse pitfalls. This skill does not decide whether Mermaid is required over other formats — that's the consuming repo's call. If the current repo has its own diagram-conventions doc, treat it as canonical and this skill as a portable baseline for the mechanics; re-read the repo doc if its guidance differs, since Mermaid's supported types evolve and any such table is a point-in-time snapshot.
 
 ## Source and placement
 

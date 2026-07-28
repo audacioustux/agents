@@ -1,6 +1,6 @@
 # Mermaid Diagram Type Catalog
 
-Point-in-time snapshot of upstream Mermaid diagram types and when to use each, mirrored from `docs/conventions/diagramming.md`. Verify the target Markdown host's bundled Mermaid version supports a chosen type — especially anything marked experimental/`-beta` — before relying on it. Consult the [full syntax reference](https://mermaid.js.org/intro/syntax-reference.html) for status changes or any type not listed here; it is authoritative and this table drifts as Mermaid evolves.
+Point-in-time snapshot of upstream Mermaid diagram types and when to use each. Verify the target Markdown host's bundled Mermaid version supports a chosen type — especially anything marked experimental/`-beta` — before relying on it. Consult the [full syntax reference](https://mermaid.js.org/intro/syntax-reference.html) for status changes or any type not listed here; it is authoritative and this table drifts as Mermaid evolves.
 
 | Type | Use it for | Start with |
 |------|------------|------------|

@@ -18,10 +18,8 @@ combos:
       - agy/gemini-3.6-flash-high
   ###
   pro-reasoning:
-    strategy: fusion
     models:
       - cc/claude-opus-5
-      - cx/gpt-5.6-sol-max
   best-reasoning:
     models:
       - cc/claude-opus-5
@@ -32,11 +30,8 @@ combos:
       # - agy/gemini-pro-agent
   ###
   pro-chat:
-    strategy: fusion
     models:
       - cc/claude-opus-5
-      - cx/gpt-5.6-sol-xhigh
-      - agy/gemini-pro-agent
   best-chat:
     models:
       - cc/claude-sonnet-5

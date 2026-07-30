@@ -19,7 +19,7 @@ task:
   eager: preferred
   isolation: 
     commits: ai
-defaultThinkingLevel: auto
+defaultThinkingLevel: high
 memory: 
   backend: "off"
 enabledModels: 
@@ -45,14 +45,14 @@ enabledModels:
 modelRoles: 
   default: omniroute/best-chat
   smol: omniroute/chat
-  slow: omniroute/pro-chat
-  plan: omniroute/pro-reasoning
-  commit: omniroute/best-fast
+  slow: omniroute/pro-chat:xhigh
+  plan: omniroute/pro-reasoning:max
+  commit: omniroute/best-fast:low
   vision: omniroute/best-vision
-  designer: omniroute/pro-vision
+  designer: omniroute/pro-vision:xhigh
   task: omniroute/best-coding
   advisor: omniroute/best-reasoning
-  tiny: omniroute/fast
+  tiny: omniroute/fast:low
 retry: 
   enabled: true
   maxRetries: 100
@@ -61,30 +61,30 @@ retry:
   fallbackRevertPolicy: cooldown-expiry
   fallbackChains: 
     default: 
-      - omniroute/best-reasoning
+      - omniroute/chat:xhigh
     smol: 
-      - omniroute/best-chat
-      - omniroute/best-free
+      - omniroute/best-chat:medium
+      - omniroute/best-free:xhigh
       - omniroute/auto/smart
     slow: 
-      - omniroute/pro-reasoning
+      - omniroute/best-chat:max
     plan: 
-      - omniroute/pro-chat
+      - omniroute/pro-chat:max
     commit: 
-      - omniroute/best-coding-fast
+      - omniroute/best-coding-fast:low
       - omniroute/best-free
       - omniroute/auto/smart
     vision: 
       - omniroute/pro-vision
     designer: 
-      - omniroute/best-vision
+      - omniroute/best-vision:max
     task: 
-      - omniroute/best-chat
+      - omniroute/coding:xhigh
     advisor: 
-      - omniroute/best-chat
+      - omniroute/reasoning:xhigh
     tiny: 
-      - omniroute/best-fast
-      - omniroute/best-free
+      - omniroute/best-fast:minimal
+      - omniroute/best-free:low
       - omniroute/auto/smart
 tui: 
   tight: false
@@ -97,12 +97,12 @@ advisor:
 features: 
   unexpectedStopDetection: true
 autolearn: 
-  enabled: true
+  enabled: false
 lsp: 
   formatOnWrite: true
   diagnosticsOnEdit: true
 inspect_image: 
-  enabled: true
+  mode: auto
 checkpoint: 
   enabled: true
 github: 
@@ -152,3 +152,5 @@ astEdit:
   enabled: true
 astGrep: 
   enabled: true
+images: 
+  describeForTextModels: true%                                                                                      

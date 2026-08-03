@@ -26,6 +26,7 @@ combos:
       # - cc/claude-fable-5
   best-reasoning:
     models:
+      - cx/gpt-5.6-sol
       - cc/claude-opus-5
   reasoning:
     models:

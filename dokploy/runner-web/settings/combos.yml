@@ -47,9 +47,9 @@ combos:
       # - cx/gpt-5.6-terra-xhigh
   chat:
     models:
-      - gh/claude-sonnet-5
       - cc/claude-sonnet-5
       - minimax/MiniMax-M3
+      - gh/claude-sonnet-5
       - agy/gemini-pro-agent
       - agy/gemini-3.6-flash-high
       - agy/claude-sonnet-4-6

@@ -13,38 +13,55 @@ providers:
     # Mirrors enabledModels in config.yml.
     models:
       - id: auto/smart
+        input: [text, image]
         contextWindow: 512000
       - id: pro-chat
+        input: [text, image]
         contextWindow: 512000
       - id: best-chat
+        input: [text, image]
         contextWindow: 512000
       - id: chat
+        input: [text, image]
         contextWindow: 512000
       - id: claude-opus
+        input: [text, image]
         contextWindow: 204800
       - id: claude-sonnet
+        input: [text, image]
         contextWindow: 204800
       - id: pro-coding
+        input: [text, image]
         contextWindow: 512000
       - id: best-coding
+        input: [text, image]
         contextWindow: 512000
       - id: coding
+        input: [text, image]
         contextWindow: 512000
       - id: best-coding-fast
+        input: [text, image]
         contextWindow: 512000
       - id: pro-fast
+        input: [text, image]
         contextWindow: 512000
       - id: best-fast
+        input: [text, image]
         contextWindow: 512000
       - id: fast
+        input: [text, image]
         contextWindow: 512000
       - id: best-free
+        input: [text, image]
         contextWindow: 131072
       - id: pro-reasoning
+        input: [text, image]
         contextWindow: 512000
       - id: best-reasoning
+        input: [text, image]
         contextWindow: 512000
       - id: reasoning
+        input: [text, image]
         contextWindow: 512000
       - id: pro-vision
         input: [text, image]

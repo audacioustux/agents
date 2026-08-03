@@ -15,13 +15,13 @@ display:
 task: 
   showResolvedModelBadge: true
   enableLsp: true
-  maxRecursionDepth: 3
+  maxRecursionDepth: 2
   eager: preferred
   isolation: 
     commits: ai
 defaultThinkingLevel: high
 memory: 
-  backend: "off"
+  backend: mnemopi
 enabledModels: 
   - omniroute/auto/smart
   - omniroute/pro-chat
@@ -97,7 +97,8 @@ advisor:
 features: 
   unexpectedStopDetection: true
 autolearn: 
-  enabled: false
+  enabled: true
+  autoContinue: true
 lsp: 
   formatOnWrite: true
   diagnosticsOnEdit: true
@@ -117,7 +118,7 @@ compaction:
   handoffSaveToDisk: true
   idleEnabled: true
   strategy: context-full
-  idleTimeoutSeconds: 1800
+  idleTimeoutSeconds: 3600
   idleThresholdTokens: 400000
 terminal: 
   showProgress: true
@@ -153,4 +154,4 @@ astEdit:
 astGrep: 
   enabled: true
 images: 
-  describeForTextModels: true%                                                                                      
+  describeForTextModels: true                                                                               

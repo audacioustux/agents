@@ -21,7 +21,7 @@ task:
     commits: ai
 defaultThinkingLevel: high
 memory: 
-  backend: mnemopi
+  backend: "off"
 enabledModels: 
   - omniroute/auto/smart
   - omniroute/pro-chat
@@ -97,7 +97,7 @@ advisor:
 features: 
   unexpectedStopDetection: true
 autolearn: 
-  enabled: true
+  enabled: false
   autoContinue: true
 lsp: 
   formatOnWrite: true
@@ -154,4 +154,4 @@ astEdit:
 astGrep: 
   enabled: true
 images: 
-  describeForTextModels: true                                                                               
+  describeForTextModels: true%%                                                                                    

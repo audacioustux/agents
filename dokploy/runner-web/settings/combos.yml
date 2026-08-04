@@ -1,138 +1,106 @@
 baseUrl: https://omni.tux.bd
 combos:
   pro-coding:
-    strategy: fusion
+    # strategy: fusion
     models:
       - cc/claude-opus-5
-      - minimax/MiniMax-M3
-      - cf/@cf/moonshotai/kimi-k2.7-code
-      - agy/gemini-pro-agent
-      - gh/claude-sonnet-5
-      # - cc/claude-fable-5
+      # - minimax/MiniMax-M3
+      # - antigravity/gemini-pro-agent
+      # - gh/claude-sonnet-5
   best-coding:
     models:
       - cc/claude-opus-5
   coding:
     models:
+      - gh/claude-sonnet-5
       - cc/claude-sonnet-5
       - minimax/MiniMax-M3
-      - cf/@cf/moonshotai/kimi-k2.7-code
-      - agy/gemini-3.6-flash-high
-      - gh/claude-sonnet-5
+      - antigravity/gemini-3.6-flash-high
   ###
   best-coding-fast:
     models:
+      - gh/claude-sonnet-5
       - cc/claude-sonnet-5
       - minimax/MiniMax-M3
-      - cf/@cf/moonshotai/kimi-k2.7-code
-      - agy/gemini-3.6-flash-high
-      - gh/claude-sonnet-5
+      - antigravity/gemini-3.6-flash-high
   ###
   pro-reasoning:
-    strategy: fusion
+    # strategy: fusion
     models:
       - cc/claude-opus-5
-      - cx/gpt-5.6-sol-xhigh
-      - agy/gemini-pro-agent
-      - gh/claude-sonnet-5
-      # - cc/claude-fable-5
+      # - cx/gpt-5.6-sol-xhigh
+      # - antigravity/gemini-pro-agent
+      # - gh/claude-sonnet-5
   best-reasoning:
     models:
       - cc/claude-opus-5
       - cx/gpt-5.6-sol-high
-      - agy/gemini-pro-agent
-      - gh/claude-sonnet-5
+      - antigravity/gemini-pro-agent
   reasoning:
     models:
+      - gh/claude-sonnet-5
       - cc/claude-sonnet-5
       - cx/gpt-5.6-sol
-      - agy/gemini-3.6-flash-high
-      - gh/claude-sonnet-5
-      # - cx/gpt-5.6-sol-high
+      - antigravity/gemini-3.6-flash-high
   ###
   pro-chat:
-    strategy: fusion
+    # strategy: fusion
     models:
       - cc/claude-opus-5
-      - minimax/MiniMax-M3
-      - cf/@cf/moonshotai/kimi-k2.7-code
-      - agy/gemini-pro-agent
-      - gh/claude-sonnet-5
-      # - cc/claude-fable-5
+      # - minimax/MiniMax-M3
+      # - antigravity/gemini-pro-agent
+      # - gh/claude-sonnet-5
   best-chat:
     models:
       - cc/claude-opus-5
-      # - agy/gemini-pro-agent
-      # - cf/@cf/moonshotai/kimi-k2.7-code
-      # - cx/gpt-5.6-terra-xhigh
   chat:
     models:
+      - gh/claude-sonnet-5
       - cc/claude-sonnet-5
       - minimax/MiniMax-M3
-      - cf/@cf/moonshotai/kimi-k2.7-code
-      - agy/gemini-3.6-flash-high
-      - gh/claude-sonnet-5
-      # - gh/claude-sonnet-5
-      # - cc/claude-sonnet-5
-      # - minimax/MiniMax-M3
-      # - agy/gemini-pro-agent
-      # - agy/gemini-3.6-flash-high
-      # - agy/claude-sonnet-4-6
-      # - oc/big-pickle
-      # - oc/big-pickle
-      # - ollamacloud/minimax-m3
-      # - nvidia/minimaxai/minimax-m3
-      # - oc/deepseek-v4-flash-free
-      # - cx/gpt-5.6-luna-xhigh
-      # - agy/claude-sonnet-4-6
+      - antigravity/gemini-3.6-flash-high
   ###
   pro-vision:
     models:
       - cc/claude-opus-5
-      # - cc/claude-fable-5
-      # - cx/gpt-5.6-sol-high
-      # - agy/gemini-pro-agent
   best-vision:
     models:
       - cc/claude-opus-5
-      # - cx/gpt-5.6-sol-medium
-      # - agy/gemini-3.6-flash-high
   ###
   pro-fast:
     models:
-      - cc/claude-sonnet-5
-      - agy/gemini-pro-agent
       - gh/claude-sonnet-5
+      - cc/claude-sonnet-5
+      - antigravity/gemini-pro-agent
   best-fast:
     models:
       - minimax/MiniMax-M3
-      - agy/gemini-3.6-flash-high
+      - antigravity/gemini-3.6-flash-high
       - oc/big-pickle
   fast:
     models:
       - cerebras/gpt-oss-120b
-      - agy/gemini-3.1-flash-lite
+      - antigravity/gemini-3.1-flash-lite
   ###
   best-free:
     models:
       - oc/big-pickle
       - ollamacloud/minimax-m3
-      - agy/gemini-3.1-flash-lite
+      - antigravity/gemini-3.1-flash-lite
       - nvidia/deepseek-ai/deepseek-v4-pro
       - fmd/gpt-5.5
-      - cf/@cf/moonshotai/kimi-k2.7-code
-      - agy/gemini-3.6-flash-high
-      - agy/gemini-pro-agent
+      - antigravity/gemini-3.6-flash-high
+      - antigravity/gemini-pro-agent
       - nvidia/mistralai/mistral-large-3-675b-instruct-2512
       - cerebras/gpt-oss-120b
-      - agy/gpt-oss-120b-medium
+      - antigravity/gpt-oss-120b-medium
       - groq/openai/gpt-oss-120b
   claude-opus:
     models:
       - cc/claude-opus-5
-      - agy/claude-opus-4-6-thinking
+      - antigravity/claude-opus-4-6-thinking
   claude-sonnet:
     models:
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
-      - agy/claude-sonnet-4-6
+      - antigravity/claude-sonnet-4-6

@@ -6,26 +6,27 @@ combos:
       - cc/claude-opus-5
       - minimax/MiniMax-M3
       - cf/@cf/moonshotai/kimi-k2.7-code
-      - agy/gemini-3.6-flash-high
+      - agy/gemini-pro-agent
+      - gh/claude-sonnet-5
       # - cc/claude-fable-5
   best-coding:
     models:
       - cc/claude-opus-5
   coding:
     models:
+      - cc/claude-sonnet-5
       - minimax/MiniMax-M3
       - cf/@cf/moonshotai/kimi-k2.7-code
       - agy/gemini-3.6-flash-high
       - gh/claude-sonnet-5
-      - cc/claude-sonnet-5
   ###
   best-coding-fast:
     models:
+      - cc/claude-sonnet-5
       - minimax/MiniMax-M3
       - cf/@cf/moonshotai/kimi-k2.7-code
       - agy/gemini-3.6-flash-high
       - gh/claude-sonnet-5
-      - cc/claude-sonnet-5
   ###
   pro-reasoning:
     strategy: fusion
@@ -33,18 +34,20 @@ combos:
       - cc/claude-opus-5
       - cx/gpt-5.6-sol-xhigh
       - agy/gemini-pro-agent
+      - gh/claude-sonnet-5
       # - cc/claude-fable-5
   best-reasoning:
     models:
       - cc/claude-opus-5
       - cx/gpt-5.6-sol-high
       - agy/gemini-pro-agent
+      - gh/claude-sonnet-5
   reasoning:
     models:
+      - cc/claude-sonnet-5
       - cx/gpt-5.6-sol
       - agy/gemini-3.6-flash-high
       - gh/claude-sonnet-5
-      - cc/claude-sonnet-5
       # - cx/gpt-5.6-sol-high
   ###
   pro-chat:
@@ -53,7 +56,8 @@ combos:
       - cc/claude-opus-5
       - minimax/MiniMax-M3
       - cf/@cf/moonshotai/kimi-k2.7-code
-      - agy/gemini-3.6-flash-high
+      - agy/gemini-pro-agent
+      - gh/claude-sonnet-5
       # - cc/claude-fable-5
   best-chat:
     models:
@@ -63,11 +67,11 @@ combos:
       # - cx/gpt-5.6-terra-xhigh
   chat:
     models:
+      - cc/claude-sonnet-5
       - minimax/MiniMax-M3
       - cf/@cf/moonshotai/kimi-k2.7-code
       - agy/gemini-3.6-flash-high
       - gh/claude-sonnet-5
-      - cc/claude-sonnet-5
       # - gh/claude-sonnet-5
       # - cc/claude-sonnet-5
       # - minimax/MiniMax-M3
@@ -96,8 +100,8 @@ combos:
   ###
   pro-fast:
     models:
-      - agy/gemini-pro-agent
       - cc/claude-sonnet-5
+      - agy/gemini-pro-agent
       - gh/claude-sonnet-5
   best-fast:
     models:

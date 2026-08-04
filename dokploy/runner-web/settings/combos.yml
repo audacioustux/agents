@@ -1,16 +1,20 @@
 baseUrl: https://omni.tux.bd
 combos:
   pro-coding:
+    strategy: fusion
     models:
       - cc/claude-opus-5
+      - minimax/MiniMax-M3
+      - cf/@cf/moonshotai/kimi-k2.7-code
+      - agy/gemini-3.6-flash-high
       # - cc/claude-fable-5
   best-coding:
     models:
       - cc/claude-opus-5
   coding:
     models:
-      - cc/claude-sonnet-5
       - gh/claude-sonnet-5
+      - cc/claude-sonnet-5
       - minimax/MiniMax-M3
       - agy/gemini-3.6-flash-high
   ###
@@ -21,23 +25,32 @@ combos:
       - agy/gemini-3.6-flash-high
   ###
   pro-reasoning:
+    strategy: fusion
     models:
       - cc/claude-opus-5
+      - cx/gpt-5.6-sol-xhigh
+      - agy/gemini-pro-agent
       # - cc/claude-fable-5
   best-reasoning:
     models:
-      - cx/gpt-5.6-sol-high
       - cc/claude-opus-5
+      - cx/gpt-5.6-sol-high
+      - agy/gemini-pro-agent
   reasoning:
     models:
-      - cc/claude-sonnet-5
       - gh/claude-sonnet-5
-      - agy/gemini-pro-agent
+      - cc/claude-sonnet-5
+      - cx/gpt-5.6-sol
+      - agy/gemini-3.6-flash-high
       # - cx/gpt-5.6-sol-high
   ###
   pro-chat:
+    strategy: fusion
     models:
       - cc/claude-opus-5
+      - minimax/MiniMax-M3
+      - cf/@cf/moonshotai/kimi-k2.7-code
+      - agy/gemini-3.6-flash-high
       # - cc/claude-fable-5
   best-chat:
     models:
@@ -47,13 +60,17 @@ combos:
       # - cx/gpt-5.6-terra-xhigh
   chat:
     models:
-      - cc/claude-sonnet-5
       - gh/claude-sonnet-5
+      - cc/claude-sonnet-5
       - minimax/MiniMax-M3
-      - agy/gemini-pro-agent
       - agy/gemini-3.6-flash-high
-      - agy/claude-sonnet-4-6
-      - oc/big-pickle
+      # - gh/claude-sonnet-5
+      # - cc/claude-sonnet-5
+      # - minimax/MiniMax-M3
+      # - agy/gemini-pro-agent
+      # - agy/gemini-3.6-flash-high
+      # - agy/claude-sonnet-4-6
+      # - oc/big-pickle
       # - oc/big-pickle
       # - ollamacloud/minimax-m3
       # - nvidia/minimaxai/minimax-m3
@@ -77,10 +94,12 @@ combos:
     models:
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
+      - agy/gemini-pro-agent
   best-fast:
     models:
       - minimax/MiniMax-M3
       - agy/gemini-3.6-flash-high
+      - oc/big-pickle
   fast:
     models:
       - cerebras/gpt-oss-120b

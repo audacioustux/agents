@@ -70,13 +70,14 @@ export function parseConfig(source: string): ComboConfig {
 }
 
 /** Accepts either the plain-array shorthand (no strategy override) or
- * `{ strategy?, models }` for combos that also want to set a strategy. */
+ * `{ strategy?, models }` for combos that also want to set a strategy.
+ * When no strategy is declared, defaults to "priority". */
 function parseComboDeclaration(
   name: string,
   value: unknown,
 ): ComboDeclaration {
   if (Array.isArray(value)) {
-    return { models: parseModelList(name, value) };
+    return { strategy: "priority", models: parseModelList(name, value) };
   }
   if (!isRecord(value) || !("models" in value)) {
     throw new Error(
@@ -85,9 +86,12 @@ function parseComboDeclaration(
   }
 
   const models = parseModelList(name, value.models);
-  return value.strategy === undefined
-    ? { models }
-    : { strategy: parseStrategy(name, value.strategy), models };
+  return {
+    strategy: value.strategy === undefined
+      ? "priority"
+      : parseStrategy(name, value.strategy),
+    models,
+  };
 }
 
 function parseStrategy(name: string, value: unknown): ComboStrategy {

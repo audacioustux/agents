@@ -48,8 +48,8 @@ combos:
   chat:
     models:
       - cc/claude-sonnet-5
-      - minimax/MiniMax-M3
       - gh/claude-sonnet-5
+      - minimax/MiniMax-M3
       - agy/gemini-pro-agent
       - agy/gemini-3.6-flash-high
       - agy/claude-sonnet-4-6

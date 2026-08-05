@@ -72,9 +72,9 @@ combos:
       - cc/claude-sonnet-5
   best-fast:
     models:
-      - oc/big-pickle
       - antigravity/gemini-pro-agent
       - minimax/MiniMax-M3
+      - oc/big-pickle
   fast:
     models:
       - antigravity/gemini-3.6-flash-high

@@ -55,6 +55,7 @@ combos:
       - cc/claude-opus-5
   chat:
     models:
+      - gh/claude-sonnet-5
       - cc/claude-sonnet-5
       - minimax/MiniMax-M3
       - antigravity/gemini-3.6-flash-high

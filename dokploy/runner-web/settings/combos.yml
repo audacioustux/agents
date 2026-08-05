@@ -14,12 +14,14 @@ combos:
   coding:
     models:
       - minimax/MiniMax-M3
+      - antigravity/gemini-3.6-flash-high
   ###
   best-coding-fast:
     models:
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
       - minimax/MiniMax-M3
+      - antigravity/gemini-3.6-flash-high
   ###
   pro-reasoning:
     # strategy: fusion

@@ -58,7 +58,6 @@ combos:
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
       - minimax/MiniMax-M3
-      - antigravity/gemini-3.6-flash-high
   ###
   pro-vision:
     models:
@@ -71,16 +70,15 @@ combos:
     models:
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
-      - antigravity/gemini-pro-agent
   best-fast:
     models:
-      - minimax/MiniMax-M3
-      - antigravity/gemini-3.6-flash-high
       - oc/big-pickle
+      - antigravity/gemini-pro-agent
+      - minimax/MiniMax-M3
   fast:
     models:
+      - antigravity/gemini-3.6-flash-high
       - cerebras/gpt-oss-120b
-      - antigravity/gemini-3.1-flash-lite
   ###
   best-free:
     models:

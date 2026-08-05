@@ -9,20 +9,17 @@ combos:
       # - gh/claude-sonnet-5
   best-coding:
     models:
-      - cc/claude-opus-5
-  coding:
-    models:
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
+  coding:
+    models:
       - minimax/MiniMax-M3
-      - antigravity/gemini-3.6-flash-high
   ###
   best-coding-fast:
     models:
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
       - minimax/MiniMax-M3
-      - antigravity/gemini-3.6-flash-high
   ###
   pro-reasoning:
     # strategy: fusion
@@ -53,6 +50,7 @@ combos:
   best-chat:
     models:
       - cc/claude-opus-5
+      - gh/claude-opus-5
   chat:
     models:
       - gh/claude-sonnet-5

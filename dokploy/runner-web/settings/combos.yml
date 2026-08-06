@@ -1,9 +1,11 @@
 baseUrl: https://omni.tux.bd
 combos:
   pro-coding:
-    # strategy: fusion
+    strategy: fusion
     models:
       - cc/claude-opus-5
+      - cx/gpt-5.6-sol-xhigh
+      - antigravity/gemini-pro-agent
       # - minimax/MiniMax-M3
       # - antigravity/gemini-pro-agent
       # - gh/claude-sonnet-5
@@ -24,9 +26,11 @@ combos:
       - antigravity/gemini-3.6-flash-high
   ###
   pro-reasoning:
-    # strategy: fusion
+    strategy: fusion
     models:
       - cc/claude-opus-5
+      - cx/gpt-5.6-sol-xhigh
+      - antigravity/gemini-pro-agent
       # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-pro-agent
       # - gh/claude-sonnet-5
@@ -34,18 +38,19 @@ combos:
     models:
       - cc/claude-opus-5
       - cx/gpt-5.6-sol-high
-      - antigravity/gemini-pro-agent
   reasoning:
     models:
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
       - cx/gpt-5.6-sol
-      - antigravity/gemini-3.6-flash-high
+      - antigravity/gemini-pro-agent
   ###
   pro-chat:
-    # strategy: fusion
+    strategy: fusion
     models:
       - cc/claude-opus-5
+      - cx/gpt-5.6-sol-xhigh
+      - antigravity/gemini-pro-agent
       # - minimax/MiniMax-M3
       # - antigravity/gemini-pro-agent
       # - gh/claude-sonnet-5

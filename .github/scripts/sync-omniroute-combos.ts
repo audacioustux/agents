@@ -8,7 +8,7 @@ const USER_AGENT = "omniroute-combo-sync/2.0";
 
 /** Strategies combos.yml is allowed to set. Other live strategies (e.g. the
  * OmniRoute-default "weighted") are left untouched unless declared here. */
-export type ComboStrategy = "priority" | "fusion";
+export type ComboStrategy = "priority" | "fusion" | "pipeline";
 
 export type ComboDeclaration = {
   strategy?: ComboStrategy;
@@ -95,8 +95,10 @@ function parseComboDeclaration(
 }
 
 function parseStrategy(name: string, value: unknown): ComboStrategy {
-  if (value !== "priority" && value !== "fusion") {
-    throw new Error(`combos.${name}.strategy must be "priority" or "fusion"`);
+  if (value !== "priority" && value !== "fusion" && value !== "pipeline") {
+    throw new Error(
+      `combos.${name}.strategy must be "priority", "fusion", or "pipeline"`,
+    );
   }
   return value;
 }

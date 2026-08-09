@@ -1,9 +1,9 @@
 baseUrl: https://omni.tux.bd
 combos:
   pro-coding:
-    strategy: pipeline
+    # strategy: pipeline
     models:
-      - cx/gpt-5.6-sol-xhigh
+      # - cx/gpt-5.6-sol-xhigh
       - cc/claude-opus-5
       # - antigravity/gemini-pro-agent
       # - minimax/MiniMax-M3
@@ -26,7 +26,7 @@ combos:
       - antigravity/gemini-3.6-flash-high
   ###
   pro-reasoning:
-    strategy: pipeline
+    # strategy: pipeline
     models:
       - cx/gpt-5.6-sol-xhigh
       - cc/claude-opus-5
@@ -46,9 +46,9 @@ combos:
       - antigravity/gemini-pro-agent
   ###
   pro-chat:
-    strategy: pipeline
+    # strategy: pipeline
     models:
-      - cx/gpt-5.6-sol-xhigh
+      # - cx/gpt-5.6-sol-xhigh
       - cc/claude-opus-5
       # - antigravity/gemini-pro-agent
       # - minimax/MiniMax-M3

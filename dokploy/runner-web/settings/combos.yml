@@ -60,6 +60,8 @@ combos:
       - gh/claude-opus-5
   chat:
     models:
+      - cc/claude-sonnet-5
+      - gh/claude-sonnet-5
       - antigravity/gemini-pro-agent
       - minimax/MiniMax-M3
       - oc/big-pickle

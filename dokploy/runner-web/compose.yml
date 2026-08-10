@@ -23,7 +23,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    image: diegosouzapw/omniroute:3.8.49-web
+    image: diegosouzapw/omniroute:next-web
     pull_policy: always
     restart: unless-stopped
     stop_grace_period: 40s

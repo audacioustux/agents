@@ -52,11 +52,11 @@ combos:
       - cc/claude-sonnet-5
   ###
   pro-chat:
-    # strategy: pipeline
+    strategy: fusion
     models:
       - cc/claude-opus-5
-      # - cx/gpt-5.6-sol-xhigh
-      # - antigravity/gemini-pro-agent
+      - cx/gpt-5.6-sol-xhigh
+      - antigravity/gemini-pro-agent
       # - minimax/MiniMax-M3
       # - antigravity/gemini-pro-agent
       # - gh/claude-sonnet-5

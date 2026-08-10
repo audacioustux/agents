@@ -1,14 +1,14 @@
 baseUrl: https://omni.tux.bd
 combos:
   pro-coding:
-    # strategy: pipeline
-    strategy: fusion
+    strategy: pipeline
+    # strategy: fusion
     models:
       - cc/claude-opus-5
-      - cx/gpt-5.6-sol-xhigh
-      - antigravity/gemini-3.6-flash-high
+      # - cx/gpt-5.6-sol-xhigh
+      # - antigravity/gemini-3.6-flash-high
       # - antigravity/gemini-pro-agent
-      # - minimax/MiniMax-M3
+      - minimax/MiniMax-M3
       # - antigravity/gemini-pro-agent
       # - gh/claude-sonnet-5
   best-coding:
@@ -28,34 +28,35 @@ combos:
       - antigravity/gemini-3.6-flash-high
   ###
   pro-reasoning:
-    strategy: fusion
+    strategy: pipeline
     models:
       - cx/gpt-5.6-sol-xhigh
       - cc/claude-opus-5
-      - antigravity/gemini-pro-agent
+      # - antigravity/gemini-pro-agent
       # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-pro-agent
       # - gh/claude-sonnet-5
   best-reasoning:
-    strategy: fusion
+    strategy: pipeline
     models:
       - cx/gpt-5.6-sol-high
-      - cc/claude-opus-5
-      - antigravity/gemini-pro-agent
+      - antigravity/gemini-3.6-flash-high
+      # - cc/claude-opus-5
+      # - antigravity/gemini-pro-agent
   reasoning:
     models:
       - cx/gpt-5.6-sol-high
-      - antigravity/gemini-pro-agent
+      - antigravity/gemini-3.6-flash-high
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
   ###
   pro-chat:
-    # strategy: pipeline
+    strategy: pipeline
     models:
       - cc/claude-opus-5
       # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-pro-agent
-      # - minimax/MiniMax-M3
+      - minimax/MiniMax-M3
       # - antigravity/gemini-pro-agent
       # - gh/claude-sonnet-5
   best-chat:

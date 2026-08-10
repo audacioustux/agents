@@ -41,13 +41,13 @@ combos:
     models:
       - cx/gpt-5.6-sol-high
       # - antigravity/gemini-3.6-flash-high
-      - antigravity/gemini-pro-agent
+      - antigravity/gemini-3.6-flash-high
       - gh/claude-opus-5
       - cc/claude-opus-5
   reasoning:
     models:
       - cx/gpt-5.6-sol
-      - antigravity/gemini-3.6-flash-high
+      - antigravity/gemini-3.6-flash-medium
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
   ###
@@ -56,7 +56,7 @@ combos:
     models:
       - cc/claude-opus-5
       - cx/gpt-5.6-sol-xhigh
-      - antigravity/gemini-pro-agent
+      - antigravity/gemini-3.6-flash-high
       # - minimax/MiniMax-M3
       # - antigravity/gemini-pro-agent
       # - gh/claude-sonnet-5
@@ -68,7 +68,7 @@ combos:
     models:
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
-      - antigravity/gemini-pro-agent
+      - antigravity/gemini-3.6-flash-medium
       - minimax/MiniMax-M3
   ###
   pro-vision:
@@ -84,12 +84,12 @@ combos:
       - cc/claude-sonnet-5
   best-fast:
     models:
-      - antigravity/gemini-pro-agent
+      - antigravity/gemini-3.6-flash-high
       - minimax/MiniMax-M3
       - oc/big-pickle
   fast:
     models:
-      - antigravity/gemini-3.6-flash-high
+      - antigravity/gemini-3.6-flash-medium
       - cerebras/gpt-oss-120b
   ###
   best-free:

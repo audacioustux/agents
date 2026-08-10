@@ -1,14 +1,14 @@
 baseUrl: https://omni.tux.bd
 combos:
   pro-coding:
-    strategy: pipeline
+    # strategy: pipeline
     # strategy: fusion
     models:
       - cc/claude-opus-5
       # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-3.6-flash-high
       # - antigravity/gemini-pro-agent
-      - minimax/MiniMax-M3
+      # - minimax/MiniMax-M3
       # - antigravity/gemini-pro-agent
       # - gh/claude-sonnet-5
   best-coding:
@@ -42,8 +42,8 @@ combos:
       - cx/gpt-5.6-sol-high
       # - antigravity/gemini-3.6-flash-high
       - antigravity/gemini-pro-agent
-      - cc/claude-opus-5
       - gh/claude-opus-5
+      - cc/claude-opus-5
   reasoning:
     models:
       - cx/gpt-5.6-sol
@@ -52,12 +52,12 @@ combos:
       - cc/claude-sonnet-5
   ###
   pro-chat:
-    strategy: pipeline
+    # strategy: pipeline
     models:
       - cc/claude-opus-5
       # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-pro-agent
-      - minimax/MiniMax-M3
+      # - minimax/MiniMax-M3
       # - antigravity/gemini-pro-agent
       # - gh/claude-sonnet-5
   best-chat:
@@ -70,7 +70,6 @@ combos:
       - gh/claude-sonnet-5
       - antigravity/gemini-pro-agent
       - minimax/MiniMax-M3
-      - oc/big-pickle
   ###
   pro-vision:
     models:

@@ -28,7 +28,7 @@ combos:
   pro-reasoning:
     # strategy: pipeline
     models:
-      - cx/gpt-5.6-sol-max
+      - cx/gpt-5.6-sol-xhigh
       - cc/claude-opus-5
       # - antigravity/gemini-pro-agent
       # - cx/gpt-5.6-sol-xhigh
@@ -36,11 +36,11 @@ combos:
       # - gh/claude-sonnet-5
   best-reasoning:
     models:
-      - cx/gpt-5.6-sol-xhigh
+      - cx/gpt-5.6-sol-high
       - cc/claude-opus-5
   reasoning:
     models:
-      - cx/gpt-5.6-sol-high
+      - cx/gpt-5.6-sol
       - antigravity/gemini-pro-agent
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
@@ -48,8 +48,8 @@ combos:
   pro-chat:
     # strategy: pipeline
     models:
-      # - cx/gpt-5.6-sol-xhigh
       - cc/claude-opus-5
+      # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-pro-agent
       # - minimax/MiniMax-M3
       # - antigravity/gemini-pro-agent

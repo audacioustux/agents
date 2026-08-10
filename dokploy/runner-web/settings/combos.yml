@@ -37,10 +37,10 @@ combos:
       # - antigravity/gemini-pro-agent
       # - gh/claude-sonnet-5
   best-reasoning:
-    strategy: pipeline
+    # strategy: pipeline
     models:
       - cx/gpt-5.6-sol-high
-      - antigravity/gemini-3.6-flash-high
+      # - antigravity/gemini-3.6-flash-high
       # - cc/claude-opus-5
       # - antigravity/gemini-pro-agent
   reasoning:

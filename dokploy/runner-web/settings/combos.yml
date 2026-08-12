@@ -28,10 +28,10 @@ combos:
       - antigravity/gemini-3.6-flash-high
   ###
   pro-reasoning:
-    strategy: pipeline
+    # strategy: pipeline
     models:
+      - cx/gpt-5.6-sol-max
       - cc/claude-opus-5
-      - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-pro-agent
       # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-pro-agent
@@ -39,14 +39,14 @@ combos:
   best-reasoning:
     # strategy: pipeline
     models:
-      - cx/gpt-5.6-sol-high
+      - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-3.6-flash-high
       - antigravity/gemini-3.6-flash-high
       - gh/claude-opus-5
       - cc/claude-opus-5
   reasoning:
     models:
-      - cx/gpt-5.6-sol
+      - cx/gpt-5.6-sol-high
       - antigravity/gemini-3.6-flash-medium
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5

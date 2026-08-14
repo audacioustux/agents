@@ -18,14 +18,14 @@ combos:
   coding:
     models:
       - minimax/MiniMax-M3
-      - antigravity/gemini-3.6-flash-high
+      - antigravity/gemini-3.7-flash-high
   ###
   best-coding-fast:
     models:
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
       - minimax/MiniMax-M3
-      - antigravity/gemini-3.6-flash-high
+      - antigravity/gemini-3.7-flash-high
   ###
   pro-reasoning:
     # strategy: pipeline
@@ -40,13 +40,10 @@ combos:
     # strategy: pipeline
     models:
       - cx/gpt-5.6-sol-high
-      # - antigravity/gemini-3.6-flash-high
-      - antigravity/gemini-3.6-flash-high
       - cc/claude-opus-5
   reasoning:
     models:
       - cx/gpt-5.6-sol
-      - antigravity/gemini-3.6-flash-medium
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
   ###
@@ -66,7 +63,7 @@ combos:
     models:
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
-      - antigravity/gemini-3.6-flash-medium
+      - antigravity/gemini-3.7-flash-high
       - minimax/MiniMax-M3
   ###
   pro-vision:
@@ -82,12 +79,12 @@ combos:
       - cc/claude-sonnet-5
   best-fast:
     models:
-      - antigravity/gemini-3.6-flash-high
+      - antigravity/gemini-3.7-flash-high
       - minimax/MiniMax-M3
       - oc/big-pickle
   fast:
     models:
-      - antigravity/gemini-3.6-flash-medium
+      - antigravity/gemini-3.7-flash-medium
       - cerebras/gpt-oss-120b
   ###
   best-free:

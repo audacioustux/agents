@@ -30,7 +30,7 @@ combos:
   pro-reasoning:
     # strategy: pipeline
     models:
-      - cx/gpt-5.6-sol-max
+      - cx/gpt-5.6-sol-xhigh
       - cc/claude-opus-5
       # - antigravity/gemini-pro-agent
       # - cx/gpt-5.6-sol-xhigh
@@ -47,6 +47,7 @@ combos:
       - cx/gpt-5.6-sol
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
+      - minimax/MiniMax-M3
   ###
   pro-chat:
     # strategy: fusion

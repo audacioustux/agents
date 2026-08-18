@@ -65,8 +65,8 @@ combos:
     models:
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
-      - antigravity/gemini-3.7-flash-tiered
       - minimax/MiniMax-M3
+      - antigravity/gemini-3.7-flash-tiered
   ###
   pro-vision:
     models:

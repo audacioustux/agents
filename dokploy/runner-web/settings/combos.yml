@@ -39,12 +39,12 @@ combos:
   best-reasoning:
     # strategy: pipeline
     models:
-      - cx/gpt-5.6-sol-high
+      - cx/gpt-5.6-luna-xhigh
       - antigravity/gemini-3.7-flash-tiered
       - cc/claude-opus-5
   reasoning:
     models:
-      - cx/gpt-5.6-sol
+      - cx/gpt-5.6-luna-high
       - gh/claude-sonnet-5
       - cc/claude-sonnet-5
       - minimax/MiniMax-M3

@@ -89,7 +89,7 @@ combos:
     models:
       - antigravity/gemini-3.6-flash-medium
       - antigravity/gpt-oss-120b-medium
-      - oc/big-pickle
+      - cf/@cf/openai/gpt-oss-120b
   ###
   best-free:
     models:

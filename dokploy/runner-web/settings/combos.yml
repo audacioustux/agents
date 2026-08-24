@@ -88,7 +88,8 @@ combos:
   fast:
     models:
       - antigravity/gemini-3.6-flash-medium
-      - cerebras/gpt-oss-120b
+      - antigravity/gpt-oss-120b-medium
+      - oc/big-pickle
   ###
   best-free:
     models:

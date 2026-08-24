@@ -62,11 +62,9 @@ combos:
   best-chat:
     models:
       - cc/claude-opus-5
-      - minimax/MiniMax-M3
   chat:
     models:
-      - cc/claude-sonnet-5
-      - gh/claude-sonnet-5
+      - cc/claude-opus-5
       - minimax/MiniMax-M3
       - antigravity/gemini-3.7-flash-tiered
   ###

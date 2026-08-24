@@ -25,7 +25,7 @@ task:
   maxRuntimeMs: 0
   agentAdvisor: 
     task: "on"
-defaultThinkingLevel: high
+defaultThinkingLevel: auto
 memory: 
   backend: mnemopi
 enabledModels: 
@@ -49,9 +49,9 @@ enabledModels:
   - omniroute/pro-vision
   - omniroute/best-vision
 modelRoles: 
-  default: omniroute/best-chat
+  default: omniroute/best-chat:xhigh
   smol: omniroute/chat
-  slow: omniroute/pro-chat:xhigh
+  slow: omniroute/pro-chat:max
   plan: omniroute/pro-reasoning:max
   commit: omniroute/best-fast:low
   vision: omniroute/best-vision

@@ -4,6 +4,7 @@ combos:
     # strategy: pipeline
     # strategy: fusion
     models:
+      - cc/claude-fable-5
       - cc/claude-opus-5
       # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-3.7-flash-tiered
@@ -31,6 +32,7 @@ combos:
     # strategy: pipeline
     models:
       - cx/gpt-5.6-sol-xhigh
+      - cc/claude-fable-5
       - cc/claude-opus-5
       # - antigravity/gemini-pro-agent
       # - cx/gpt-5.6-sol-xhigh
@@ -52,6 +54,7 @@ combos:
   pro-chat:
     # strategy: fusion
     models:
+      - cc/claude-fable-5
       - cc/claude-opus-5
       # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-3.7-flash-tiered
@@ -70,6 +73,7 @@ combos:
   ###
   pro-vision:
     models:
+      - cc/claude-fable-5
       - cc/claude-opus-5
   best-vision:
     models:

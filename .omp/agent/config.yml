@@ -1,14 +1,15 @@
-setupVersion: 1
+setupVersion: 2
 theme: 
   dark: dark-catppuccin
   light: light-catppuccin
-symbolPreset: nerd
+symbolPreset: ascii
 statusLine: 
-  preset: full
+  preset: default
   separator: slash
   transparent: true
   sessionAccent: true
   compactThinkingLevel: false
+  contextLine: percentage
 display: 
   showTokenUsage: false
   shimmer: classic
@@ -19,9 +20,14 @@ task:
   eager: preferred
   isolation: 
     commits: ai
+  maxConcurrency: 4
+  enableEffort: true
+  maxRuntimeMs: 0
+  agentAdvisor: 
+    task: "on"
 defaultThinkingLevel: high
 memory: 
-  backend: "off"
+  backend: mnemopi
 enabledModels: 
   - omniroute/auto/smart
   - omniroute/pro-chat
@@ -93,11 +99,10 @@ tui:
 advisor: 
   enabled: true
   syncBacklog: "1"
-  subagents: false
 features: 
-  unexpectedStopDetection: true
+  unexpectedStopDetection: smart
 autolearn: 
-  enabled: false
+  enabled: true
   autoContinue: true
 lsp: 
   formatOnWrite: true
@@ -113,13 +118,18 @@ github:
 secrets: 
   enabled: true
 compaction: 
-  thresholdPercent: -1
+  thresholdPercent: 90
   thresholdTokens: -1
   handoffSaveToDisk: true
-  idleEnabled: true
-  strategy: context-full
+  idleEnabled: false
   idleTimeoutSeconds: 3600
   idleThresholdTokens: 400000
+  methodOrder: 
+    - remote
+    - snapcompact
+    - handoff
+    - shake
+    - soft
 terminal: 
   showProgress: true
 interruptMode: immediate
@@ -134,7 +144,7 @@ bash:
     enabled: false
   enabled: true
 todo: 
-  eager: preferred
+  eager: always
 contextPromotion: 
   enabled: false
 browser: 
@@ -154,4 +164,16 @@ astEdit:
 astGrep: 
   enabled: true
 images: 
-  describeForTextModels: true
+  describeForTextModels: true%
+mnemopi: 
+  polyphonicRecall: true
+  enhancedRecall: true
+  proactiveLinking: true
+security: 
+  enabled: true
+codexResets: 
+  autoRedeem: "yes"
+error: 
+  notify: "on"
+composer: 
+  shape: claude

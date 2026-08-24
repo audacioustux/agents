@@ -164,7 +164,7 @@ astEdit:
 astGrep: 
   enabled: true
 images: 
-  describeForTextModels: true%
+  describeForTextModels: true
 mnemopi: 
   polyphonicRecall: true
   enhancedRecall: true

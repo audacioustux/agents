@@ -1,38 +1,59 @@
+# Two runner pools on one host. A runner registers to exactly one scope, so
+# each pool is its own service; scaling either is its `deploy.replicas`.
+#
+# Replicas rule out `container_name` and per-replica named volumes, so runner
+# registration and /nix both live in the container filesystem:
+# - Registration is ephemeral by design: the image self-registers from its
+#   access token on start and deregisters on graceful stop (the grace period
+#   is what gives that trap time to run), so redeploys do not leak offline
+#   duplicates in the runner lists.
+# - /nix is warm across jobs for a replica's lifetime and cold only after a
+#   redeploy — a shared named volume is not an option, since concurrent
+#   replicas would race the nix store's sqlite db.
+x-runner: &runner
+  image: myoung34/github-runner:ubuntu-noble
+  pull_policy: always
+  restart: unless-stopped
+  stop_grace_period: 60s
+  env_file: .env
+  volumes:
+    # Job service containers (Tickify's ci.yml runs postgres:18 + redis:8)
+    # and any docker steps run as siblings on the host daemon.
+    - /var/run/docker.sock:/var/run/docker.sock
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
 services:
-  github-runner:
-    image: myoung34/github-runner:ubuntu-noble
-    pull_policy: always
-    restart: unless-stopped
-    stop_grace_period: 60s
-    env_file: .env
-    # One replica = one concurrent job. Scaling is this one number.
-    #
-    # Replicas rule out `container_name` and per-replica named volumes, so
-    # runner registration and /nix both live in the container filesystem:
-    # - Registration is ephemeral by design: the image self-registers from
-    #   ACCESS_TOKEN on start and deregisters on graceful stop (the grace
-    #   period above is what gives that trap time to run), so redeploys do
-    #   not leak offline duplicates in the repo's runner list.
-    # - /nix is warm across jobs for the container's lifetime and cold only
-    #   after a redeploy — a shared named volume is not an option, since
-    #   concurrent replicas would race the nix store's sqlite db.
+  runner-tickify:
+    <<: *runner
     deploy:
       replicas: 3
     environment:
       RUNNER_SCOPE: repo
       REPO_URL: ${REPO_URL:?}
-      RUNNER_NAME_PREFIX: dokploy
-      LABELS: dokploy
+      RUNNER_NAME_PREFIX: dokploy-tickify
+      LABELS: dokploy-tickify
       # Persistent runner (not EPHEMERAL): keeps the workspace and /nix warm
       # across jobs. Safe for these workflows: every checkout uses
       # persist-credentials:false and actions/checkout cleans the tree.
       DISABLE_AUTO_UPDATE: "true"
-    volumes:
-      # Job service containers (ci.yml runs postgres:18 + redis:8) and any
-      # docker steps run as siblings on the host daemon.
-      - /var/run/docker.sock:/var/run/docker.sock
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
+
+  runner-nobinalo:
+    <<: *runner
+    # 0 until NOBINALO_ACCESS_TOKEN lands in the Dokploy env: org-scope
+    # registration needs a PAT with admin:org (classic) or org-level
+    # "Self-hosted runners: write" (fine-grained) on nobinalo, which the
+    # tickify pool's repo-scoped token cannot do. Flip to the target count
+    # in the same change that sets the token.
+    deploy:
+      replicas: 0
+    environment:
+      RUNNER_SCOPE: org
+      ORG_NAME: nobinalo
+      ACCESS_TOKEN: ${NOBINALO_ACCESS_TOKEN:-}
+      RUNNER_NAME_PREFIX: dokploy-nobinalo
+      LABELS: dokploy-nobinalo
+      DISABLE_AUTO_UPDATE: "true"

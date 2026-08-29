@@ -9,10 +9,13 @@ GitHub plan; jobs run here instead of drawing on the hosted-runner quota.
 | Service | Scope | Label | Replicas |
 |---|---|---|---|
 | `runner-tickify` | repo `stage-crew/tickify` | `dokploy-tickify` | 3 |
-| `runner-nobinalo` | org `nobinalo` | `dokploy-nobinalo` | 0 until `NOBINALO_ACCESS_TOKEN` is set |
+| `runner-thegrid` | repo `nobinalo/TheGrid` | `dokploy-thegrid` | 3 |
 
 A runner registers to exactly one scope, so each pool is its own service;
-scaling either is its `deploy.replicas`.
+scaling either is its `deploy.replicas`. The thegrid pool converts to org
+scope (`RUNNER_SCOPE: org`) once an `admin:org` PAT for `nobinalo` exists;
+repo-scope registration only needs repo admin, which the shared
+`ACCESS_TOKEN` already has.
 
 ## Files
 
@@ -25,8 +28,8 @@ scaling either is its `deploy.replicas`.
 2. Point the service at this repo path: `dokploy/github-runner`.
 3. Use `compose.yml` as the Compose file.
 4. Set the variables from `.env.example` in Dokploy env.
-5. Deploy. Runners appear under Settings → Actions → Runners (repo for
-   tickify, org for nobinalo) named `dokploy-tickify-…` / `dokploy-nobinalo-…`.
+5. Deploy. Runners appear under each repo's Settings → Actions → Runners,
+   named `dokploy-tickify-…` / `dokploy-thegrid-…`.
 
 ## Runtime
 
@@ -43,5 +46,5 @@ scaling either is its `deploy.replicas`.
 
 ## Pointing workflows at a pool
 
-`runs-on: dokploy-tickify` or `runs-on: dokploy-nobinalo`. Keep hosted and
+`runs-on: dokploy-tickify` or `runs-on: dokploy-thegrid`. Keep hosted and
 self-hosted interchangeable by reverting that one line to `ubuntu-latest`.

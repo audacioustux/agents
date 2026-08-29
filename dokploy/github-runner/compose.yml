@@ -41,19 +41,16 @@ services:
       # persist-credentials:false and actions/checkout cleans the tree.
       DISABLE_AUTO_UPDATE: "true"
 
-  runner-nobinalo:
+  runner-thegrid:
     <<: *runner
-    # 0 until NOBINALO_ACCESS_TOKEN lands in the Dokploy env: org-scope
-    # registration needs a PAT with admin:org (classic) or org-level
-    # "Self-hosted runners: write" (fine-grained) on nobinalo, which the
-    # tickify pool's repo-scoped token cannot do. Flip to the target count
-    # in the same change that sets the token.
+    # Repo-scoped for now — the shared ACCESS_TOKEN covers it. Converts to
+    # an org-scope pool (RUNNER_SCOPE: org, ORG_NAME: nobinalo) once a PAT
+    # with admin:org exists; repo-scope registration only needs repo admin.
     deploy:
-      replicas: 0
+      replicas: 3
     environment:
-      RUNNER_SCOPE: org
-      ORG_NAME: nobinalo
-      ACCESS_TOKEN: ${NOBINALO_ACCESS_TOKEN:-}
-      RUNNER_NAME_PREFIX: dokploy-nobinalo
-      LABELS: dokploy-nobinalo
+      RUNNER_SCOPE: repo
+      REPO_URL: https://github.com/nobinalo/TheGrid
+      RUNNER_NAME_PREFIX: dokploy-thegrid
+      LABELS: dokploy-thegrid
       DISABLE_AUTO_UPDATE: "true"

@@ -21,13 +21,16 @@ instead of drawing on the hosted-runner quota.
 
 ## Runtime
 
-- Image: `myoung34/github-runner:ubuntu-noble`
+- Image: `myoung34/github-runner:ubuntu-noble`, `deploy.replicas: 3` — one
+  replica per concurrent job; scaling is that one number.
 - Docker: host socket mounted — workflow `services:` containers (Tickify's
   CI runs postgres:18 and redis:8) run as siblings on the host daemon.
-- Persistent runner with a `/nix` volume: Tickify's workflows realize a nix
-  flake per job, and the warm store turns minutes of install into seconds.
-- Registration state persists in the `runner-state` volume, so redeploys
-  re-attach as the same runner instead of leaking offline duplicates.
+- Persistent runner, container-local state: each replica self-registers on
+  start and deregisters on graceful stop (the 60 s grace period exists for
+  that trap), so redeploys don't leak offline duplicates. `/nix` stays warm
+  for the replica's lifetime and is cold after a redeploy — a shared volume
+  is off the table because concurrent replicas would race the store's
+  sqlite db.
 
 ## Pointing workflows at it
 

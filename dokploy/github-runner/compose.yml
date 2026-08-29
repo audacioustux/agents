@@ -1,59 +1,38 @@
-# Two identical runner slots = two concurrent jobs. Each slot has its OWN
-# runner-state and /nix volume: registration state is per-runner by nature,
-# and two live nix daemons sharing one store db would race. The second
-# slot's store warms independently on its first job.
-x-runner: &runner
-  image: myoung34/github-runner:ubuntu-noble
-  pull_policy: always
-  restart: unless-stopped
-  stop_grace_period: 60s
-  env_file: .env
-  logging:
-    driver: json-file
-    options:
-      max-size: 10m
-      max-file: "3"
-
-x-runner-env: &runner-env
-  RUNNER_SCOPE: repo
-  REPO_URL: ${REPO_URL:?}
-  RUNNER_NAME_PREFIX: dokploy
-  LABELS: dokploy
-  # Persistent, not EPHEMERAL: the Tickify workflows realize a nix flake
-  # on every job, and a persistent runner keeps /nix (volume below) warm
-  # across jobs — the cold path costs minutes per job, the warm path
-  # seconds. Workspace reuse is safe for these workflows: every checkout
-  # uses persist-credentials:false and actions/checkout cleans the tree.
-  DISABLE_AUTO_UPDATE: "true"
-
 services:
   github-runner:
-    <<: *runner
-    container_name: github-runner
+    image: myoung34/github-runner:ubuntu-noble
+    pull_policy: always
+    restart: unless-stopped
+    stop_grace_period: 60s
+    env_file: .env
+    # One replica = one concurrent job. Scaling is this one number.
+    #
+    # Replicas rule out `container_name` and per-replica named volumes, so
+    # runner registration and /nix both live in the container filesystem:
+    # - Registration is ephemeral by design: the image self-registers from
+    #   ACCESS_TOKEN on start and deregisters on graceful stop (the grace
+    #   period above is what gives that trap time to run), so redeploys do
+    #   not leak offline duplicates in the repo's runner list.
+    # - /nix is warm across jobs for the container's lifetime and cold only
+    #   after a redeploy — a shared named volume is not an option, since
+    #   concurrent replicas would race the nix store's sqlite db.
+    deploy:
+      replicas: 3
     environment:
-      <<: *runner-env
+      RUNNER_SCOPE: repo
+      REPO_URL: ${REPO_URL:?}
+      RUNNER_NAME_PREFIX: dokploy
+      LABELS: dokploy
+      # Persistent runner (not EPHEMERAL): keeps the workspace and /nix warm
+      # across jobs. Safe for these workflows: every checkout uses
+      # persist-credentials:false and actions/checkout cleans the tree.
+      DISABLE_AUTO_UPDATE: "true"
     volumes:
       # Job service containers (ci.yml runs postgres:18 + redis:8) and any
       # docker steps run as siblings on the host daemon.
       - /var/run/docker.sock:/var/run/docker.sock
-      # Runner registration state; survives container replacement so the
-      # runner does not leak offline duplicates in the repo's runner list.
-      - runner-state:/actions-runner
-      # Warm nix store across jobs (see DISABLE_AUTO_UPDATE note above).
-      - nix-store:/nix
-
-  github-runner-2:
-    <<: *runner
-    container_name: github-runner-2
-    environment:
-      <<: *runner-env
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - runner-state-2:/actions-runner
-      - nix-store-2:/nix
-
-volumes:
-  runner-state:
-  nix-store:
-  runner-state-2:
-  nix-store-2:
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

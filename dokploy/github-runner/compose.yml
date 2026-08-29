@@ -16,9 +16,28 @@ x-runner: &runner
   restart: unless-stopped
   stop_grace_period: 60s
   env_file: .env
+  # Jobs start sibling containers on the host daemon (socket below) with
+  # host-published ports (Tickify's ci.yml: postgres:18 on 5432, redis:8;
+  # TheGrid's tests: postgres on 55432). Host networking makes the runner's
+  # 127.0.0.1 the same interface those ports publish to; without it every
+  # `-p host:container` sibling is unreachable from inside the job. Runners
+  # listen on nothing, so replicas cannot conflict.
+  network_mode: host
+  # Docker's default seccomp profile denies io_uring_* with EPERM (removed
+  # from the allowlist in 23.x). TheGrid's runtime is io_uring-based —
+  # observed as "failed to open the durable archive: Operation not
+  # permitted" in run 33239280012 — and its own Dockerfile documents the
+  # requirement. Unconfined seccomp only; no new capabilities granted.
+  security_opt:
+    - seccomp=unconfined
+  # tmpfs rather than the container's overlayfs layer: O_DIRECT opens fail
+  # EINVAL on overlayfs, and durable-archive tests create their fixtures
+  # under /tmp. Also faster for the ~1600-binary link storms.
+  tmpfs:
+    - /tmp:exec,size=8g
   volumes:
-    # Job service containers (Tickify's ci.yml runs postgres:18 + redis:8)
-    # and any docker steps run as siblings on the host daemon.
+    # Job service containers and any docker steps run as siblings on the
+    # host daemon.
     - /var/run/docker.sock:/var/run/docker.sock
   logging:
     driver: json-file

@@ -32,7 +32,7 @@ You MUST create a task for each of these items and complete them in order:
 6. **Write design doc** — save to `docs/designs/YYYY-MM-DD-<topic>-design.md` and commit
 7. **Spec self-review** — quick inline check for placeholders, contradictions, ambiguity, scope (see below). For an independent pass, dispatch a reviewer subagent with `./prompts/spec-document-reviewer.md`.
 8. **User reviews written spec** — ask user to review the spec file before proceeding
-9. **Transition to implementation** — invoke `writing-plans` skill to create implementation plan
+9. **Transition to implementation** — use the `writing-plans` skill if available; otherwise write the plan directly from the spec, one task per verifiable change
 
 ## Process Flow
 

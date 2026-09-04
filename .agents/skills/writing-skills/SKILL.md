@@ -205,6 +205,25 @@ Choose most relevant language:
 
 You're good at porting - one great example is enough.
 
+## Declaring cross-skill dependencies
+
+A skill must work when a skill it references is absent. Never assume installation.
+
+```yaml
+uses:
+  - name: writing-plans
+    source: audacioustux/agents
+```
+
+`uses:` records where a referenced skill comes from so it can be resolved or fetched. The installer ignores unknown frontmatter keys — it reads only `name` and `description` — so this block is for the agent and for humans wiring skills together, not for tooling that will act on it automatically.
+
+The body carries the actual behaviour:
+
+- **Imperative handoff** — must degrade: "use the `writing-plans` skill if available; otherwise write the plan directly from the spec"
+- **Informational cross-reference** — needs no fallback: "`writing-plans` — creates the plan this skill executes"
+
+Never write `REQUIRED SUB-SKILL` or `You MUST understand X`. A hard requirement on something that may not exist is a dead end.
+
 ## File Organization
 
 ### Self-Contained Skill

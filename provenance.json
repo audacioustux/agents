@@ -52,7 +52,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "953cea28dd9d3aef2ce73baef1a15f9ea6cf6c7764ee974d85b6c08ea97cfb31",
+          "sha256": "eb48ac8d63f46081ec234f56ffd59d489e53ad923f7ee508cffe2a601040edfa",
           "upstream": {
             "status": "diverged",
             "sha256": "74edf03ea6d24ef53db48677b93558d14a979bdf052ca3f57ecdca0c66791608"
@@ -295,7 +295,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "1a296d945cca93c83a1d403852af22d431b2740b79ea3cc991ad34061c0d5679",
+          "sha256": "0a4be0d49a82ee6e4a76afcbc0f404c28c8ad64366f3cd835ba414f6fdea1610",
           "upstream": {
             "status": "diverged",
             "sha256": "1968923066f3b707eb01d1992cdf4c42284c3855f70253b9cd5000ff45fca13c"
@@ -603,7 +603,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "e09b3c9ba13c1a5a9e7e503fa2b25daa2c423b77d34f3b9dfdcda37c5f8673e3",
+          "sha256": "1179df1f9262a51e09acf8b4e0d4ffeb999cd7bf42481b3308c2d3ca4cbc637c",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
@@ -844,7 +844,7 @@
       ],
       "files": {
         "SKILL.md": {
-          "sha256": "1f45976846dcc47241ae098a9acafaa3160c4acbbb64cc6fadc5894e7ebde22a",
+          "sha256": "29f6128d111da8e0f05023d7516283c71ad1cb7a931bf8c7fedb01dae2c9979f",
           "upstream": {
             "status": "added-locally"
           }
@@ -1046,7 +1046,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "072f1a00f87999bdcab8dfbc00d77740473cd5e3ef169f939de0839b68ef2fce",
+          "sha256": "0e20a82759ad37110d6030ca463a4aadc4b395334205d7280363ce7669f212df",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"
@@ -1101,7 +1101,8 @@
     "naming": "Skill names use gerund/verb-first form per writing-skills:217 and Anthropic's authoring guide ('we recommend gerund form'). Exceptions kept verbatim: test-driven-development and subagent-driven-development name established methodologies an agent searches by name; systematic-debugging already reads verb-first.",
     "skill-split": "writing-skills covered authoring AND adversarial testing in 1873w. Split: writing-skills keeps structure/naming/layout, testing-skills owns baseline runs, pressure scenarios, and loophole closing. They reference each other via uses:.",
     "routing": "Sibling skills covering the same trigger must each state the discriminator and name the alternative. executing-plans and subagent-driven-development both key on subagent availability; using-git-worktrees and dispatching-parallel-agents explicitly disclaim plan execution.",
-    "uses-graph": "Every skill named in another skill's description, body, or companions is declared in that skill's uses: block. Bare sibling names in prose are backticked so a name is visually distinct from an ordinary word."
+    "uses-graph": "Every skill named in another skill's description, body, or companions is declared in that skill's uses: block. Bare sibling names in prose are backticked so a name is visually distinct from an ordinary word.",
+    "uses-is-agent-facing": "Verified against skills@1.5.23 dist/cli.mjs: the installer parses only name and description; 'uses' appears nowhere. uses: survives installs because unknown keys are ignored, not because anything acts on it. It is agent- and human-facing metadata, so every imperative handoff in the body must also state a fallback."
   },
   "consolidated": "2026-09-04",
   "vendorSnapshot": {

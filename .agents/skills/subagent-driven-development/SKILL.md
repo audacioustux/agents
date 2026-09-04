@@ -183,7 +183,7 @@ Fresh context per task, curated inputs, automatic review checkpoints. See `refer
 - **`using-git-worktrees`** - Ensures isolated workspace (creates one or verifies existing)
 - **`writing-plans`** - Creates the plan this skill executes
 - **`requesting-code-review`** - Code review template for reviewer subagents
-- **`finishing-a-development-branch`** - Complete development after all tasks
+- **`finishing-a-development-branch`** - Complete development after all tasks; if not installed, merge or open a PR yourself and remove any worktree you created
 
 **Subagents should use:**
 - **`test-driven-development`** - Subagents follow TDD for each task

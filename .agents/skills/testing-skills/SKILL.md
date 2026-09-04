@@ -104,6 +104,8 @@ Deploying untested skills = deploying untested code. It's a violation of quality
 
 Structure, naming, description, and file layout are the `writing-skills` skill. This one starts once a draft exists.
 
+A skill that passes its pressure test is not yet proven in use. Before claiming it works, the `verifying-before-completion` skill applies here too, if installed.
+
 ## Deeper references
 
 | Read | When |

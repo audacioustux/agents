@@ -41,7 +41,7 @@
   },
   "skills": {
     "a11y-interactions-forms": {
-      "disposition": "unclassified",
+      "disposition": "keep-as-is",
       "upstream": [
         {
           "repo": "audacioustux/agents",
@@ -58,10 +58,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "audacioustux-owned, pristine vs upstream"
     },
     "anti-bloat-review": {
-      "disposition": "unclassified",
+      "disposition": "keep-as-is",
       "upstream": [
         {
           "repo": "audacioustux/agents",
@@ -84,10 +85,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "audacioustux-owned, pristine"
     },
     "brainstorming": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -154,10 +156,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "diverged both ways; 5 hardcoded .superpowers/brainstorm paths to fix"
     },
     "browser-ux-qa-review": {
-      "disposition": "unclassified",
+      "disposition": "keep-as-is",
       "upstream": [
         {
           "repo": "audacioustux/agents",
@@ -174,10 +177,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "audacioustux-owned, pristine"
     },
     "component-system-design": {
-      "disposition": "unclassified",
+      "disposition": "keep-as-is",
       "upstream": [
         {
           "repo": "audacioustux/agents",
@@ -194,10 +198,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "audacioustux-owned, pristine"
     },
     "context7-cli": {
-      "disposition": "unclassified",
+      "disposition": "external",
       "upstream": [
         {
           "repo": "upstash/context7",
@@ -234,10 +239,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "vendor CLI surface; upstash owns tool truth"
     },
     "dispatching-parallel-agents": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -255,10 +261,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "core workflow skill, locally modified"
     },
     "executing-plans": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -276,10 +283,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "must inherit declared-path rule"
     },
     "find-skills": {
-      "disposition": "unclassified",
+      "disposition": "retired",
       "upstream": [
         {
           "repo": "vercel-labs/skills",
@@ -297,10 +305,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "user decision 2026-09-04; verified zero inbound references"
     },
     "finishing-a-development-branch": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -318,10 +327,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "cleanup allowlist must change in lockstep with using-git-worktrees"
     },
     "firecrawl": {
-      "disposition": "unclassified",
+      "disposition": "external",
       "upstream": [
         {
           "repo": "firecrawl/cli",
@@ -350,10 +360,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "vendor CLI doc; upstream path 404s at pin — needs re-locating"
     },
     "handoff": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "mattpocock/skills",
@@ -371,10 +382,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "847B; too small to justify external tracking"
     },
     "layout-responsiveness": {
-      "disposition": "unclassified",
+      "disposition": "keep-as-is",
       "upstream": [
         {
           "repo": "audacioustux/agents",
@@ -391,10 +403,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "audacioustux-owned, pristine"
     },
     "mermaid-diagrams": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "audacioustux/agents",
@@ -418,10 +431,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "audacioustux-owned but locally modified; push edits back to return to pristine"
     },
     "receiving-code-review": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -439,10 +453,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "core workflow skill"
     },
     "repo-ui-conventions": {
-      "disposition": "unclassified",
+      "disposition": "keep-as-is",
       "upstream": [
         {
           "repo": "audacioustux/agents",
@@ -459,10 +474,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "audacioustux-owned, pristine"
     },
     "requesting-code-review": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -487,10 +503,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "hardcodes docs/superpowers/plans"
     },
     "subagent-driven-development": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -527,10 +544,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "hard one: upstream 12.5KB->32KB; reconcile deliberately"
     },
     "systematic-debugging": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -609,10 +627,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "core workflow skill"
     },
     "tdd": {
-      "disposition": "unclassified",
+      "disposition": "merge-into:test-driven-development",
       "upstream": [
         {
           "repo": "mattpocock/skills",
@@ -661,10 +680,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "duplicate TDD territory; fold unique content, keep the name 7 cross-refs point at"
     },
     "test-driven-development": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -688,10 +708,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "absorbs tdd; most-referenced skill, keep the name"
     },
     "using-git-worktrees": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -709,10 +730,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": ".worktrees/ option contradicts AGENTS.md nested-worktree prohibition"
     },
     "using-superpowers": {
-      "disposition": "unclassified",
+      "disposition": "merge-rewrite",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -750,10 +772,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "obra bootstrap; branding+namespace guidance stale post-consolidation"
     },
     "verification-before-completion": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -771,10 +794,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "core workflow skill"
     },
     "web-quality-performance": {
-      "disposition": "unclassified",
+      "disposition": "keep-as-is",
       "upstream": [
         {
           "repo": "audacioustux/agents",
@@ -791,10 +815,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "audacioustux-owned, pristine"
     },
     "web-search": {
-      "disposition": "unclassified",
+      "disposition": "external",
       "upstream": [
         {
           "repo": "brave/brave-search-skills",
@@ -812,10 +837,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "Brave API surface; vendor owns it"
     },
     "writing-plans": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -840,10 +866,11 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "local MISSES upstream Task Right-Sizing section; plus path-declaration change"
     },
     "writing-skills": {
-      "disposition": "unclassified",
+      "disposition": "merge",
       "upstream": [
         {
           "repo": "obra/superpowers",
@@ -900,7 +927,14 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [],
+      "rationale": "becomes the authoring standard for the agents repo"
     }
+  },
+  "dispositionsRecorded": "2026-09-04",
+  "decisions": {
+    "paths": "Skills must not hardcode vendor paths. Declared in AGENTS.md when the repo declares one; otherwise a fixed documented default. Discovery/heuristic scanning rejected: nondeterministic across sessions.",
+    "docs-superpowers-rename": "Approved by user 2026-09-04. Target names pending; ~40+ citations across ~15 files, and docs:verify (lychee) does NOT cover backtick prose citations — needs its own zero-remaining grep gate.",
+    "installer-destructive": "Measured 2026-09-04: `skills experimental_install` rm -rf's each skill dir and copies from unpinned upstream HEAD. skills:setup guard changed from completeness-count to existence so the destructive path is unreachable once a tree exists."
   }
 }

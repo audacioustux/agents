@@ -318,7 +318,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "be6e583749061504696e622b712d42331acf9a1961701318a5a3df78d250fb2f",
+          "sha256": "b313516e931090de72d7b30afaf08e61953d61984fd813f87e00c85bed300cdb",
           "upstream": {
             "status": "diverged",
             "sha256": "c4c3d8b628c51114cd165fb8246fe02744cd8be180032328391252e653028d9b"
@@ -1102,7 +1102,8 @@
     "skill-split": "writing-skills covered authoring AND adversarial testing in 1873w. Split: writing-skills keeps structure/naming/layout, testing-skills owns baseline runs, pressure scenarios, and loophole closing. They reference each other via uses:.",
     "routing": "Sibling skills covering the same trigger must each state the discriminator and name the alternative. executing-plans and subagent-driven-development both key on subagent availability; using-git-worktrees and dispatching-parallel-agents explicitly disclaim plan execution.",
     "uses-graph": "Every skill named in another skill's description, body, or companions is declared in that skill's uses: block. Bare sibling names in prose are backticked so a name is visually distinct from an ordinary word.",
-    "uses-is-agent-facing": "Verified against skills@1.5.23 dist/cli.mjs: the installer parses only name and description; 'uses' appears nowhere. uses: survives installs because unknown keys are ignored, not because anything acts on it. It is agent- and human-facing metadata, so every imperative handoff in the body must also state a fallback."
+    "uses-is-agent-facing": "Verified against skills@1.5.23 dist/cli.mjs: the installer parses only name and description; 'uses' appears nowhere. uses: survives installs because unknown keys are ignored, not because anything acts on it. It is agent- and human-facing metadata, so every imperative handoff in the body must also state a fallback.",
+    "standalone": "Verified empirically: installed brainstorming, executing-plans, and testing-skills alone with every declared dependency absent. Each retains a complete path. Informational cross-references ('Related skills' lists) need no fallback; only imperative handoffs do."
   },
   "consolidated": "2026-09-04",
   "vendorSnapshot": {

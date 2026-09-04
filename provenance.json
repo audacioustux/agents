@@ -105,56 +105,64 @@
           "sha256": "c403c76d5b3e066d0686ad2883ce0a90de5a042f9af21d7781e2da75c4b0d542",
           "upstream": {
             "status": "diverged",
-            "sha256": "74edf03ea6d24ef53db48677b93558d14a979bdf052ca3f57ecdca0c66791608"
+            "sha256": "74edf03ea6d24ef53db48677b93558d14a979bdf052ca3f57ecdca0c66791608",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/brainstorming/SKILL.md"
           }
         },
         "scripts/frame-template.html": {
           "sha256": "fb22ba9d47f3b83b56e0a95d52a3c2727db03b0d4365078d92c850293a62457b",
           "upstream": {
             "status": "diverged",
-            "sha256": "6a8a4e58bd6a44b904e2e3c57de774481d909204597e1498de53f1b2fecc4c4e"
+            "sha256": "6a8a4e58bd6a44b904e2e3c57de774481d909204597e1498de53f1b2fecc4c4e",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/brainstorming/scripts/frame-template.html"
           }
         },
         "scripts/helper.js": {
           "sha256": "e763d82f32b4ebb320be2f0d08449d3e5a0585778edf5c407c1fdab3f39976a5",
           "upstream": {
             "status": "diverged",
-            "sha256": "43c6d69954a46ec34a2a262bcc62a9a7e83e839c739f199cb72646d397c686e3"
+            "sha256": "43c6d69954a46ec34a2a262bcc62a9a7e83e839c739f199cb72646d397c686e3",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/brainstorming/scripts/helper.js"
           }
         },
         "scripts/server.cjs": {
           "sha256": "ea81185f581897c67d4b417eeb9bc7a158c50e0932c73047054fe53efc2683ef",
           "upstream": {
             "status": "diverged",
-            "sha256": "2d2961ea8d11f56c5f4c3a1a68d22709efa5d7601a2246d8c880774e7e9e8412"
+            "sha256": "2d2961ea8d11f56c5f4c3a1a68d22709efa5d7601a2246d8c880774e7e9e8412",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/brainstorming/scripts/server.cjs"
           }
         },
         "scripts/start-server.sh": {
           "sha256": "20b6f36cf7653e3824cf3d6f5fa0a347d2f07c9822e7e3d73e080565c9d02bf0",
           "upstream": {
             "status": "diverged",
-            "sha256": "a4e5ae84275bcaacd2f84345afeabe59cf7b00ba080e123da7cc1fb226f12847"
+            "sha256": "a4e5ae84275bcaacd2f84345afeabe59cf7b00ba080e123da7cc1fb226f12847",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/brainstorming/scripts/start-server.sh"
           }
         },
         "scripts/stop-server.sh": {
           "sha256": "0e8716b4c35d348b464b0b409d888531156f70465408e19021598fa0e839be43",
           "upstream": {
             "status": "diverged",
-            "sha256": "0b5ccbbd57f62d3ed88993f7940b5ee0e5c0fc9b21c550c623da4f6292e47daf"
+            "sha256": "0b5ccbbd57f62d3ed88993f7940b5ee0e5c0fc9b21c550c623da4f6292e47daf",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/brainstorming/scripts/stop-server.sh"
           }
         },
         "spec-document-reviewer-prompt.md": {
           "sha256": "320fae2b514a8c7a8b5077eab126d1a6289d30f373e9ce8fd8d25089b01454fe",
           "upstream": {
             "status": "diverged",
-            "sha256": "95a0a195de9d984be2fffa95bab16fc8c563bc296a9cfc5e9c29cb3ece0d7457"
+            "sha256": "95a0a195de9d984be2fffa95bab16fc8c563bc296a9cfc5e9c29cb3ece0d7457",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/brainstorming/spec-document-reviewer-prompt.md"
           }
         },
         "visual-companion.md": {
           "sha256": "9d393c3a7d0ff30f04557cdbf739117637be7542f44dadc4f67c4fc20469db4c",
           "upstream": {
             "status": "diverged",
-            "sha256": "77eb44a4ec3408bb3dafb872288ecd94beb8cf21da4f2bafa54fd08255d7808b"
+            "sha256": "77eb44a4ec3408bb3dafb872288ecd94beb8cf21da4f2bafa54fd08255d7808b",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/brainstorming/visual-companion.md"
           }
         }
       },
@@ -243,14 +251,16 @@
           "sha256": "ef9b201d183b42f161fca0422603119e10c8ce5c7dd6e53914908c3a9310c96c",
           "upstream": {
             "status": "diverged",
-            "sha256": "144d463d5aa69c897395191d3509aec72d2e0fda0f03c0fdb20d6ab73210bd18"
+            "sha256": "144d463d5aa69c897395191d3509aec72d2e0fda0f03c0fdb20d6ab73210bd18",
+            "snapshot": "vendor-snapshot/upstream/upstash/context7/a37d30cf14f69341e12c226fcc729c62b4f0a900/skills/context7-cli/references/docs.md"
           }
         },
         "references/setup.md": {
           "sha256": "79530eb571b56f9846fd714d3b5e2759f2102042e590347501e43bf22a56a6e0",
           "upstream": {
             "status": "diverged",
-            "sha256": "9dac029e280a6eeb67de528ddcd645983f98bb1fda1e08b5753490d03301d6bd"
+            "sha256": "9dac029e280a6eeb67de528ddcd645983f98bb1fda1e08b5753490d03301d6bd",
+            "snapshot": "vendor-snapshot/upstream/upstash/context7/a37d30cf14f69341e12c226fcc729c62b4f0a900/skills/context7-cli/references/setup.md"
           }
         },
         "references/skills.md": {
@@ -279,7 +289,8 @@
           "sha256": "76806091c7f923ba2596546b19cccd98a08e57a68745df77c3a7b998fe838e2b",
           "upstream": {
             "status": "diverged",
-            "sha256": "1968923066f3b707eb01d1992cdf4c42284c3855f70253b9cd5000ff45fca13c"
+            "sha256": "1968923066f3b707eb01d1992cdf4c42284c3855f70253b9cd5000ff45fca13c",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/dispatching-parallel-agents/SKILL.md"
           }
         }
       },
@@ -302,7 +313,8 @@
           "sha256": "e26bc62f4ce208faaac08cbdb305e94f335e9ee74e31e887a02b515f53229146",
           "upstream": {
             "status": "diverged",
-            "sha256": "c4c3d8b628c51114cd165fb8246fe02744cd8be180032328391252e653028d9b"
+            "sha256": "c4c3d8b628c51114cd165fb8246fe02744cd8be180032328391252e653028d9b",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/executing-plans/SKILL.md"
           }
         }
       },
@@ -325,7 +337,8 @@
           "sha256": "1e85f6f9686e145aca4a124e3b704b9bbea9aa87e08515c1e352eee70f6e6e7a",
           "upstream": {
             "status": "diverged",
-            "sha256": "c00eeea0e13e74fe4a9d84ba0a8542205a1b736d65f13134fe1a6647eb14976f"
+            "sha256": "c00eeea0e13e74fe4a9d84ba0a8542205a1b736d65f13134fe1a6647eb14976f",
+            "snapshot": "vendor-snapshot/upstream/vercel-labs/skills/435076e78988e1e6ec40d00b0b1d76bdbbc5419a/skills/find-skills/SKILL.md"
           }
         }
       },
@@ -348,7 +361,8 @@
           "sha256": "976c22f14c415dda4f932717e566e4eff49bc945e52e442f2bff9761f2ef70a5",
           "upstream": {
             "status": "diverged",
-            "sha256": "8db5a922b242dd4e1bf824cb91c13b3e8d8e8a86d6ceaf7f0774eb9cce909d65"
+            "sha256": "8db5a922b242dd4e1bf824cb91c13b3e8d8e8a86d6ceaf7f0774eb9cce909d65",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/finishing-a-development-branch/SKILL.md"
           }
         }
       },
@@ -405,7 +419,8 @@
           "sha256": "d215dd8f2a19bf85fdaf67a3cdb5077641f6b4108f229ba79579414793d7b0a3",
           "upstream": {
             "status": "diverged",
-            "sha256": "7c62de979fdc7ac32fb5ddb2146156c917f80ee070d30fadc9d40343c4b6ed25"
+            "sha256": "7c62de979fdc7ac32fb5ddb2146156c917f80ee070d30fadc9d40343c4b6ed25",
+            "snapshot": "vendor-snapshot/upstream/mattpocock/skills/3cca18b368ae95cdbdebbff572ccafa662551015/skills/productivity/handoff/SKILL.md"
           }
         }
       },
@@ -450,7 +465,8 @@
           "sha256": "5113ac082eb53120ad13817c820107dfd3489528717b21b9c701d35460362426",
           "upstream": {
             "status": "diverged",
-            "sha256": "ed2addbaba3b1bdf5013c6741640bd4e08c087e14026ed29bf16c427a39dd6ad"
+            "sha256": "ed2addbaba3b1bdf5013c6741640bd4e08c087e14026ed29bf16c427a39dd6ad",
+            "snapshot": "vendor-snapshot/upstream/audacioustux/agents/4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253/.agents/skills/mermaid-diagrams/SKILL.md"
           }
         },
         "references/diagram-type-table.md": {
@@ -479,7 +495,8 @@
           "sha256": "c9382e92b8f32363566068ecfed19d3b2651eaf40d3942b24840f839dedfc406",
           "upstream": {
             "status": "diverged",
-            "sha256": "091df1629510af1b92fc4abd6f96732ebedb4cb2c0f3457e8f2740b0504a2438"
+            "sha256": "091df1629510af1b92fc4abd6f96732ebedb4cb2c0f3457e8f2740b0504a2438",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/receiving-code-review/SKILL.md"
           }
         }
       },
@@ -524,14 +541,16 @@
           "sha256": "22592fe435364b0973ac5f2e71556f5d218d41a31b760446ef04f75c0e4f911c",
           "upstream": {
             "status": "diverged",
-            "sha256": "d71cc01ba56d2325cf8af5f7c11837819b63ecd57de0bfdb812f7f3ff7751df8"
+            "sha256": "d71cc01ba56d2325cf8af5f7c11837819b63ecd57de0bfdb812f7f3ff7751df8",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/requesting-code-review/SKILL.md"
           }
         },
         "code-reviewer.md": {
           "sha256": "595d91d05d5ecba530bd52e1e53c5173d820ab5d4bc223eb7820d69a9ab1c403",
           "upstream": {
             "status": "diverged",
-            "sha256": "5eca5fcfd48a50e0a526ce5ffd64bf625d6b81bb46d11795274dae451fe6ffd4"
+            "sha256": "5eca5fcfd48a50e0a526ce5ffd64bf625d6b81bb46d11795274dae451fe6ffd4",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/requesting-code-review/code-reviewer.md"
           }
         }
       },
@@ -554,7 +573,8 @@
           "sha256": "01372b7f3c6cc4cab74abd7a8d5ba1c051088daf80855f3fcaa3155dd0cd32d1",
           "upstream": {
             "status": "diverged",
-            "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
+            "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/subagent-driven-development/SKILL.md"
           }
         },
         "code-quality-reviewer-prompt.md": {
@@ -567,7 +587,8 @@
           "sha256": "a416193f881e5a712c988fffabfe1d5a97bffcd091eb95577c84fe2136588617",
           "upstream": {
             "status": "diverged",
-            "sha256": "81dd9d5a3fb0b09b96b5829f03b9796842f3199ef7591d1ba1c2db2a515f64d0"
+            "sha256": "81dd9d5a3fb0b09b96b5829f03b9796842f3199ef7591d1ba1c2db2a515f64d0",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/subagent-driven-development/implementer-prompt.md"
           }
         },
         "spec-reviewer-prompt.md": {
@@ -602,7 +623,8 @@
           "sha256": "68c3099bc0ac4820ed6ef536cb30bd43728e59c2213ba84125938d62a250db39",
           "upstream": {
             "status": "diverged",
-            "sha256": "808fc5717aa88ad65efff312b11c186294d3e6ee301afb584e2f86599b137787"
+            "sha256": "808fc5717aa88ad65efff312b11c186294d3e6ee301afb584e2f86599b137787",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/systematic-debugging/SKILL.md"
           }
         },
         "condition-based-waiting-example.ts": {
@@ -627,7 +649,8 @@
           "sha256": "6462747eae9b175ac145b78bcfaeab755654a75e32637f08eb633f065a9e1d7c",
           "upstream": {
             "status": "diverged",
-            "sha256": "dd7b8f13c4cc2a24b33ff87b18da9248f3e1c80a085c3316224f69ff0fa5c43c"
+            "sha256": "dd7b8f13c4cc2a24b33ff87b18da9248f3e1c80a085c3316224f69ff0fa5c43c",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/systematic-debugging/find-polluter.sh"
           }
         },
         "root-cause-tracing.md": {
@@ -680,7 +703,8 @@
           "sha256": "af059705061156fd4845ddbb736fe92b564118ac5f03551e09ef9e8f6d970638",
           "upstream": {
             "status": "diverged",
-            "sha256": "cb01f66bebfaa25fa1f88e6b7e769cd9fd9f35b1120b8563749820738814c927"
+            "sha256": "cb01f66bebfaa25fa1f88e6b7e769cd9fd9f35b1120b8563749820738814c927",
+            "snapshot": "vendor-snapshot/upstream/mattpocock/skills/3cca18b368ae95cdbdebbff572ccafa662551015/skills/engineering/tdd/SKILL.md"
           }
         },
         "deep-modules.md": {
@@ -711,7 +735,8 @@
           "sha256": "e12182f5c4c6a844b7c6ab4b8d2623b642aaaae5460fe58ed087efd4f3d5fb8a",
           "upstream": {
             "status": "diverged",
-            "sha256": "859f9e592c188fda4fc7277dd180e4ce9c7a2e13f6efe1f6f29eccc9d28c106a"
+            "sha256": "859f9e592c188fda4fc7277dd180e4ce9c7a2e13f6efe1f6f29eccc9d28c106a",
+            "snapshot": "vendor-snapshot/upstream/mattpocock/skills/3cca18b368ae95cdbdebbff572ccafa662551015/skills/engineering/tdd/tests.md"
           }
         }
       },
@@ -734,7 +759,8 @@
           "sha256": "7dee67b4af6bdccc7a914ca34533184d64592d0f5b23aeae631538168db14994",
           "upstream": {
             "status": "diverged",
-            "sha256": "bf1b8216e523851a411e91d429a7c1c2a173e79d88957bc78e348218d50edd54"
+            "sha256": "bf1b8216e523851a411e91d429a7c1c2a173e79d88957bc78e348218d50edd54",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/test-driven-development/SKILL.md"
           }
         },
         "testing-anti-patterns.md": {
@@ -793,7 +819,8 @@
           "sha256": "d99a7543b7a84a9f10b4344e5c5897ff41ae204a6aeb817f6a3421517f309619",
           "upstream": {
             "status": "diverged",
-            "sha256": "8cfb86f121269e8f7f12361e6795c4f6738828340e28964c9229d365666c9edd"
+            "sha256": "8cfb86f121269e8f7f12361e6795c4f6738828340e28964c9229d365666c9edd",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/using-git-worktrees/SKILL.md"
           }
         }
       },
@@ -816,14 +843,16 @@
           "sha256": "316e29381219adf0cac62190c67aeabf427d6e6e5f2735541d502b3d339be7aa",
           "upstream": {
             "status": "diverged",
-            "sha256": "30f2ab78e20ddc27ee7158ae8d4a2abe161c360981c7cc3548070913142d3dc3"
+            "sha256": "30f2ab78e20ddc27ee7158ae8d4a2abe161c360981c7cc3548070913142d3dc3",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/using-superpowers/SKILL.md"
           }
         },
         "references/codex-tools.md": {
           "sha256": "37e06103a352516dcec2eb326f990d50c6728b571135cc7b54cbbb8902c451e0",
           "upstream": {
             "status": "diverged",
-            "sha256": "1a38ad9b188c393052f58d95657a1c35ea6aafc8b5a27f198f3922912f70bbe7"
+            "sha256": "1a38ad9b188c393052f58d95657a1c35ea6aafc8b5a27f198f3922912f70bbe7",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/using-superpowers/references/codex-tools.md"
           }
         },
         "references/copilot-tools.md": {
@@ -836,7 +865,8 @@
           "sha256": "a66092fb2dd2c69b6b6d1098feaf456614521fd7b887cf7cb4160c8040ed1d62",
           "upstream": {
             "status": "diverged",
-            "sha256": "62b9157bcb0ee3c6784e3d0da0798ddfa5872f9e0c34bea48f3079dabea71965"
+            "sha256": "62b9157bcb0ee3c6784e3d0da0798ddfa5872f9e0c34bea48f3079dabea71965",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/using-superpowers/references/gemini-tools.md"
           }
         }
       },
@@ -859,7 +889,8 @@
           "sha256": "ea52d15aabaf72bc6b558efe2c126f161b53961090ddcd712000273bfe8c7b6c",
           "upstream": {
             "status": "diverged",
-            "sha256": "2befe7fc55bcadaa3d97dd9e8efeb633d2561c0ebe74c5a8b17c4d9e7e4520b3"
+            "sha256": "2befe7fc55bcadaa3d97dd9e8efeb633d2561c0ebe74c5a8b17c4d9e7e4520b3",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/verification-before-completion/SKILL.md"
           }
         }
       },
@@ -904,7 +935,8 @@
           "sha256": "8e652d2267c967700bf4ab4b416d0afc571ed05076082e1bc92b98b85ba7fcb4",
           "upstream": {
             "status": "diverged",
-            "sha256": "71b36b64b6ab05c3372dbbc8a7e42f11c099de6f381e9000cda95552f5232cbe"
+            "sha256": "71b36b64b6ab05c3372dbbc8a7e42f11c099de6f381e9000cda95552f5232cbe",
+            "snapshot": "vendor-snapshot/upstream/brave/brave-search-skills/62793e0c49ed2fc7c8f0c99a8ab8898abdf32a1d/skills/web-search/SKILL.md"
           }
         }
       },
@@ -927,14 +959,16 @@
           "sha256": "01aebfd01f9a218c9cb03697c1b92ae435de9891d531998f10f5cb5e7d9f5b5c",
           "upstream": {
             "status": "diverged",
-            "sha256": "48508f44bbfd7d24b029fbf3a314f3cd14c9615599059366e922f47b8dc08cf2"
+            "sha256": "48508f44bbfd7d24b029fbf3a314f3cd14c9615599059366e922f47b8dc08cf2",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/writing-plans/SKILL.md"
           }
         },
         "plan-document-reviewer-prompt.md": {
           "sha256": "6fce2aa83c63715697e9dd86050c820716100b91efbd9f12bab8477ecc060256",
           "upstream": {
             "status": "diverged",
-            "sha256": "aa728b96aad603c8be28875a4305637f6c984aa81ffcadcb13e743202fa2a0c7"
+            "sha256": "aa728b96aad603c8be28875a4305637f6c984aa81ffcadcb13e743202fa2a0c7",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/writing-plans/plan-document-reviewer-prompt.md"
           }
         }
       },
@@ -957,14 +991,16 @@
           "sha256": "de4dfbd45467f86d0fbf1723b2b65ba73ed71a2f7240d7646c8411f0c6db21b7",
           "upstream": {
             "status": "diverged",
-            "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"
+            "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/writing-skills/SKILL.md"
           }
         },
         "anthropic-best-practices.md": {
           "sha256": "20914c2fda31670c75fe91710e18a53d413ce0d00b5102acfa251d75c9226e3f",
           "upstream": {
             "status": "diverged",
-            "sha256": "217629b356c09c9bd11017c9788e8fc654ca1b32c92d4a51cd490e16dd65e59a"
+            "sha256": "217629b356c09c9bd11017c9788e8fc654ca1b32c92d4a51cd490e16dd65e59a",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/writing-skills/anthropic-best-practices.md"
           }
         },
         "examples/CLAUDE_MD_TESTING.md": {
@@ -983,20 +1019,24 @@
           "sha256": "c3c84f572a51dd8b6d4fc6e5cbdc2bc3b9e07ba381a45bdabfce7ad2894dd828",
           "upstream": {
             "status": "diverged",
-            "sha256": "a51bc9bf75189ea73a27b3fb504a2fdfdb966fb1f7f1cdf03203230a216ccc03"
+            "sha256": "a51bc9bf75189ea73a27b3fb504a2fdfdb966fb1f7f1cdf03203230a216ccc03",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/writing-skills/persuasion-principles.md"
           }
         },
         "render-graphs.js": {
           "sha256": "ccda971a87bb185f8febf81c56b556a20d026fa980c17b35fa3e8824fbb37852",
           "upstream": {
             "status": "diverged",
-            "sha256": "c7f412cc629461c4d10287e668731874c0497707023e3e3f74a5355eb2cee196"
+            "sha256": "c7f412cc629461c4d10287e668731874c0497707023e3e3f74a5355eb2cee196",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/writing-skills/render-graphs.js"
           }
         },
         "testing-skills-with-subagents.md": {
           "sha256": "0dba46de2d2640af8df1530692587a2b6896b249d74016ac9d8e06c74cd195c2",
           "upstream": {
-            "status": "identical"
+            "status": "diverged",
+            "sha256": "c711346852c911b24a84aa161e0cff06a4cd7f4e2fa9e9c0a266cead5afcbade",
+            "snapshot": "vendor-snapshot/upstream/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/writing-skills/testing-skills-with-subagents.md"
           }
         }
       },
@@ -1013,5 +1053,9 @@
     "retired": "find-skills (vercel registry surface, zero inbound refs) and using-superpowers (Skill-tool bootstrap; premise fails in an auto-injecting harness). tdd folded into test-driven-development, which keeps the name 7 cross-references point at.",
     "namespace": "superpowers:<name> prefixes stripped to bare names. A stale vendor prefix resolves to no skill silently."
   },
-  "consolidated": "2026-09-04"
+  "consolidated": "2026-09-04",
+  "vendorSnapshot": {
+    "local": "vendor-snapshot/local/ — the tree as it stood before consolidation",
+    "upstream": "vendor-snapshot/upstream/<repo>/<sha>/<path> — upstream bytes at each pinned SHA. Makes the fork base survive upstream deletion or force-push, and lets a drift job run with no network."
+  }
 }

@@ -52,7 +52,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "5c595f269b605d2a93043552b8c87ae24a39dee3d24afaef3c8cf99cd1ce41ea",
+          "sha256": "9f06205e5e5210a69227bf52fb0caef49105bc885155f66ea6e4f059cda64975",
           "upstream": {
             "status": "diverged",
             "sha256": "74edf03ea6d24ef53db48677b93558d14a979bdf052ca3f57ecdca0c66791608"
@@ -65,7 +65,7 @@
           }
         },
         "references/visual-companion.md": {
-          "sha256": "9d393c3a7d0ff30f04557cdbf739117637be7542f44dadc4f67c4fc20469db4c",
+          "sha256": "f151e1f4a0a51ba14a5a6fd67cb44902e84f727136297b5aaa199f78a1db3d11",
           "upstream": {
             "status": "diverged",
             "sha256": "77eb44a4ec3408bb3dafb872288ecd94beb8cf21da4f2bafa54fd08255d7808b",
@@ -124,7 +124,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "6b526f7552bfd3a596ccf246f68da3b2c389026b987c65e6dbea9f59e6b8077a",
+          "sha256": "29750948c73827a03f35ce79724fd6e7c883c539e12153b0ccf12e8ce6c24210",
           "upstream": {
             "status": "identical",
             "sha256": "6b526f7552bfd3a596ccf246f68da3b2c389026b987c65e6dbea9f59e6b8077a"
@@ -147,7 +147,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "51b8d0b6730e70aa973f8e49b4a1389c0f73542f60669fa6a2c4334af9a4c043",
+          "sha256": "61571bd1871bd51d5b2f0e09a2148451b0eb5fbb80bde342ae2501562c00caab",
           "upstream": {
             "status": "identical",
             "sha256": "51b8d0b6730e70aa973f8e49b4a1389c0f73542f60669fa6a2c4334af9a4c043"
@@ -166,9 +166,15 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "27d7e7d73f55ec533bf6e59c63a9abf3701dc058e3e3c10332a80bb240177e16",
+          "sha256": "128f1668808dc3922daee945184825d229f0dd948dd0934910ab51d927680de2",
           "upstream": {
             "status": "native"
+          }
+        },
+        "references/anti-patterns.md": {
+          "sha256": "c8a8c81ff85839da29e9806cd19b13786053d6a87b49a3b41010be84770ed8cb",
+          "upstream": {
+            "status": "added-locally"
           }
         }
       },
@@ -230,7 +236,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "b01dfb838a4f2e72c5287e6f56beb374fc65b61b422a230107964c2db28ee637",
+          "sha256": "28f870d31b28f1c250f45c67a60b8c83551b24fb36aac44ac532e3b4ab619ac2",
           "upstream": {
             "status": "identical",
             "sha256": "b01dfb838a4f2e72c5287e6f56beb374fc65b61b422a230107964c2db28ee637"
@@ -253,7 +259,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "5113ac082eb53120ad13817c820107dfd3489528717b21b9c701d35460362426",
+          "sha256": "8d45f4b0987b1269fa89912ddc568c8148501fca623f375b23deaa4123c416a6",
           "upstream": {
             "status": "diverged",
             "sha256": "ed2addbaba3b1bdf5013c6741640bd4e08c087e14026ed29bf16c427a39dd6ad"
@@ -264,6 +270,12 @@
           "upstream": {
             "status": "identical",
             "sha256": "bdf6a2a6a7b3eeac37c2b7672b6fbfe13b1e4e981674f4a7564d3e130f091476"
+          }
+        },
+        "references/pitfalls.md": {
+          "sha256": "04901aa70b2d06270fd13eb5e4648c1c337ae4a09fb79870a4a6f119e4b605fa",
+          "upstream": {
+            "status": "added-locally"
           }
         }
       },
@@ -352,10 +364,16 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "f74df940957fbe2d4bf1282d7b7619a5787f513e9ec56d23b2360f35c2065391",
+          "sha256": "72dd135d20e9963c53afcba96b908500d8d549f75722ccd6871ddb14ab50f9c1",
           "upstream": {
             "status": "diverged",
             "sha256": "8db5a922b242dd4e1bf824cb91c13b3e8d8e8a86d6ceaf7f0774eb9cce909d65"
+          }
+        },
+        "references/common-mistakes.md": {
+          "sha256": "7bc22a536f6b8f4764671cb95e03cd90f5dce3e8ce2582ee4914cfb561f53624",
+          "upstream": {
+            "status": "added-locally"
           }
         }
       },
@@ -409,7 +427,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "a750f8e941ba6184ab22ef84427f119e2d56b3a36b6896a472dfd66c5398e7d8",
+          "sha256": "895f122e0dbd6adad3b3f0302feb0ca3b521f9d2eaf43fe930312c5dc7ad9721",
           "upstream": {
             "status": "identical",
             "sha256": "a750f8e941ba6184ab22ef84427f119e2d56b3a36b6896a472dfd66c5398e7d8"
@@ -432,7 +450,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "0892a6598350729a546925134cce839b452309c94eddf001a3a6d970be630b80",
+          "sha256": "830f507ccba0a525c3c28c1263a26926c13e19a7ce2e44047062cd133c99c004",
           "upstream": {
             "status": "diverged",
             "sha256": "7c62de979fdc7ac32fb5ddb2146156c917f80ee070d30fadc9d40343c4b6ed25"
@@ -455,7 +473,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "a7b01ea320004238655aced38bb0a8501043cf33009496280160145402d8066e",
+          "sha256": "9cb64f503a125cee230ba5f79bb18667ff0a616b359ab82d4b503e7732f1e227",
           "upstream": {
             "status": "identical",
             "sha256": "a7b01ea320004238655aced38bb0a8501043cf33009496280160145402d8066e"
@@ -532,7 +550,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "67744dee8241e1a38a5750389726b7bee66c275508ed949154bb2989d82229ad",
+          "sha256": "3e8eea0857ef3f6361ba09a41c64816ee6cdcd7eb82f92aac81aa633dba97a4b",
           "upstream": {
             "status": "diverged",
             "sha256": "82e003d477c4cd3c1ee09963abc29db2fc31f68539c4e6c9b2bfafa43efd8a16"
@@ -562,7 +580,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "6726079ea77a416c18d1753d9bf0c54eea469f3854757a586af7e6df903f4931",
+          "sha256": "82e644dbffd9d4c19af27810c4152af3bf72709f50dcf8197704d091c28e4fdd",
           "upstream": {
             "status": "identical",
             "sha256": "6726079ea77a416c18d1753d9bf0c54eea469f3854757a586af7e6df903f4931"
@@ -585,10 +603,16 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "3b8f4b95a5c646390bc7ba005e7d49c5421e0427600bbd5ea78ed52c39b32b4b",
+          "sha256": "b22b7c84ff2acb169b4e45e942292cff9d4a3b7fdf973fb8aba5eb2afef3a937",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
+          }
+        },
+        "examples/full-workflow.md": {
+          "sha256": "fa46c633a2e7583a1d3433a5f8a51222037ed14e1c83a3a092968d5666493817",
+          "upstream": {
+            "status": "added-locally"
           }
         },
         "prompts/code-quality-reviewer.md": {
@@ -626,7 +650,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "ea61fd299b46dedaad6f1872b38718af8957d2ab409885c19420cbc73bf88a6d",
+          "sha256": "a9756573dab6524dddd8e40006b57d0c78d5e550490ec95e176bac0c2fa33300",
           "upstream": {
             "status": "diverged",
             "sha256": "808fc5717aa88ad65efff312b11c186294d3e6ee301afb584e2f86599b137787"
@@ -654,6 +678,12 @@
             "status": "identical",
             "sha256": "1e175fb86fc357e58c6aebf5441e481e1b7868b4380c0456b63a17eefbd18ba7",
             "upstreamPath": "defense-in-depth.md"
+          }
+        },
+        "references/four-phases.md": {
+          "sha256": "209d46bc15220906c3d57be0de7a6cb958ae54d98dbd13fc3cd159785d939bdb",
+          "upstream": {
+            "status": "added-locally"
           }
         },
         "references/root-cause-tracing.md": {
@@ -791,6 +821,60 @@
       "rationale": "absorbs tdd; most-referenced skill, keep the name",
       "owned": true
     },
+    "testing-skills": {
+      "owned": true,
+      "upstream": [
+        {
+          "repo": "obra/superpowers",
+          "sha": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+          "path": "skills/writing-skills"
+        }
+      ],
+      "files": {
+        "SKILL.md": {
+          "sha256": "1e59256a4b5baac9bc9c1a52e6fb0ce19025cd73493614de82e621d88a8c90ff",
+          "upstream": {
+            "status": "added-locally"
+          }
+        },
+        "examples/claude-md-test-campaign.md": {
+          "sha256": "968a5356e409370493f859cbb346d0f241eed60eb41e8842c6a5b5c7ab119066",
+          "upstream": {
+            "status": "added-locally"
+          }
+        },
+        "references/bulletproofing.md": {
+          "sha256": "629dbe3ff0e1720382308c7e1627269dfbdd3c960d1e64fe762d6a99cd4af176",
+          "upstream": {
+            "status": "diverged",
+            "sha256": "c711346852c911b24a84aa161e0cff06a4cd7f4e2fa9e9c0a266cead5afcbade",
+            "upstreamPath": "testing-skills-with-subagents.md"
+          }
+        },
+        "references/persuasion-principles.md": {
+          "sha256": "41a3fbc55b8bcf1bc24e0d2273407cb778affb0599c5b6d5744322d3f7bb4315",
+          "upstream": {
+            "status": "added-locally"
+          }
+        },
+        "references/testing-skill-types.md": {
+          "sha256": "6cdbd81ed662bd8ddb26d8dfa02af7bd54636192e77fd4525a1eaf9f498f8056",
+          "upstream": {
+            "status": "diverged",
+            "sha256": "c711346852c911b24a84aa161e0cff06a4cd7f4e2fa9e9c0a266cead5afcbade",
+            "upstreamPath": "testing-skills-with-subagents.md"
+          }
+        },
+        "references/testing-with-subagents.md": {
+          "sha256": "fad494044761fe490955f3ead5d67d343d98de03c5ac3f6d220f15d6e40427fc",
+          "upstream": {
+            "status": "diverged",
+            "sha256": "c711346852c911b24a84aa161e0cff06a4cd7f4e2fa9e9c0a266cead5afcbade",
+            "upstreamPath": "testing-skills-with-subagents.md"
+          }
+        }
+      }
+    },
     "using-git-worktrees": {
       "disposition": "merge",
       "upstream": [
@@ -803,10 +887,16 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "c54ff9a3e4f835bf222c21d97326122e1d8785e5b149394cdcaab3fd1993e1c6",
+          "sha256": "af4cc62f91ea2f58824e7bce6c427ea620b4feda01fa1a55a92351a6f47633fe",
           "upstream": {
             "status": "diverged",
             "sha256": "8cfb86f121269e8f7f12361e6795c4f6738828340e28964c9229d365666c9edd"
+          }
+        },
+        "references/common-mistakes.md": {
+          "sha256": "ef345b94a2c4cc0f664020686a1fc3fc1d9c97b4f6855d8ec90398b1295ecb65",
+          "upstream": {
+            "status": "added-locally"
           }
         }
       },
@@ -869,7 +959,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "bf725e4aa7c1132f202230379c86f04ea91299b9014b5fb2b82dbd6fb4d12bae",
+          "sha256": "6dd2bdc6b7808c770a5fdabd431a713a04c3ad836cd3454404ca2f47c7bcbfda",
           "upstream": {
             "status": "diverged",
             "sha256": "2befe7fc55bcadaa3d97dd9e8efeb633d2561c0ebe74c5a8b17c4d9e7e4520b3"
@@ -944,17 +1034,10 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "a6816ec5cd46686f3f64c6573f4c80831874f36dfd80309f8bda383d56997706",
+          "sha256": "247d852b0bf9ffa19ac13decd8acf964c6eda41ca27a33201059629f21d6f0ed",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"
-          }
-        },
-        "examples/CLAUDE_MD_TESTING.md": {
-          "sha256": "0b379a3415e185d3c434b3ad283d8aa132f3022c2a4f210f168865b5986bcef0",
-          "upstream": {
-            "status": "identical",
-            "sha256": "0b379a3415e185d3c434b3ad283d8aa132f3022c2a4f210f168865b5986bcef0"
           }
         },
         "references/anthropic-best-practices.md": {
@@ -965,28 +1048,18 @@
             "upstreamPath": "anthropic-best-practices.md"
           }
         },
+        "references/discovery-and-triggers.md": {
+          "sha256": "1a6ba729ab18a6d84ab7c8011b916323229567792b97344ffa71c5255b686478",
+          "upstream": {
+            "status": "added-locally"
+          }
+        },
         "references/graphviz-conventions.dot": {
           "sha256": "e2890a593c91370e384b42f2f67b1a6232c9e69dddea7891a0c1c46d7b20b694",
           "upstream": {
             "status": "identical",
             "sha256": "e2890a593c91370e384b42f2f67b1a6232c9e69dddea7891a0c1c46d7b20b694",
             "upstreamPath": "graphviz-conventions.dot"
-          }
-        },
-        "references/persuasion-principles.md": {
-          "sha256": "c3c84f572a51dd8b6d4fc6e5cbdc2bc3b9e07ba381a45bdabfce7ad2894dd828",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "a51bc9bf75189ea73a27b3fb504a2fdfdb966fb1f7f1cdf03203230a216ccc03",
-            "upstreamPath": "persuasion-principles.md"
-          }
-        },
-        "references/testing-skills-with-subagents.md": {
-          "sha256": "d6541de3304480525357660baeed7ba9fa112a302fb24e14839d78840bb407a9",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "c711346852c911b24a84aa161e0cff06a4cd7f4e2fa9e9c0a266cead5afcbade",
-            "upstreamPath": "testing-skills-with-subagents.md"
           }
         },
         "scripts/render-graphs.js": {
@@ -1013,7 +1086,8 @@
     "structure": "Companion files grouped by role: references/ (docs an agent reads), prompts/ (subagent templates), scripts/ (executables), examples/. Previously four skills held 3-6 files flat in the skill root.",
     "cross-skill": "Skills never assume another skill is installed. Frontmatter `uses:` declares name + source (github repo) so a harness can resolve or fetch; body text degrades to a manual fallback when the skill is absent.",
     "provenance-paths": "Local companion regrouping (references/, prompts/, scripts/) changed paths that upstream still holds flat. Each file records upstreamPath when the local path differs, so status is recomputed against snapshot bytes rather than assumed from the local name.",
-    "naming": "Skill names use gerund/verb-first form per writing-skills:217 and Anthropic's authoring guide ('we recommend gerund form'). Exceptions kept verbatim: test-driven-development and subagent-driven-development name established methodologies an agent searches by name; systematic-debugging already reads verb-first."
+    "naming": "Skill names use gerund/verb-first form per writing-skills:217 and Anthropic's authoring guide ('we recommend gerund form'). Exceptions kept verbatim: test-driven-development and subagent-driven-development name established methodologies an agent searches by name; systematic-debugging already reads verb-first.",
+    "skill-split": "writing-skills covered authoring AND adversarial testing in 1873w. Split: writing-skills keeps structure/naming/layout, testing-skills owns baseline runs, pressure scenarios, and loophole closing. They reference each other via uses:."
   },
   "consolidated": "2026-09-04",
   "vendorSnapshot": {

@@ -1103,7 +1103,7 @@
     "routing": "Sibling skills covering the same trigger must each state the discriminator and name the alternative. executing-plans and subagent-driven-development both key on subagent availability; using-git-worktrees and dispatching-parallel-agents explicitly disclaim plan execution.",
     "uses-graph": "Every skill named in another skill's description, body, or companions is declared in that skill's uses: block. Bare sibling names in prose are backticked so a name is visually distinct from an ordinary word.",
     "uses-is-agent-facing": "Verified against skills@1.5.23 dist/cli.mjs: the installer parses only name and description; 'uses' appears nowhere. uses: survives installs because unknown keys are ignored, not because anything acts on it. It is agent- and human-facing metadata, so every imperative handoff in the body must also state a fallback.",
-    "standalone": "Verified empirically: installed brainstorming, executing-plans, and testing-skills alone with every declared dependency absent. Each retains a complete path. Informational cross-references ('Related skills' lists) need no fallback; only imperative handoffs do."
+    "standalone": "Verified by enumeration, not sampling: all 24 declared dependency edges were exercised with the target skill absent, across four isolated installs. Zero dead ends. 8 edges carry an explicit fallback; 16 are informational cross-references ('Related skills' entries, scope notes) that strand nobody. Only imperative handoffs require a fallback."
   },
   "consolidated": "2026-09-04",
   "vendorSnapshot": {

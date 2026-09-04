@@ -20,22 +20,14 @@ When you have multiple unrelated failures (different test files, different subsy
 
 ## When to Use
 
-```dot
-digraph when_to_use {
-    "Multiple failures?" [shape=diamond];
-    "Are they independent?" [shape=diamond];
-    "Single agent investigates all" [shape=box];
-    "One agent per problem domain" [shape=box];
-    "Can they work in parallel?" [shape=diamond];
-    "Sequential agents" [shape=box];
-    "Parallel dispatch" [shape=box];
-
-    "Multiple failures?" -> "Are they independent?" [label="yes"];
-    "Are they independent?" -> "Single agent investigates all" [label="no - related"];
-    "Are they independent?" -> "Can they work in parallel?" [label="yes"];
-    "Can they work in parallel?" -> "Parallel dispatch" [label="yes"];
-    "Can they work in parallel?" -> "Sequential agents" [label="no - shared state"];
-}
+```mermaid
+flowchart TD
+    N1{"Multiple failures?"} -->|"yes"| N2{"Are they independent?"}
+    N2 -->|"no - related"| N3["Single agent investigates all"]
+    N2 -->|"yes"| N4{"Can they work in parallel?"}
+    N4 -->|"yes"| N5["Parallel dispatch"]
+    N4 -->|"no - shared state"| N6["Sequential agents"]
+    N7["One agent per problem domain"]
 ```
 
 **Use when:**

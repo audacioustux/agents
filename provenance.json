@@ -52,7 +52,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "eb48ac8d63f46081ec234f56ffd59d489e53ad923f7ee508cffe2a601040edfa",
+          "sha256": "53b59817f70111d277e79871dd625a8c96d5f02041bc360b312243e453d6c63d",
           "upstream": {
             "status": "diverged",
             "sha256": "74edf03ea6d24ef53db48677b93558d14a979bdf052ca3f57ecdca0c66791608"
@@ -295,7 +295,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "0a4be0d49a82ee6e4a76afcbc0f404c28c8ad64366f3cd835ba414f6fdea1610",
+          "sha256": "becad13a757d3a5f0386e07214aa93019585900901adbf9f3ffa91b22097aa0b",
           "upstream": {
             "status": "diverged",
             "sha256": "1968923066f3b707eb01d1992cdf4c42284c3855f70253b9cd5000ff45fca13c"
@@ -603,7 +603,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "1179df1f9262a51e09acf8b4e0d4ffeb999cd7bf42481b3308c2d3ca4cbc637c",
+          "sha256": "4709ceff04252d672ce49e66d728c86a98a22441d86e41f576f2e63a2780caa1",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
@@ -671,7 +671,7 @@
           }
         },
         "references/condition-based-waiting.md": {
-          "sha256": "3abc682f49083d0fa26a977f6249c8fdb11967c5e87842ad9256d3f72ceb36c6",
+          "sha256": "75e5894e1f83d181903a9775de6eb48d1c5444b1b24d8d3055c9565b7c3707a1",
           "upstream": {
             "status": "diverged",
             "sha256": "e89fec8400d6cd50f43407cec9fab50976ba4d55d0ec2eb51c0bd68036b54c26",
@@ -693,7 +693,7 @@
           }
         },
         "references/root-cause-tracing.md": {
-          "sha256": "31bc8cc0d163cb260d93bff4a11061ef69371deb147fd51fd50cd45eedb37fc7",
+          "sha256": "bb7966fa38638c6a0d9ba6dc69be6fd5386141b6ca35bcbf449575a84d71f198",
           "upstream": {
             "status": "diverged",
             "sha256": "6b0622269e098ca1399e123e553fd385f0b6412d88ef0e9c4f5a8ea9cf1cec7b",
@@ -780,7 +780,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "5d95e3a7f0ff59c3a790adc22a7ff7f67e471b448f5a00a047f90c74cb49cb8d",
+          "sha256": "7ff612c653c6586421e2453cffb08350ebb90e859efe33fb8e3b354c0d321934",
           "upstream": {
             "status": "diverged",
             "sha256": "bf1b8216e523851a411e91d429a7c1c2a173e79d88957bc78e348218d50edd54"
@@ -1046,7 +1046,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "0e20a82759ad37110d6030ca463a4aadc4b395334205d7280363ce7669f212df",
+          "sha256": "8e08bc56e356cd0a230891446968b963c6559bada64c5b5b94ef06b3317e8c8c",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"
@@ -1064,22 +1064,6 @@
           "sha256": "c7a70d4e382c67abde95ab764d7bfad7c60ed8fa3b53df7322a2ae6424b48734",
           "upstream": {
             "status": "added-locally"
-          }
-        },
-        "references/graphviz-conventions.dot": {
-          "sha256": "e2890a593c91370e384b42f2f67b1a6232c9e69dddea7891a0c1c46d7b20b694",
-          "upstream": {
-            "status": "identical",
-            "sha256": "e2890a593c91370e384b42f2f67b1a6232c9e69dddea7891a0c1c46d7b20b694",
-            "upstreamPath": "graphviz-conventions.dot"
-          }
-        },
-        "scripts/render-graphs.js": {
-          "sha256": "645c3ac312ec453d95174d473105be60ba4b8873117b375faf3c3b2f932beb79",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "c7f412cc629461c4d10287e668731874c0497707023e3e3f74a5355eb2cee196",
-            "upstreamPath": "render-graphs.js"
           }
         }
       },
@@ -1104,7 +1088,8 @@
     "uses-graph": "Every skill named in another skill's description, body, or companions is declared in that skill's uses: block. Bare sibling names in prose are backticked so a name is visually distinct from an ordinary word.",
     "uses-is-agent-facing": "Verified against skills@1.5.23 dist/cli.mjs: the installer parses only name and description; 'uses' appears nowhere. uses: survives installs because unknown keys are ignored, not because anything acts on it. It is agent- and human-facing metadata, so every imperative handoff in the body must also state a fallback.",
     "standalone": "Verified by enumeration, not sampling: all 24 declared dependency edges were exercised with the target skill absent, across four isolated installs. Zero dead ends. 8 edges carry an explicit fallback; 16 are informational cross-references ('Related skills' entries, scope notes) that strand nobody. Only imperative handoffs require a fallback.",
-    "metrics": "Corpus at 8ff325d: 24 skills, 42 companions, mean 817w, max 1562w (writing-skills), 6 skills over 1000w. Earlier summaries reported mean 809w / max 1422w - those were measured before the 'Declaring cross-skill dependencies' section was added in the same commit (eda7812), so they understated writing-skills by 140w."
+    "metrics": "Corpus at 8ff325d: 24 skills, 42 companions, mean 817w, max 1562w (writing-skills), 6 skills over 1000w. Earlier summaries reported mean 809w / max 1422w - those were measured before the 'Declaring cross-skill dependencies' section was added in the same commit (eda7812), so they understated writing-skills by 140w.",
+    "diagrams": "Diagrams are mermaid fences, not graphviz. graphviz needs a `dot` binary that is not installed here, so the 11 dot fences were unrendered source text; mermaid renders natively in GitHub, VS Code, and agent UIs. TheGrid's docs/conventions/diagramming.md already mandates mermaid, and diagramming-with-mermaid explicitly defers format choice to the consuming repo. 9 fences converted and validated with mermaid.parse; one deliberately-bad example left as dot; graphviz-conventions.dot and render-graphs.js deleted as dead."
   },
   "consolidated": "2026-09-04",
   "vendorSnapshot": {

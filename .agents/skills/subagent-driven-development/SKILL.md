@@ -28,22 +28,14 @@ Execute plan by dispatching fresh subagent per task, with two-stage review after
 
 ## When to Use
 
-```dot
-digraph when_to_use {
-    "Have implementation plan?" [shape=diamond];
-    "Tasks mostly independent?" [shape=diamond];
-    "Stay in this session?" [shape=diamond];
-    "subagent-driven-development" [shape=box];
-    "`executing-plans`" [shape=box];
-    "Manual execution or brainstorm first" [shape=box];
-
-    "Have implementation plan?" -> "Tasks mostly independent?" [label="yes"];
-    "Have implementation plan?" -> "Manual execution or brainstorm first" [label="no"];
-    "Tasks mostly independent?" -> "Stay in this session?" [label="yes"];
-    "Tasks mostly independent?" -> "Manual execution or brainstorm first" [label="no - tightly coupled"];
-    "Stay in this session?" -> "subagent-driven-development" [label="yes"];
-    "Stay in this session?" -> "`executing-plans`" [label="no - parallel session"];
-}
+```mermaid
+flowchart TD
+    N1{"Have implementation plan?"} -->|"yes"| N2{"Tasks mostly independent?"}
+    N1 -->|"no"| N3["Manual execution or brainstorm first"]
+    N2 -->|"yes"| N4{"Stay in this session?"}
+    N2 -->|"no - tightly coupled"| N3
+    N4 -->|"yes"| N5["subagent-driven-development"]
+    N4 -->|"no - parallel session"| N6["`executing-plans`"]
 ```
 
 **vs. Executing Plans (parallel session):**
@@ -54,49 +46,44 @@ digraph when_to_use {
 
 ## The Process
 
-```dot
-digraph process {
-    rankdir=TB;
-
-    subgraph cluster_per_task {
-        label="Per Task";
-        "Dispatch implementer subagent (./prompts/implementer.md)" [shape=box];
-        "Implementer subagent asks questions?" [shape=diamond];
-        "Answer questions, provide context" [shape=box];
-        "Implementer subagent implements, tests, commits, self-reviews" [shape=box];
-        "Dispatch spec reviewer subagent (./prompts/spec-reviewer.md)" [shape=box];
-        "Spec reviewer subagent confirms code matches spec?" [shape=diamond];
-        "Implementer subagent fixes spec gaps" [shape=box];
-        "Dispatch code quality reviewer subagent (./prompts/code-quality-reviewer.md)" [shape=box];
-        "Code quality reviewer subagent approves?" [shape=diamond];
-        "Implementer subagent fixes quality issues" [shape=box];
-        "Mark task complete in TodoWrite" [shape=box];
-    }
-
-    "Read plan, extract all tasks with full text, note context, create TodoWrite" [shape=box];
-    "More tasks remain?" [shape=diamond];
-    "Dispatch final code reviewer subagent for entire implementation" [shape=box];
-    "Use `finishing-a-development-branch`" [shape=box style=filled fillcolor=lightgreen];
-
-    "Read plan, extract all tasks with full text, note context, create TodoWrite" -> "Dispatch implementer subagent (./prompts/implementer.md)";
-    "Dispatch implementer subagent (./prompts/implementer.md)" -> "Implementer subagent asks questions?";
-    "Implementer subagent asks questions?" -> "Answer questions, provide context" [label="yes"];
-    "Answer questions, provide context" -> "Dispatch implementer subagent (./prompts/implementer.md)";
-    "Implementer subagent asks questions?" -> "Implementer subagent implements, tests, commits, self-reviews" [label="no"];
-    "Implementer subagent implements, tests, commits, self-reviews" -> "Dispatch spec reviewer subagent (./prompts/spec-reviewer.md)";
-    "Dispatch spec reviewer subagent (./prompts/spec-reviewer.md)" -> "Spec reviewer subagent confirms code matches spec?";
-    "Spec reviewer subagent confirms code matches spec?" -> "Implementer subagent fixes spec gaps" [label="no"];
-    "Implementer subagent fixes spec gaps" -> "Dispatch spec reviewer subagent (./prompts/spec-reviewer.md)" [label="re-review"];
-    "Spec reviewer subagent confirms code matches spec?" -> "Dispatch code quality reviewer subagent (./prompts/code-quality-reviewer.md)" [label="yes"];
-    "Dispatch code quality reviewer subagent (./prompts/code-quality-reviewer.md)" -> "Code quality reviewer subagent approves?";
-    "Code quality reviewer subagent approves?" -> "Implementer subagent fixes quality issues" [label="no"];
-    "Implementer subagent fixes quality issues" -> "Dispatch code quality reviewer subagent (./prompts/code-quality-reviewer.md)" [label="re-review"];
-    "Code quality reviewer subagent approves?" -> "Mark task complete in TodoWrite" [label="yes"];
-    "Mark task complete in TodoWrite" -> "More tasks remain?";
-    "More tasks remain?" -> "Dispatch implementer subagent (./prompts/implementer.md)" [label="yes"];
-    "More tasks remain?" -> "Dispatch final code reviewer subagent for entire implementation" [label="no"];
-    "Dispatch final code reviewer subagent for entire implementation" -> "Use `finishing-a-development-branch`";
-}
+```mermaid
+flowchart TD
+    subgraph per_task["Per Task"]
+        N1["Dispatch implementer subagent (./prompts/implementer.md)"]
+        N2{"Implementer subagent asks questions?"}
+        N3["Answer questions, provide context"]
+        N4["Implementer subagent implements, tests, commits, self-reviews"]
+        N5["Dispatch spec reviewer subagent (./prompts/spec-reviewer.md)"]
+        N6{"Spec reviewer subagent confirms code matches spec?"}
+        N7["Implementer subagent fixes spec gaps"]
+        N8["Dispatch code quality reviewer subagent (./prompts/code-quality-reviewer.md)"]
+        N9{"Code quality reviewer subagent approves?"}
+        N10["Implementer subagent fixes quality issues"]
+        N11["Mark task complete in TodoWrite"]
+        N12["Read plan, extract all tasks with full text, note context, create TodoWrite"]
+        N13{"More tasks remain?"}
+        N14["Dispatch final code reviewer subagent for entire implementation"]
+        N15["Use `finishing-a-development-branch`"]
+    end
+    N12 --> N1
+    N1 --> N2
+    N2 -->|"yes"| N3
+    N3 --> N1
+    N2 -->|"no"| N4
+    N4 --> N5
+    N5 --> N6
+    N6 -->|"no"| N7
+    N7 -->|"re-review"| N5
+    N6 -->|"yes"| N8
+    N8 --> N9
+    N9 -->|"no"| N10
+    N10 -->|"re-review"| N8
+    N9 -->|"yes"| N11
+    N11 --> N13
+    N13 -->|"yes"| N1
+    N13 -->|"no"| N14
+    N14 --> N15
+    style N15 fill:#d4edda
 ```
 
 ## Model Selection

@@ -2,6 +2,8 @@
 name: writing-skills
 description: Use when creating new skills, editing existing skills, or verifying skills work before deployment
 uses:
+  - name: diagramming-with-mermaid
+    source: audacioustux/agents
   - name: testing-skills
     source: audacioustux/agents
   - name: test-driven-development
@@ -150,17 +152,11 @@ How to make a skill findable: naming, description keywords, and trigger phrasing
 
 ## Flowchart Usage
 
-```dot
-digraph when_flowchart {
-    "Need to show information?" [shape=diamond];
-    "Decision where I might go wrong?" [shape=diamond];
-    "Use markdown" [shape=box];
-    "Small inline flowchart" [shape=box];
-
-    "Need to show information?" -> "Decision where I might go wrong?" [label="yes"];
-    "Decision where I might go wrong?" -> "Small inline flowchart" [label="yes"];
-    "Decision where I might go wrong?" -> "Use markdown" [label="no"];
-}
+```mermaid
+flowchart TD
+    N1{"Need to show information?"} -->|"yes"| N2{"Decision where I might go wrong?"}
+    N2 -->|"yes"| N3["Small inline flowchart"]
+    N2 -->|"no"| N4["Use markdown"]
 ```
 
 **Use flowcharts ONLY for:**
@@ -174,13 +170,13 @@ digraph when_flowchart {
 - Linear instructions → Numbered lists
 - Labels without semantic meaning (step1, helper2)
 
-See `references/graphviz-conventions.dot` for graphviz style rules.
+Diagrams are `mermaid` fences. They render natively in GitHub, VS Code, and most agent
+UIs, so a reader sees the diagram rather than its source and no toolchain is required.
+Keep the fence in the document it explains.
 
-**Visualizing for your human partner:** Use `scripts/render-graphs.js` in this directory to render a skill's flowcharts to SVG:
-```bash
-./scripts/render-graphs.js ../some-skill           # Each diagram separately
-./scripts/render-graphs.js ../some-skill --combine # All diagrams in one SVG
-```
+For choosing a diagram type and avoiding parse pitfalls, use the `diagramming-with-mermaid`
+skill if installed; otherwise `flowchart TD` with `{"..."}` for decisions and `["..."]`
+for steps covers everything a skill needs.
 
 ## Code Examples
 

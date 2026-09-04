@@ -46,26 +46,20 @@ Implement fresh from tests. Period.
 
 ## Red-Green-Refactor
 
-```dot
-digraph tdd_cycle {
-    rankdir=LR;
-    red [label="RED\nWrite failing test", shape=box, style=filled, fillcolor="#ffcccc"];
-    verify_red [label="Verify fails\ncorrectly", shape=diamond];
-    green [label="GREEN\nMinimal code", shape=box, style=filled, fillcolor="#ccffcc"];
-    verify_green [label="Verify passes\nAll green", shape=diamond];
-    refactor [label="REFACTOR\nClean up", shape=box, style=filled, fillcolor="#ccccff"];
-    next [label="Next", shape=ellipse];
-
-    red -> verify_red;
-    verify_red -> green [label="yes"];
-    verify_red -> red [label="wrong\nfailure"];
-    green -> verify_green;
-    verify_green -> refactor [label="yes"];
-    verify_green -> green [label="no"];
-    refactor -> verify_green [label="stay\ngreen"];
-    verify_green -> next;
-    next -> red;
-}
+```mermaid
+flowchart LR
+    N1["RED<br/>Write failing test"] --> N2{"Verify fails<br/>correctly"}
+    N2 -->|"yes"| N3["GREEN<br/>Minimal code"]
+    N2 -->|"wrong<br/>failure"| N1
+    N3 --> N4{"Verify passes<br/>All green"}
+    N4 -->|"yes"| N5["REFACTOR<br/>Clean up"]
+    N4 -->|"no"| N3
+    N5 -->|"stay<br/>green"| N4
+    N4 --> N6(("Next"))
+    N6 --> N1
+    style N1 fill:#ffcccc
+    style N3 fill:#ccffcc
+    style N5 fill:#ccccff
 ```
 
 ### RED - Write Failing Test

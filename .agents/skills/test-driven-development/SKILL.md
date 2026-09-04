@@ -203,6 +203,18 @@ Next failing test for next feature.
 | **Clear** | Name describes behavior | `test('test1')` |
 | **Shows intent** | Demonstrates desired API | Obscures what code should do |
 
+### Deeper references
+
+The loop above is the law; these cover the judgement it does not encode.
+
+| Read | When |
+|------|------|
+| `references/tests.md` | Choosing what a test should assert, and where it belongs |
+| `references/interface-design.md` | The code under test is awkward to call — usually a design signal, not a testing one |
+| `references/deep-modules.md` | Deciding what belongs behind an interface before you commit tests to its shape |
+| `references/mocking.md` | Reaching for a mock; read before, not after |
+| `references/refactoring.md` | The REFACTOR step, once green |
+
 ## Why Order Matters
 
 **"I'll write tests after to verify it works"**
@@ -356,7 +368,7 @@ Never fix bugs without a test.
 
 ## Testing Anti-Patterns
 
-When adding mocks or test utilities, read @testing-anti-patterns.md to avoid common pitfalls:
+When adding mocks or test utilities, read `references/testing-anti-patterns.md` to avoid common pitfalls:
 - Testing mock behavior instead of real behavior
 - Adding test-only methods to production classes
 - Mocking without understanding dependencies

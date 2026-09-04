@@ -1,6 +1,6 @@
 ---
 name: anti-bloat-review
-description: Use when reviewing or changing code, configuration, schemas, tests, infrastructure, migrations, or generated changes that show duplication, patchwork, convention drift, unclear ownership, hidden coupling, or complexity growing faster than capability.
+description: Use when reviewing code, configuration, schemas, tests, infrastructure, migrations, or generated changes for duplication, patchwork, convention drift, unclear ownership, hidden coupling, or complexity growing faster than capability.
 ---
 
 # Anti-Bloat Review

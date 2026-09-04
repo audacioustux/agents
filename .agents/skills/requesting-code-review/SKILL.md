@@ -1,6 +1,6 @@
 ---
 name: requesting-code-review
-description: Use when completing tasks, implementing major features, or before merging to verify work meets requirements
+description: Use when a task or feature is complete and before merging — dispatches a code-reviewer subagent with purpose-built context, rather than reviewing the work yourself.
 ---
 
 # Requesting Code Review
@@ -31,7 +31,7 @@ HEAD_SHA=$(git rev-parse HEAD)
 
 **2. Dispatch code reviewer subagent:**
 
-Use Task tool with `general-purpose` type, fill template at `code-reviewer.md`
+Use Task tool with `general-purpose` type, fill template at `prompts/code-reviewer.md`
 
 **Placeholders:**
 - `{DESCRIPTION}` - Brief summary of what you built

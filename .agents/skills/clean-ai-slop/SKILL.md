@@ -1,6 +1,9 @@
 ---
 name: clean-ai-slop
 description: Corrective cleanup of AI-generated code — removes LLM-specific patterns while preserving behavior. Use when the user says "deslop", "slop", "clean AI code", "remove AI patterns", or when you spot LLM-generated code smells after a generation session. For review that produces findings rather than fixes, use anti-bloat-review.
+uses:
+  - name: anti-bloat-review
+    source: audacioustux/agents
 ---
 
 # AI Slop Cleaner

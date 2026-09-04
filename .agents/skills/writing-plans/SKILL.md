@@ -1,6 +1,15 @@
 ---
 name: writing-plans
 description: Use when you have a spec or requirements for a multi-step task, before touching code
+uses:
+  - name: brainstorming
+    source: audacioustux/agents
+  - name: subagent-driven-development
+    source: audacioustux/agents
+  - name: executing-plans
+    source: audacioustux/agents
+  - name: using-git-worktrees
+    source: audacioustux/agents
 ---
 
 # Writing Plans
@@ -15,7 +24,9 @@ Assume they are a skilled developer, but know almost nothing about our toolset o
 
 **Context:** If working in an isolated worktree, it should have been created via the `using-git-worktrees` skill at execution time.
 
-**Save plans to:** `docs/plans/YYYY-MM-DD-<feature-name>.md`
+**Save plans to:** `docs/plans/YYYY-MM-DD-<feature-name>.md` — unless the repo's AGENTS.md or the user declares a different location, which wins.
+
+Before handing the plan off, optionally dispatch a reviewer subagent with `./prompts/plan-document-reviewer.md` to check it for gaps.
 - (User preferences for plan location override this default)
 
 ## Scope Check
@@ -49,7 +60,7 @@ This structure informs the task decomposition. Each task should produce self-con
 ```markdown
 # [Feature Name] Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** implement this plan task-by-task — with the `subagent-driven-development` skill if available, else `executing-plans`, else in order by hand. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** [One sentence describing what this builds]
 
@@ -144,9 +155,9 @@ After saving the plan, offer execution choice:
 **Which approach?"**
 
 **If Subagent-Driven chosen:**
-- **REQUIRED SUB-SKILL:** Use subagent-driven-development
+- **Hand off to:** the `subagent-driven-development` skill if available; otherwise execute the tasks in order yourself, one test cycle each.
 - Fresh subagent per task + two-stage review
 
 **If Inline Execution chosen:**
-- **REQUIRED SUB-SKILL:** Use executing-plans
+- **Hand off to:** the `executing-plans` skill if available; otherwise work the checklist top to bottom in this session.
 - Batch execution with checkpoints for review

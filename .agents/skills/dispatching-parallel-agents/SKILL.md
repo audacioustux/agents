@@ -1,6 +1,9 @@
 ---
 name: dispatching-parallel-agents
-description: Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies
+description: Use when facing 2+ independent problems — unrelated test failures, separate broken subsystems, parallel investigations — that can be worked concurrently. Not for executing an implementation plan; use subagent-driven-development for that.
+uses:
+  - name: subagent-driven-development
+    source: audacioustux/agents
 ---
 
 # Dispatching Parallel Agents

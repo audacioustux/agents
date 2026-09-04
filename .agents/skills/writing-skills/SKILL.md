@@ -1,6 +1,13 @@
 ---
 name: writing-skills
 description: Use when creating new skills, editing existing skills, or verifying skills work before deployment
+uses:
+  - name: test-driven-development
+    source: audacioustux/agents
+  - name: systematic-debugging
+    source: audacioustux/agents
+  - name: verification-before-completion
+    source: audacioustux/agents
 ---
 
 # Writing Skills
@@ -15,9 +22,9 @@ You write test cases (pressure scenarios with subagents), watch them fail (basel
 
 **Core principle:** If you didn't watch an agent fail without the skill, you don't know if the skill teaches the right thing.
 
-**REQUIRED BACKGROUND:** You MUST understand test-driven-development before using this skill. That skill defines the fundamental RED-GREEN-REFACTOR cycle. This skill adapts TDD to documentation.
+**Assumed background:** the `test-driven-development` skill, if installed. That skill defines the fundamental RED-GREEN-REFACTOR cycle. This skill adapts TDD to documentation.
 
-**Official guidance:** For Anthropic's official skill authoring best practices, see anthropic-best-practices.md. This document provides additional patterns and guidelines that complement the TDD-focused approach in this skill.
+**Official guidance:** For Anthropic's official skill authoring best practices, see references/anthropic-best-practices.md. This document provides additional patterns and guidelines that complement the TDD-focused approach in this skill.
 
 ## What is a Skill?
 
@@ -313,12 +320,12 @@ digraph when_flowchart {
 - Linear instructions → Numbered lists
 - Labels without semantic meaning (step1, helper2)
 
-See @graphviz-conventions.dot for graphviz style rules.
+See `references/graphviz-conventions.dot` for graphviz style rules.
 
-**Visualizing for your human partner:** Use `render-graphs.js` in this directory to render a skill's flowcharts to SVG:
+**Visualizing for your human partner:** Use `scripts/render-graphs.js` in this directory to render a skill's flowcharts to SVG:
 ```bash
-./render-graphs.js ../some-skill           # Each diagram separately
-./render-graphs.js ../some-skill --combine # All diagrams in one SVG
+./scripts/render-graphs.js ../some-skill           # Each diagram separately
+./scripts/render-graphs.js ../some-skill --combine # All diagrams in one SVG
 ```
 
 ## Code Examples
@@ -390,7 +397,7 @@ Edit skill without testing? Same violation.
 - Don't "adapt" while running tests
 - Delete means delete
 
-**REQUIRED BACKGROUND:** The test-driven-development skill explains why this matters. Same principles apply to documentation.
+**Background:** the `test-driven-development` skill explains why this matters, if installed. Same principles apply to documentation.
 
 ## Testing All Skill Types
 
@@ -460,7 +467,7 @@ Different skill types need different test approaches:
 
 Skills that enforce discipline (like TDD) need to resist rationalization. Agents are smart and will find loopholes when under pressure.
 
-**Psychology note:** Understanding WHY persuasion techniques work helps you apply them systematically. See persuasion-principles.md for research foundation (Cialdini, 2021; Meincke et al., 2025) on authority, commitment, scarcity, social proof, and unity principles.
+**Psychology note:** Understanding WHY persuasion techniques work helps you apply them systematically. See references/persuasion-principles.md for research foundation (Cialdini, 2021; Meincke et al., 2025) on authority, commitment, scarcity, social proof, and unity principles.
 
 ### Close Every Loophole Explicitly
 
@@ -553,7 +560,7 @@ Run same scenarios WITH skill. Agent should now comply.
 
 Agent found new rationalization? Add explicit counter. Re-test until bulletproof.
 
-**Testing methodology:** See @testing-skills-with-subagents.md for the complete testing methodology:
+**Testing methodology:** See `references/testing-skills-with-subagents.md` for the complete testing methodology:
 - How to write pressure scenarios
 - Pressure types (time, sunk cost, authority, exhaustion)
 - Plugging holes systematically
@@ -629,8 +636,7 @@ Deploying untested skills = deploying untested code. It's a violation of quality
 - [ ] Supporting files only for tools or heavy reference
 
 **Deployment:**
-- [ ] Commit skill to git and push to your fork (if configured)
-- [ ] Consider contributing back via PR (if broadly useful)
+- [ ] Commit the skill to this repo
 
 ## Discovery Workflow
 

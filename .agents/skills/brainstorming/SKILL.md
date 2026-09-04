@@ -1,6 +1,9 @@
 ---
 name: brainstorming
 description: "You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation."
+uses:
+  - name: writing-plans
+    source: audacioustux/agents
 ---
 
 # Brainstorming Ideas Into Designs
@@ -27,7 +30,7 @@ You MUST create a task for each of these items and complete them in order:
 4. **Propose 2-3 approaches** — with trade-offs and your recommendation
 5. **Present design** — in sections scaled to their complexity, get user approval after each section
 6. **Write design doc** — save to `docs/designs/YYYY-MM-DD-<topic>-design.md` and commit
-7. **Spec self-review** — quick inline check for placeholders, contradictions, ambiguity, scope (see below)
+7. **Spec self-review** — quick inline check for placeholders, contradictions, ambiguity, scope (see below). For an independent pass, dispatch a reviewer subagent with `./prompts/spec-document-reviewer.md`.
 8. **User reviews written spec** — ask user to review the spec file before proceeding
 9. **Transition to implementation** — invoke writing-plans skill to create implementation plan
 
@@ -109,8 +112,7 @@ digraph brainstorming {
 **Documentation:**
 
 - Write the validated design (spec) to `docs/designs/YYYY-MM-DD-<topic>-design.md`
-  - (User preferences for spec location override this default)
-- Use elements-of-style:writing-clearly-and-concisely skill if available
+  - (If the repo's AGENTS.md or the user declares a location, use it instead)
 - Commit the design document to git
 
 **Spec Self-Review:**
@@ -161,4 +163,4 @@ A browser-based companion for showing mockups, diagrams, and visual options duri
 A question about a UI topic is not automatically a visual question. "What does personality mean in this context?" is a conceptual question — use the terminal. "Which wizard layout works better?" is a visual question — use the browser.
 
 If they agree to the companion, read the detailed guide before proceeding:
-`skills/brainstorming/visual-companion.md`
+`./references/visual-companion.md`

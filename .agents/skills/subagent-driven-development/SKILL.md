@@ -1,6 +1,6 @@
 ---
 name: subagent-driven-development
-description: Use when executing implementation plans with independent tasks in the current session
+description: Use when executing a written implementation plan and subagents are available - dispatches one subagent per task with curated context, then reviews each before integrating. Without subagents, use `executing-plans`.
 uses:
   - name: writing-plans
     source: audacioustux/agents

@@ -603,7 +603,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "06eae4529fda90ae118b07f717cac393087682c33a6fe44008ca78e31500ad0b",
+          "sha256": "d9d7860af05a7f6a7362c54d508b32985de5905feca575422dfd6c22f0fa0f0b",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
@@ -899,7 +899,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "af4cc62f91ea2f58824e7bce6c427ea620b4feda01fa1a55a92351a6f47633fe",
+          "sha256": "397174afbb5a484f788789c5798f041029365207f96f44e2a326a350054323a3",
           "upstream": {
             "status": "diverged",
             "sha256": "8cfb86f121269e8f7f12361e6795c4f6738828340e28964c9229d365666c9edd"
@@ -1099,7 +1099,8 @@
     "cross-skill": "Skills never assume another skill is installed. Frontmatter `uses:` declares name + source (github repo) so a harness can resolve or fetch; body text degrades to a manual fallback when the skill is absent.",
     "provenance-paths": "Local companion regrouping (references/, prompts/, scripts/) changed paths that upstream still holds flat. Each file records upstreamPath when the local path differs, so status is recomputed against snapshot bytes rather than assumed from the local name.",
     "naming": "Skill names use gerund/verb-first form per writing-skills:217 and Anthropic's authoring guide ('we recommend gerund form'). Exceptions kept verbatim: test-driven-development and subagent-driven-development name established methodologies an agent searches by name; systematic-debugging already reads verb-first.",
-    "skill-split": "writing-skills covered authoring AND adversarial testing in 1873w. Split: writing-skills keeps structure/naming/layout, testing-skills owns baseline runs, pressure scenarios, and loophole closing. They reference each other via uses:."
+    "skill-split": "writing-skills covered authoring AND adversarial testing in 1873w. Split: writing-skills keeps structure/naming/layout, testing-skills owns baseline runs, pressure scenarios, and loophole closing. They reference each other via uses:.",
+    "routing": "Sibling skills covering the same trigger must each state the discriminator and name the alternative. executing-plans and subagent-driven-development both key on subagent availability; using-git-worktrees and dispatching-parallel-agents explicitly disclaim plan execution."
   },
   "consolidated": "2026-09-04",
   "vendorSnapshot": {

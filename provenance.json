@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "Provenance for consolidated agent skills. Maintenance metadata only — never loaded by agents. sha256 = plain SHA-256 of file bytes (deliberately independent of skills-lock.json's computedHash, whose derivation is unspecified by the vercel installer).",
+  "note": "Provenance for consolidated agent skills. Maintenance metadata only — never loaded by agents. sha256 = plain SHA-256 of file bytes (independent of skills-lock.json's computedHash, whose derivation the vercel installer does not document). Skills marked owned:true now live in .agents/skills/ of this repo; their `upstream` block records what they were forked from and at which SHA, for periodic re-merge under human judgement.",
   "captured": "2026-09-04",
   "upstreams": {
     "obra/superpowers": {
@@ -49,7 +49,7 @@
           "path": ".agents/skills/a11y-interactions-forms"
         }
       ],
-      "state": "pristine",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
           "sha256": "6b526f7552bfd3a596ccf246f68da3b2c389026b987c65e6dbea9f59e6b8077a",
@@ -59,7 +59,8 @@
         }
       },
       "decisions": [],
-      "rationale": "audacioustux-owned, pristine vs upstream"
+      "rationale": "audacioustux-owned, pristine vs upstream",
+      "owned": true
     },
     "anti-bloat-review": {
       "disposition": "keep-as-is",
@@ -70,7 +71,7 @@
           "path": ".agents/skills/anti-bloat-review"
         }
       ],
-      "state": "pristine",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
           "sha256": "82e003d477c4cd3c1ee09963abc29db2fc31f68539c4e6c9b2bfafa43efd8a16",
@@ -86,7 +87,8 @@
         }
       },
       "decisions": [],
-      "rationale": "audacioustux-owned, pristine"
+      "rationale": "audacioustux-owned, pristine",
+      "owned": true
     },
     "brainstorming": {
       "disposition": "merge",
@@ -97,10 +99,10 @@
           "path": "skills/brainstorming"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "bba47904a7f6bbee3bf8a107ebbe84e65d392be683bbb898ded736b29e415f90",
+          "sha256": "c403c76d5b3e066d0686ad2883ce0a90de5a042f9af21d7781e2da75c4b0d542",
           "upstream": {
             "status": "diverged",
             "sha256": "74edf03ea6d24ef53db48677b93558d14a979bdf052ca3f57ecdca0c66791608"
@@ -128,28 +130,28 @@
           }
         },
         "scripts/start-server.sh": {
-          "sha256": "3442a54b5ee5511637d27bf696e092b72f94c2324f40b5ba4410da4dd0c23bc8",
+          "sha256": "20b6f36cf7653e3824cf3d6f5fa0a347d2f07c9822e7e3d73e080565c9d02bf0",
           "upstream": {
             "status": "diverged",
             "sha256": "a4e5ae84275bcaacd2f84345afeabe59cf7b00ba080e123da7cc1fb226f12847"
           }
         },
         "scripts/stop-server.sh": {
-          "sha256": "f65b7634a27343eab2086bdb6c59ba78695685f471b5a577b08a8817f7c50600",
+          "sha256": "0e8716b4c35d348b464b0b409d888531156f70465408e19021598fa0e839be43",
           "upstream": {
             "status": "diverged",
             "sha256": "0b5ccbbd57f62d3ed88993f7940b5ee0e5c0fc9b21c550c623da4f6292e47daf"
           }
         },
         "spec-document-reviewer-prompt.md": {
-          "sha256": "12cb5ed58aef41b8da6fbb505547c71ca3f5658c83b66ca6e556c936308b3189",
+          "sha256": "320fae2b514a8c7a8b5077eab126d1a6289d30f373e9ce8fd8d25089b01454fe",
           "upstream": {
             "status": "diverged",
             "sha256": "95a0a195de9d984be2fffa95bab16fc8c563bc296a9cfc5e9c29cb3ece0d7457"
           }
         },
         "visual-companion.md": {
-          "sha256": "a2bc6fc47d0df1df981d02f707a16225b147f462e7059175ad2bc5e6dd29fcae",
+          "sha256": "9d393c3a7d0ff30f04557cdbf739117637be7542f44dadc4f67c4fc20469db4c",
           "upstream": {
             "status": "diverged",
             "sha256": "77eb44a4ec3408bb3dafb872288ecd94beb8cf21da4f2bafa54fd08255d7808b"
@@ -157,7 +159,8 @@
         }
       },
       "decisions": [],
-      "rationale": "diverged both ways; 5 hardcoded .superpowers/brainstorm paths to fix"
+      "rationale": "diverged both ways; 5 hardcoded .superpowers/brainstorm paths to fix",
+      "owned": true
     },
     "browser-ux-qa-review": {
       "disposition": "keep-as-is",
@@ -168,7 +171,7 @@
           "path": ".agents/skills/browser-ux-qa-review"
         }
       ],
-      "state": "pristine",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
           "sha256": "6726079ea77a416c18d1753d9bf0c54eea469f3854757a586af7e6df903f4931",
@@ -178,7 +181,24 @@
         }
       },
       "decisions": [],
-      "rationale": "audacioustux-owned, pristine"
+      "rationale": "audacioustux-owned, pristine",
+      "owned": true
+    },
+    "clean-ai-slop": {
+      "disposition": "keep-as-is",
+      "rationale": "authored in this repo; never externally sourced",
+      "owned": true,
+      "upstream": [],
+      "state": "native",
+      "files": {
+        "SKILL.md": {
+          "sha256": "67befc14618657c33a730e6eb968e1d17bbf317150da3605ff14900e2c68b3bd",
+          "upstream": {
+            "status": "native"
+          }
+        }
+      },
+      "decisions": []
     },
     "component-system-design": {
       "disposition": "keep-as-is",
@@ -189,7 +209,7 @@
           "path": ".agents/skills/component-system-design"
         }
       ],
-      "state": "pristine",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
           "sha256": "b01dfb838a4f2e72c5287e6f56beb374fc65b61b422a230107964c2db28ee637",
@@ -199,7 +219,8 @@
         }
       },
       "decisions": [],
-      "rationale": "audacioustux-owned, pristine"
+      "rationale": "audacioustux-owned, pristine",
+      "owned": true
     },
     "context7-cli": {
       "disposition": "external",
@@ -240,7 +261,8 @@
         }
       },
       "decisions": [],
-      "rationale": "vendor CLI surface; upstash owns tool truth"
+      "rationale": "vendor CLI surface; upstash owns tool truth",
+      "owned": false
     },
     "dispatching-parallel-agents": {
       "disposition": "merge",
@@ -251,7 +273,7 @@
           "path": "skills/dispatching-parallel-agents"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
           "sha256": "76806091c7f923ba2596546b19cccd98a08e57a68745df77c3a7b998fe838e2b",
@@ -262,7 +284,8 @@
         }
       },
       "decisions": [],
-      "rationale": "core workflow skill, locally modified"
+      "rationale": "core workflow skill, locally modified",
+      "owned": true
     },
     "executing-plans": {
       "disposition": "merge",
@@ -273,10 +296,10 @@
           "path": "skills/executing-plans"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "e2102f11631433939f162d383d769f8257d859d6639e0e14969cda3ef0a95eca",
+          "sha256": "e26bc62f4ce208faaac08cbdb305e94f335e9ee74e31e887a02b515f53229146",
           "upstream": {
             "status": "diverged",
             "sha256": "c4c3d8b628c51114cd165fb8246fe02744cd8be180032328391252e653028d9b"
@@ -284,7 +307,8 @@
         }
       },
       "decisions": [],
-      "rationale": "must inherit declared-path rule"
+      "rationale": "must inherit declared-path rule",
+      "owned": true
     },
     "find-skills": {
       "disposition": "retired",
@@ -306,7 +330,8 @@
         }
       },
       "decisions": [],
-      "rationale": "user decision 2026-09-04; verified zero inbound references"
+      "rationale": "user decision 2026-09-04; verified zero inbound references",
+      "owned": false
     },
     "finishing-a-development-branch": {
       "disposition": "merge",
@@ -317,10 +342,10 @@
           "path": "skills/finishing-a-development-branch"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "5c8d4b59aedb14c94e2f5d787a3265e858e8f53d4ceffe7ff1c15878a52b0e91",
+          "sha256": "976c22f14c415dda4f932717e566e4eff49bc945e52e442f2bff9761f2ef70a5",
           "upstream": {
             "status": "diverged",
             "sha256": "8db5a922b242dd4e1bf824cb91c13b3e8d8e8a86d6ceaf7f0774eb9cce909d65"
@@ -328,7 +353,8 @@
         }
       },
       "decisions": [],
-      "rationale": "cleanup allowlist must change in lockstep with using-git-worktrees"
+      "rationale": "cleanup allowlist must change in lockstep with using-git-worktrees",
+      "owned": true
     },
     "firecrawl": {
       "disposition": "external",
@@ -361,7 +387,8 @@
         }
       },
       "decisions": [],
-      "rationale": "vendor CLI doc; upstream path 404s at pin — needs re-locating"
+      "rationale": "vendor CLI doc; upstream path 404s at pin — needs re-locating",
+      "owned": false
     },
     "handoff": {
       "disposition": "merge",
@@ -372,7 +399,7 @@
           "path": "skills/productivity/handoff"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
           "sha256": "d215dd8f2a19bf85fdaf67a3cdb5077641f6b4108f229ba79579414793d7b0a3",
@@ -383,7 +410,8 @@
         }
       },
       "decisions": [],
-      "rationale": "847B; too small to justify external tracking"
+      "rationale": "847B; too small to justify external tracking",
+      "owned": true
     },
     "layout-responsiveness": {
       "disposition": "keep-as-is",
@@ -394,7 +422,7 @@
           "path": ".agents/skills/layout-responsiveness"
         }
       ],
-      "state": "pristine",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
           "sha256": "51b8d0b6730e70aa973f8e49b4a1389c0f73542f60669fa6a2c4334af9a4c043",
@@ -404,7 +432,8 @@
         }
       },
       "decisions": [],
-      "rationale": "audacioustux-owned, pristine"
+      "rationale": "audacioustux-owned, pristine",
+      "owned": true
     },
     "mermaid-diagrams": {
       "disposition": "merge",
@@ -415,10 +444,10 @@
           "path": ".agents/skills/mermaid-diagrams"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "8fd20ae0156f62b99cf1423c42679baa9ae38ae3ad830685e0e4ebc1b694727a",
+          "sha256": "5113ac082eb53120ad13817c820107dfd3489528717b21b9c701d35460362426",
           "upstream": {
             "status": "diverged",
             "sha256": "ed2addbaba3b1bdf5013c6741640bd4e08c087e14026ed29bf16c427a39dd6ad"
@@ -432,7 +461,8 @@
         }
       },
       "decisions": [],
-      "rationale": "audacioustux-owned but locally modified; push edits back to return to pristine"
+      "rationale": "audacioustux-owned but locally modified; push edits back to return to pristine",
+      "owned": true
     },
     "receiving-code-review": {
       "disposition": "merge",
@@ -443,7 +473,7 @@
           "path": "skills/receiving-code-review"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
           "sha256": "c9382e92b8f32363566068ecfed19d3b2651eaf40d3942b24840f839dedfc406",
@@ -454,7 +484,8 @@
         }
       },
       "decisions": [],
-      "rationale": "core workflow skill"
+      "rationale": "core workflow skill",
+      "owned": true
     },
     "repo-ui-conventions": {
       "disposition": "keep-as-is",
@@ -465,7 +496,7 @@
           "path": ".agents/skills/repo-ui-conventions"
         }
       ],
-      "state": "pristine",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
           "sha256": "a750f8e941ba6184ab22ef84427f119e2d56b3a36b6896a472dfd66c5398e7d8",
@@ -475,7 +506,8 @@
         }
       },
       "decisions": [],
-      "rationale": "audacioustux-owned, pristine"
+      "rationale": "audacioustux-owned, pristine",
+      "owned": true
     },
     "requesting-code-review": {
       "disposition": "merge",
@@ -486,10 +518,10 @@
           "path": "skills/requesting-code-review"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "5a3a44a3667800e2dc836829c6b92fada51e6dc58ac144ec05fe59f47d6bcd84",
+          "sha256": "22592fe435364b0973ac5f2e71556f5d218d41a31b760446ef04f75c0e4f911c",
           "upstream": {
             "status": "diverged",
             "sha256": "d71cc01ba56d2325cf8af5f7c11837819b63ecd57de0bfdb812f7f3ff7751df8"
@@ -504,7 +536,8 @@
         }
       },
       "decisions": [],
-      "rationale": "hardcodes docs/superpowers/plans"
+      "rationale": "hardcodes docs/superpowers/plans",
+      "owned": true
     },
     "subagent-driven-development": {
       "disposition": "merge",
@@ -515,10 +548,10 @@
           "path": "skills/subagent-driven-development"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "905a2b9be59b734dbe166525ad31dcaaf712a75926135adee1f554557aba5744",
+          "sha256": "01372b7f3c6cc4cab74abd7a8d5ba1c051088daf80855f3fcaa3155dd0cd32d1",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
@@ -545,7 +578,8 @@
         }
       },
       "decisions": [],
-      "rationale": "hard one: upstream 12.5KB->32KB; reconcile deliberately"
+      "rationale": "hard one: upstream 12.5KB->32KB; reconcile deliberately",
+      "owned": true
     },
     "systematic-debugging": {
       "disposition": "merge",
@@ -556,7 +590,7 @@
           "path": "skills/systematic-debugging"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "CREATION-LOG.md": {
           "sha256": "c24733a5b1821bd6bed1fc950261f0b9f4e90097e0bbb96459d8179713730789",
@@ -565,7 +599,7 @@
           }
         },
         "SKILL.md": {
-          "sha256": "4999cb851360485eca5074e727bbdd62ef20549c5d5b01216fcbf5831badb473",
+          "sha256": "68c3099bc0ac4820ed6ef536cb30bd43728e59c2213ba84125938d62a250db39",
           "upstream": {
             "status": "diverged",
             "sha256": "808fc5717aa88ad65efff312b11c186294d3e6ee301afb584e2f86599b137787"
@@ -628,7 +662,8 @@
         }
       },
       "decisions": [],
-      "rationale": "core workflow skill"
+      "rationale": "core workflow skill",
+      "owned": true
     },
     "tdd": {
       "disposition": "merge-into:test-driven-development",
@@ -681,7 +716,8 @@
         }
       },
       "decisions": [],
-      "rationale": "duplicate TDD territory; fold unique content, keep the name 7 cross-refs point at"
+      "rationale": "duplicate TDD territory; fold unique content, keep the name 7 cross-refs point at",
+      "owned": false
     },
     "test-driven-development": {
       "disposition": "merge",
@@ -692,7 +728,7 @@
           "path": "skills/test-driven-development"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
           "sha256": "7dee67b4af6bdccc7a914ca34533184d64592d0f5b23aeae631538168db14994",
@@ -706,10 +742,41 @@
           "upstream": {
             "status": "absent-at-sha"
           }
+        },
+        "deep-modules.md": {
+          "sha256": "f2123700bf953db1740625686c75bdd145efd486357c47c6818c869fee657a32",
+          "upstream": {
+            "status": "added-locally"
+          }
+        },
+        "interface-design.md": {
+          "sha256": "764c5ff0e3fa6b4ab7095eb65ccc7201e090baf19fa16051dfdb72c06d27417d",
+          "upstream": {
+            "status": "added-locally"
+          }
+        },
+        "mocking.md": {
+          "sha256": "3ceb807fdf4a47d6a93d4d9a891e5ba6d362a6247bd08adc451feebfc17361ef",
+          "upstream": {
+            "status": "added-locally"
+          }
+        },
+        "refactoring.md": {
+          "sha256": "54fced22dd1911b7094c3fe7979b7c1a40d40be307482c4adf7dc0588f27d6cc",
+          "upstream": {
+            "status": "added-locally"
+          }
+        },
+        "tests.md": {
+          "sha256": "e12182f5c4c6a844b7c6ab4b8d2623b642aaaae5460fe58ed087efd4f3d5fb8a",
+          "upstream": {
+            "status": "added-locally"
+          }
         }
       },
       "decisions": [],
-      "rationale": "absorbs tdd; most-referenced skill, keep the name"
+      "rationale": "absorbs tdd; most-referenced skill, keep the name",
+      "owned": true
     },
     "using-git-worktrees": {
       "disposition": "merge",
@@ -720,10 +787,10 @@
           "path": "skills/using-git-worktrees"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "085a45ee3de432bdb2768011591d9a882cb6c759e2317f379226451c5618fe8e",
+          "sha256": "d99a7543b7a84a9f10b4344e5c5897ff41ae204a6aeb817f6a3421517f309619",
           "upstream": {
             "status": "diverged",
             "sha256": "8cfb86f121269e8f7f12361e6795c4f6738828340e28964c9229d365666c9edd"
@@ -731,7 +798,8 @@
         }
       },
       "decisions": [],
-      "rationale": ".worktrees/ option contradicts AGENTS.md nested-worktree prohibition"
+      "rationale": ".worktrees/ option contradicts AGENTS.md nested-worktree prohibition",
+      "owned": true
     },
     "using-superpowers": {
       "disposition": "merge-rewrite",
@@ -773,7 +841,8 @@
         }
       },
       "decisions": [],
-      "rationale": "obra bootstrap; branding+namespace guidance stale post-consolidation"
+      "rationale": "obra bootstrap; branding+namespace guidance stale post-consolidation",
+      "owned": false
     },
     "verification-before-completion": {
       "disposition": "merge",
@@ -784,7 +853,7 @@
           "path": "skills/verification-before-completion"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
           "sha256": "ea52d15aabaf72bc6b558efe2c126f161b53961090ddcd712000273bfe8c7b6c",
@@ -795,7 +864,8 @@
         }
       },
       "decisions": [],
-      "rationale": "core workflow skill"
+      "rationale": "core workflow skill",
+      "owned": true
     },
     "web-quality-performance": {
       "disposition": "keep-as-is",
@@ -806,7 +876,7 @@
           "path": ".agents/skills/web-quality-performance"
         }
       ],
-      "state": "pristine",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
           "sha256": "a7b01ea320004238655aced38bb0a8501043cf33009496280160145402d8066e",
@@ -816,7 +886,8 @@
         }
       },
       "decisions": [],
-      "rationale": "audacioustux-owned, pristine"
+      "rationale": "audacioustux-owned, pristine",
+      "owned": true
     },
     "web-search": {
       "disposition": "external",
@@ -838,7 +909,8 @@
         }
       },
       "decisions": [],
-      "rationale": "Brave API surface; vendor owns it"
+      "rationale": "Brave API surface; vendor owns it",
+      "owned": false
     },
     "writing-plans": {
       "disposition": "merge",
@@ -849,10 +921,10 @@
           "path": "skills/writing-plans"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "4fd4627d2c02367879c0307d7249270bed633317ff9be82e926a6d57bf5d331b",
+          "sha256": "01aebfd01f9a218c9cb03697c1b92ae435de9891d531998f10f5cb5e7d9f5b5c",
           "upstream": {
             "status": "diverged",
             "sha256": "48508f44bbfd7d24b029fbf3a314f3cd14c9615599059366e922f47b8dc08cf2"
@@ -867,7 +939,8 @@
         }
       },
       "decisions": [],
-      "rationale": "local MISSES upstream Task Right-Sizing section; plus path-declaration change"
+      "rationale": "local MISSES upstream Task Right-Sizing section; plus path-declaration change",
+      "owned": true
     },
     "writing-skills": {
       "disposition": "merge",
@@ -878,10 +951,10 @@
           "path": "skills/writing-skills"
         }
       ],
-      "state": "locally-modified",
+      "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "38ba648975ae6ba512d6695676f146163db61a496b867f716f4bdfb0ee3aca3e",
+          "sha256": "de4dfbd45467f86d0fbf1723b2b65ba73ed71a2f7240d7646c8411f0c6db21b7",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"
@@ -921,20 +994,24 @@
           }
         },
         "testing-skills-with-subagents.md": {
-          "sha256": "c711346852c911b24a84aa161e0cff06a4cd7f4e2fa9e9c0a266cead5afcbade",
+          "sha256": "0dba46de2d2640af8df1530692587a2b6896b249d74016ac9d8e06c74cd195c2",
           "upstream": {
             "status": "identical"
           }
         }
       },
       "decisions": [],
-      "rationale": "becomes the authoring standard for the agents repo"
+      "rationale": "becomes the authoring standard for the agents repo",
+      "owned": true
     }
   },
   "dispositionsRecorded": "2026-09-04",
   "decisions": {
     "paths": "Skills must not hardcode vendor paths. Declared in AGENTS.md when the repo declares one; otherwise a fixed documented default. Discovery/heuristic scanning rejected: nondeterministic across sessions.",
-    "docs-superpowers-rename": "Approved by user 2026-09-04. Target names pending; ~40+ citations across ~15 files, and docs:verify (lychee) does NOT cover backtick prose citations — needs its own zero-remaining grep gate.",
-    "installer-destructive": "Measured 2026-09-04: `skills experimental_install` rm -rf's each skill dir and copies from unpinned upstream HEAD. skills:setup guard changed from completeness-count to existence so the destructive path is unreachable once a tree exists."
-  }
+    "docs-superpowers-rename": "Executed 2026-09-04: docs/superpowers/{specs,plans} -> docs/{designs,plans}; 34 citations across 15 files. Two references intentionally left in docs/reviews/2026-07-05-telemetry-plan/ where a reviewer quotes the old path while arguing against it.",
+    "installer-destructive": "Measured 2026-09-04: `skills experimental_install` rm -rf's each skill dir and copies from unpinned upstream HEAD. skills:setup guard changed from completeness-count to existence so the destructive path is unreachable once a tree exists.",
+    "retired": "find-skills (vercel registry surface, zero inbound refs) and using-superpowers (Skill-tool bootstrap; premise fails in an auto-injecting harness). tdd folded into test-driven-development, which keeps the name 7 cross-references point at.",
+    "namespace": "superpowers:<name> prefixes stripped to bare names. A stale vendor prefix resolves to no skill silently."
+  },
+  "consolidated": "2026-09-04"
 }

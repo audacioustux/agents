@@ -6,10 +6,6 @@ uses:
     source: audacioustux/agents
   - name: test-driven-development
     source: audacioustux/agents
-  - name: systematic-debugging
-    source: audacioustux/agents
-  - name: verifying-before-completion
-    source: audacioustux/agents
 ---
 
 # Writing Skills

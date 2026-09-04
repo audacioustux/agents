@@ -52,7 +52,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "9f06205e5e5210a69227bf52fb0caef49105bc885155f66ea6e4f059cda64975",
+          "sha256": "953cea28dd9d3aef2ce73baef1a15f9ea6cf6c7764ee974d85b6c08ea97cfb31",
           "upstream": {
             "status": "diverged",
             "sha256": "74edf03ea6d24ef53db48677b93558d14a979bdf052ca3f57ecdca0c66791608"
@@ -318,7 +318,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "8c1c0c2bc808011ff245ca862860a51ed4144f331289558c12f973e191b9f2ec",
+          "sha256": "be6e583749061504696e622b712d42331acf9a1961701318a5a3df78d250fb2f",
           "upstream": {
             "status": "diverged",
             "sha256": "c4c3d8b628c51114cd165fb8246fe02744cd8be180032328391252e653028d9b"
@@ -603,7 +603,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "d9d7860af05a7f6a7362c54d508b32985de5905feca575422dfd6c22f0fa0f0b",
+          "sha256": "e09b3c9ba13c1a5a9e7e503fa2b25daa2c423b77d34f3b9dfdcda37c5f8673e3",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
@@ -844,7 +844,7 @@
       ],
       "files": {
         "SKILL.md": {
-          "sha256": "1e59256a4b5baac9bc9c1a52e6fb0ce19025cd73493614de82e621d88a8c90ff",
+          "sha256": "1f45976846dcc47241ae098a9acafaa3160c4acbbb64cc6fadc5894e7ebde22a",
           "upstream": {
             "status": "added-locally"
           }
@@ -1017,7 +1017,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "79ecabb5181594088f50019c571e62b754b065d934fdb721154eff2e7c9e5c32",
+          "sha256": "4af2007f43faa1f4e352cf713e2bf2ab953ee450678cd96db3e23ab71ba78c32",
           "upstream": {
             "status": "diverged",
             "sha256": "48508f44bbfd7d24b029fbf3a314f3cd14c9615599059366e922f47b8dc08cf2"
@@ -1046,7 +1046,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "247d852b0bf9ffa19ac13decd8acf964c6eda41ca27a33201059629f21d6f0ed",
+          "sha256": "072f1a00f87999bdcab8dfbc00d77740473cd5e3ef169f939de0839b68ef2fce",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"
@@ -1061,7 +1061,7 @@
           }
         },
         "references/discovery-and-triggers.md": {
-          "sha256": "1a6ba729ab18a6d84ab7c8011b916323229567792b97344ffa71c5255b686478",
+          "sha256": "c7a70d4e382c67abde95ab764d7bfad7c60ed8fa3b53df7322a2ae6424b48734",
           "upstream": {
             "status": "added-locally"
           }
@@ -1100,7 +1100,8 @@
     "provenance-paths": "Local companion regrouping (references/, prompts/, scripts/) changed paths that upstream still holds flat. Each file records upstreamPath when the local path differs, so status is recomputed against snapshot bytes rather than assumed from the local name.",
     "naming": "Skill names use gerund/verb-first form per writing-skills:217 and Anthropic's authoring guide ('we recommend gerund form'). Exceptions kept verbatim: test-driven-development and subagent-driven-development name established methodologies an agent searches by name; systematic-debugging already reads verb-first.",
     "skill-split": "writing-skills covered authoring AND adversarial testing in 1873w. Split: writing-skills keeps structure/naming/layout, testing-skills owns baseline runs, pressure scenarios, and loophole closing. They reference each other via uses:.",
-    "routing": "Sibling skills covering the same trigger must each state the discriminator and name the alternative. executing-plans and subagent-driven-development both key on subagent availability; using-git-worktrees and dispatching-parallel-agents explicitly disclaim plan execution."
+    "routing": "Sibling skills covering the same trigger must each state the discriminator and name the alternative. executing-plans and subagent-driven-development both key on subagent availability; using-git-worktrees and dispatching-parallel-agents explicitly disclaim plan execution.",
+    "uses-graph": "Every skill named in another skill's description, body, or companions is declared in that skill's uses: block. Bare sibling names in prose are backticked so a name is visually distinct from an ordinary word."
   },
   "consolidated": "2026-09-04",
   "vendorSnapshot": {

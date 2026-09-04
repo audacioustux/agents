@@ -2,6 +2,8 @@
 name: executing-plans
 description: Use when executing a written implementation plan inline, in the current session, without subagent support. With subagents available, prefer subagent-driven-development.
 uses:
+  - name: writing-plans
+    source: audacioustux/agents
   - name: using-git-worktrees
     source: audacioustux/agents
   - name: finishing-a-development-branch
@@ -18,7 +20,7 @@ Load plan, review critically, execute all tasks, report when complete.
 
 **Announce at start:** "I'm using the executing-plans skill to implement this plan."
 
-**Note:** Tell your human partner that this workflow works much better with access to subagents. The quality of the work will be significantly higher if run on a platform with subagent support (such as Claude Code or Codex). If subagents are available, use subagent-driven-development instead of this skill.
+**Note:** Tell your human partner that this workflow works much better with access to subagents. The quality of the work will be significantly higher if run on a platform with subagent support (such as Claude Code or Codex). If subagents are available, use `subagent-driven-development` instead of this skill.
 
 ## The Process
 
@@ -39,7 +41,7 @@ For each task:
 ### Step 3: Complete Development
 
 After all tasks complete and verified:
-- Announce: "I'm using the finishing-a-development-branch skill to complete this work."
+- Announce: "I'm using the `finishing-a-development-branch` skill to complete this work."
 - **Hand off to:** the `finishing-a-development-branch` skill if available; otherwise finish the branch manually — merge or PR, then remove the worktree you created.
 - Follow that skill to verify tests, present options, execute choice
 

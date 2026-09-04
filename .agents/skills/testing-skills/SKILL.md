@@ -2,6 +2,10 @@
 name: testing-skills
 description: Use when a skill is written and before relying on it - pressure-tests the skill against an agent that wants to skip it, and closes the loopholes it finds
 uses:
+  - name: verifying-before-completion
+    source: audacioustux/agents
+  - name: test-driven-development
+    source: audacioustux/agents
   - name: writing-skills
     source: audacioustux/agents
 ---

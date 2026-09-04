@@ -40,59 +40,6 @@
     }
   },
   "skills": {
-    "a11y-interactions-forms": {
-      "disposition": "keep-as-is",
-      "upstream": [
-        {
-          "repo": "audacioustux/agents",
-          "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
-          "path": ".agents/skills/a11y-interactions-forms"
-        }
-      ],
-      "state": "owned-normalized",
-      "files": {
-        "SKILL.md": {
-          "sha256": "6b526f7552bfd3a596ccf246f68da3b2c389026b987c65e6dbea9f59e6b8077a",
-          "upstream": {
-            "status": "identical",
-            "sha256": "6b526f7552bfd3a596ccf246f68da3b2c389026b987c65e6dbea9f59e6b8077a"
-          }
-        }
-      },
-      "decisions": [],
-      "rationale": "audacioustux-owned, pristine vs upstream",
-      "owned": true
-    },
-    "anti-bloat-review": {
-      "disposition": "keep-as-is",
-      "upstream": [
-        {
-          "repo": "audacioustux/agents",
-          "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
-          "path": ".agents/skills/anti-bloat-review"
-        }
-      ],
-      "state": "owned-normalized",
-      "files": {
-        "SKILL.md": {
-          "sha256": "67744dee8241e1a38a5750389726b7bee66c275508ed949154bb2989d82229ad",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "82e003d477c4cd3c1ee09963abc29db2fc31f68539c4e6c9b2bfafa43efd8a16"
-          }
-        },
-        "references/pattern-catalog.md": {
-          "sha256": "73f0c887dc1ecf51ab3d7a1d5e555d4e00591c798dd5fa481796af9a652b593f",
-          "upstream": {
-            "status": "identical",
-            "sha256": "73f0c887dc1ecf51ab3d7a1d5e555d4e00591c798dd5fa481796af9a652b593f"
-          }
-        }
-      },
-      "decisions": [],
-      "rationale": "audacioustux-owned, pristine",
-      "owned": true
-    },
     "brainstorming": {
       "disposition": "merge",
       "upstream": [
@@ -165,22 +112,45 @@
       "rationale": "diverged both ways; 5 hardcoded .superpowers/brainstorm paths to fix",
       "owned": true
     },
-    "browser-ux-qa-review": {
+    "building-accessible-interfaces": {
       "disposition": "keep-as-is",
       "upstream": [
         {
           "repo": "audacioustux/agents",
           "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
-          "path": ".agents/skills/browser-ux-qa-review"
+          "path": ".agents/skills/a11y-interactions-forms"
         }
       ],
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "6726079ea77a416c18d1753d9bf0c54eea469f3854757a586af7e6df903f4931",
+          "sha256": "6b526f7552bfd3a596ccf246f68da3b2c389026b987c65e6dbea9f59e6b8077a",
           "upstream": {
             "status": "identical",
-            "sha256": "6726079ea77a416c18d1753d9bf0c54eea469f3854757a586af7e6df903f4931"
+            "sha256": "6b526f7552bfd3a596ccf246f68da3b2c389026b987c65e6dbea9f59e6b8077a"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "audacioustux-owned, pristine vs upstream",
+      "owned": true
+    },
+    "building-responsive-layouts": {
+      "disposition": "keep-as-is",
+      "upstream": [
+        {
+          "repo": "audacioustux/agents",
+          "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
+          "path": ".agents/skills/layout-responsiveness"
+        }
+      ],
+      "state": "owned-normalized",
+      "files": {
+        "SKILL.md": {
+          "sha256": "51b8d0b6730e70aa973f8e49b4a1389c0f73542f60669fa6a2c4334af9a4c043",
+          "upstream": {
+            "status": "identical",
+            "sha256": "51b8d0b6730e70aa973f8e49b4a1389c0f73542f60669fa6a2c4334af9a4c043"
           }
         }
       },
@@ -188,7 +158,7 @@
       "rationale": "audacioustux-owned, pristine",
       "owned": true
     },
-    "clean-ai-slop": {
+    "cleaning-ai-slop": {
       "disposition": "keep-as-is",
       "rationale": "authored in this repo; never externally sourced",
       "owned": true,
@@ -203,29 +173,6 @@
         }
       },
       "decisions": []
-    },
-    "component-system-design": {
-      "disposition": "keep-as-is",
-      "upstream": [
-        {
-          "repo": "audacioustux/agents",
-          "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
-          "path": ".agents/skills/component-system-design"
-        }
-      ],
-      "state": "owned-normalized",
-      "files": {
-        "SKILL.md": {
-          "sha256": "b01dfb838a4f2e72c5287e6f56beb374fc65b61b422a230107964c2db28ee637",
-          "upstream": {
-            "status": "identical",
-            "sha256": "b01dfb838a4f2e72c5287e6f56beb374fc65b61b422a230107964c2db28ee637"
-          }
-        }
-      },
-      "decisions": [],
-      "rationale": "audacioustux-owned, pristine",
-      "owned": true
     },
     "context7-cli": {
       "disposition": "external",
@@ -270,6 +217,59 @@
       "decisions": [],
       "rationale": "vendor CLI surface; upstash owns tool truth",
       "owned": false
+    },
+    "designing-component-systems": {
+      "disposition": "keep-as-is",
+      "upstream": [
+        {
+          "repo": "audacioustux/agents",
+          "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
+          "path": ".agents/skills/component-system-design"
+        }
+      ],
+      "state": "owned-normalized",
+      "files": {
+        "SKILL.md": {
+          "sha256": "b01dfb838a4f2e72c5287e6f56beb374fc65b61b422a230107964c2db28ee637",
+          "upstream": {
+            "status": "identical",
+            "sha256": "b01dfb838a4f2e72c5287e6f56beb374fc65b61b422a230107964c2db28ee637"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "audacioustux-owned, pristine",
+      "owned": true
+    },
+    "diagramming-with-mermaid": {
+      "disposition": "merge",
+      "upstream": [
+        {
+          "repo": "audacioustux/agents",
+          "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
+          "path": ".agents/skills/mermaid-diagrams"
+        }
+      ],
+      "state": "owned-normalized",
+      "files": {
+        "SKILL.md": {
+          "sha256": "5113ac082eb53120ad13817c820107dfd3489528717b21b9c701d35460362426",
+          "upstream": {
+            "status": "diverged",
+            "sha256": "ed2addbaba3b1bdf5013c6741640bd4e08c087e14026ed29bf16c427a39dd6ad"
+          }
+        },
+        "references/diagram-type-table.md": {
+          "sha256": "bdf6a2a6a7b3eeac37c2b7672b6fbfe13b1e4e981674f4a7564d3e130f091476",
+          "upstream": {
+            "status": "identical",
+            "sha256": "bdf6a2a6a7b3eeac37c2b7672b6fbfe13b1e4e981674f4a7564d3e130f091476"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "audacioustux-owned but locally modified; push edits back to return to pristine",
+      "owned": true
     },
     "dispatching-parallel-agents": {
       "disposition": "merge",
@@ -397,7 +397,30 @@
       "rationale": "vendor CLI doc; upstream path 404s at pin — needs re-locating",
       "owned": false
     },
-    "handoff": {
+    "following-repo-ui-conventions": {
+      "disposition": "keep-as-is",
+      "upstream": [
+        {
+          "repo": "audacioustux/agents",
+          "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
+          "path": ".agents/skills/repo-ui-conventions"
+        }
+      ],
+      "state": "owned-normalized",
+      "files": {
+        "SKILL.md": {
+          "sha256": "a750f8e941ba6184ab22ef84427f119e2d56b3a36b6896a472dfd66c5398e7d8",
+          "upstream": {
+            "status": "identical",
+            "sha256": "a750f8e941ba6184ab22ef84427f119e2d56b3a36b6896a472dfd66c5398e7d8"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "audacioustux-owned, pristine",
+      "owned": true
+    },
+    "handing-off-work": {
       "disposition": "merge",
       "upstream": [
         {
@@ -420,57 +443,27 @@
       "rationale": "847B; too small to justify external tracking",
       "owned": true
     },
-    "layout-responsiveness": {
+    "improving-web-performance": {
       "disposition": "keep-as-is",
       "upstream": [
         {
           "repo": "audacioustux/agents",
           "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
-          "path": ".agents/skills/layout-responsiveness"
+          "path": ".agents/skills/web-quality-performance"
         }
       ],
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "51b8d0b6730e70aa973f8e49b4a1389c0f73542f60669fa6a2c4334af9a4c043",
+          "sha256": "a7b01ea320004238655aced38bb0a8501043cf33009496280160145402d8066e",
           "upstream": {
             "status": "identical",
-            "sha256": "51b8d0b6730e70aa973f8e49b4a1389c0f73542f60669fa6a2c4334af9a4c043"
+            "sha256": "a7b01ea320004238655aced38bb0a8501043cf33009496280160145402d8066e"
           }
         }
       },
       "decisions": [],
       "rationale": "audacioustux-owned, pristine",
-      "owned": true
-    },
-    "mermaid-diagrams": {
-      "disposition": "merge",
-      "upstream": [
-        {
-          "repo": "audacioustux/agents",
-          "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
-          "path": ".agents/skills/mermaid-diagrams"
-        }
-      ],
-      "state": "owned-normalized",
-      "files": {
-        "SKILL.md": {
-          "sha256": "5113ac082eb53120ad13817c820107dfd3489528717b21b9c701d35460362426",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "ed2addbaba3b1bdf5013c6741640bd4e08c087e14026ed29bf16c427a39dd6ad"
-          }
-        },
-        "references/diagram-type-table.md": {
-          "sha256": "bdf6a2a6a7b3eeac37c2b7672b6fbfe13b1e4e981674f4a7564d3e130f091476",
-          "upstream": {
-            "status": "identical",
-            "sha256": "bdf6a2a6a7b3eeac37c2b7672b6fbfe13b1e4e981674f4a7564d3e130f091476"
-          }
-        }
-      },
-      "decisions": [],
-      "rationale": "audacioustux-owned but locally modified; push edits back to return to pristine",
       "owned": true
     },
     "receiving-code-review": {
@@ -494,29 +487,6 @@
       },
       "decisions": [],
       "rationale": "core workflow skill",
-      "owned": true
-    },
-    "repo-ui-conventions": {
-      "disposition": "keep-as-is",
-      "upstream": [
-        {
-          "repo": "audacioustux/agents",
-          "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
-          "path": ".agents/skills/repo-ui-conventions"
-        }
-      ],
-      "state": "owned-normalized",
-      "files": {
-        "SKILL.md": {
-          "sha256": "a750f8e941ba6184ab22ef84427f119e2d56b3a36b6896a472dfd66c5398e7d8",
-          "upstream": {
-            "status": "identical",
-            "sha256": "a750f8e941ba6184ab22ef84427f119e2d56b3a36b6896a472dfd66c5398e7d8"
-          }
-        }
-      },
-      "decisions": [],
-      "rationale": "audacioustux-owned, pristine",
       "owned": true
     },
     "requesting-code-review": {
@@ -548,6 +518,59 @@
       },
       "decisions": [],
       "rationale": "hardcodes docs/superpowers/plans",
+      "owned": true
+    },
+    "reviewing-for-bloat": {
+      "disposition": "keep-as-is",
+      "upstream": [
+        {
+          "repo": "audacioustux/agents",
+          "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
+          "path": ".agents/skills/anti-bloat-review"
+        }
+      ],
+      "state": "owned-normalized",
+      "files": {
+        "SKILL.md": {
+          "sha256": "67744dee8241e1a38a5750389726b7bee66c275508ed949154bb2989d82229ad",
+          "upstream": {
+            "status": "diverged",
+            "sha256": "82e003d477c4cd3c1ee09963abc29db2fc31f68539c4e6c9b2bfafa43efd8a16"
+          }
+        },
+        "references/pattern-catalog.md": {
+          "sha256": "73f0c887dc1ecf51ab3d7a1d5e555d4e00591c798dd5fa481796af9a652b593f",
+          "upstream": {
+            "status": "identical",
+            "sha256": "73f0c887dc1ecf51ab3d7a1d5e555d4e00591c798dd5fa481796af9a652b593f"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "audacioustux-owned, pristine",
+      "owned": true
+    },
+    "reviewing-ux-in-browser": {
+      "disposition": "keep-as-is",
+      "upstream": [
+        {
+          "repo": "audacioustux/agents",
+          "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
+          "path": ".agents/skills/browser-ux-qa-review"
+        }
+      ],
+      "state": "owned-normalized",
+      "files": {
+        "SKILL.md": {
+          "sha256": "6726079ea77a416c18d1753d9bf0c54eea469f3854757a586af7e6df903f4931",
+          "upstream": {
+            "status": "identical",
+            "sha256": "6726079ea77a416c18d1753d9bf0c54eea469f3854757a586af7e6df903f4931"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "audacioustux-owned, pristine",
       "owned": true
     },
     "subagent-driven-development": {
@@ -834,7 +857,7 @@
       "rationale": "obra bootstrap; branding+namespace guidance stale post-consolidation",
       "owned": false
     },
-    "verification-before-completion": {
+    "verifying-before-completion": {
       "disposition": "merge",
       "upstream": [
         {
@@ -855,29 +878,6 @@
       },
       "decisions": [],
       "rationale": "core workflow skill",
-      "owned": true
-    },
-    "web-quality-performance": {
-      "disposition": "keep-as-is",
-      "upstream": [
-        {
-          "repo": "audacioustux/agents",
-          "sha": "4c80d9446ca5b9a5aeb88f641af9e69a6c2cf253",
-          "path": ".agents/skills/web-quality-performance"
-        }
-      ],
-      "state": "owned-normalized",
-      "files": {
-        "SKILL.md": {
-          "sha256": "a7b01ea320004238655aced38bb0a8501043cf33009496280160145402d8066e",
-          "upstream": {
-            "status": "identical",
-            "sha256": "a7b01ea320004238655aced38bb0a8501043cf33009496280160145402d8066e"
-          }
-        }
-      },
-      "decisions": [],
-      "rationale": "audacioustux-owned, pristine",
       "owned": true
     },
     "web-search": {
@@ -1012,7 +1012,8 @@
     "namespace": "superpowers:<name> prefixes stripped to bare names. A stale vendor prefix resolves to no skill silently.",
     "structure": "Companion files grouped by role: references/ (docs an agent reads), prompts/ (subagent templates), scripts/ (executables), examples/. Previously four skills held 3-6 files flat in the skill root.",
     "cross-skill": "Skills never assume another skill is installed. Frontmatter `uses:` declares name + source (github repo) so a harness can resolve or fetch; body text degrades to a manual fallback when the skill is absent.",
-    "provenance-paths": "Local companion regrouping (references/, prompts/, scripts/) changed paths that upstream still holds flat. Each file records upstreamPath when the local path differs, so status is recomputed against snapshot bytes rather than assumed from the local name."
+    "provenance-paths": "Local companion regrouping (references/, prompts/, scripts/) changed paths that upstream still holds flat. Each file records upstreamPath when the local path differs, so status is recomputed against snapshot bytes rather than assumed from the local name.",
+    "naming": "Skill names use gerund/verb-first form per writing-skills:217 and Anthropic's authoring guide ('we recommend gerund form'). Exceptions kept verbatim: test-driven-development and subagent-driven-development name established methodologies an agent searches by name; systematic-debugging already reads verb-first."
   },
   "consolidated": "2026-09-04",
   "vendorSnapshot": {

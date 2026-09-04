@@ -1,5 +1,5 @@
 ---
-name: browser-ux-qa-review
+name: reviewing-ux-in-browser
 description: Use when a runnable app, preview URL, local server, or built page is available and the UI needs browser-based verification. Covers screenshots, responsive checks, theme checks, keyboard walkthroughs, console/network review, dynamic content, and final QA notes. Tool-agnostic; use whatever browser automation or DevTools tools are available.
 ---
 

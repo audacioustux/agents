@@ -1,5 +1,5 @@
 ---
-name: web-quality-performance
+name: improving-web-performance
 description: Use when reviewing or improving frontend performance, Core Web Vitals, loading behavior, runtime responsiveness, visual stability, SEO basics, modern web best practices, security hygiene, and production readiness. Stack-agnostic.
 ---
 

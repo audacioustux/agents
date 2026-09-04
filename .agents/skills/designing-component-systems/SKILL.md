@@ -1,5 +1,5 @@
 ---
-name: component-system-design
+name: designing-component-systems
 description: Use when building or reviewing UI components, component APIs, design tokens, theming, slots/composition, controlled and uncontrolled state, reusable styling, documentation, and component library boundaries. Stack-agnostic.
 ---
 

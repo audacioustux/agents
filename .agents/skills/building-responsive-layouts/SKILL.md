@@ -1,5 +1,5 @@
 ---
-name: layout-responsiveness
+name: building-responsive-layouts
 description: Use when implementing or reviewing responsive layouts, navigation, drawers, dialogs, dynamic result lists, progressive disclosure, constrained-width UI, container-query behavior, and layout stability. Stack-agnostic.
 ---
 

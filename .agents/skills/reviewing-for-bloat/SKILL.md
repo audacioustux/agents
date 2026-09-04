@@ -1,5 +1,5 @@
 ---
-name: anti-bloat-review
+name: reviewing-for-bloat
 description: Use when reviewing code, configuration, schemas, tests, infrastructure, migrations, or generated changes for duplication, patchwork, convention drift, unclear ownership, hidden coupling, or complexity growing faster than capability.
 ---
 

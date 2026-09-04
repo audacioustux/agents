@@ -1,8 +1,8 @@
 ---
-name: clean-ai-slop
-description: Corrective cleanup of AI-generated code — removes LLM-specific patterns while preserving behavior. Use when the user says "deslop", "slop", "clean AI code", "remove AI patterns", or when you spot LLM-generated code smells after a generation session. For review that produces findings rather than fixes, use anti-bloat-review.
+name: cleaning-ai-slop
+description: Corrective cleanup of AI-generated code — removes LLM-specific patterns while preserving behavior. Use when the user says "deslop", "slop", "clean AI code", "remove AI patterns", or when you spot LLM-generated code smells after a generation session. For review that produces findings rather than fixes, use reviewing-for-bloat.
 uses:
-  - name: anti-bloat-review
+  - name: reviewing-for-bloat
     source: audacioustux/agents
 ---
 
@@ -12,7 +12,7 @@ A corrective discipline for cleaning AI-generated code, run after generation.
 
 The core problem: LLMs produce code that works but carries distinctive smells — over-commenting, unnecessary abstractions, defensive paranoia for impossible scenarios, verbose naming. Left unchecked, these accumulate into a codebase harder to read and maintain than hand-written code.
 
-This skill removes those smells systematically, one category at a time, without changing behavior. It is the corrective counterpart to `anti-bloat-review`: that skill finds and reports; this one fixes, under gates that make the fixes safe.
+This skill removes those smells systematically, one category at a time, without changing behavior. It is the corrective counterpart to `reviewing-for-bloat`: that skill finds and reports; this one fixes, under gates that make the fixes safe.
 
 ## Hard Gates
 

@@ -1,5 +1,5 @@
 ---
-name: repo-ui-conventions
+name: following-repo-ui-conventions
 description: Use when building, modifying, or reviewing repository-owned frontend UI. Enforces predictable, calm, accessible, responsive, theme-safe interfaces without depending on a specific framework, language, component library, or visual style.
 ---
 

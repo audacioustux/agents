@@ -1,5 +1,5 @@
 ---
-name: a11y-interactions-forms
+name: building-accessible-interfaces
 description: Use when implementing or reviewing accessibility, keyboard behavior, focus management, forms, validation, icon-only controls, reduced motion, target sizes, announcements, and assistive-technology semantics. Stack-agnostic.
 ---
 

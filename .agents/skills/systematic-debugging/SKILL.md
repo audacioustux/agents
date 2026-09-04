@@ -133,8 +133,8 @@ These techniques are part of systematic debugging and available in this director
 - **`references/condition-based-waiting.md`** - Replace arbitrary timeouts with condition polling
 
 **Related skills:**
-- **test-driven-development** - For creating failing test case (Phase 4, Step 1)
-- **verifying-before-completion** - Verify fix worked before claiming success
+- **`test-driven-development`** - For creating failing test case (Phase 4, Step 1)
+- **`verifying-before-completion`** - Verify fix worked before claiming success
 
 ## Real-World Impact
 

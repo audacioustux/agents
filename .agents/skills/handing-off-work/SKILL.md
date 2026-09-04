@@ -1,10 +1,10 @@
 ---
 name: handing-off-work
-description: Use when context is running out, when work must pass to a fresh session, or when the user asks for a handing-off-work — compacts the conversation into a document another agent can pick up from.
+description: Use when context is running out, when work must pass to a fresh session, or when the user asks for a handoff — compacts the conversation into a document another agent can pick up from.
 argument-hint: "What will the next session be used for?"
 ---
 
-Write a handing-off-work document summarising the current conversation so a fresh agent can continue the work. Save to the temporary directory of the user's OS - not the current workspace.
+Write a handoff document summarising the current conversation so a fresh agent can continue the work. Save to the temporary directory of the user's OS - not the current workspace.
 
 Include a "suggested skills" section in the document, which suggests skills that the agent should invoke.
 

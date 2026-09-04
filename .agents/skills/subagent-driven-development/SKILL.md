@@ -144,34 +144,7 @@ An end-to-end run: dispatch, review, integrate. See `examples/full-workflow.md`.
 
 ## Advantages
 
-**vs. Manual execution:**
-- Subagents follow TDD naturally
-- Fresh context per task (no confusion)
-- Subagent can ask questions (before AND during work)
-
-**vs. Executing Plans:**
-- Same session (no handing-off-work)
-- Continuous progress (no waiting)
-- Review checkpoints automatic
-
-**Efficiency gains:**
-- No file reading overhead (controller provides full text)
-- Controller curates exactly what context is needed
-- Subagent gets complete information upfront
-- Questions surfaced before work begins (not after)
-
-**Quality gates:**
-- Self-review catches issues before handing-off-work
-- Two-stage review: spec compliance, then code quality
-- Review loops ensure fixes actually work
-- Spec compliance prevents over/under-building
-- Code quality ensures implementation is well-built
-
-**Cost:**
-- More subagent invocations (implementer + 2 reviewers per task)
-- Controller does more prep work (extracting all tasks upfront)
-- Review loops add iterations
-- But catches issues early (cheaper than debugging later)
+Fresh context per task, curated inputs, automatic review checkpoints. See `references/why-subagents.md`.
 
 ## Red Flags
 
@@ -207,13 +180,13 @@ An end-to-end run: dispatch, review, integrate. See `examples/full-workflow.md`.
 ## Integration
 
 **Required workflow skills:**
-- **using-git-worktrees** - Ensures isolated workspace (creates one or verifies existing)
-- **writing-plans** - Creates the plan this skill executes
-- **requesting-code-review** - Code review template for reviewer subagents
-- **finishing-a-development-branch** - Complete development after all tasks
+- **`using-git-worktrees`** - Ensures isolated workspace (creates one or verifies existing)
+- **`writing-plans`** - Creates the plan this skill executes
+- **`requesting-code-review`** - Code review template for reviewer subagents
+- **`finishing-a-development-branch`** - Complete development after all tasks
 
 **Subagents should use:**
-- **test-driven-development** - Subagents follow TDD for each task
+- **`test-driven-development`** - Subagents follow TDD for each task
 
 **Alternative workflow:**
-- **executing-plans** - Use for parallel session instead of same-session execution
+- **`executing-plans`** - Use for parallel session instead of same-session execution

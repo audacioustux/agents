@@ -107,7 +107,7 @@ skills/
 - Max 1024 characters total
 - `name`: Use letters, numbers, and hyphens only (no parentheses, special chars)
 - `description`: Third-person, describes ONLY when to use (NOT what it does)
-  - Start with "Use when..." to focus on triggering conditions
+  - Open with the trigger: "Use when..." normally, or "Use before..." when the skill runs ahead of its trigger rather than in response to it
   - Include specific symptoms, situations, and contexts
   - **NEVER summarize the skill's process or workflow** (see CSO section for why)
   - Keep under 500 characters if possible
@@ -300,7 +300,7 @@ helper1, helper2, step3, pattern4
 **GREEN Phase - Write Minimal Skill:**
 - [ ] Name uses only letters, numbers, hyphens (no parentheses/special chars)
 - [ ] YAML frontmatter with required `name` and `description` fields (max 1024 chars; see [spec](https://agentskills.io/specification))
-- [ ] Description starts with "Use when..." and includes specific triggers/symptoms
+- [ ] Description opens with the trigger, normally "Use when..." and "Use before..." where the skill runs ahead of the trigger rather than in response to it
 - [ ] Description written in third person
 - [ ] Keywords throughout for search (errors, symptoms, tools)
 - [ ] Clear overview with core principle

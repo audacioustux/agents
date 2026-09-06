@@ -18,9 +18,11 @@ findable at the moment it is needed and by owning its rules outright.
 ```
 
 `SKILL.md` frontmatter carries `name` (matching the directory) and `description`.
-A description states when to use the skill and must contain an explicit trigger
-phrase, because that phrasing is what routes work here. Optional `uses:` records
-sibling skills the body names, with the source repository each came from.
+A description is third person and opens with its trigger, normally "Use when..."
+and "Use before..." for a skill that runs ahead of the trigger rather than in
+response to it. That opening is what routes work here, so it is load-bearing rather
+than stylistic. Optional `uses:` records sibling skills the body names, with the
+source repository each came from.
 
 Authoring rules live in `writing-skills`. Adversarial testing lives in
 `testing-skills`.

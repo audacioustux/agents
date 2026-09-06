@@ -1,6 +1,17 @@
 ---
 name: following-repo-ui-conventions
 description: Use when building, modifying, or reviewing repository-owned frontend UI. Enforces predictable, calm, accessible, responsive, theme-safe interfaces without depending on a specific framework, language, component library, or visual style.
+uses:
+  - name: refining-typography
+    source: audacioustux/agents
+  - name: building-color-systems
+    source: audacioustux/agents
+  - name: writing-interface-copy
+    source: audacioustux/agents
+  - name: building-responsive-layouts
+    source: audacioustux/agents
+  - name: building-accessible-interfaces
+    source: audacioustux/agents
 ---
 
 # Repo UI Conventions
@@ -17,6 +28,8 @@ Prioritize:
 4. broad UX principles only when they clarify a concrete product decision.
 
 Do not invent a new design system, visual style, framework pattern, or styling stack unless the user explicitly asks for one.
+
+Repository conventions outrank every rule in a sibling skill. Within them, `refining-typography` owns text rendering, `building-color-systems` owns palette construction and contrast measurement, `writing-interface-copy` owns user-facing wording, `building-responsive-layouts` owns adaptation and direction, and `building-accessible-interfaces` owns semantics, keyboard, and focus. Where those skills are not installed, apply the rule here and note the gap.
 
 ## When to use
 

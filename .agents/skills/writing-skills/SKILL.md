@@ -80,7 +80,6 @@ API docs, syntax guides, tool documentation (office docs)
 
 ## Directory Structure
 
-
 ```
 skills/
   skill-name/
@@ -139,12 +138,31 @@ Inline code for simple patterns
 Link to file for heavy reference or reusable tools
 
 ## Common Mistakes
-What goes wrong + fixes
+Two-column table. Left column is the observable symptom, right column is the fix.
+
+| Symptom | Fix |
+| --- | --- |
+| What the agent can actually detect | What to do about it |
 
 ## Real-World Impact (optional)
 Concrete results
 ```
 
+## Calibrate how hard to press
+
+A skill that lists rules without saying how hard to press leaves that to chance. State which values are exact rather than approximate, what counts as a finding versus a preference, and when the right answer is to write nothing. That is the difference between a review that blocks on evidence and one that blocks on taste.
+
+Match the degree of prescription to the decision. A requirement can be unconditional; a heuristic names its context and its escape conditions before giving a recipe value.
+
+## Write mistake tables as detection patterns
+
+Where a skill has recurring mistakes, a two-column table beats a prose list. The left column is the observable symptom, which is exactly what a principle statement does not give you: "orphan word alone on a paragraph's last line" is detectable, "use good typography" is not. The right column is the fix.
+
+A row that only restates the principle above it earns nothing. Cut it.
+
+## One home per rule
+
+Each rule lives in exactly one skill. Siblings point at the owner by name rather than restating it, because a rule stated twice drifts in one place and goes stale in the other. When a concern crosses domains, keep the rule with its owner and let the other skill state only the handoff.
 
 ## Claude Search Optimization (CSO)
 
@@ -299,7 +317,8 @@ helper1, helper2, step3, pattern4
 **Quality Checks:**
 - [ ] Small flowchart only if decision non-obvious
 - [ ] Quick reference table
-- [ ] Common mistakes section
+- [ ] Common mistakes as a two-column table, left column an observable symptom
+- [ ] Calibration stated: which values are exact, what counts as a finding
 - [ ] No narrative storytelling
 - [ ] Supporting files only for tools or heavy reference
 

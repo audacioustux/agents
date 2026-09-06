@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "note": "Provenance for consolidated agent skills. Maintenance metadata only — never loaded by agents. sha256 = plain SHA-256 of file bytes (independent of skills-lock.json's computedHash, whose derivation the vercel installer does not document). Skills marked owned:true now live in .agents/skills/ of this repo; their `upstream` block records what they were forked from and at which SHA, for periodic re-merge under human judgement.",
-  "captured": "2026-09-04",
+  "note": "Provenance for consolidated agent skills. Maintenance metadata only - never loaded by agents. sha256 = plain SHA-256 of file bytes. Skills marked owned:true live in .agents/skills/ of this repo; their `upstream` block records what they were forked from and at which SHA, for periodic re-merge under human judgement.",
+  "captured": "2026-09-06",
   "upstreams": {
     "obra/superpowers": {
       "sha": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
@@ -37,6 +37,20 @@
       "sha": "62793e0c49ed2fc7c8f0c99a8ab8898abdf32a1d",
       "ref": "HEAD",
       "captured": "2026-09-04"
+    },
+    "jakubkrehel/skills": {
+      "sha": "267330e1adfc66a718fb65fa6918c1f06d0a689e",
+      "ref": "HEAD",
+      "captured": "2026-09-06"
+    },
+    "vercel-labs/web-interface-guidelines": {
+      "ref": "main/command.md",
+      "captured": "2026-09-06",
+      "note": "unpinned: upstream is a single living rules file with no release tags; re-check by diffing the current file"
+    },
+    "jakubkrehel/oklch-skill": {
+      "ref": "main",
+      "captured": "2026-09-06"
     }
   },
   "skills": {
@@ -124,7 +138,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "29750948c73827a03f35ce79724fd6e7c883c539e12153b0ccf12e8ce6c24210",
+          "sha256": "2be6e4c2702d46f94ba619cc694d666e57a2b376c24319012201aa838afc859d",
           "upstream": {
             "status": "identical",
             "sha256": "6b526f7552bfd3a596ccf246f68da3b2c389026b987c65e6dbea9f59e6b8077a"
@@ -147,7 +161,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "61571bd1871bd51d5b2f0e09a2148451b0eb5fbb80bde342ae2501562c00caab",
+          "sha256": "6e2e7f31c9c5353d2ca0cb2a0a671223cb18dcd424cfd3970d134c14aa870686",
           "upstream": {
             "status": "identical",
             "sha256": "51b8d0b6730e70aa973f8e49b4a1389c0f73542f60669fa6a2c4334af9a4c043"
@@ -190,39 +204,11 @@
         }
       ],
       "state": "locally-modified",
-      "files": {
-        "SKILL.md": {
-          "sha256": "d7b70ba126d9f55d7dc014f95a8264c6c402f351574317909b8c6d14b85c829d",
-          "upstream": {
-            "status": "identical",
-            "sha256": "d7b70ba126d9f55d7dc014f95a8264c6c402f351574317909b8c6d14b85c829d"
-          }
-        },
-        "references/docs.md": {
-          "sha256": "ef9b201d183b42f161fca0422603119e10c8ce5c7dd6e53914908c3a9310c96c",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "144d463d5aa69c897395191d3509aec72d2e0fda0f03c0fdb20d6ab73210bd18"
-          }
-        },
-        "references/setup.md": {
-          "sha256": "79530eb571b56f9846fd714d3b5e2759f2102042e590347501e43bf22a56a6e0",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "9dac029e280a6eeb67de528ddcd645983f98bb1fda1e08b5753490d03301d6bd"
-          }
-        },
-        "references/skills.md": {
-          "sha256": "a31c9c56044424e07e764de7522fb542ce58b327259b582a1ba18223d13b26b5",
-          "upstream": {
-            "status": "identical",
-            "sha256": "a31c9c56044424e07e764de7522fb542ce58b327259b582a1ba18223d13b26b5"
-          }
-        }
-      },
+      "files": {},
       "decisions": [],
       "rationale": "vendor CLI surface; upstash owns tool truth",
-      "owned": false
+      "owned": false,
+      "presentInTree": false
     },
     "designing-component-systems": {
       "disposition": "keep-as-is",
@@ -236,7 +222,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "28f870d31b28f1c250f45c67a60b8c83551b24fb36aac44ac532e3b4ab619ac2",
+          "sha256": "b4dd71f0c5db713c001ab65802187df019bfb2826313866b593fbf1c036e000c",
           "upstream": {
             "status": "identical",
             "sha256": "b01dfb838a4f2e72c5287e6f56beb374fc65b61b422a230107964c2db28ee637"
@@ -339,18 +325,11 @@
         }
       ],
       "state": "locally-modified",
-      "files": {
-        "SKILL.md": {
-          "sha256": "1e85f6f9686e145aca4a124e3b704b9bbea9aa87e08515c1e352eee70f6e6e7a",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "c00eeea0e13e74fe4a9d84ba0a8542205a1b736d65f13134fe1a6647eb14976f"
-          }
-        }
-      },
+      "files": {},
       "decisions": [],
       "rationale": "user decision 2026-09-04; verified zero inbound references",
-      "owned": false
+      "owned": false,
+      "presentInTree": false
     },
     "finishing-a-development-branch": {
       "disposition": "merge",
@@ -391,29 +370,11 @@
         }
       ],
       "state": "locally-modified",
-      "files": {
-        "SKILL.md": {
-          "sha256": "e413e43067ad20e9afaa1e4ae46b7cd87a83bcaa66577b395c2f4cf0067b63c8",
-          "upstream": {
-            "status": "added-locally"
-          }
-        },
-        "rules/install.md": {
-          "sha256": "a9a284fb0d3f184471864b54f9b963571775e58fd448dda12b1a80811806f8b0",
-          "upstream": {
-            "status": "added-locally"
-          }
-        },
-        "rules/security.md": {
-          "sha256": "44ec97b88c7e8e1cd855cabbe737d16b80cdde3de21420821012634a80c806f0",
-          "upstream": {
-            "status": "added-locally"
-          }
-        }
-      },
+      "files": {},
       "decisions": [],
       "rationale": "vendor CLI doc; upstream path 404s at pin — needs re-locating",
-      "owned": false
+      "owned": false,
+      "presentInTree": false
     },
     "following-repo-ui-conventions": {
       "disposition": "keep-as-is",
@@ -427,7 +388,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "895f122e0dbd6adad3b3f0302feb0ca3b521f9d2eaf43fe930312c5dc7ad9721",
+          "sha256": "399127d789b231b10259714f8c6e83dd32cf07ab84f3eb1d265ee6027e54aed6",
           "upstream": {
             "status": "identical",
             "sha256": "a750f8e941ba6184ab22ef84427f119e2d56b3a36b6896a472dfd66c5398e7d8"
@@ -473,7 +434,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "9cb64f503a125cee230ba5f79bb18667ff0a616b359ab82d4b503e7732f1e227",
+          "sha256": "819fbe4d2aa482c621da810c25958fdc02eaaece58675ccba342621b8e59e116",
           "upstream": {
             "status": "identical",
             "sha256": "a7b01ea320004238655aced38bb0a8501043cf33009496280160145402d8066e"
@@ -723,50 +684,11 @@
         }
       ],
       "state": "locally-modified",
-      "files": {
-        "SKILL.md": {
-          "sha256": "af059705061156fd4845ddbb736fe92b564118ac5f03551e09ef9e8f6d970638",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "cb01f66bebfaa25fa1f88e6b7e769cd9fd9f35b1120b8563749820738814c927"
-          }
-        },
-        "deep-modules.md": {
-          "sha256": "f2123700bf953db1740625686c75bdd145efd486357c47c6818c869fee657a32",
-          "upstream": {
-            "status": "added-locally"
-          }
-        },
-        "interface-design.md": {
-          "sha256": "764c5ff0e3fa6b4ab7095eb65ccc7201e090baf19fa16051dfdb72c06d27417d",
-          "upstream": {
-            "status": "added-locally"
-          }
-        },
-        "mocking.md": {
-          "sha256": "3ceb807fdf4a47d6a93d4d9a891e5ba6d362a6247bd08adc451feebfc17361ef",
-          "upstream": {
-            "status": "identical",
-            "sha256": "3ceb807fdf4a47d6a93d4d9a891e5ba6d362a6247bd08adc451feebfc17361ef"
-          }
-        },
-        "refactoring.md": {
-          "sha256": "54fced22dd1911b7094c3fe7979b7c1a40d40be307482c4adf7dc0588f27d6cc",
-          "upstream": {
-            "status": "added-locally"
-          }
-        },
-        "tests.md": {
-          "sha256": "e12182f5c4c6a844b7c6ab4b8d2623b642aaaae5460fe58ed087efd4f3d5fb8a",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "859f9e592c188fda4fc7277dd180e4ce9c7a2e13f6efe1f6f29eccc9d28c106a"
-          }
-        }
-      },
+      "files": {},
       "decisions": [],
       "rationale": "duplicate TDD territory; fold unique content, keep the name 7 cross-refs point at",
-      "owned": false
+      "owned": false,
+      "presentInTree": false
     },
     "test-driven-development": {
       "disposition": "merge",
@@ -926,38 +848,11 @@
         }
       ],
       "state": "locally-modified",
-      "files": {
-        "SKILL.md": {
-          "sha256": "316e29381219adf0cac62190c67aeabf427d6e6e5f2735541d502b3d339be7aa",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "30f2ab78e20ddc27ee7158ae8d4a2abe161c360981c7cc3548070913142d3dc3"
-          }
-        },
-        "references/codex-tools.md": {
-          "sha256": "37e06103a352516dcec2eb326f990d50c6728b571135cc7b54cbbb8902c451e0",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "1a38ad9b188c393052f58d95657a1c35ea6aafc8b5a27f198f3922912f70bbe7"
-          }
-        },
-        "references/copilot-tools.md": {
-          "sha256": "9fb400a432d31494c6d764506f04227c4b8d89e27a09f84da9cc2b75998f2db6",
-          "upstream": {
-            "status": "added-locally"
-          }
-        },
-        "references/gemini-tools.md": {
-          "sha256": "a66092fb2dd2c69b6b6d1098feaf456614521fd7b887cf7cb4160c8040ed1d62",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "62b9157bcb0ee3c6784e3d0da0798ddfa5872f9e0c34bea48f3079dabea71965"
-          }
-        }
-      },
+      "files": {},
       "decisions": [],
       "rationale": "obra bootstrap; branding+namespace guidance stale post-consolidation",
-      "owned": false
+      "owned": false,
+      "presentInTree": false
     },
     "verifying-before-completion": {
       "disposition": "merge",
@@ -992,18 +887,11 @@
         }
       ],
       "state": "locally-modified",
-      "files": {
-        "SKILL.md": {
-          "sha256": "8e652d2267c967700bf4ab4b416d0afc571ed05076082e1bc92b98b85ba7fcb4",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "71b36b64b6ab05c3372dbbc8a7e42f11c099de6f381e9000cda95552f5232cbe"
-          }
-        }
-      },
+      "files": {},
       "decisions": [],
       "rationale": "Brave API surface; vendor owns it",
-      "owned": false
+      "owned": false,
+      "presentInTree": false
     },
     "writing-plans": {
       "disposition": "merge",
@@ -1046,7 +934,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "8e08bc56e356cd0a230891446968b963c6559bada64c5b5b94ef06b3317e8c8c",
+          "sha256": "29179cb19a3f73019eba49b5c615b8b8875b735d71005ce826d5f94dab8048df",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"
@@ -1070,6 +958,108 @@
       "decisions": [],
       "rationale": "becomes the authoring standard for the agents repo",
       "owned": true
+    },
+    "refining-typography": {
+      "disposition": "merge",
+      "upstream": [
+        {
+          "repo": "jakubkrehel/skills",
+          "sha": "267330e1adfc66a718fb65fa6918c1f06d0a689e",
+          "path": "skills/better-typography"
+        }
+      ],
+      "state": "owned-normalized",
+      "files": {
+        "SKILL.md": {
+          "sha256": "e88b17e24a5225c40cca481fe1b4bfd35eafbd79c07c645bff81adf069ee53b8",
+          "upstream": {
+            "status": "rewritten"
+          }
+        },
+        "references/opentype-and-variable-fonts.md": {
+          "sha256": "fa27c17c53d9be1038951d54b959dc3d548999db5f7bb427a5b3b011e8672828",
+          "upstream": {
+            "status": "rewritten"
+          }
+        },
+        "references/measure-and-line-length.md": {
+          "sha256": "28d72c8308253904c16b0f152e1dc1e1ac64a423ab8c2855211209cfdb6440d4",
+          "upstream": {
+            "status": "rewritten"
+          }
+        },
+        "references/ios-input-zoom-recipes.md": {
+          "sha256": "82975789276f90a5c2eb5ba2c8c65cd933f274c18fad8cab1512b0e5c76f3d5d",
+          "upstream": {
+            "status": "rewritten"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
+      "owned": true
+    },
+    "building-color-systems": {
+      "disposition": "merge",
+      "upstream": [
+        {
+          "repo": "jakubkrehel/skills",
+          "sha": "267330e1adfc66a718fb65fa6918c1f06d0a689e",
+          "path": "skills/better-colors"
+        }
+      ],
+      "state": "owned-normalized",
+      "files": {
+        "SKILL.md": {
+          "sha256": "3826f6ecd75eac94056cec3c850dd1c57289764437bbd4b172d3260994c3119a",
+          "upstream": {
+            "status": "rewritten"
+          }
+        },
+        "references/ramp-roles.md": {
+          "sha256": "1735db38ebe732e97402a4bb7956f49bfe1770513857b58c82ea77da6d1e2498",
+          "upstream": {
+            "status": "rewritten"
+          }
+        },
+        "references/notation-and-gamut.md": {
+          "sha256": "3322b7efb63e254580c4c4d7581b281612264bacd5bfc1a961a353eb6b3689a9",
+          "upstream": {
+            "status": "rewritten"
+          }
+        },
+        "references/measuring-contrast.md": {
+          "sha256": "709d5411a2ff18c63e08346c8a95f02035e32afb7b72c68d2787f928c5e0f914",
+          "upstream": {
+            "status": "rewritten"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
+      "owned": true
+    },
+    "writing-interface-copy": {
+      "disposition": "merge",
+      "upstream": [
+        {
+          "repo": "jakubkrehel/skills",
+          "sha": "267330e1adfc66a718fb65fa6918c1f06d0a689e",
+          "path": "skills/better-writing"
+        }
+      ],
+      "state": "owned-normalized",
+      "files": {
+        "SKILL.md": {
+          "sha256": "32edd29ba6b55e85e526b983ac8ec4e558e5ae5594ce9b2d5ed6602ec23fcdc3",
+          "upstream": {
+            "status": "rewritten"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
+      "owned": true
     }
   },
   "dispositionsRecorded": "2026-09-04",
@@ -1090,11 +1080,17 @@
     "standalone": "Verified by enumeration, not sampling: all 24 declared dependency edges were exercised with the target skill absent, across four isolated installs. Zero dead ends. 8 edges carry an explicit fallback; 16 are informational cross-references ('Related skills' entries, scope notes) that strand nobody. Only imperative handoffs require a fallback.",
     "metrics": "Corpus at 8ff325d: 24 skills, 42 companions, mean 817w, max 1562w (writing-skills), 6 skills over 1000w. Earlier summaries reported mean 809w / max 1422w - those were measured before the 'Declaring cross-skill dependencies' section was added in the same commit (eda7812), so they understated writing-skills by 140w.",
     "diagrams": "Diagrams are mermaid fences, not graphviz. graphviz needs a `dot` binary that is not installed here, so the 11 dot fences were unrendered source text; mermaid renders natively in GitHub, VS Code, and agent UIs. TheGrid's docs/conventions/diagramming.md already mandates mermaid, and diagramming-with-mermaid explicitly defers format choice to the consuming repo. 9 fences converted and validated with mermaid.parse; one deliberately-bad example left as dot; graphviz-conventions.dot and render-graphs.js deleted as dead.",
-    "mermaid-validation": "Validated against mermaid 11.17.2: Pass A mermaid.parse under jsdom 9/9; Pass B mermaid.render in real Chromium 9/9 with no error-SVG and min SVG 13,895 bytes (real diagrams, not stubs). Both passes teeth-checked 5/5 against unclosed brackets, misspelled type, ':: ' in state label, ';' in sequence message, malformed ER cardinality. Silent-pitfall scan clean; parenthesised labels confirmed verbatim via getDiagramFromText. Note: this repo pins no mermaid dependency and has no CI check, so GitHub's renderer version may differ."
+    "mermaid-validation": "Validated against mermaid 11.17.2: Pass A mermaid.parse under jsdom 9/9; Pass B mermaid.render in real Chromium 9/9 with no error-SVG and min SVG 13,895 bytes (real diagrams, not stubs). Both passes teeth-checked 5/5 against unclosed brackets, misspelled type, ':: ' in state label, ';' in sequence message, malformed ER cardinality. Silent-pitfall scan clean; parenthesised labels confirmed verbatim via getDiagramFromText. Note: this repo pins no mermaid dependency and has no CI check, so GitHub's renderer version may differ.",
+    "ui-domain-gaps": "Measured 2026-09-06: zero corpus hits for text-wrap, tabular-nums, OpenType, variable-font, oklch, gamut, contrast-ratio, microcopy, font-size, line-height, letter-spacing. Typography, color-system construction and interface copy were genuinely uncovered - existing skills detected the symptoms (reviewing-ux-in-browser 'wrapping, overflow, clipped controls'; following-repo-ui-conventions grading 'inconsistent spacing/copy') without owning any fix. Closed with three new skills rewritten from jakubkrehel/skills (MIT). His orchestration layer (better-interface, interface-review, variant, break, explain-interface) rejected: duplicates requesting-code-review and reviewing-ux-in-browser machinery.",
+    "source-rejections": "Leonxlnx/taste-skill REJECTED: self-scopes to marketing pages ('NOT for: Dashboards / dense product UI / admin panels'), prescribes a visual style that following-repo-ui-conventions:19 forbids inventing, 1207-line body against a <1000-word target. designmotionhq.com/patterns REJECTED as a source: quality spread within one site - z-index-mastery is correct CSS mechanics while golden-ratio is myth ('seashells, galaxies', unsourced Stripe/Linear claim) whose 1.618 type scale contradicts the measured typography rules; unsourced motion ms dials conflict with exact values held elsewhere. One verified line adopted: stacking-context behaviour into building-responsive-layouts. jakub.kr blog articles superseded by his skills repo, which is the same author's material in reviewable form.",
+    "rule-ownership": "Each rule lives in exactly one skill; siblings state a hand-off rather than restating. Contrast splits deliberately: building-accessible-interfaces decides whether a ratio is required, building-color-systems measures the rendered pair and changes values. Typography owns text rendering, writing-interface-copy owns the words. Hand-off lines added to building-accessible-interfaces, designing-component-systems and following-repo-ui-conventions so ownership survives the corpus growing.",
+    "authoring-conventions": "Adopted 2026-09-06 from jakubkrehel/skills AGENTS.md: calibration (state how hard to press), detection-pattern mistake tables (left column an observable symptom, not a restated principle), and one-home-per-rule with explicit hand-off lines. The SKILL.md template block and the creation checklist were updated in the same pass so the template does not teach prose for a section the rule requires as a table. Rejected his no-trigger-list description philosophy: it contradicts this corpus's routing constraint that descriptions carry a 'Use when' trigger.",
+    "vendor-snapshot-removed": "Removed 2026-09-06. vendor-snapshot/local (584K) was byte-identical to the pre-consolidation tree already in git history - verified by comparing blob sha256 at 2e3c5aa~1. vendor-snapshot/upstream (568K) was verified fetchable on demand at each pinned SHA with matching sha256. What is load-bearing for re-merge is the pinned SHA plus the recorded hash, not the bytes. Cost of the removal: a re-merge now needs network, and a force-pushed or deleted upstream is unrecoverable - accepted, since the pins are public repos and the recorded hashes still prove drift.",
+    "scope": "This repo consolidates cross-cutting craft knowledge that multiple third-party sources each state slightly differently - accessibility, layout, typography, color, copy, review and process workflow. Vendor tool skills (framework, design-tool, CLI and API surfaces) are NOT forked here: they change when the vendor's product changes, so the vendor owns that truth and they are installed from the publisher. Forking one buys a maintenance burden and guarantees staleness.",
+    "registry-survey": "Surveyed ui-skills.com/skills/registry.txt (289 entries, ~80 sources) on 2026-09-06. Found via a browser crawl of jakub.kr after reading rendered text repeatedly failed - the catalog indexes both sources previously supplied (jakubkrehel, leonxlnx), so those were leaves of a tree not yet examined. Verdicts: the overwhelming majority are VENDOR TOOL SKILLS (figma 16, antfu 19 framework skills, vuejs-ai 8, mengto 18 GSAP/three.js, vercel next-*, microsoft playwright, remotion) - rejected by scope, not quality: those belong to their publishers and are installed, never forked. Adopted MECHANISMS ONLY from two: vercel-labs/web-interface-guidelines (an org-backed rule list; extracted form affordances, motion, compositor, CLS, safe-area, i18n and native-theming rules into the five existing owner skills) and jakubkrehel/oklch-skill (confirmed the perceptual-lightness and hue-drift rules already carried in building-color-systems; its channel-range table and APCA thresholds were already covered by references/notation-and-gamut.md and references/measuring-contrast.md). Rejected as skills: ibelick/baseline-ui (deslop UI - overlaps cleaning-ai-slop and following-repo-ui-conventions), anthropics/frontend-design and the generative aesthetic skills (prescribe a visual style that following-repo-ui-conventions forbids inventing), cursor/unslop (prose humanizing, not UI), the accesslint set (a hosted rule engine - a tool to run, not knowledge to hold), mattpocock/* process skills (this corpus already forked what it wanted at 3cca18b). No third-party skill was installed or vendored as a result of this survey.",
+    "clip-path-article": "jakub.kr/work/clip-path-buttons found by browser crawl and absent from /api/rss, so an RSS-derived inventory missed it. Content is one sentence plus an interactive demo, no extractable rules. Rejected.",
+    "absent-records": "Six records describe skills deliberately not present in .agents/skills/: context7-cli, firecrawl and web-search are vendor surfaces installed from their publisher rather than forked; find-skills is retired; tdd was folded into test-driven-development; using-superpowers was retired as its Skill-tool bootstrap premise fails in an auto-injecting harness. Each carries presentInTree:false and an empty files map, so a drift check does not report intentional absence as missing files. Their upstream pins are kept so the decision stays auditable."
   },
   "consolidated": "2026-09-04",
-  "vendorSnapshot": {
-    "local": "vendor-snapshot/local/ — the tree as it stood before consolidation",
-    "upstream": "vendor-snapshot/upstream/<repo>/<sha>/<path> — upstream bytes at each pinned SHA. Makes the fork base survive upstream deletion or force-push, and lets a drift job run with no network."
-  }
+  "upstreamRetrieval": "Upstream bytes are fetched on demand at the pinned SHA rather than vendored into this repo: https://raw.githubusercontent.com/<repo>/<sha>/<path>. Every upstream file records its sha256 here, so a drift check verifies the fetched bytes without trusting the network. A vendor-snapshot/ directory previously held these bytes; it was removed as bloat (1.2MB, 134 files) after verifying the fetched blobs are byte-identical to the snapshot and that vendor-snapshot/local duplicated content already in git history at f7b6fdf."
 }

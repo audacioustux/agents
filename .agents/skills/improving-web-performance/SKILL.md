@@ -47,6 +47,8 @@ Use these as practical targets unless the product has stricter budgets:
 - Lazy-load below-the-fold content that is not needed for the initial task.
 - Avoid font loading that hides or shifts critical text.
 - Preload only high-confidence critical resources; excessive preloading competes with real work.
+- Preconnect to third-party asset and CDN origins the critical path depends on, so DNS and TLS do not serialize ahead of the first useful byte.
+- Preload critical fonts and pair them with a swap display strategy, so text paints in a fallback rather than staying invisible.
 - Avoid shipping large unused JavaScript or CSS for the current route.
 
 ### Runtime responsiveness
@@ -56,12 +58,20 @@ Use these as practical targets unless the product has stricter budgets:
 - Debounce or defer expensive work when immediate precision is not required.
 - Virtualize only when list size justifies it; do not add virtualization complexity for small lists.
 - Move non-urgent work out of critical interaction paths.
+- Animate compositor-friendly properties (transform and opacity). Animating layout or paint properties forces work every frame.
+- Never transition every property at once: list them explicitly, or an unrelated future property silently joins the animation.
+- Keep layout reads (element geometry, scroll offsets) out of render, and batch reads before writes so the two do not interleave and force repeated layout.
+- Promote a layer only while it is actually animating. A permanent will-change hint holds memory and can make paint worse than not hinting at all.
+- Pause looping animation and video that is scrolled out of view; off-screen work costs the same as visible work.
+- Large blurred or backdrop-filtered surfaces are expensive to composite every frame. Keep them small, static, or both.
 
 ### Visual stability
 
 - Reserve dimensions for images, embeds, skeletons, ads, banners, and async result blocks.
 - Avoid injecting content above the user's current task after interaction begins.
 - Keep overlay shells stable while results update.
+- Give images explicit dimensions or an aspect ratio so the space is reserved before the bytes land; this is the most common single cause of layout shift.
+- Mark below-the-fold images lazy and above-the-fold hero images high priority. Both defaults are wrong for the other case.
 
 ### Feedback and resilience
 

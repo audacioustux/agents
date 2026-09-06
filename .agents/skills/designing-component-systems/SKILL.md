@@ -1,6 +1,11 @@
 ---
 name: designing-component-systems
 description: Use when building or reviewing UI components, component APIs, design tokens, theming, slots/composition, controlled and uncontrolled state, reusable styling, documentation, and component library boundaries. Stack-agnostic.
+uses:
+  - name: building-color-systems
+    source: audacioustux/agents
+  - name: refining-typography
+    source: audacioustux/agents
 ---
 
 # Component System Design
@@ -8,6 +13,8 @@ description: Use when building or reviewing UI components, component APIs, desig
 ## Role
 
 Build reusable UI pieces that are accessible, composable, theme-aware, testable, and easy to adopt without locking the project into a particular framework or visual style.
+
+This skill owns how components consume tokens. Building the palette those tokens point at, including ramp construction and contrast measurement, belongs to `building-color-systems`. Text rendering inside a component belongs to `refining-typography`. Where those skills are not installed, apply the rule here and note the gap.
 
 ## When to use
 
@@ -72,6 +79,10 @@ Do not bury important state transitions in styling-only hooks or side effects.
 - Avoid raw hex values, arbitrary spacing, and custom CSS that bypasses the design system.
 - Prefer the repo's styling system. Utility-first, CSS modules, vanilla CSS, CSS-in-JS, design tokens, or UI-library styles are all acceptable when they are already the project convention.
 - If the same styling combination appears repeatedly, extract a shared composition rather than copying drift.
+- Use one corner-radius scale per surface. Mixing radius systems is one of the most common reasons an interface reads as unfinished, and a deliberate mix needs a stated rule.
+- Nested corners are concentric: an inner radius plus its padding gives the outer radius. Equal radii on nested elements look wrong at the corner.
+- Borders communicate structure and state; depth is better carried by layered shadows. Where a border exists only to suggest elevation, prefer a shadow built from several low-alpha layers (a hairline, a tight contact shadow, a wider diffuse one) rather than one large blur.
+- A translucent shadow adapts to whatever sits behind it. A solid border colour only works against the background it was picked for, so surfaces over images or varied backgrounds should carry shadow rather than border.
 
 ## Component states to cover
 

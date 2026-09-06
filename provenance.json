@@ -66,7 +66,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "53b59817f70111d277e79871dd625a8c96d5f02041bc360b312243e453d6c63d",
+          "sha256": "00d326a392dc0a48c83248bb2807a72916cbd47c3d0d453cf3bbdbae1c7d4153",
           "upstream": {
             "status": "diverged",
             "sha256": "74edf03ea6d24ef53db48677b93558d14a979bdf052ca3f57ecdca0c66791608"
@@ -343,7 +343,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "72dd135d20e9963c53afcba96b908500d8d549f75722ccd6871ddb14ab50f9c1",
+          "sha256": "a071a5c0d417797f1c758dd85ea1a54dc0e72ac87bd148aff17d9193b04f2500",
           "upstream": {
             "status": "diverged",
             "sha256": "8db5a922b242dd4e1bf824cb91c13b3e8d8e8a86d6ceaf7f0774eb9cce909d65"
@@ -905,7 +905,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "4af2007f43faa1f4e352cf713e2bf2ab953ee450678cd96db3e23ab71ba78c32",
+          "sha256": "eb5c61ce02b39fc0d2843e06611709d29e301142b5d4784d649f2f6b82e6e799",
           "upstream": {
             "status": "diverged",
             "sha256": "48508f44bbfd7d24b029fbf3a314f3cd14c9615599059366e922f47b8dc08cf2"
@@ -934,7 +934,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "29179cb19a3f73019eba49b5c615b8b8875b735d71005ce826d5f94dab8048df",
+          "sha256": "aa8ac614404e513911726881bd9d04c801ea0e7b64f616e7f8f2e410a4fdd191",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"
@@ -1089,7 +1089,8 @@
     "scope": "This repo consolidates cross-cutting craft knowledge that multiple third-party sources each state slightly differently - accessibility, layout, typography, color, copy, review and process workflow. Vendor tool skills (framework, design-tool, CLI and API surfaces) are NOT forked here: they change when the vendor's product changes, so the vendor owns that truth and they are installed from the publisher. Forking one buys a maintenance burden and guarantees staleness.",
     "registry-survey": "Surveyed ui-skills.com/skills/registry.txt (289 entries, ~80 sources) on 2026-09-06. Found via a browser crawl of jakub.kr after reading rendered text repeatedly failed - the catalog indexes both sources previously supplied (jakubkrehel, leonxlnx), so those were leaves of a tree not yet examined. Verdicts: the overwhelming majority are VENDOR TOOL SKILLS (figma 16, antfu 19 framework skills, vuejs-ai 8, mengto 18 GSAP/three.js, vercel next-*, microsoft playwright, remotion) - rejected by scope, not quality: those belong to their publishers and are installed, never forked. Adopted MECHANISMS ONLY from two: vercel-labs/web-interface-guidelines (an org-backed rule list; extracted form affordances, motion, compositor, CLS, safe-area, i18n and native-theming rules into the five existing owner skills) and jakubkrehel/oklch-skill (confirmed the perceptual-lightness and hue-drift rules already carried in building-color-systems; its channel-range table and APCA thresholds were already covered by references/notation-and-gamut.md and references/measuring-contrast.md). Rejected as skills: ibelick/baseline-ui (deslop UI - overlaps cleaning-ai-slop and following-repo-ui-conventions), anthropics/frontend-design and the generative aesthetic skills (prescribe a visual style that following-repo-ui-conventions forbids inventing), cursor/unslop (prose humanizing, not UI), the accesslint set (a hosted rule engine - a tool to run, not knowledge to hold), mattpocock/* process skills (this corpus already forked what it wanted at 3cca18b). No third-party skill was installed or vendored as a result of this survey.",
     "clip-path-article": "jakub.kr/work/clip-path-buttons found by browser crawl and absent from /api/rss, so an RSS-derived inventory missed it. Content is one sentence plus an interactive demo, no extractable rules. Rejected.",
-    "absent-records": "Six records describe skills deliberately not present in .agents/skills/: context7-cli, firecrawl and web-search are vendor surfaces installed from their publisher rather than forked; find-skills is retired; tdd was folded into test-driven-development; using-superpowers was retired as its Skill-tool bootstrap premise fails in an auto-injecting harness. Each carries presentInTree:false and an empty files map, so a drift check does not report intentional absence as missing files. Their upstream pins are kept so the decision stays auditable."
+    "absent-records": "Six records describe skills deliberately not present in .agents/skills/: context7-cli, firecrawl and web-search are vendor surfaces installed from their publisher rather than forked; find-skills is retired; tdd was folded into test-driven-development; using-superpowers was retired as its Skill-tool bootstrap premise fails in an auto-injecting harness. Each carries presentInTree:false and an empty files map, so a drift check does not report intentional absence as missing files. Their upstream pins are kept so the decision stays auditable.",
+    "description-conventions": "Audited 2026-09-06 against the rules the corpus actually codifies in writing-skills (third person, trigger phrase, name matches directory) rather than invented ones. Three violations fixed: brainstorming was second person with no trigger ('You MUST use this before...'), finishing-a-development-branch and writing-plans each addressed the reader as 'you'. writing-skills also gained a writing-plans entry in uses:, since it names that skill in prose while teaching the convention. Note: an earlier pass flagged em dashes and curly quotes across 40 files; that standard is NOT codified anywhere in this repo and those files were left alone. Style rules that no document states are not violations."
   },
   "consolidated": "2026-09-04",
   "upstreamRetrieval": "Upstream bytes are fetched on demand at the pinned SHA rather than vendored into this repo: https://raw.githubusercontent.com/<repo>/<sha>/<path>. Every upstream file records its sha256 here, so a drift check verifies the fetched bytes without trusting the network. A vendor-snapshot/ directory previously held these bytes; it was removed as bloat (1.2MB, 134 files) after verifying the fetched blobs are byte-identical to the snapshot and that vendor-snapshot/local duplicated content already in git history at f7b6fdf."

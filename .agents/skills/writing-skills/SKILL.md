@@ -8,6 +8,8 @@ uses:
     source: audacioustux/agents
   - name: test-driven-development
     source: audacioustux/agents
+  - name: writing-plans
+    source: audacioustux/agents
 ---
 
 # Writing Skills

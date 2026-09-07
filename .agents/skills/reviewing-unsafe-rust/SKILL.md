@@ -12,11 +12,13 @@ uses:
 
 ## Overview
 
-`unsafe` does not switch off the borrow checker. It unlocks five specific operations
-the compiler cannot verify, and leaves every other rule in force.
+`unsafe` does not switch off the borrow checker. It unlocks a specific, enumerable set
+of operations the compiler cannot verify, and leaves every other rule in force.
 
 Reviewing unsafe code is therefore not a search for danger in general. It is checking,
 per operation, what that operation requires and whether something guarantees it.
+
+Verified against stable Rust as of 1.90, editions 2021 and 2024.
 
 ## When to use
 
@@ -32,14 +34,19 @@ Auditing dependencies for unsafe code belongs to `hardening-rust-supply-chain`.
 
 ## What unsafe actually grants
 
-Exactly five capabilities: dereferencing a raw pointer, calling an unsafe function,
-accessing or modifying a mutable static, implementing an unsafe trait, and reading a
-union field.
+Five operations, plus two cases that arrived later. The classic five: dereferencing a
+raw pointer, calling an unsafe function, accessing or modifying a mutable static,
+implementing an unsafe trait, and reading a union field. Each is genuinely gated —
+omitting `unsafe` is `E0133` for the operations, `E0200` for the trait impl. Inline
+assembly is a sixth, gated the same way. In edition 2024, attributes such as
+`#[no_mangle]` also require an `unsafe(...)` wrapper, so a list of "five" is now the
+historical framing rather than the current count.
 
 Everything else follows safe rules inside the block. Borrowing, lifetimes, and
-allocation behave as they always do. This matters because a block wrapping fifty
-lines to cover one dereference tells a reviewer nothing about which line is
-load-bearing. Keep the block around the operation that needs it.
+allocation behave as they always do — a use-after-borrow inside an `unsafe` block is
+still `E0502`. This matters because a block wrapping fifty lines to cover one
+dereference tells a reviewer nothing about which line is load-bearing. Keep the block
+around the operation that needs it.
 
 That principle has a consequence worth stating on its own: `unsafe` is not an escape
 hatch. Reaching for it because the borrow checker rejected a design converts a
@@ -103,25 +110,32 @@ Ownership has to be settled explicitly and in one direction. Which side allocate
 which side frees, and with which allocator. Freeing foreign memory with Rust's
 allocator, or the reverse, is undefined behaviour that usually appears to work.
 
-A Rust panic unwinding into foreign frames is undefined behaviour. Any `extern` entry
+A Rust panic must not escape into foreign frames. Since Rust 1.81 an unwind reaching
+an `extern "C"` boundary aborts the process rather than causing undefined behaviour —
+safer than it was, but still a crash your caller cannot handle. Any `extern` entry
 point that could panic needs the unwind caught at the boundary and converted into
 something the other side understands, typically an error code.
 
 Types crossing the boundary need a guaranteed layout. Rust's default representation
-gives no ordering or padding promises, so anything shared with C needs an explicit C
-representation rather than an assumption that the fields land where they look like
-they land.
+promises nothing about field order or padding, and it genuinely reorders: a struct of
+`u8, u32, u8` lays out as `a` at offset 4, `b` at 0, `c` at 5 under `repr(Rust)`,
+against 0/4/8 under `repr(C)`. Anything shared with C needs the explicit C
+representation rather than an assumption that fields land where they look like they do.
 
 ## Verification
 
 Miri interprets Rust and detects undefined behaviour that testing alone will not
 surface: out-of-bounds access, use-after-free, misaligned access, and aliasing
-violations. It runs the code paths your tests reach, so its coverage is your tests'
-coverage.
+violations. The gap is not theoretical. A crate containing an out-of-bounds read and
+a double-`&mut` passes `cargo test` green on both, and `cargo miri test` fails with
+"error: Undefined Behavior" on each. Miri runs only the code paths your tests reach,
+so its coverage is your tests' coverage — and it stops at the first violation, so a
+clean second run after a fix is not proof that there was only one.
 
 Clippy catches only a small share of unsafe defects, and that is by design rather
-than a gap to be closed — most soundness obligations are not lint-shaped. Treat a
-clean lint run as no evidence at all about unsafe correctness.
+than a gap to be closed — most soundness obligations are not lint-shaped. On the same
+out-of-bounds read, Clippy exits zero with no warnings at all. Treat a clean lint run
+as no evidence whatsoever about unsafe correctness.
 
 Sanitisers are the third layer, catching at run time what static analysis cannot
 reach. None of these substitute for the per-operation argument; they check it.
@@ -134,7 +148,7 @@ reach. None of these substitute for the per-operation argument; they check it.
 - Does every `unsafe fn` carry a `# Safety` section stating the caller's obligation?
 - Is every manual `Send`/`Sync` justified against every field?
 - At each FFI boundary: lengths bounded, ownership assigned, unwind caught, layout guaranteed?
-- Has Miri run over the tests that exercise the unsafe paths?
+- Has Miri run over tests that actually reach the unsafe paths under review?
 
 ## Anti-patterns
 
@@ -144,3 +158,5 @@ reach. None of these substitute for the per-operation argument; they check it.
 - A safe function documenting a precondition it does not enforce.
 - Assuming a length supplied by foreign code.
 - Trusting a clean Clippy run as evidence about unsafe code.
+- Treating a "five capabilities" list as current: inline asm and, in edition 2024, unsafe attributes also qualify.
+- Assuming an escaping panic is UB rather than an abort, and skipping the catch because "it works".

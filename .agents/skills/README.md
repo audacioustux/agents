@@ -66,8 +66,10 @@ Current UI ownership boundaries:
 | `improving-web-performance` | Loading, runtime responsiveness, visual stability, resilience |
 | `reviewing-ux-in-browser` | Browser verification procedure |
 
-How the UI skills compose. An arrow means "defers this concern to", declared in the
-source skill's `uses:` block and stated in its hand-off line:
+How the UI skills compose. A solid arrow means "defers this concern to", declared in
+the source skill's `uses:` block and stated in its hand-off line. The one dashed arrow
+means "verifies", which is a procedure relationship rather than a deferral and carries
+no `uses:` entry in either direction:
 
 ```mermaid
 flowchart TD
@@ -92,10 +94,11 @@ flowchart TD
   browser -.->|verifies| conv
 ```
 
-`following-repo-ui-conventions` is the entry point and takes no inbound edge on
-purpose: repository conventions outrank every sibling rule. `reviewing-ux-in-browser`
-is a procedure rather than a domain, so it verifies the others rather than owning
-rules they defer to it.
+`following-repo-ui-conventions` is the entry point and takes no inbound deferral on
+purpose: repository conventions outrank every sibling rule, so no skill hands its
+rules upward. `reviewing-ux-in-browser` is a procedure rather than a domain, so it
+verifies the others rather than owning rules they defer to it, which is why its one
+arrow is dashed.
 
 ## Upstream tracking
 
@@ -119,8 +122,9 @@ force-pushes or disappears takes its history with it. The pins are public
 repositories and the recorded hashes still prove drift, so the bytes were not worth
 the megabyte they cost.
 
-Skills marked `owned: false` are vendor surfaces tracked here for convenience.
-Prefer installing those from their publisher.
+Skills marked `owned: false` are absent from this tree by decision, and the record
+says which decision: left to its publisher, merged into a sibling, or retired. The
+entry survives so a later pass finds the reasoning instead of re-adopting the skill.
 
 ## Adding or changing a skill
 

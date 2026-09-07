@@ -132,7 +132,7 @@ For long or multi-step flows:
 - Test at 200% zoom.
 - Review screen-reader names for icon-only controls.
 - Submit invalid forms and confirm focus/error behavior.
-- Enable reduced motion and verify non-essential animation is removed.
+- Enable reduced motion and confirm each animation is reduced rather than merely switched off, so the state change still reads.
 - Confirm color is not the only state signal.
 
 ## Review output format

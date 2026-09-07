@@ -1,6 +1,9 @@
 ---
 name: improving-web-performance
 description: Use when reviewing or improving frontend performance, Core Web Vitals, loading behavior, runtime responsiveness, visual stability, SEO basics, modern web best practices, security hygiene, and production readiness. Stack-agnostic.
+uses:
+  - name: building-responsive-layouts
+    source: audacioustux/agents
 ---
 
 # Web Quality and Performance
@@ -69,7 +72,7 @@ Use these as practical targets unless the product has stricter budgets:
 
 - Reserve dimensions for images, embeds, skeletons, ads, banners, and async result blocks.
 - Avoid injecting content above the user's current task after interaction begins.
-- Keep overlay shells stable while results update.
+- Overlay shells that resize as their contents change are `building-responsive-layouts`, which owns shell stability. Reserve space for what lands inside them; the shell's own geometry is that skill's rule.
 - Give images explicit dimensions or an aspect ratio so the space is reserved before the bytes land; this is the most common single cause of layout shift.
 - Mark below-the-fold images lazy and above-the-fold hero images high priority. Both defaults are wrong for the other case.
 

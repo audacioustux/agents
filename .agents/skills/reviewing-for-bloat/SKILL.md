@@ -1,6 +1,9 @@
 ---
 name: reviewing-for-bloat
 description: Use when reviewing code, configuration, schemas, tests, infrastructure, migrations, or generated changes for duplication, patchwork, convention drift, unclear ownership, hidden coupling, or complexity growing faster than capability.
+uses:
+  - name: cleaning-ai-slop
+    source: audacioustux/agents
 ---
 
 # Anti-Bloat Review
@@ -37,7 +40,7 @@ Do not turn a narrow review into an unsolicited architecture rewrite.
 4. **Trace recurrence.** Find where the same rule, state, workaround, or side effect exists and which path is authoritative.
 5. **Prefer the smallest coherent correction.** Delete, consolidate, make ownership explicit, or reuse before adding an abstraction, option, layer, or rewrite.
 6. **Do not invent policy.** Make uncertain trust boundaries, invariants, ownership, and global-versus-local scope explicit.
-7. **Assign a disposition.** Every finding is `fix now`, `fix while touched`, or `flag only`, with a reason.
+7. **Assign a disposition.** Every finding is `fix now`, `fix while touched`, or `flag only`, with a reason. Where a `fix now` finding is an LLM-generated smell, `cleaning-ai-slop` executes the correction under gates that keep behaviour unchanged.
 8. **Re-review generated fixes.** Check for full-file rewrites, defensive clutter, explanatory noise, speculative hooks, duplicate comments, and unrelated churn.
 
 ## Workflow

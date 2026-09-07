@@ -78,7 +78,7 @@ If you catch yourself thinking:
 
 **ALL of these mean: STOP. Return to Phase 1.**
 
-**If 3+ fixes failed:** Question the architecture (see Phase 4.5)
+**If 3+ fixes failed:** Stop fixing. Three failures against one bug means the fixes shared an assumption that is wrong, so name that assumption and challenge it with your human partner before attempting a fourth.
 
 ## your human partner's Signals You're Doing It Wrong
 

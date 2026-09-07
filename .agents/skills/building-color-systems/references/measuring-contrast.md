@@ -10,7 +10,7 @@ Contrast is measured between a foreground (text, an icon, a UI element) and the 
 
 ## APCA thresholds
 
-APCA (Accessible Perceptual Contrast Algorithm) models perceived contrast more accurately than the WCAG 2 ratio and is the better default for design decisions. Lc (Lightness Contrast) measures perceived contrast between foreground and background; these levels simplify APCA's full font-size and weight lookup table:
+APCA (Accessible Perceptual Contrast Algorithm) models perceived contrast more accurately than the WCAG 2 ratio, so it is the better instrument for judging how a pair will actually read. It does not set the pass mark: `building-accessible-interfaces` holds WCAG AA as the baseline every pair must clear, and this table refines decisions above it. Lc (Lightness Contrast) measures perceived contrast between foreground and background; these levels simplify APCA's full font-size and weight lookup table:
 
 | Content type | Minimum | Preferred |
 | --- | --- | --- |
@@ -25,7 +25,7 @@ Lc is signed: positive means dark text on a light background, negative means lig
 
 ## WCAG 2 thresholds
 
-Required when a project must make a formal WCAG 2.x conformance claim. Its luminance ratio is both too strict and too lenient depending on the pair, but it has the legal standing APCA does not.
+The baseline. Its luminance ratio is both too strict and too lenient depending on the pair, but it is what `building-accessible-interfaces` and `following-repo-ui-conventions` require, and it carries the legal standing APCA does not. A pair that fails AA fails, whatever its Lc.
 
 | Content type | AA | AAA |
 | --- | --- | --- |
@@ -35,7 +35,7 @@ Required when a project must make a formal WCAG 2.x conformance claim. Its lumin
 
 WCAG defines large text in points: 18pt is roughly `24px`, 14pt bold is roughly `18.5px`.
 
-When a project must claim WCAG conformance, treat WCAG as the gate and APCA as the tiebreaker for anything above it.
+WCAG is the gate and APCA is the tiebreaker for anything above it. Report both when they disagree: a pair that clears AA but sits below its Lc minimum is legible on paper and hard to read in practice, and that is worth saying.
 
 ## Fixing a failing pair, on request
 

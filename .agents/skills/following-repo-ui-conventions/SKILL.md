@@ -59,12 +59,14 @@ Use for:
 
 ### Accessibility by default
 
-- All interactive elements must be keyboard reachable and visibly focusable.
-- Icon-only controls must have accessible names.
-- Labels stay adjacent and programmatically associated with controls.
-- Do not use color alone to communicate state.
-- Normal text must meet WCAG AA contrast at minimum; muted text must remain readable.
-- Motion must support comprehension and respect reduced-motion settings.
+Semantics, keyboard reach, focus behaviour, accessible names, and whether a state may
+be carried by colour belong to `building-accessible-interfaces`. Contrast measurement
+and its thresholds belong to `building-color-systems`. Apply them from there, and
+where neither is installed, hold the line at WCAG AA and note the gap.
+
+What this skill adds is precedence: an accessibility rule outranks a repository
+convention that contradicts it. A house pattern is not a reason to ship an
+unreachable control.
 
 ### Theme safety
 

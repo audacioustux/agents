@@ -32,13 +32,13 @@ Execute plan by dispatching fresh subagent per task, with two-stage review after
 flowchart TD
     N1{"Have implementation plan?"} -->|"yes"| N2{"Tasks mostly independent?"}
     N1 -->|"no"| N3["Manual execution or brainstorm first"]
-    N2 -->|"yes"| N4{"Stay in this session?"}
+    N2 -->|"yes"| N4{"Subagents available?"}
     N2 -->|"no - tightly coupled"| N3
     N4 -->|"yes"| N5["subagent-driven-development"]
-    N4 -->|"no - parallel session"| N6["`executing-plans`"]
+    N4 -->|"no"| N6["`executing-plans`"]
 ```
 
-**vs. Executing Plans (parallel session):**
+**vs. Executing Plans (no subagents available):**
 - Same session (no context switch)
 - Fresh subagent per task (no context pollution)
 - Two-stage review after each task: spec compliance first, then code quality
@@ -176,4 +176,4 @@ Fresh context per task, curated inputs, automatic review checkpoints. See `refer
 - **`test-driven-development`** - Subagents follow TDD for each task
 
 **Alternative workflow:**
-- **`executing-plans`** - Use for parallel session instead of same-session execution
+- **`executing-plans`** - Use where subagents are unavailable; it executes the same plan inline

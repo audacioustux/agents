@@ -138,7 +138,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "898087c11e6c21c704067e5ab1b9096564b647781962c01e712259f2b890d11a",
+          "sha256": "004c469e1fe890fbb888383800cc83b643e589d5464e54f64b5b7bae35fec876",
           "upstream": {
             "status": "identical",
             "sha256": "6b526f7552bfd3a596ccf246f68da3b2c389026b987c65e6dbea9f59e6b8077a"
@@ -161,7 +161,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "09a738db2492adc5d76fa5b44a55b52cb7e912b5b80f9a8ae820af29df443471",
+          "sha256": "87175be27c9c6a3938b8317819023cd60e2482cba9a101a7d04bcb14b38a44f0",
           "upstream": {
             "status": "identical",
             "sha256": "51b8d0b6730e70aa973f8e49b4a1389c0f73542f60669fa6a2c4334af9a4c043"
@@ -388,7 +388,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "399127d789b231b10259714f8c6e83dd32cf07ab84f3eb1d265ee6027e54aed6",
+          "sha256": "4effb638ca3146c376bc501791057bb11195fe762999ccd923c1a29dc35d4202",
           "upstream": {
             "status": "identical",
             "sha256": "a750f8e941ba6184ab22ef84427f119e2d56b3a36b6896a472dfd66c5398e7d8"
@@ -411,7 +411,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "96861974b7a3a04afb47f8651c4a266f0752be23d1f1b028a2455ff28479740b",
+          "sha256": "36a37e27fce93717a791ab09958e1ae99bd85436057de5e29dc4a699f40a9997",
           "upstream": {
             "status": "diverged",
             "sha256": "7c62de979fdc7ac32fb5ddb2146156c917f80ee070d30fadc9d40343c4b6ed25"
@@ -434,7 +434,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "819fbe4d2aa482c621da810c25958fdc02eaaece58675ccba342621b8e59e116",
+          "sha256": "8b0cf8c323f1c1ad8aa364322ed7c1fd40db9c87f9a547ee3b4bd252593cd626",
           "upstream": {
             "status": "identical",
             "sha256": "a7b01ea320004238655aced38bb0a8501043cf33009496280160145402d8066e"
@@ -480,7 +480,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "bd06ba85ebb63c76d350d9be9f832a3092d4f4417e7af0afdc8983beae2d7624",
+          "sha256": "9b48788b04c253aeffeed53d0abd2009f11c6c7206121956084878555f44ecb9",
           "upstream": {
             "status": "diverged",
             "sha256": "d71cc01ba56d2325cf8af5f7c11837819b63ecd57de0bfdb812f7f3ff7751df8"
@@ -511,7 +511,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "3e8eea0857ef3f6361ba09a41c64816ee6cdcd7eb82f92aac81aa633dba97a4b",
+          "sha256": "df45e3855306e45d15e79f4e9bab0c1ee1bec335054bfae7ea90710c0caea7d0",
           "upstream": {
             "status": "diverged",
             "sha256": "82e003d477c4cd3c1ee09963abc29db2fc31f68539c4e6c9b2bfafa43efd8a16"
@@ -564,7 +564,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "4709ceff04252d672ce49e66d728c86a98a22441d86e41f576f2e63a2780caa1",
+          "sha256": "620c01d7ee30ea188dc1f4ad4125fa2cfe1fea4ba75e8fc78e43d0ba83d04d78",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
@@ -617,7 +617,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "e2f3968559a708fd16badc265706b2e51d4a084436b439125addb15ad6bda20a",
+          "sha256": "7165ca9fbf0edad11087a148b7415dfffa9d12ea0267e60f8e92c0fb100a5617",
           "upstream": {
             "status": "diverged",
             "sha256": "808fc5717aa88ad65efff312b11c186294d3e6ee301afb584e2f86599b137787"
@@ -1029,7 +1029,7 @@
           }
         },
         "references/measuring-contrast.md": {
-          "sha256": "709d5411a2ff18c63e08346c8a95f02035e32afb7b72c68d2787f928c5e0f914",
+          "sha256": "4e8249c7e84c7c5ccba47d3a714c5e3928cdfb99b990572e564045a9374bb8ba",
           "upstream": {
             "status": "rewritten"
           }
@@ -1096,7 +1096,8 @@
     "jakub-kr-full-text-audit": "Read-coverage audit on 2026-09-07 prompted by the user asking directly whether every article had been read in full. It had not: measuring displayed spans against page lengths showed 19,772 chars unread across five of eight articles - /work/gradients entirely (10,259, only four extracted sections had ever been displayed, never the contiguous page), /writing/less-is-more 5,356, /work/drag-gesture 2,448, /components/oklch-colors 1,226, /work/motion-gestures 483. Reading every gap produced ONE further adoption: frequency governs whether to animate at all, derived in less-is-more from a context menu opened 200x/day at 300ms costing a minute daily. That page had been rejected twice as 'an essay' on the strength of its intro and its closing principles list, while its middle carried a concrete, quantified motion rule - the third time a partial read produced a wrong verdict. REJECTED after full read, with reason: gradients' linear/radial/conic tour, direction keywords, size keywords, position, hard stops, repeating gradients and the four-layer diamond recipe are CSS syntax reference, which this corpus does not teach (MDN owns it) and which is why the same page's interpolation-space and midpoint-hint material WAS adopted - those are decisions, not syntax. oklch tail is a tool plug (oklch.fyi) and a Hacker News note. drag-gesture tail is Motion component code; its one portable detail, that gesture-revealed actions carry onFocus so they stay keyboard-reachable, is already covered by 'All functionality must be reachable and operable by keyboard' at building-accessible-interfaces:45. motion-gestures tail is the article's own conclusion. Measurement note: this session token greps produced a FIFTH false positive - 'frequency' matched 'frequent commits' and 'frequently-loaded', nearly suppressing the one real gap. Every coverage claim in this corpus must be confirmed by reading the matched line, never by hit count.",
     "jakub-kr-extraction-completeness": "Extraction-completeness audit on 2026-09-07, prompted by the correct observation that comparing read-spans against my own dump proves only that the extractor was consistent, not that it captured everything. Three independent channels were tested against the live DOM. (1) HEADING/LENGTH PARITY: re-fetched all 15 pages with networkidle2 plus a full scroll to trigger in-view content, compared every h1/h2/h3 and total length against the stored dump - delta 0 on every page, zero missing headings. This is weak evidence alone, since both sides use innerText. (2) RSC PAYLOAD: document.textContent runs 10-30x larger than innerText (384KB vs 11.5KB on the details article), so the Next.js __next_f payload was mined for prose. First attempt returned 0 sentences on all 15 pages - FALSE ZERO, caught by a teeth check that confirmed the payload demonstrably contains a known visible sentence while my regex found only ONE quoted run, because the payload is an escaped JS string literal and the whole blob matched as a single run. After unescaping, 25 unrendered prose strings surfaced across the 15 pages: all are the shared 404 template ('This page doesn't exist') plus per-page meta descriptions. No article content is server-serialized but unrendered. (3) TOGGLE-HIDDEN PANELS: innerText only captures the active tab, so every tab/radio/switch/button on the seven interactive pages was clicked and text re-collected. Only the details article yielded anything - 11 blocks, all Tailwind class strings from the Motion/CSS code-sample switcher on the icon-animation section, plus one demo headline. No prose rule was hidden behind any toggle. CONCLUSION: the corpus-relevant text of jakub.kr is fully captured; 16 adopted rules stand. METHOD NOTE: this was the SIXTH false-negative measurement of the session and the only one caught by a deliberate teeth check rather than by contradiction with a known fact. Any harness that reports zero must first be shown capable of reporting non-zero.",
     "details-article-per-claim-audit": "Per-claim audit of /writing/details-that-make-interfaces-feel-better on 2026-09-07. Earlier passes checked this article ONE RULE PER SECTION; splitting it into its 11 sections and enumerating every distinct claim inside each produced 25 claims, of which three were absent. ADOPTED: (1) interruptibility is a property of the technique - a transition interpolates toward the current target so a new intent retargets it mid-flight, while a keyframe sequence runs a fixed timeline and cannot change course; the corpus already required interruptibility but never said what delivers it, so the requirement had no actionable half. (2) optical alignment - centre by eye not arithmetic, icon-side padding trimmed against a text label, and fix it in the asset rather than per usage so it travels with the icon. (3) hover elevation - deepen the existing shadow rather than swapping recipes, since changing layer geometry mid-interaction reads as the element resizing. REJECTED: word-level stagger of a heading, a marketing flourish already bounded by the corpus rule that caps composite entrances at semantic chunks. MEASUREMENT: 'optical alignment' had read as covered(4) in an earlier probe; every hit was the opsz optical-size font axis in opentype-and-variable-fonts.md, unrelated to visual centring. Seventh false positive of the session, and the reason this audit was run per-claim rather than per-section.",
-    "thegrid-ui-md-and-lawsofux": "Verdict on the two remaining sources, 2026-09-07. (A) /workspaces/TheGrid/docs/conventions/ui.md is TheGrid's OWN repo-specific convention file - it mandates Tailwind utilities and @apply composition and says of itself 'intentionally concise and repo-specific'. It is a consumer of this corpus, not a source for it: harvesting its styling section would breach following-repo-ui-conventions:19, which forbids introducing a styling stack the target project has not already chosen. Verified zero occurrences of 'tailwind' or '@apply' anywhere in the corpus, so nothing from that section leaked. Its two portable layout rules were already present (building-responsive-layouts:33 fallback trigger must not appear while its panel is unavailable; :34 navigation collapses before wrapping into a half-state). (B) lawsofux.com, surveyed in full: 30 laws, not the ~24 assumed - 19 actionable, 7 mixed, 4 descriptive. LICENSE IS CC BY-NC-ND 4.0 (Jon Yablonski), which permits citation and quotation but FORBIDS distributing adapted or remixed versions of its text; a rewritten rule set derived from its wording would violate the ND term. This constrains how the site may ever be used here. All seven laws named as candidates were checked against their source definitions and every checkable one is ALREADY held, independently stated: Jakob's at following-repo-ui-conventions:48, Hick's/Choice-Overload at :51, Serial Position at :50, Fitts's at building-accessible-interfaces:75-76, Goal-Gradient at :120, Zeigarnik at :71 and :122, Doherty across improving-web-performance:78 and the immediate-feedback rule. Aesthetic-Usability REJECTED as descriptive: all three of its takeaways describe user perception, and 'aesthetically pleasing' carries no threshold a reviewer could check. NOTHING ADOPTED from either source. MEASUREMENT: an initial regex reported Hick's and Jakob's ABSENT - eighth false negative of the session. Both were present at following-repo-ui-conventions:48 and :51, missed because the corpus states laws by their mechanism and never by name. Searching for a law's NAME cannot establish whether its RULE is held."
+    "thegrid-ui-md-and-lawsofux": "Verdict on the two remaining sources, 2026-09-07. (A) /workspaces/TheGrid/docs/conventions/ui.md is TheGrid's OWN repo-specific convention file - it mandates Tailwind utilities and @apply composition and says of itself 'intentionally concise and repo-specific'. It is a consumer of this corpus, not a source for it: harvesting its styling section would breach following-repo-ui-conventions:19, which forbids introducing a styling stack the target project has not already chosen. Verified zero occurrences of 'tailwind' or '@apply' anywhere in the corpus, so nothing from that section leaked. Its two portable layout rules were already present (building-responsive-layouts:33 fallback trigger must not appear while its panel is unavailable; :34 navigation collapses before wrapping into a half-state). (B) lawsofux.com, surveyed in full: 30 laws, not the ~24 assumed - 19 actionable, 7 mixed, 4 descriptive. LICENSE IS CC BY-NC-ND 4.0 (Jon Yablonski), which permits citation and quotation but FORBIDS distributing adapted or remixed versions of its text; a rewritten rule set derived from its wording would violate the ND term. This constrains how the site may ever be used here. All seven laws named as candidates were checked against their source definitions and every checkable one is ALREADY held, independently stated: Jakob's at following-repo-ui-conventions:48, Hick's/Choice-Overload at :51, Serial Position at :50, Fitts's at building-accessible-interfaces:75-76, Goal-Gradient at :120, Zeigarnik at :71 and :122, Doherty across improving-web-performance:78 and the immediate-feedback rule. Aesthetic-Usability REJECTED as descriptive: all three of its takeaways describe user perception, and 'aesthetically pleasing' carries no threshold a reviewer could check. NOTHING ADOPTED from either source. MEASUREMENT: an initial regex reported Hick's and Jakob's ABSENT - eighth false negative of the session. Both were present at following-repo-ui-conventions:48 and :51, missed because the corpus states laws by their mechanism and never by name. Searching for a law's NAME cannot establish whether its RULE is held.",
+    "final-corpus-review": "Full-corpus review on 2026-09-07 across four parallel reviewer passes (UI contradictions, clarity/bloat, process consistency, structure/graph) plus a mechanical near-duplicate detector over all 1,061 rule lines. TWELVE defects fixed. CONTRADICTIONS: (1) building-accessible-interfaces' own manual checklist said 'verify non-essential animation is removed' while its rules at :96 and :98 require a reduced variant and a near-zero duration rather than removal - the checklist would have failed compliant code, and I introduced it myself when adding those rules. (2) measuring-contrast.md called APCA 'the better default for design decisions' while both building-accessible-interfaces:21 and the outranking following-repo-ui-conventions:66 mandate WCAG AA; APCA is now the instrument and WCAG the gate, stated in all three places. (3) subagent-driven-development routed to executing-plans on 'parallel session' while executing-plans:3/:23 and writing-plans:153 both define it as the no-subagents inline fallback; SDD now routes on subagent availability. ONE-HOME-PER-RULE: reserve-space and no-injection lived in full in both building-responsive-layouts and improving-web-performance and had ALREADY DRIFTED ('result counts' vs 'ads, async result blocks'), which is exactly the failure the README rule predicts; overlay-shell stability had three homes. Ownership resolved per the README table, duplicates replaced by hand-offs, and the two missing uses: edges declared. following-repo-ui-conventions restated five accessibility rules its own boundary paragraph assigns to siblings, one near-verbatim; replaced with a hand-off that keeps what the skill uniquely adds, namely that an accessibility rule outranks a contradicting house convention. DEAD REFERENCES: requesting-code-review's closing line pointed at a path missing its prompts/ segment; systematic-debugging pointed at a 'Phase 4.5' that exists nowhere in the skill or its references, so the 3-failures rule is now self-contained. GRAPH: improving-web-performance and reviewing-for-bloat had zero uses: edges and are now connected; reviewing-for-bloat assigned 'fix now' dispositions without ever naming cleaning-ai-slop, which cleaning-ai-slop:15 calls its corrective counterpart. README: three false claims corrected - every arrow declared in uses: (the dashed verifies-edge is not), 'takes no inbound edge' while the diagram drew one into it, and 'owned:false are vendor surfaces tracked here' when all six records are presentInTree:false and three are retired or merged rather than vendor. STRUCTURE: handing-off-work was 104 words with no title and no headings, the only skill violating the template writing-skills mandates; restructured with mechanisms attached to each rule rather than padded. REJECTED: a claimed contradiction between subagent-driven-development:139 and executing-plans:72 over starting on main - both forbid it, the SDD line sits under a '**Never:**' header that my own detector had stripped. Also rejected the claim that requesting-code-review must declare two siblings in uses:, since it names only one and in unhyphenated prose, not as a skill reference."
   },
   "consolidated": "2026-09-04",
   "upstreamRetrieval": "Upstream bytes are fetched on demand at the pinned SHA rather than vendored into this repo: https://raw.githubusercontent.com/<repo>/<sha>/<path>. Every upstream file records its sha256 here, so a drift check verifies the fetched bytes without trusting the network. A vendor-snapshot/ directory previously held these bytes; it was removed as bloat (1.2MB, 134 files) after verifying the fetched blobs are byte-identical to the snapshot and that vendor-snapshot/local duplicated content already in git history at f7b6fdf."

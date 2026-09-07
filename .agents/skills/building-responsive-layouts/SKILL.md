@@ -6,6 +6,8 @@ uses:
     source: audacioustux/agents
   - name: building-accessible-interfaces
     source: audacioustux/agents
+  - name: improving-web-performance
+    source: audacioustux/agents
 ---
 
 # Layout Responsiveness
@@ -78,9 +80,12 @@ Never collapse labels, summaries, or controls that are required to understand th
 
 ### Prevent avoidable layout shift
 
-- Reserve space for images, skeletons, async content, banners, and result counts when their size is predictable.
-- Prefer skeletons or stable placeholders for content blocks over spinners that leave blank space.
-- Do not insert promotional, unrelated, or surprise content into focused flows after the user begins interacting.
+Reserving space for async content, preferring skeletons over spinners, and keeping
+late-arriving content out of a flow the user has already started belong to
+`improving-web-performance`, which owns visual stability. Apply them from there.
+
+What stays here is the layout half: a shell whose own geometry moves when its
+contents change is a layout defect, not a loading one, and no reserved space fixes it.
 
 ## Implementation checklist
 

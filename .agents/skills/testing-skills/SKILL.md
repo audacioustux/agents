@@ -16,9 +16,9 @@ A skill that has never been tested is a hypothesis. Skills that enforce discipli
 
 ## The Iron Law (Same as TDD)
 
-``
+```
 NO SKILL WITHOUT A FAILING TEST FIRST
-``
+```
 
 This applies to NEW skills AND EDITS to existing skills.
 

@@ -6,6 +6,8 @@ uses:
     source: audacioustux/agents
   - name: speeding-up-rust-builds
     source: audacioustux/agents
+  - name: writing-async-rust
+    source: audacioustux/agents
 ---
 
 # Writing Idiomatic Rust
@@ -29,7 +31,8 @@ Use for:
 - a `clone` you are not sure is necessary
 
 Defer to `reviewing-unsafe-rust` for anything inside an `unsafe` block or crossing an
-FFI boundary, and to `speeding-up-rust-builds` for compile-time cost.
+FFI boundary, to `writing-async-rust` for await points and cancellation, and to
+`speeding-up-rust-builds` for compile-time cost.
 
 ## Ownership at the boundary
 
@@ -90,6 +93,33 @@ Distinguish the placeholder macros rather than reaching for whichever comes to m
 supported, and `unreachable!` asserts a state the logic excludes. They read
 identically at runtime and completely differently to the next person.
 
+## Designing the error type
+
+A library and a binary want opposite things from an error, which is why one choice
+cannot serve both.
+
+A library's caller needs to branch on what went wrong, so its error should be an enum
+with a variant per failure mode the caller could handle differently. That gives them
+a `match` and lets the compiler tell them when a new variant arrives. Deriving the
+boilerplate is fine; the design decision is the variant set, not the derive.
+
+A binary's "caller" is a human reading a message, so it needs context on the way out
+rather than branchable structure. A single opaque error carrying a chain of context
+is the right shape there, and it is the wrong shape in a library precisely because it
+erases the distinctions a caller would have branched on.
+
+That is the whole rule: a boxed or opaque error in a library forces every caller to
+string-match or give up. Reserve it for the top of an application, where nothing
+downstream needs to tell the cases apart.
+
+Preserve the underlying cause when wrapping. An error that discards what it wrapped
+turns a diagnosable failure into a guess, and the source chain is what makes a
+message useful three layers up.
+
+Errors that cross an async or thread boundary need to be sendable and self-contained,
+which in practice means not borrowing from the frame that produced them. This is
+easier to design in at the start than to retrofit once a type has callers.
+
 ## Iterators
 
 Prefer an iterator chain to a manual index loop. The bounds check the loop needs is
@@ -128,6 +158,8 @@ internals usually know their type.
 - Does any `clone` sit inside a loop?
 - Is any `unwrap` outside a test asserting something nothing verifies?
 - Does any match chain exist only to return its error unchanged?
+- Does a library expose an opaque error where callers need to branch?
+- Does any wrap discard the cause it wrapped?
 - Is an intermediate collection allocated between two adapters?
 - Is a generic used where the type set is genuinely open, or `dyn` on a hot path?
 
@@ -137,5 +169,6 @@ internals usually know their type.
 - `String` and `Vec<T>` parameters on functions that only read.
 - `unwrap` in library code, with the reachability argument left in someone's head.
 - A match chain wrapping a single fallible call.
+- An opaque or boxed error in a library, forcing callers to string-match.
 - `iter()` plus `cloned()` where `into_iter()` was meant.
 - Boxing a trait object inside a module that knows the concrete type.

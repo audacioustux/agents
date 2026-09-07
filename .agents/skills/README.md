@@ -108,8 +108,9 @@ Rust ownership boundaries:
 
 | Skill | Owns |
 | --- | --- |
-| `writing-idiomatic-rust` | Ownership at API boundaries, clones, fallibility, iterators, dispatch |
+| `writing-idiomatic-rust` | Ownership at API boundaries, clones, fallibility, error-type design, iterators, dispatch |
 | `reviewing-unsafe-rust` | What each unsafe operation requires, safe-abstraction contracts, FFI boundaries |
+| `writing-async-rust` | Cancellation, state across await points, blocking, task lifetime |
 | `hardening-rust-supply-chain` | Dependency policy, lockfile discipline, advisory response |
 | `speeding-up-rust-builds` | Compile time: crate graph, dev profiles, linking |
 
@@ -117,11 +118,13 @@ Rust ownership boundaries:
 flowchart TD
   idio["writing-idiomatic-rust<br/>ownership, errors, dispatch"]
   unsafe_["reviewing-unsafe-rust<br/>soundness, FFI"]
+  async_["writing-async-rust<br/>cancellation, await points"]
   supply["hardening-rust-supply-chain<br/>dependency policy"]
   builds["speeding-up-rust-builds<br/>compile time"]
 
-  idio --> unsafe_ & builds
+  idio --> unsafe_ & async_ & builds
   unsafe_ --> idio & supply
+  async_ --> idio
   supply --> unsafe_
   builds --> idio
 ```
@@ -129,7 +132,8 @@ flowchart TD
 `writing-idiomatic-rust` is the entry point for Rust work. The split between it and
 `reviewing-unsafe-rust` is what the compiler checks: ownership questions the borrow
 checker settles belong to the first, and obligations it cannot see belong to the
-second.
+second. `writing-async-rust` splits on the same principle — a future dropped at an
+await point is a hazard no type in the signature reports.
 
 ## Upstream tracking
 

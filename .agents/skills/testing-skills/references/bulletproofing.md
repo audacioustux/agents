@@ -40,7 +40,7 @@ This cuts off entire class of "I'm following the spirit" rationalizations.
 
 ### Build Rationalization Table
 
-Capture rationalizations from baseline testing (see Testing section below). Every excuse agents make goes in the table:
+Capture rationalizations from baseline testing (see Testing section below). Every excuse agents make goes in the table, paired with the rebuttal:
 
 ```markdown
 | Excuse | Reality |
@@ -52,19 +52,26 @@ Capture rationalizations from baseline testing (see Testing section below). Ever
 
 ### Create Red Flags List
 
-Make it easy for agents to self-check when rationalizing:
+Make it easy for agents to self-check. The table above owns the excuses; this list
+owns the observable states, and repeating an excuse here earns nothing:
 
 ```markdown
 ## Red Flags - STOP and Start Over
 
-- Code before test
-- "I already manually tested it"
-- "Tests after achieve the same purpose"
-- "It's about spirit not ritual"
-- "This is different because..."
+Observable states, not excuses. The excuses and their rebuttals live in
+Common Rationalizations above.
+
+- Code written before its test
+- A test that passes the first time it runs
+- Can't explain why the test failed
+- Tests deferred to "later"
 
 **All of these mean: Delete code. Start over with TDD.**
 ```
+
+A quoted excuse belongs in exactly one place. If it is in the table, the red-flag
+list points at the table rather than restating it — a reader who has to check two
+lists for the same rule will drift one of them.
 
 ### Update CSO for Violation Symptoms
 

@@ -30,17 +30,36 @@ Reviewing unsafe code you own belongs to `reviewing-unsafe-rust`.
 
 ## Advisories and policy
 
-Advisory scanning answers one question: does anything in the tree have a known
-vulnerability? Run it in CI rather than on request, because the answer changes without
-the tree changing.
+Two tools cover this ground, and the split matters. `cargo-audit` answers one
+question: does anything in `Cargo.lock` have a known advisory in the RustSec
+database? `cargo-deny` runs four checks — `advisories`, `bans`, `licenses`,
+`sources` — and covers what advisory scanning does not: licences that are
+incompatible or absent, crates the project has decided not to depend on, sources
+outside the registries it trusts, and the same crate pulled in at several versions
+at once.
 
-Policy checking is the broader gate and covers what advisory scanning does not:
-licences that are incompatible or absent, crates the project has decided not to
-depend on, sources outside the registries it trusts, and the same crate pulled in at
-several versions at once.
+Run them in CI on a schedule, not only on dependency changes. The answer changes
+without the tree changing, which is the whole reason a green build proves nothing
+here.
 
-Set each policy to deny rather than warn. A warning in a green build is a decision
-deferred indefinitely, and the deferral is invisible to whoever ships next.
+Turn the warnings that matter into failures — but know which ones you can. Not every
+finding is a configurable lint level, and assuming otherwise produces a config that
+looks strict and is not:
+
+| Finding | Default | Configurable? |
+| --- | --- | --- |
+| Security vulnerability | error | No — always fails |
+| Unlicensed crate | error | No — always fails |
+| Non-allowed licence | error | No — always fails |
+| `unmaintained` | `all` | Scope, not a level: `all`/`workspace`/`transitive`/`none` |
+| `yanked` | `warn` | Yes |
+| `multiple-versions` | `warn` | Yes |
+| `wildcards` | `allow` | Yes |
+| `unknown-registry`, `unknown-git` | `warn` | Yes |
+
+The two that actually need changing are `multiple-versions` and `wildcards`. A
+warning in a green build is a decision deferred indefinitely, and `wildcards`
+defaults to `allow`, so it reports nothing at all until set.
 
 Duplicate versions are worth a specific mention. Two versions of one crate in a tree
 means two copies compiled in, and where the crate carries global state or a type that
@@ -48,27 +67,36 @@ crosses an API boundary, they are not interchangeable — a type from one versio
 not satisfy a signature expecting the other, and the error names the same crate on
 both sides.
 
-Wildcard version requirements deserve denial for the same reason lockfiles exist:
-they make the build's inputs a function of when it ran.
+Wildcard requirements deserve denial for the same reason lockfiles exist: they make
+the build's inputs a function of when it ran.
 
 ## Lockfiles
 
-Commit the lockfile for anything that ships as a binary. It is the record of what was
-actually built, and without it a rebuild of the same commit is a different build.
+Commit the lockfile by default, whatever the crate type. The old rule — commit for
+binaries, gitignore for libraries — was officially retired in August 2023, and
+`cargo new` no longer ignores it for libraries. The current guidance is to commit
+unless a project has a specific reason not to.
 
-Libraries are the opposite case: their lockfile is not used by consumers, who resolve
-their own, so committing it records only what the library's own CI happened to test.
+What changed is the framing, not the underlying fact. A library's lockfile still does
+not affect its consumers, who resolve their own; committing it makes the library's own
+CI reproducible, which is worth having on its own terms. The cost is merge conflicts
+and the false sense that consumers are getting what you tested.
 
-In CI, resolve with the lockfile enforced rather than merely present, so a build fails
-on a manifest that has drifted rather than quietly updating the lock and continuing.
-The failure is the point: it means the dependency change gets reviewed rather than
-absorbed.
+Because a committed lockfile pins what CI tests, pair it with a scheduled job that
+resolves fresh, so newly-published breakage surfaces on your schedule rather than a
+contributor's.
+
+In CI, resolve with `--locked` rather than merely having the file present, so a build
+fails on a manifest that has drifted instead of quietly updating the lock and
+continuing. The failure is the point: it means the dependency change gets reviewed
+rather than absorbed. `--frozen` additionally forbids network access; `--locked` alone
+does not.
 
 ## Assessing inherited unsafe
 
-Unsafe code in a dependency is unsafe code in the binary. Counting it across the tree
-gives a proportionate sense of where soundness risk actually lives, which is often not
-where a team assumes.
+Unsafe code in a dependency is unsafe code in the binary. `cargo-geiger` counts it
+across the tree, giving a proportionate sense of where soundness risk actually lives,
+which is often not where a team assumes.
 
 Treat the count as a map rather than a score. A crate with substantial unsafe and a
 serious audit history is a better dependency than one with none and no maintenance.
@@ -86,22 +114,32 @@ both as equally urgent trains people to treat neither as urgent.
 Prefer a patch release that keeps the API. Where none exists, a maintained fork or a
 replacement crate is a larger change than it looks and should be reviewed as one.
 
-Where the fix cannot land immediately, record the exception with an expiry rather than
-silencing the check. A permanent ignore entry is how an advisory becomes invisible.
+Where the fix cannot land immediately, the ignore entry is the only lever, and it is
+blunter than people expect. Neither tool supports an expiry: `cargo-deny`'s ignore
+accepts an advisory id and a free-text `reason` and rejects unknown keys outright, so
+an `expires` field is a config parse error rather than a silently-ignored convention.
+`cargo-audit`'s ignore list is bare ids with nowhere to put metadata at all.
+
+So the expiry has to live somewhere a human will see it. Put the date and the
+condition in the `reason` string, and make something outside the tool — a calendar
+entry, a tracking issue — responsible for coming back. An ignore with no stated
+end condition is how an advisory becomes permanently invisible.
 
 ## Review checklist
 
-- Does CI run advisory scanning on a schedule, not only on dependency changes?
-- Are licence, banned-crate, source, and duplicate-version policies set to deny?
-- Are wildcard version requirements denied?
-- Is the lockfile committed for binaries, and absent or unused for libraries?
-- Does CI resolve with the lockfile enforced, failing on drift?
-- Is any advisory exception recorded with an expiry rather than an open-ended ignore?
+- Does CI run `cargo-audit` or `cargo-deny advisories` on a schedule, not only on dependency changes?
+- Are `multiple-versions` and `wildcards` raised from their defaults to `deny`?
+- Is the licence allow-list actually populated, given unlicensed crates already fail?
+- Is the lockfile committed, and paired with a scheduled fresh-resolve job?
+- Does CI resolve with `--locked`, failing on drift?
+- Does every ignore entry state an end condition in its `reason`?
 
 ## Anti-patterns
 
-- Policies set to warn, in a build nobody reads the warnings of.
-- A lockfile committed for a library, recording only its own CI's resolution.
+- Configuring a lint level for vulnerabilities or unlicensed crates, which are always errors.
+- Assuming `wildcards` is on: it defaults to `allow` and reports nothing until set.
+- An `expires` key in an ignore entry, which is a parse error, not a deferral.
+- A committed lockfile with nothing ever resolving fresh, so CI tests one pinned set forever.
 - An advisory ignored permanently because the fix was inconvenient once.
 - Treating a dependency's unsafe count as a quality score.
 - Auditing only on dependency changes, when advisories arrive independently.

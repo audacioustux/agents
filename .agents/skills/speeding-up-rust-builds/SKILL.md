@@ -30,8 +30,9 @@ shape questions belong to `writing-idiomatic-rust`.
 
 ## Measure first
 
-Ask the compiler where the time went before changing anything. It can report per-crate
-timings and produce a timeline showing which crates blocked others.
+Ask the compiler where the time went before changing anything. `cargo build --timings`
+writes an HTML report to `target/cargo-timings/` showing per-unit durations, which
+units each completion unblocked, and concurrency over time.
 
 That timeline is the thing worth reading. Total time is much less informative than
 the critical path, because crates compile in parallel and only the chain that
@@ -48,12 +49,19 @@ compile them in parallel and lets an edit invalidate only part of the tree.
 
 Three splitting rules, in order of payoff:
 
-Break circular dependencies first. A cycle forces sequential compilation and defeats
-every other split.
+Split along the direction code actually depends. Cargo rejects a cycle between
+packages outright — `error: cyclic package dependency`, at resolution, before
+anything compiles — so a mutually-referencing module pair cannot simply be cut in
+two. Untangling that coupling is the work the split depends on, not an optimisation
+to do afterwards. The one legal cycle is through `dev-dependencies`, and it costs
+ordering: under `cargo test` the dependency must build before the crate that tests
+with it.
 
-Give procedural macros their own crate. Everything depending on a proc-macro waits
-for it, so a proc-macro sharing a crate with ordinary code drags that code onto the
-critical path of every dependent.
+Give procedural macros their own crate. Cargo pipelines `rlib` dependencies — a
+dependent can start once its dependency finishes metadata, before codegen — but a
+proc-macro is a linkable output, so it is excluded from pipelining in both directions.
+Everything depending on it waits for a full build, and a proc-macro sharing a crate
+with ordinary code drags that code onto the critical path of every dependent.
 
 Isolate code that changes often. Invalidation propagates downstream, so a
 frequently-edited module sitting in a foundational crate rebuilds the world on every
@@ -61,26 +69,34 @@ save. Moving it to a leaf costs nothing and stops the cascade.
 
 ## Dev profile
 
-Debug information is usually the largest single dev-profile cost, and full debug info
-is more than a backtrace needs. Reducing it to line-table level typically keeps
-debugging usable and removes a large fraction of build time.
+Debug information is usually the largest single dev-profile cost, and the dev default
+is full info. `debug = "line-tables-only"` is the cheapest setting that still gives
+backtraces with file and line. `debug = 1` (`"limited"`) is a middle option — it adds
+module-level info but drops type and variable info — so it is not the cheapest, and
+claiming otherwise misreads the ladder.
 
-Link-time optimisation belongs off in dev. It runs after compilation, over the whole
-program, and it exists to improve runtime performance nobody is measuring during an
-edit-test loop.
+Link-time optimisation is already effectively off in both built-in profiles: dev and
+release both default to `lto = false`. Note that `false` is not `"off"` — it still
+performs thin-local LTO across the crate's own codegen units, and only `"off"`
+disables LTO entirely. The rule that matters is not to turn it on in dev.
 
 Linking is often a bigger share of an incremental rebuild than compilation, because
-it happens after every change and does not benefit from caching. A faster linker is
-usually the single cheapest improvement available, since it changes nothing about the
-code.
+it happens after every change and does not benefit from caching. Before configuring a
+linker, check whether you already have a fast one: since Rust 1.90, `rust-lld` is the
+default on `x86_64-unknown-linux-gnu`, so adding `-fuse-ld=lld` there is stale advice
+and the flag can conflict with what rustc already passes. On other targets, or for
+mold, the linker is still set through `.cargo/config.toml` rustflags.
 
-An alternative codegen backend can compile substantially faster than the default at
-the cost of slower generated code. That trade is right for dev and wrong for release,
-so it belongs behind a dev-only profile setting rather than a global one.
+Optimising dependencies while leaving your own crate unoptimised is a real lever:
+`[profile.dev.package."*"]` applies to every non-workspace dependency. Prefer
+`opt-level = 1` over 2 or 3 — at 2 and above a crate stops sharing monomorphised
+generics across crate boundaries, which can cost more than the optimisation gains on
+generic-heavy trees.
 
-Where dependencies are slow but rarely change, they can be optimised while your own
-crates are not: they compile once and then sit in the cache, so paying for their
-optimisation is nearly free while keeping your own iteration fast.
+An alternative codegen backend such as Cranelift can compile substantially faster at
+the cost of slower generated code, which is the right trade for dev and wrong for
+release. It is nightly-only: `codegen-backend` is an unstable Cargo feature and
+requires opting in explicitly, so it is not available to a project on stable.
 
 ## Guarding the result
 
@@ -94,19 +110,21 @@ schedule rather than once.
 
 ## Review checklist
 
-- Has the build been timed, with the critical path identified rather than the total?
+- Has the build been timed with `--timings`, and the critical path read rather than the total?
 - Are clean and incremental builds distinguished?
-- Do any dependency cycles remain?
-- Do proc-macros live in their own crate?
+- Is the intended split along a one-way dependency, or does the code still reference back?
+- Do proc-macros live in their own crate, given they cannot be pipelined?
 - Does frequently-edited code sit in a foundational crate?
-- Is debug info reduced in dev, and LTO off there?
-- Has a faster linker been tried before restructuring code?
+- Is dev debug info reduced, and LTO left off?
+- On x86_64 Linux, is the toolchain new enough that lld is already the default?
+- If dependencies are optimised in dev, is `opt-level = 1` used rather than 2 or 3?
 
 ## Anti-patterns
 
 - Optimising a crate that was never on the critical path.
-- Splitting crates before breaking cycles.
+- Planning a split across a mutually-referencing module pair, which Cargo will reject.
 - LTO enabled in a dev profile.
 - Full debug info where line tables would do.
-- Restructuring the crate graph before trying a faster linker.
-- A fast-codegen backend left on for release builds.
+- Adding `-fuse-ld=lld` on a target where rust-lld is already the default.
+- `opt-level = 3` on dependencies, losing shared monomorphised generics.
+- Assuming Cranelift is available on stable.

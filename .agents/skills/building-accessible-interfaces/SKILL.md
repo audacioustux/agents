@@ -83,6 +83,7 @@ Use for:
 ### Motion and feedback
 
 - Motion should clarify cause, state, hierarchy, or continuity.
+- Frequency decides whether to animate at all. A duration that reads as polish on a once-a-session action becomes a tax on one performed hundreds of times a day: a 300ms menu opened 200 times costs a minute daily, and the user is waiting on every one. Animate the rare and consequential; let the high-frequency path be instant, or animate only its exit where that keeps the surface feeling settled.
 - An element that persists across a state change should move, not disappear and reappear: the same identity in both states is what tells the user this is the thing they were already looking at. Give that identity to exactly one element per state, since two claimants leave the transition no single thing to travel between and it collapses into a jump.
 - Continuity and entrance are mutually exclusive for the same element. Something moving between two positions must not also be running an enter or exit, or it fades while it travels and reads as two objects rather than one; let the persisting element move and let only the surrounding content fade.
 - Animate a property the engine can interpolate rather than swapping the class or rule that sets it. A swap flips to the end value immediately while the rest of the transition still runs, so corners and colours snap mid-flight even though the movement itself is smooth.

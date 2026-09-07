@@ -83,6 +83,12 @@ Use for:
 ### Motion and feedback
 
 - Motion should clarify cause, state, hierarchy, or continuity.
+- An element that persists across a state change should move, not disappear and reappear: the same identity in both states is what tells the user this is the thing they were already looking at. Give that identity to exactly one element per state, since two claimants leave the transition no single thing to travel between and it collapses into a jump.
+- Continuity and entrance are mutually exclusive for the same element. Something moving between two positions must not also be running an enter or exit, or it fades while it travels and reads as two objects rather than one; let the persisting element move and let only the surrounding content fade.
+- Animate a property the engine can interpolate rather than swapping the class or rule that sets it. A swap flips to the end value immediately while the rest of the transition still runs, so corners and colours snap mid-flight even though the movement itself is smooth.
+- A press must cancel when the pointer travels away before release, so a drag that starts on a button does not fire it, and a user who presses then thinks better of it can slide off to escape.
+- Keep focus feedback subtle. It fires on every keyboard step, so motion sized for a deliberate click becomes disorienting when it repeats down a whole form.
+- Content revealed on scroll must not depend on the reveal to exist. Anything gated on entering the viewport should already be in the document and readable if the animation never runs, since an observer that does not fire leaves it permanently invisible to search, assistive technology, and anyone whose reduced-motion setting cancelled the transition.
 - Respect reduced-motion preferences: ship a reduced variant rather than only disabling, so the state change still reads.
 - Motion that autoplays longer than a few seconds beside other content needs a pause, stop, or hide control.
 - Animations must stay interruptible and respond to input mid-flight; a user who acts again should not wait out the previous animation.

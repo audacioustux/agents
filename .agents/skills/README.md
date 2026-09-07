@@ -87,12 +87,13 @@ flowchart TD
 
   conv --> a11y & layout & type & color & copy
   a11y --> color & type & copy & layout & motion
-  layout --> type & a11y
+  layout --> type & a11y & perf
   type --> a11y & color & copy & perf & layout
   color --> a11y & comp & type
   copy --> type & a11y
   comp --> color & type
   motion --> a11y
+  perf --> layout
 
   browser -.->|verifies| conv
 ```

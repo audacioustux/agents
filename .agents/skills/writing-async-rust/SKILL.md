@@ -178,7 +178,6 @@ explicitly rather than by dropping the handle and hoping.
 
 - For each await: if the future is dropped here, is any work lost?
 - Does any select loop poll a non-cancel-safe operation?
-- Is cleanup written after an await rather than in a `Drop` guard?
 - Does any guard that spans an await come from a std lock rather than an async one?
 - Conversely, is an async mutex used where a short critical section never reaches an await?
 - Is anything non-`Send` held across an await in a future that must be spawned across threads?

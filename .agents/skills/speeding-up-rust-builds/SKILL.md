@@ -71,10 +71,20 @@ save. Moving it to a leaf costs nothing and stops the cascade.
 
 Debug information is usually the largest single dev-profile cost, and the dev default
 is full info. `debug = "line-tables-only"` is the cheapest setting that still gives
-backtraces with file and line. `debug = 1` (`"limited"`) is a middle option — it adds
-module-level info but drops type and variable info — so it is not the cheapest, and
-claiming otherwise misreads the ladder. The string forms need Rust 1.71 or newer; the
-numeric and boolean forms work on older toolchains.
+backtraces with file and line. Measured on the same 33-binary relink: `debug = true`
+29.2s, `line-tables-only` 10.1s, `debug = 0` 6.6s. Backtrace quality between the first
+two was identical — 41 resolved frames each, against 0 with `debug = 0` — so the 2.9x
+is bought by dropping variable inspection in a debugger, not backtraces.
+
+That makes the tradeoff a per-session one rather than a project-wide loss:
+`CARGO_PROFILE_DEV_DEBUG=true cargo build` restores full info for a `gdb` or `lldb`
+session. Leave `[profile.bench]` on full debug regardless — profilers need it, and
+bench builds are not on the edit-compile loop.
+
+`debug = 1` (`"limited"`) is a middle option — it adds module-level info but drops
+type and variable info — so it is not the cheapest, and claiming otherwise misreads
+the ladder. The string forms need Rust 1.71 or newer; the numeric and boolean forms
+work on older toolchains.
 
 Link-time optimisation is already effectively off in both built-in profiles: dev and
 release both default to `lto = false`. Note that `false` is not `"off"` — it still
@@ -82,11 +92,24 @@ performs thin-local LTO across the crate's own codegen units, and only `"off"`
 disables LTO entirely. The rule that matters is not to turn it on in dev.
 
 Linking is often a bigger share of an incremental rebuild than compilation, because
-it happens after every change and does not benefit from caching. Before configuring a
-linker, check whether you already have a fast one: since Rust 1.90, `rust-lld` is the
-default on `x86_64-unknown-linux-gnu`, so adding `-fuse-ld=lld` there is stale advice
-and the flag can conflict with what rustc already passes. On other targets, or for
-mold, the linker is still set through `.cargo/config.toml` rustflags.
+it happens after every change and does not benefit from caching. Check what you
+actually link with before configuring anything: `rustc --print link-args` shows the
+driver and its flags. Since Rust 1.90 `rust-lld` is the default on
+`x86_64-unknown-linux-gnu` only — on `aarch64-unknown-linux-gnu` the same toolchain
+still invokes plain `cc`, so "lld is already on" is true per target, not per toolchain.
+Where it is already on, adding `-fuse-ld=lld` is redundant and can conflict with what
+rustc passes; where it is not, `-Clinker-features=+lld` with
+`-Clink-self-contained=+linker` enables the `rust-lld` that ships with the toolchain,
+with no system linker to install.
+
+If you enable lld, cap its threads in the same change. This is the part usually
+omitted and it inverts the result. lld defaults to one thread per core *per link*, and
+cargo already links binaries concurrently, so a workspace linking dozens of test
+binaries oversubscribes the machine by the product of the two. Measured on a 12-core
+box relinking 33 test binaries after a one-line change: GNU bfd 38.3s, lld with
+`--threads=1` 13.1s, lld with default threads 120-150s. The fast linker was four times
+slower than the one it replaced until its internal parallelism was capped —
+`-Clink-arg=-Wl,--threads=1` leaves the parallelism where cargo can schedule it.
 
 Optimising dependencies while leaving your own crate unoptimised is a real lever:
 `[profile.dev.package."*"]` applies to every non-workspace dependency. Prefer
@@ -117,7 +140,9 @@ schedule rather than once.
 - Do proc-macros live in their own crate, given they cannot be pipelined?
 - Does frequently-edited code sit in a foundational crate?
 - Is dev debug info reduced, and LTO left off?
-- On x86_64 Linux, is the toolchain new enough that lld is already the default?
+- Has `--print link-args` confirmed which linker actually runs, per target rather than per toolchain?
+- If lld is enabled, are its threads capped so concurrent links do not oversubscribe?
+- Does `[profile.bench]` still carry full debug info for profilers?
 - If dependencies are optimised in dev, is `opt-level = 1` used rather than 2 or 3?
 
 ## Anti-patterns
@@ -127,5 +152,8 @@ schedule rather than once.
 - LTO enabled in a dev profile.
 - Full debug info where line tables would do.
 - Adding `-fuse-ld=lld` on a target where rust-lld is already the default.
+- Enabling lld without capping its threads, making links slower than the linker replaced.
+- Assuming a linker default is toolchain-wide when it landed for one target.
+- Stripping debug info from `[profile.bench]`, where profilers need it.
 - `opt-level = 3` on dependencies, losing shared monomorphised generics.
 - Assuming Cranelift is available on stable.

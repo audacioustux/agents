@@ -51,13 +51,12 @@ Skip any step = lying, not verifying
 
 ## Red Flags - STOP
 
+Observable states, not excuses. The excuses and their rebuttals are in
+Rationalization Prevention below.
+
 - Using "should", "probably", "seems to"
 - Expressing satisfaction before verification ("Great!", "Perfect!", "Done!", etc.)
 - About to commit/push/PR without verification
-- Trusting agent success reports
-- Relying on partial verification
-- Thinking "just this once"
-- Tired and wanting work over
 - **ANY wording implying success without having run verification**
 
 ## Rationalization Prevention

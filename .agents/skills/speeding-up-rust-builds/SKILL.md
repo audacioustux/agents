@@ -67,7 +67,7 @@ Isolate code that changes often. Invalidation propagates downstream, so a
 frequently-edited module sitting in a foundational crate rebuilds the world on every
 save. Moving it to a leaf costs nothing and stops the cascade.
 
-## Dev profile
+## Debug info and LTO
 
 Debug information is usually the largest single dev-profile cost, and the dev default
 is full info. `debug = "line-tables-only"` is the cheapest setting that still gives
@@ -90,6 +90,8 @@ Link-time optimisation is already effectively off in both built-in profiles: dev
 release both default to `lto = false`. Note that `false` is not `"off"` — it still
 performs thin-local LTO across the crate's own codegen units, and only `"off"`
 disables LTO entirely. The rule that matters is not to turn it on in dev.
+
+## Linking
 
 Linking is often a bigger share of an incremental rebuild than compilation, because
 it happens after every change and does not benefit from caching. Check what you
@@ -122,11 +124,15 @@ box relinking 33 test binaries after a one-line change: GNU bfd 38.3s, lld with
 slower than the one it replaced until its internal parallelism was capped —
 `-Clink-arg=-Wl,--threads=1` leaves the parallelism where cargo can schedule it.
 
+## Optimising dependencies
+
 Optimising dependencies while leaving your own crate unoptimised is a real lever:
 `[profile.dev.package."*"]` applies to every non-workspace dependency. Prefer
 `opt-level = 1` over 2 or 3 — at 2 and above a crate stops sharing monomorphised
 generics across crate boundaries, which can cost more than the optimisation gains on
 generic-heavy trees.
+
+## Codegen backend
 
 An alternative codegen backend such as Cranelift can compile substantially faster at
 the cost of slower generated code, which is the right trade for dev and wrong for
@@ -166,7 +172,6 @@ schedule rather than once.
 - Are clean and incremental builds distinguished?
 - Is the intended split along a one-way dependency, or does the code still reference back?
 - Do proc-macros live in their own crate, given they cannot be pipelined?
-- Does frequently-edited code sit in a foundational crate?
 - Is dev debug info reduced, and LTO left off?
 - Has `--print link-args` confirmed which linker actually runs, per target rather than per toolchain?
 - If lld is enabled, are its threads capped so concurrent links do not oversubscribe?

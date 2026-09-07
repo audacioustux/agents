@@ -188,6 +188,5 @@ Nested worktrees, wrong base, forgetting cleanup. See `references/common-mistake
 - Run Step 0 detection first
 - Prefer native tools over git fallback
 - Follow directory priority: instruction file > existing > global legacy > default
-- Verify directory is ignored for project-local
 - Auto-detect and run project setup
 - Verify clean test baseline

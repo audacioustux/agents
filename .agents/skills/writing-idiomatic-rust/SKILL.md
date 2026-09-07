@@ -171,9 +171,7 @@ internals usually know their type.
 
 - Does any parameter take ownership the function does not keep?
 - Can each `clone` be justified in one sentence?
-- Does any `clone` sit inside a loop?
 - Is any `unwrap` outside a test asserting something nothing verifies?
-- Does any match chain exist only to return its error unchanged?
 - Does a library expose an opaque error where callers need to branch?
 - Does any wrap discard the cause it wrapped?
 - Is an intermediate collection allocated between two adapters?

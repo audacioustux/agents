@@ -2,10 +2,12 @@
 name: reviewer-gate-around-commits
 description: "Require a reviewer-agent pass before major task execution and after every commit"
 condition:
-  # `git commit` carrying a message: -m, -F, --message, --file
-  - 'git\s+commit\s+(-F|-m|--file|--message)'
+  # `git commit` carrying a message: -m, -F, --message, --file.
+  # `git` and `commit` are often separated (`git -c user.name=x commit`), as are
+  # `commit` and the flag (`git commit -q -F -`); both gaps must be tolerated.
+  - 'git\s[^\n|;&]*\bcommit\b[^\n|;&]*\s(-F|-m|--file|--message)\b'
   # `git commit` with an explicit pathspec: the `-- <paths>` form
-  - 'git\s+commit\b[^\n]*--\s'
+  - 'git\s[^\n|;&]*\bcommit\b[^\n]*--\s'
 scope: "tool:bash"
 ---
 

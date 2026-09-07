@@ -181,12 +181,9 @@ Nested worktrees, wrong base, forgetting cleanup. See `references/common-mistake
 - Use `git worktree add` when you have a native worktree tool (e.g., `EnterWorktree`). This is the #1 mistake — if you have it, use it.
 - Skip Step 1a by jumping straight to Step 1b's git commands
 - Create worktree without verifying it's ignored (project-local)
-- Skip baseline test verification
 - Proceed with failing tests without asking
 
 **Always:**
-- Run Step 0 detection first
-- Prefer native tools over git fallback
 - Follow directory priority: instruction file > existing > global legacy > default
 - Auto-detect and run project setup
 - Verify clean test baseline

@@ -142,7 +142,7 @@ reach. None of these substitute for the per-operation argument; they check it.
 
 ## Review checklist
 
-- Does each `unsafe` block wrap only the operation that needs it?
+- Which operation needs the `unsafe` — raw deref, unsafe call, mutable static, unsafe impl, union read, inline asm, or a 2024 unsafe attribute — and does the block wrap only that?
 - For each dereference: non-null, aligned, initialised, aliasing-respecting, still valid?
 - Does any safe function let a caller reach undefined behaviour with valid-looking input?
 - Does every `unsafe fn` carry a `# Safety` section stating the caller's obligation?

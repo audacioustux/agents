@@ -73,7 +73,8 @@ Debug information is usually the largest single dev-profile cost, and the dev de
 is full info. `debug = "line-tables-only"` is the cheapest setting that still gives
 backtraces with file and line. `debug = 1` (`"limited"`) is a middle option — it adds
 module-level info but drops type and variable info — so it is not the cheapest, and
-claiming otherwise misreads the ladder.
+claiming otherwise misreads the ladder. The string forms need Rust 1.71 or newer; the
+numeric and boolean forms work on older toolchains.
 
 Link-time optimisation is already effectively off in both built-in profiles: dev and
 release both default to `lto = false`. Note that `false` is not `"off"` — it still

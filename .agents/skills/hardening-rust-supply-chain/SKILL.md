@@ -44,7 +44,7 @@ here.
 
 Turn the warnings that matter into failures — but know which ones you can. Not every
 finding is a configurable lint level, and assuming otherwise produces a config that
-looks strict and is not:
+looks strict and is not. Verified against cargo-deny 0.20.2:
 
 | Finding | Default | Configurable? |
 | --- | --- | --- |
@@ -56,6 +56,12 @@ looks strict and is not:
 | `multiple-versions` | `warn` | Yes |
 | `wildcards` | `allow` | Yes |
 | `unknown-registry`, `unknown-git` | `warn` | Yes |
+
+That schema moves. `unmaintained` used to be a lint level and is now a scope, and
+`vulnerability`, `severity-threshold`, and `unlicensed` were removed outright once
+those findings became unconditional errors. Because the config rejects unknown keys,
+a stale key is a hard config error rather than a silent no-op — so check the version
+before assuming a mismatch here is drift rather than a change on their side.
 
 The two that actually need changing are `multiple-versions` and `wildcards`. A
 warning in a green build is a decision deferred indefinitely, and `wildcards`
@@ -115,7 +121,8 @@ Prefer a patch release that keeps the API. Where none exists, a maintained fork 
 replacement crate is a larger change than it looks and should be reviewed as one.
 
 Where the fix cannot land immediately, the ignore entry is the only lever, and it is
-blunter than people expect. Neither tool supports an expiry: `cargo-deny`'s ignore
+blunter than people expect. Neither tool supported an expiry as of cargo-deny 0.20.2
+and cargo-audit 0.22.2: `cargo-deny`'s ignore
 accepts an advisory id and a free-text `reason` and rejects unknown keys outright, so
 an `expires` field is a config parse error rather than a silently-ignored convention.
 `cargo-audit`'s ignore list is bare ids with nowhere to put metadata at all.

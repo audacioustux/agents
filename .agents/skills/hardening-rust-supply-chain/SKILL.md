@@ -143,10 +143,10 @@ end condition is how an advisory becomes permanently invisible.
 | `unmaintained` set to `warn` or `deny` | It takes a scope: `all`/`workspace`/`transitive`/`none` |
 | `expires` key in an ignore entry | Parse error, not a deferral; put the date in `reason` |
 | Ignore entry with no stated end condition | Add one, and own the follow-up outside the tool |
-| Lockfile gitignored because it is a library | Commit it; the bin/lib split was retired in 2023 |
+| `Cargo.lock` in `.gitignore` | Commit it; the bin/lib split was retired in 2023 |
 | Committed lockfile and nothing resolves fresh | Add a scheduled job that resolves without it |
 | CI has the lockfile present but not enforced | Resolve with `--locked` so manifest drift fails the build |
-| Dependency judged by its unsafe count alone | Treat the count as a map; maintenance history matters more |
+| A crate rejected on its unsafe count with no look at its history | Treat the count as a map; maintenance matters more |
 
 ## Review checklist
 

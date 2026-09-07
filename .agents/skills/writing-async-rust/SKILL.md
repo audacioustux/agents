@@ -172,8 +172,7 @@ explicitly rather than by dropping the handle and hoping.
 | Blocking or CPU-bound call on the async path | Offload it; `spawn_blocking` under tokio, and note `block_in_place` is multi-thread only |
 | `for` loop awaiting each item in turn, called concurrent | Join them, or use a bounded stream |
 | One spawned task per item of unbounded input | Bound the concurrency explicitly |
-| Task handle dropped to "let it run in the background" | tokio detaches, smol cancels — call `detach()` explicitly |
-| Spawned task whose handle nobody awaits | Keep the handle; it is how a panic reaches you |
+| `let _ = spawn(...)` or a handle dropped immediately | tokio detaches, smol cancels — call `detach()` explicitly, and keep the handle to see panics |
 
 ## Review checklist
 

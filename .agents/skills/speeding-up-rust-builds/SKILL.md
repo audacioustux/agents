@@ -147,8 +147,7 @@ schedule rather than once.
 
 | Symptom | Fix |
 | --- | --- |
-| Optimising by total build time | Read the critical path in `--timings`; parallel work is already free |
-| A crate was sped up and nothing improved | It was never on the critical path |
+| A crate was sped up and total build time did not move | It was never on the critical path; read `--timings` |
 | Split plan blocked by a mutual reference | Untangle the direction first; Cargo rejects package cycles outright |
 | Proc-macro sharing a crate with ordinary code | Give it its own crate; it cannot be pipelined |
 | A frequently-edited module in a foundational crate | Move it to a leaf; invalidation flows downstream |
@@ -157,7 +156,7 @@ schedule rather than once.
 | `lto` enabled in dev | Turn it off; it optimises runtime nobody is measuring mid-loop |
 | lld enabled, links got slower | Cap its threads: it spawns one per core *per link* |
 | `-fuse-ld=lld` added to opt out of lld | Use `-Clinker-features=-lld`, the supported opt-out |
-| Linker assumed from a version number | `rustc --print link-args`; the default is per target and per distribution |
+| `.cargo/config.toml` sets a linker nobody confirmed is in use | `rustc --print link-args`; the default is per target and per distribution |
 | `opt-level = 3` on dependencies in dev | Use `1`; 2+ stops sharing monomorphised generics across crates |
 | Cranelift configured on a stable toolchain | It is nightly-only |
 

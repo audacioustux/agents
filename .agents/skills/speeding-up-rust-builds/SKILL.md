@@ -143,6 +143,24 @@ If build time matters enough to fix, it matters enough to measure again later. T
 timing data the compiler already emits is enough; the point is looking at it on a
 schedule rather than once.
 
+## Detection patterns
+
+| Symptom | Fix |
+| --- | --- |
+| Optimising by total build time | Read the critical path in `--timings`; parallel work is already free |
+| A crate was sped up and nothing improved | It was never on the critical path |
+| Split plan blocked by a mutual reference | Untangle the direction first; Cargo rejects package cycles outright |
+| Proc-macro sharing a crate with ordinary code | Give it its own crate; it cannot be pipelined |
+| A frequently-edited module in a foundational crate | Move it to a leaf; invalidation flows downstream |
+| `debug = true` in a dev profile | `line-tables-only` keeps backtraces and cuts ~3x off relinking |
+| `[profile.bench]` stripped of debug info | Restore it; profilers need it, and bench is off the edit loop |
+| `lto` enabled in dev | Turn it off; it optimises runtime nobody is measuring mid-loop |
+| lld enabled, links got slower | Cap its threads: it spawns one per core *per link* |
+| `-fuse-ld=lld` added to opt out of lld | Use `-Clinker-features=-lld`, the supported opt-out |
+| Linker assumed from a version number | `rustc --print link-args`; the default is per target and per distribution |
+| `opt-level = 3` on dependencies in dev | Use `1`; 2+ stops sharing monomorphised generics across crates |
+| Cranelift configured on a stable toolchain | It is nightly-only |
+
 ## Review checklist
 
 - Has the build been timed with `--timings`, and the critical path read rather than the total?

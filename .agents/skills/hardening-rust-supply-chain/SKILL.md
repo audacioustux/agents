@@ -132,6 +132,22 @@ condition in the `reason` string, and make something outside the tool — a cale
 entry, a tracking issue — responsible for coming back. An ignore with no stated
 end condition is how an advisory becomes permanently invisible.
 
+## Detection patterns
+
+| Symptom | Fix |
+| --- | --- |
+| Advisory scan runs only on dependency changes | Schedule it; advisories arrive without the tree changing |
+| `wildcards` never reported anything | It defaults to `allow`; set it to `deny` |
+| `multiple-versions` left at its default | Set to `deny`; duplicates compile in twice and their types do not interchange |
+| Config sets a lint level for `vulnerability` or `unlicensed` | Remove it; those are unconditional errors with no key |
+| `unmaintained` set to `warn` or `deny` | It takes a scope: `all`/`workspace`/`transitive`/`none` |
+| `expires` key in an ignore entry | Parse error, not a deferral; put the date in `reason` |
+| Ignore entry with no stated end condition | Add one, and own the follow-up outside the tool |
+| Lockfile gitignored because it is a library | Commit it; the bin/lib split was retired in 2023 |
+| Committed lockfile and nothing resolves fresh | Add a scheduled job that resolves without it |
+| CI has the lockfile present but not enforced | Resolve with `--locked` so manifest drift fails the build |
+| Dependency judged by its unsafe count alone | Treat the count as a map; maintenance history matters more |
+
 ## Review checklist
 
 - Does CI run `cargo-audit` or `cargo-deny advisories` on a schedule, not only on dependency changes?

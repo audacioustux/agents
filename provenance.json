@@ -457,7 +457,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "c9382e92b8f32363566068ecfed19d3b2651eaf40d3942b24840f839dedfc406",
+          "sha256": "e5803facf809de9f5605143766c6a8e5d7dc34546073e3c0422cf80baa7d1857",
           "upstream": {
             "status": "diverged",
             "sha256": "091df1629510af1b92fc4abd6f96732ebedb4cb2c0f3457e8f2740b0504a2438"
@@ -733,7 +733,7 @@
           }
         },
         "references/testing-anti-patterns.md": {
-          "sha256": "bde453bc258f06543987477c837939afaa774ea2acbd9f308d702fc452bc4283",
+          "sha256": "229e5a8c71ad5604f998490651f46f421c654705e573d6852ac47252cec44404",
           "upstream": {
             "status": "added-locally"
           }
@@ -772,7 +772,7 @@
           }
         },
         "examples/claude-md-test-campaign.md": {
-          "sha256": "0b379a3415e185d3c434b3ad283d8aa132f3022c2a4f210f168865b5986bcef0",
+          "sha256": "0052c9b70d10709dc710b9ebcd344101207bf9e321f20e6f484068c491b60470",
           "upstream": {
             "status": "added-locally"
           }
@@ -800,7 +800,7 @@
           }
         },
         "references/testing-with-subagents.md": {
-          "sha256": "7d88ecd697a04ab41db8e0dea584c95cedd887b32ab8e41be1c658f3e354c17f",
+          "sha256": "881ab3cbf14c90c68d035b0d3ec4ce162bbbf2ba8ccde5d938ab5e58851c5e10",
           "upstream": {
             "status": "diverged",
             "sha256": "c711346852c911b24a84aa161e0cff06a4cd7f4e2fa9e9c0a266cead5afcbade",
@@ -949,7 +949,7 @@
           }
         },
         "references/discovery-and-triggers.md": {
-          "sha256": "c7a70d4e382c67abde95ab764d7bfad7c60ed8fa3b53df7322a2ae6424b48734",
+          "sha256": "b199b87a7242b54c767841833cbd2717b98ce16197781fb7b893fe85d0868e36",
           "upstream": {
             "status": "added-locally"
           }
@@ -1092,7 +1092,7 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "9c1bed7f37cbbdb214bdc9d70c767a35818af769c444ade9bbc02b770665f0b7",
+          "sha256": "105ad63ea59086897baa53f67c8a8ba84025f976d0966f30d33ffc44a5f73256",
           "upstream": {
             "status": "native"
           }
@@ -1119,7 +1119,7 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "8ed2fbf8427d95eb41a07cefbd26988ea54899a4efaf42a4ddccbad195737210",
+          "sha256": "ea7dee3934d409a6a16bec1b899501c469ab7deb4285b8bf9f16cad4b4ee7a30",
           "upstream": {
             "status": "native"
           }
@@ -1141,7 +1141,7 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "acd5301d4e103619221e4b733ebda73ada01e8f3a986aa4e47879739b5fd7d7d",
+          "sha256": "c29ab324a272c58c729a43e6da7162a2a1587180c566ad666d028a9ba445c627",
           "upstream": {
             "status": "native"
           }
@@ -1163,7 +1163,7 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "69f5cb7c4e6e1458df2c4497ffed38b0c3555501e46ea7f45a46e7d5d32256fc",
+          "sha256": "c0dae01bc967033042dacc43cda4fbaccca824dbb141abfff73a11936534f609",
           "upstream": {
             "status": "native"
           }
@@ -1178,7 +1178,7 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "db68eb87ccd6ab3958a15466ea4b54e882ac17b7b3892edbfef4d76537b74419",
+          "sha256": "f28b06376eacd858a4e4b0a59e4d1fa9cc3284614eb0a58cd601f0672b4686ba",
           "upstream": {
             "status": "native"
           }
@@ -1228,7 +1228,7 @@
     "rust-async-runtime-scope": "Verified 2026-09-07 against std docs, tokio 1.53.1, async-std 1.13.2, smol 2.0.2 / async-task 4.7.1, plus direct measurement. writing-async-rust originally stated tokio behaviour as universal. Findings: (1) DIVERGENCE - dropping a task handle detaches under tokio and async-std but CANCELS under smol and anything on async-task, which marks Task #[must_use = \"tasks get canceled when dropped\"]. Measured: identical spawn-drop-wait shape runs under tokio and never runs under smol. The skill had asserted the tokio behaviour as universal, which is inverted for half the ecosystem. (2) 'Cancellation safety' is tokio's own term, defined on its select! docs; std and futures-rs do not use it, and the per-API verdicts are tokio's about tokio's APIs. (3) Tokio's own Mutex docs say 'Contrary to popular belief, it is ok and often preferred to use the ordinary Mutex from the standard library in asynchronous code', contradicting the skill's blanket 'needs an async-aware lock'. (4) A non-Send value across an await is compiler-level, not runtime-level, and under spawn_local it compiles and runs correctly - measured; the skill had wrongly attached a deadlock to it. The real deadlock is a blocking guard held across an await on a single-threaded runtime, measured as a total hang in which a 400ms tokio::time::timeout never fired because the timer could not run. (5) block_in_place is multi-threaded-only and panics on a current-thread runtime; std provides no offload facility at all. Language-level claims (lazy polling, cancel-by-drop, auto-trait derivation) are now separated from runtime-specific ones, and versions are anchored in the overview. Lock guidance sharpened after review: the two directions have different force and were measured separately. std Mutex by default is a preference (tokio's own docs). An async lock when the guard spans an await is a REQUIREMENT: a std guard is not Send, so under tokio::spawn it is a hard compile error ('future cannot be sent between threads safely', measured exit 101), while the identical code under spawn_local compiles and runs (measured exit 0) and fails instead as the runtime hang. Same rule, different enforcement; the skill now states both directions in the body, checklist and anti-patterns.",
     "rust-unsafe-verification": "Verified 2026-09-07 against stable Rust 1.90 by compiling every checkable claim; reviewing-unsafe-rust had shipped with no verification pass. Confirmed: all five classic capabilities are genuinely gated (E0133 for deref/unsafe-call/mutable-static/union-field, E0200 for unsafe trait impl, each proven by a without-unsafe negative that fails and a with-unsafe positive that compiles); safe rules stay in force inside an unsafe block (a use-after-borrow is still E0502); Send/Sync are auto-derived, a manual impl without unsafe is E0200, and a raw-pointer struct is not auto-Send (E0277). Corrected: (1) 'exactly five capabilities' is wrong - inline assembly is also gated by E0133, and in edition 2024 attributes such as #[no_mangle] require an unsafe(...) wrapper, so five is the historical framing not the current count; the overview asserted this too. (2) 'A Rust panic unwinding into foreign frames is undefined behaviour' is outdated - since Rust 1.81 it aborts (measured: exit 134 SIGABRT). The advice to catch at the boundary stands; the stated mechanism did not. Strengthened with measurement: repr(Rust) genuinely reorders a u8,u32,u8 struct to offsets 4/0/5 against repr(C)'s 0/4/8 and is smaller (8 vs 12 bytes); a crate with an out-of-bounds read and a double-&mut passes cargo test 2/2 green while cargo miri test reports 'error: Undefined Behavior' and exits 1, and clippy on the same UB exits 0 with zero warnings - the skill's claim that a clean lint run is no evidence about unsafe correctness is now demonstrated rather than asserted. Also noted that miri halts at the first violation, so a clean rerun does not prove there was only one.",
     "rust-build-measured-from-practice": "Updated 2026-09-07 from a real workspace's .cargo/config.toml and Cargo.toml (TheGrid, 24 crates, nightly-2026-08-18) whose settings carry their own measurements. Two corrections and two additions. CORRECTION 1: the skill said rust-lld is the default since 1.90 and treated that as toolchain-wide; it is per-target. Verified with `rustc --print link-args` on this box: the host aarch64-unknown-linux-gnu target links via plain `cc` with no fuse-ld flag, and `fuse-ld=lld` appears only when -Clinker-features=+lld is passed explicitly. The 1.90 change landed for x86_64-unknown-linux-gnu only. CORRECTION 2: two paragraphs contradicted each other after the first edit - one saying lld is already on, the next saying 'if you do switch to lld'. Resolved into a single per-target rule. ADDITION 1: the lld thread-oversubscription trap, which the skill omitted entirely and which inverts the advice. lld defaults to one thread per core PER LINK while cargo links concurrently; measured on a 12-core box relinking 33 test binaries, GNU bfd 38.3s, lld --threads=1 13.1s, lld default threads 120-150s - the fast linker was 4x SLOWER than the one it replaced until capped. ADDITION 2: debug-info numbers with a verified backtrace-parity claim - debug=true 29.2s, line-tables-only 10.1s, debug=0 6.6s, with 41 resolved frames under both true and line-tables-only and 0 under debug=0, so the 2.9x costs debugger variable inspection rather than backtraces; plus the per-session CARGO_PROFILE_DEV_DEBUG=true override and the [profile.bench] exemption that profilers need. Follow-up 2026-09-07 after a reviewer questioned whether the rust-lld default claim and its anti-pattern were true at all. Verified against the 1.90.0 release notes, PR #140525, the rustc book, and compiler source; plus measured locally. Three further corrections. (a) The default is narrower than 'x86_64 since 1.90': it is applied via a bootstrap env var (CFG_DEFAULT_LINKER_SELF_CONTAINED_LLD_CC) only for x86_64-unknown-linux-gnu and only in the toolchains rustup distributes, so a distro-built rustc may not have it. (b) -Clinker-features=+lld is unstable on EVERY target including x86_64 and errors without -Zunstable-options - measured here as 'error: `-C linker-features=+lld` is unstable'; only the -lld opt-out is stable, and only on x86_64. The skill had presented +lld as an ordinary knob. (c) The anti-pattern 'Adding -fuse-ld=lld where rust-lld is already the default' was WRONG: the rustc book states 'If the user also passes a -Clink-arg=-fuse-ld=$value, both will be given to the linker driver but the user's will be passed last, and would generally have priority over rustc's', so it is redundant and harmless rather than conflicting. Replaced with the real hazard - using a -fuse-ld override as an opt-out instead of the supported -Clinker-features=-lld, noting that rustc's old-GCC retry strips only the exact string -fuse-ld=lld so a differently-spelled override survives a retry meant to drop it.",
-    "corpus-review-2026-09-07": "Full 33-skill review for rendering and structural defects. Checked: fence closure and tagging, fence languages, table/heading/list blank-line separation, bare URLs, backtick balance, paragraph length and prose runs, heading depth, emoji, all-caps, trailing whitespace, TODO markers, and heading vocabulary. Fixed three real defects: (1) systematic-debugging's h2 read '## your human partner's Signals You're Doing It Wrong', ungrammatical damage from an earlier find-and-replace de-personalisation pass; (2) one trailing-whitespace line in writing-skills; (3) twelve headings across eight skills that differed only in casing - 'When To Use'/'When to Use' vs 'When to use', 'Anti-Patterns' vs 'Anti-patterns', 'Red flags' vs 'Red Flags', 'Common mistakes' vs 'Common Mistakes' - normalised to the corpus-majority form, with no internal anchor links or prose references to break. Deliberately NOT changed: the `dot` fence at writing-skills:281, which the `diagrams` decision records as the one deliberately-bad example kept as graphviz because the section heading is '### Code in Flowcharts' and the fence IS the anti-pattern; 30 untagged fences, which hold pseudo-code process templates and directory trees rather than runnable code; and the semantic split between 'Anti-patterns' (12), 'Red Flags' (5) and 'Common Mistakes' (5), which mark genuinely different things in workflow skills. No unclosed fences, no oversized paragraphs (longest 107 words), no h4+ nesting outside two skills, and no broken tables were found. SECOND PASS: the first review only opened SKILL.md files and its fence scan matched `{3,}, so it was structurally blind to malformed delimiters. A reviewer caught 68 two-backtick fence lines across 5 files in testing-skills (SKILL.md, examples/claude-md-test-campaign.md, references/bulletproofing.md, references/persuasion-principles.md, references/testing-with-subagents.md), including tagged opens like ``markdown and ``yaml, all of which render as inline code rather than blocks - 34 blocks broken. Verified before converting: every file balanced (opens == closes), zero pre-existing three-tick fences, zero mid-line double-backtick spans that a ^`` pass could clobber, and no nested fences needing longer delimiters. Converted all 68 and confirmed content byte-identical apart from the added tick. Also swept all 73 markdown files (33 SKILL.md + 40 companions) for single-backtick line starts, unclosed fences, trailing whitespace, consecutive blanks, lowercase headings and missing trailing newlines; the remaining flags were all false positives - prose lines wrapping onto a backticked term, and legitimate headings ('# iOS input zoom recipes', '# advanced.md'). Root-caused the miss: the corpus-wide grep used the BRE `^``\\([^`]\\|$\\)`, which returns 0 rather than erroring. Verified against the pre-fix file at 70e1fd2 - that pattern finds 0 matches while `grep -P '^``(?!`)'` and `grep '^``' | grep -v '```'` both find 12. Isolated the failing construct: `^``[^`]` alone matches and `^``` alone matches, but the escaped alternation inside the group yields 0 under BOTH BRE and ERE, and `\\|` is alternation in BRE yet a literal pipe in ERE, so the pattern was never portable. The silent zero sent the investigation to symlinks and git-tracking before the JS scan settled it. Rule going forward: a zero result from a hand-written regex is a claim that needs a positive control - run the pattern against content known to contain the target before believing an empty result."
+    "corpus-review-2026-09-07": "Full 33-skill review for rendering and structural defects. Checked: fence closure and tagging, fence languages, table/heading/list blank-line separation, bare URLs, backtick balance, paragraph length and prose runs, heading depth, emoji, all-caps, trailing whitespace, TODO markers, and heading vocabulary. Fixed three real defects: (1) systematic-debugging's h2 read '## your human partner's Signals You're Doing It Wrong', ungrammatical damage from an earlier find-and-replace de-personalisation pass; (2) one trailing-whitespace line in writing-skills; (3) twelve headings across eight skills that differed only in casing - 'When To Use'/'When to Use' vs 'When to use', 'Anti-Patterns' vs 'Anti-patterns', 'Red flags' vs 'Red Flags', 'Common mistakes' vs 'Common Mistakes' - normalised to the corpus-majority form, with no internal anchor links or prose references to break. Deliberately NOT changed: the `dot` fence at writing-skills:281, which the `diagrams` decision records as the one deliberately-bad example kept as graphviz because the section heading is '### Code in Flowcharts' and the fence IS the anti-pattern; 30 untagged fences, which hold pseudo-code process templates and directory trees rather than runnable code; and the semantic split between 'Anti-patterns' (12), 'Red Flags' (5) and 'Common Mistakes' (5), which mark genuinely different things in workflow skills. No unclosed fences, no oversized paragraphs (longest 107 words), no h4+ nesting outside two skills, and no broken tables were found. SECOND PASS: the first review only opened SKILL.md files and its fence scan matched `{3,}, so it was structurally blind to malformed delimiters. A reviewer caught 68 two-backtick fence lines across 5 files in testing-skills (SKILL.md, examples/claude-md-test-campaign.md, references/bulletproofing.md, references/persuasion-principles.md, references/testing-with-subagents.md), including tagged opens like ``markdown and ``yaml, all of which render as inline code rather than blocks - 34 blocks broken. Verified before converting: every file balanced (opens == closes), zero pre-existing three-tick fences, zero mid-line double-backtick spans that a ^`` pass could clobber, and no nested fences needing longer delimiters. Converted all 68 and confirmed content byte-identical apart from the added tick. Also swept all 73 markdown files (33 SKILL.md + 40 companions) for single-backtick line starts, unclosed fences, trailing whitespace, consecutive blanks, lowercase headings and missing trailing newlines; the remaining flags were all false positives - prose lines wrapping onto a backticked term, and legitimate headings ('# iOS input zoom recipes', '# advanced.md'). Root-caused the miss: the corpus-wide grep used the BRE `^``\\([^`]\\|$\\)`, which returns 0 rather than erroring. Verified against the pre-fix file at 70e1fd2 - that pattern finds 0 matches while `grep -P '^``(?!`)'` and `grep '^``' | grep -v '```'` both find 12. Isolated the failing construct: `^``[^`]` alone matches and `^``` alone matches, but the escaped alternation inside the group yields 0 under BOTH BRE and ERE, and `\\|` is alternation in BRE yet a literal pipe in ERE, so the pattern was never portable. The silent zero sent the investigation to symlinks and git-tracking before the JS scan settled it. Rule going forward: a zero result from a hand-written regex is a claim that needs a positive control - run the pattern against content known to contain the target before believing an empty result. THIRD PASS, closing the two items the review measured but left: (1) ten sentence-initial 'your human partner' artifacts across five files - the same find-and-replace damage as the systematic-debugging heading - capitalised, with the 13 legitimate mid-sentence uses preserved. (2) The Rust skills were the corpus's prose-heaviest at 79% prose against a 34% average, four of five with zero tables while the UI skills carry '## Detection patterns' tables throughout. Added that section to all five, each row sourced from a defect its own body already establishes, matching the '| Symptom | Fix |' convention in refining-typography and building-color-systems. Prose density fell to 68% and table rows rose from an average of 2 to 16; no Rust skill now lacks a detection table."
   },
   "consolidated": "2026-09-04",
   "upstreamRetrieval": "Upstream bytes are fetched on demand at the pinned SHA rather than vendored into this repo: https://raw.githubusercontent.com/<repo>/<sha>/<path>. Every upstream file records its sha256 here, so a drift check verifies the fetched bytes without trusting the network. A vendor-snapshot/ directory previously held these bytes; it was removed as bloat (1.2MB, 134 files) after verifying the fetched blobs are byte-identical to the snapshot and that vendor-snapshot/local duplicated content already in git history at f7b6fdf."

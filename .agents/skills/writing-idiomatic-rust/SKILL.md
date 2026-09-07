@@ -151,6 +151,22 @@ Where a boxed trait object is the right answer, put it at the API boundary rathe
 than threading it through internals. The boundary is where the openness is real; the
 internals usually know their type.
 
+## Detection patterns
+
+| Symptom | Fix |
+| --- | --- |
+| `fn f(s: String)` where the body only reads | Take `&str`; callers with a `String` pass `&s` and keep it |
+| `.clone()` added right after a borrow-checker error | Revisit the ownership design; the error was information |
+| `.clone()` inside a loop body | Hoist the borrow outside the loop |
+| `.unwrap()` in library or application code | Return `Result`, or `.expect("why this cannot happen")` |
+| `match` whose only arm returns the error unchanged | Replace with `?` |
+| Nested `match` to bind one value or return | `let ... else` |
+| `.collect()` immediately followed by iteration | Drop the intermediate; chain the adapters |
+| `.iter()` then `.cloned()` on a `Copy` collection | `.into_iter()`, or `.copied()` if the borrow is wanted |
+| Library error is `Box<dyn Error>` or a single opaque type | Enum with a variant per failure the caller can handle |
+| Wrapper error discards what it wrapped | Keep the cause; implement `source()` |
+| `dyn Trait` inside a module that knows the concrete type | Generic here; box at the API boundary instead |
+
 ## Review checklist
 
 - Does any parameter take ownership the function does not keep?

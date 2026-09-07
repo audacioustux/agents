@@ -140,6 +140,24 @@ as no evidence whatsoever about unsafe correctness.
 Sanitisers are the third layer, catching at run time what static analysis cannot
 reach. None of these substitute for the per-operation argument; they check it.
 
+## Detection patterns
+
+| Symptom | Fix |
+| --- | --- |
+| `unsafe` block spanning many lines for one operation | Shrink it to the operation; the rest follows safe rules anyway |
+| `unsafe` added after a borrow-checker rejection | Revisit the design; the obligation moved from compiler to reader |
+| `unsafe` used for speed with no measurement | Measure first; bounds checks are often already eliminated |
+| Raw deref justified by a null check alone | State all five: non-null, aligned, initialised, aliasing, still-valid |
+| Two `&mut` derived from one raw pointer | UB whether or not both are used; restructure so only one exists |
+| `unsafe impl Send`/`Sync` with no comment | State the per-field argument beside it |
+| Safe `fn` that documents a precondition it does not check | Validate at the boundary, or make the function `unsafe fn` |
+| `unsafe fn` with no `# Safety` section | Add one; it is the only channel the caller sees |
+| Wrapper or alias that hides `unsafe` in its name | Keep the word; renaming closes the warning channel |
+| Length from foreign code used unvalidated | Bound it, upper limit included |
+| `extern` entry point that can panic | Catch the unwind and return an error code; it aborts otherwise |
+| Struct shared with C using the default representation | `#[repr(C)]`; the default reorders fields |
+| Unsafe paths covered only by `cargo test` | Run them under Miri; Clippy sees none of this |
+
 ## Review checklist
 
 - Which operation needs the `unsafe` — raw deref, unsafe call, mutable static, unsafe impl, union read, inline asm, or a 2024 unsafe attribute — and does the block wrap only that?

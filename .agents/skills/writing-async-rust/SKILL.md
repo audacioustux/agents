@@ -158,6 +158,23 @@ a detached task's failure surfaces nowhere. Give every spawned task an owner tha
 observes its outcome, and where a task truly should outlive its spawner, detach it
 explicitly rather than by dropping the handle and hoping.
 
+## Detection patterns
+
+| Symptom | Fix |
+| --- | --- |
+| Cleanup written after an `.await` on a cancellable path | Move it into a `Drop` guard |
+| `select!` loop recreating a read each pass | Hold the future outside the loop so it is polled to completion |
+| `read_exact`/`read_to_end` inside a `select!` branch | Use a cancel-safe read, or move it out of the select |
+| `std::sync::MutexGuard` alive across an `.await` | Release before awaiting, or use an async lock if it must span |
+| `tokio::sync::Mutex` for a critical section with no await | Plain `std::sync::Mutex`; tokio's own docs prefer it |
+| Spawn fails with "future cannot be sent between threads" | Find the non-`Send` value held across the await |
+| Same code compiles under `spawn_local` but hangs | A blocking guard spans an await; the timeout cannot fire either |
+| Blocking or CPU-bound call on the async path | Offload it; `spawn_blocking` under tokio, and note `block_in_place` is multi-thread only |
+| `for` loop awaiting each item in turn, called concurrent | Join them, or use a bounded stream |
+| One spawned task per item of unbounded input | Bound the concurrency explicitly |
+| Task handle dropped to "let it run in the background" | tokio detaches, smol cancels — call `detach()` explicitly |
+| Spawned task whose handle nobody awaits | Keep the handle; it is how a panic reaches you |
+
 ## Review checklist
 
 - For each await: if the future is dropped here, is any work lost?

@@ -60,6 +60,8 @@ Load the faces the design actually uses instead of a family that forces the brow
 
 Below 18px, stay at weight 400 or heavier; thinner weights are display-only (28px+) and disappear at text sizes. Start long-form body around 16px; UI text can go to roughly 14px for inputs and menus, rarely below 12px for captions. Mobile text inputs still need 16px, since iOS Safari zooms the page below that (`references/ios-input-zoom-recipes.md`).
 
+Forcing grayscale smoothing thins strokes. On macOS it is a common house style and can read as crisper, but it overrides a rendering choice the user's system made and costs perceived contrast, which is why it belongs with the weight floor rather than in a reset. Apply it to a whole document only when the type is already at or above the floor above, and never as a way to make a thin weight look intentional. If text reads too heavy, change weight or color, which every platform honours.
+
 ## Copy, punctuation, direction
 
 Store copy in natural case, style with `text-transform`, so a redesign never means rewriting strings. Use curly quotes in prose (straight quotes in code), an en dash for ranges, a single ellipsis character instead of three periods, a non-breaking space to hold a value and its unit together, and a soft hyphen where a long word may break.

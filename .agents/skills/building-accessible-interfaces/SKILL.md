@@ -75,6 +75,9 @@ Use for:
 - Avoid tiny adjacent controls, especially in dense tables, toolbars, and overlays.
 - Set touch-action to suppress the double-tap zoom delay on controls, and set the tap-highlight deliberately rather than inheriting it.
 - Gestures (drag, swipe, pinch, path) need a tap and keyboard alternative unless the gesture is genuinely essential.
+- A drag that commits an action needs a stated commit threshold, and on release the element settles to a defined resting position rather than wherever the finger stopped. Below the threshold it returns to rest, so a hesitant drag is always cancellable.
+- Suppress fling momentum on gestures that commit an action. Velocity deciding the outcome means a flick and a deliberate drag do different things, and the user cannot tell which they performed until it is done.
+- Where a drag reveals several actions, stage them by distance rather than showing all at once, so the shallow gesture offers the common action and the deeper one is deliberate.
 - Use autofocus sparingly: a single primary desktop input at most, and avoid it on mobile where it forces the keyboard open.
 
 ### Motion and feedback
@@ -83,6 +86,8 @@ Use for:
 - Respect reduced-motion preferences: ship a reduced variant rather than only disabling, so the state change still reads.
 - Motion that autoplays longer than a few seconds beside other content needs a pause, stop, or hide control.
 - Animations must stay interruptible and respond to input mid-flight; a user who acts again should not wait out the previous animation.
+- Stagger a composite entrance instead of animating one large block: animate the heading, body, and actions as separate pieces a short beat apart, so the eye is led through the content in reading order rather than meeting all of it at once.
+- Exits should be quieter than entrances. An element leaving does not need the attention one arriving does, so let fade and softening carry most of a dismissal rather than travelling the full distance back out.
 - Provide immediate visual feedback for user actions.
 - Long-running work needs progress, optimistic feedback, skeletons, or clear pending states; avoid leaving users unsure whether anything happened.
 

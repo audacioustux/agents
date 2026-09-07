@@ -83,6 +83,7 @@ Do not bury important state transitions in styling-only hooks or side effects.
 - Nested corners are concentric: an inner radius plus its padding gives the outer radius. Equal radii on nested elements look wrong at the corner.
 - Borders communicate structure and state; depth is better carried by layered shadows. Where a border exists only to suggest elevation, prefer a shadow built from several low-alpha layers (a hairline, a tight contact shadow, a wider diffuse one) rather than one large blur.
 - A translucent shadow adapts to whatever sits behind it. A solid border colour only works against the background it was picked for, so surfaces over images or varied backgrounds should carry shadow rather than border.
+- Images need their own edge. A shadow sits outside the element and cannot stop light content dissolving into a light surface, so give media a hairline inset outline at about ten percent opacity, dark on light themes and light on dark. Inset it over the image's own edge so it follows the corner radius and adds no layout box, which a border would.
 
 ## Component states to cover
 

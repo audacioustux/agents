@@ -63,6 +63,10 @@ Generate ramps against sRGB unless display-restricted, and layer P3 as an enhanc
 
 Interpolation space is a look, not a correctness setting. An even, perceptually uniform space is the default for gradients, holding brightness steady. A polar space suits a two-hue gradient that goes grey in the middle. Plain sRGB darkens and mutes the midpoint, which is what most interfaces already have.
 
+Polar spaces carry one hazard worth knowing before choosing one: hue is an angle, so interpolating it sweeps an arc and the gradient passes through hues neither stop declared. Blue to yellow can travel via green or via pink depending on which way round the wheel is shorter. A rectangular space interpolates in a straight line and cannot introduce a hue you did not pick, so prefer it whenever the surprise matters more than the extra chroma.
+
+To move where a blend happens without inventing a colour, bias the midpoint between two stops rather than inserting a third one. A third stop pins a colour at a position and changes what the gradient contains; a midpoint hint only changes how fast one stop gives way to the next. Reach for the hint when a gradient is technically correct but weighted wrong, since adding a stop to fix a rate is what produces the extra bands nobody chose.
+
 ## Before you finish
 
 | Symptom | Fix |

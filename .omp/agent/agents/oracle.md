@@ -3,7 +3,7 @@ name: oracle
 description: "Use for a second opinion on a position you already hold, for non-obvious angles on a hard problem, for reasoning that needs more depth than the work at hand affords, and for thinking through how to approach something before committing to it. NOT for locating code (use scout), judging a finished diff (use reviewer), or executing work (use task)."
 tools: read, grep, glob, bash, ast_grep, web_search
 spawns: scout
-model: "@plan"
+model: "@plan, omniroute/best-reasoning:max, omniroute/reasoning:xhigh"
 read-summarize: false
 output:
   properties:

@@ -1092,7 +1092,7 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "45353a2838691898d362ae2fcdb128262fe73e4620a90cd11d822f843a3a681b",
+          "sha256": "9c1bed7f37cbbdb214bdc9d70c767a35818af769c444ade9bbc02b770665f0b7",
           "upstream": {
             "status": "native"
           }

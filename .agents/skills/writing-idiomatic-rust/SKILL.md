@@ -37,10 +37,10 @@ FFI boundary, to `writing-async-rust` for await points and cancellation, and to
 ## Ownership at the boundary
 
 Take the least owned thing that does the job. A parameter typed `&str` accepts a
-`String`, a `&String`, and a string literal; a parameter typed `String` forces every
-caller to own or clone one. The same holds for `&[T]` against `Vec<T>`. Widening a
-parameter this way costs nothing and removes an allocation from callers who had a
-borrow already.
+string literal and, by deref coercion, a `&String` — so a caller holding a `String`
+passes `&s` and keeps it, while a parameter typed `String` forces that caller to give
+it up or clone. The same holds for `&[T]` against `Vec<T>`. Widening a parameter this
+way costs nothing and removes an allocation from callers who had a borrow already.
 
 Return owned data when the caller needs it to outlive the callee, and borrowed data
 when it does not. A function returning `String` where every caller immediately reads

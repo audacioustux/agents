@@ -177,9 +177,13 @@ Agent violated rule despite having the skill? This is like a test regression - y
 
 ### Plugging Each Hole
 
-For each new rationalization, add:
+For each new rationalization, add it in **one** of the following places — not
+several. A quoted excuse duplicated across a table and a list drifts in one
+copy and goes stale in the other.
 
 ### 1. Explicit Negation in Rules
+
+Use when the rule itself can be tightened so the excuse has nothing to attach to.
 
 <Before>
 ```markdown
@@ -201,6 +205,8 @@ Write code before test? Delete it. Start over.
 
 ### 2. Entry in Rationalization Table
 
+The default home for a quoted excuse, because the table carries its rebuttal:
+
 ```markdown
 | Excuse | Reality |
 |--------|---------|
@@ -209,11 +215,15 @@ Write code before test? Delete it. Start over.
 
 ### 3. Red Flag Entry
 
+Red flags list **observable states**, not excuses — an agent self-checking needs
+to recognise the situation it is in, and the table above already owns the
+quotes:
+
 ```markdown
 ## Red Flags - STOP
 
-- "Keep as reference" or "adapt existing code"
-- "I'm following the spirit not the letter"
+- Code written before its test
+- Existing implementation still open while writing tests
 ```
 
 ### 4. Update description

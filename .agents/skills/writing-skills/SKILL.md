@@ -24,7 +24,7 @@ You write test cases (pressure scenarios with subagents), watch them fail (basel
 
 This skill covers writing. The testing half — running the baseline, pressure-testing, closing loopholes — is the `testing-skills` skill.
 
-**Core principle:** If you didn't watch an agent fail without the skill, you don't know if the skill teaches the right thing.
+**Core principle:** a skill you did not watch an agent fail without is a guess. `testing-skills` owns that argument and the procedure for acting on it; this skill assumes you accept it.
 
 **Assumed background:** the `test-driven-development` skill, if installed. That skill defines the fundamental RED-GREEN-REFACTOR cycle. This skill adapts TDD to documentation.
 
@@ -292,10 +292,9 @@ helper1, helper2, step3, pattern4
 
 **IMPORTANT: Use TodoWrite to create todos for EACH checklist item below.**
 
-**RED Phase - Write Failing Test:** (procedure: `testing-skills`)
-- [ ] Create pressure scenarios (3+ combined pressures for discipline skills)
-- [ ] Run scenarios WITHOUT skill - document baseline behavior verbatim
-- [ ] Identify patterns in rationalizations/failures
+**RED Phase - Write Failing Test:** run the RED checklist in `testing-skills`
+(`references/testing-with-subagents.md`). It owns the procedure; do not work
+from a copy.
 
 **GREEN Phase - Write Minimal Skill:**
 - [ ] Name uses only letters, numbers, hyphens (no parentheses/special chars)
@@ -309,12 +308,9 @@ helper1, helper2, step3, pattern4
 - [ ] One excellent example (not multi-language)
 - [ ] Run scenarios WITH skill - verify agents now comply
 
-**REFACTOR Phase - Close Loopholes:** (procedure: `testing-skills`)
-- [ ] Identify NEW rationalizations from testing
-- [ ] Add explicit counters (if discipline skill)
-- [ ] Build rationalization table from all test iterations
-- [ ] Create red flags list
-- [ ] Re-test until bulletproof
+**REFACTOR Phase - Close Loopholes:** run the REFACTOR checklist in
+`testing-skills`. It carries requirements this page does not repeat, including
+updating the description with violation symptoms and meta-testing for clarity.
 
 **Quality Checks:**
 - [ ] Small flowchart only if decision non-obvious

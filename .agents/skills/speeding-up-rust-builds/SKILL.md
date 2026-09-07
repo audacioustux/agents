@@ -95,12 +95,23 @@ Linking is often a bigger share of an incremental rebuild than compilation, beca
 it happens after every change and does not benefit from caching. Check what you
 actually link with before configuring anything: `rustc --print link-args` shows the
 driver and its flags. Since Rust 1.90 `rust-lld` is the default on
-`x86_64-unknown-linux-gnu` only — on `aarch64-unknown-linux-gnu` the same toolchain
-still invokes plain `cc`, so "lld is already on" is true per target, not per toolchain.
-Where it is already on, adding `-fuse-ld=lld` is redundant and can conflict with what
-rustc passes; where it is not, `-Clinker-features=+lld` with
-`-Clink-self-contained=+linker` enables the `rust-lld` that ships with the toolchain,
-with no system linker to install.
+`x86_64-unknown-linux-gnu` only, and only in the toolchains rustup distributes — a
+distro-built rustc can ship with it off. On `aarch64-unknown-linux-gnu` the same
+toolchain still invokes plain `cc`, so "lld is already on" is a fact about a target
+and a build of the compiler, not about a version number.
+
+Enabling it elsewhere is a nightly affair. `-Clinker-features=+lld` is unstable on
+every target, including x86_64, and errors without `-Zunstable-options`; only the
+`-lld` opt-out is stable, and only on x86_64. Pair it with
+`-Clink-self-contained=+linker` to use the `rust-lld` that ships with the toolchain,
+which is why this needs no system linker installed — and pin a dated toolchain, since
+unstable flags can be renamed.
+
+Going the other way, the supported opt-out is `-Clinker-features=-lld`. A
+`-Clink-arg=-fuse-ld=...` override does work — rustc passes user link args last, so
+yours wins — but it is the unsanctioned path, and rustc's own fallback for old GCC
+strips only the exact string `-fuse-ld=lld`, so a differently-spelled override can
+survive a retry that was meant to drop it.
 
 If you enable lld, cap its threads in the same change. This is the part usually
 omitted and it inverts the result. lld defaults to one thread per core *per link*, and
@@ -151,9 +162,9 @@ schedule rather than once.
 - Planning a split across a mutually-referencing module pair, which Cargo will reject.
 - LTO enabled in a dev profile.
 - Full debug info where line tables would do.
-- Adding `-fuse-ld=lld` on a target where rust-lld is already the default.
+- Using a `-fuse-ld` override to turn lld off: the supported opt-out is `-Clinker-features=-lld`.
 - Enabling lld without capping its threads, making links slower than the linker replaced.
-- Assuming a linker default is toolchain-wide when it landed for one target.
+- Assuming a linker default is toolchain-wide when it landed for one target and one distribution.
 - Stripping debug info from `[profile.bench]`, where profilers need it.
 - `opt-level = 3` on dependencies, losing shared monomorphised generics.
 - Assuming Cranelift is available on stable.

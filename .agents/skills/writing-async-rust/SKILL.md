@@ -89,12 +89,17 @@ the only thread. Nothing else can run — including the timer driving a timeout 
 bound it, which is why this failure presents as a total hang rather than an error.
 Take what the lock protects, release it, then await.
 
-Do not reach for an async mutex reflexively. Tokio's own documentation is blunt about
-this: "Contrary to popular belief, it is ok and often preferred to use the ordinary
-Mutex from the standard library in asynchronous code." A blocking mutex around a short
-critical section that never spans an await is the simpler and usually faster choice.
-The async-aware lock earns its cost only when the guard genuinely must be held across
-an await — and that is a design decision worth stating rather than defaulting into.
+So: std `Mutex` by default, an async lock only when the guard genuinely spans an await.
+Tokio's own documentation is blunt about the first half — "Contrary to popular belief,
+it is ok and often preferred to use the ordinary Mutex from the standard library in
+asynchronous code" — because a blocking mutex around a short critical section that
+never reaches an await is simpler and usually faster.
+
+The second half is a requirement, not a preference. A std guard is not `Send`, so
+holding one across an await makes the whole future non-`Send`. Under a spawn that
+requires `Send` this is a hard compile error: `future cannot be sent between threads
+safely`. Under `spawn_local` there is no such bound, so the same code compiles — and
+then hits the hang above. The rule holds either way; only the enforcement differs.
 
 Large values held across awaits inflate the state machine, which is allocated as a
 whole. A future carrying a large buffer across several awaits pays for it at every
@@ -158,8 +163,8 @@ explicitly rather than by dropping the handle and hoping.
 - For each await: if the future is dropped here, is any work lost?
 - Does any select loop poll a non-cancel-safe operation?
 - Is cleanup written after an await rather than in a `Drop` guard?
-- Is a blocking lock guard held across an await, especially on a single-threaded runtime?
-- Is an async mutex used where a short blocking critical section would do?
+- Does any guard that spans an await come from a std lock rather than an async one?
+- Conversely, is an async mutex used where a short critical section never reaches an await?
 - Is anything non-`Send` held across an await in a future that must be spawned across threads?
 - Is any blocking or CPU-bound call sitting on the async path?
 - Are sequential awaits intended, or meant to overlap?
@@ -171,10 +176,10 @@ explicitly rather than by dropping the handle and hoping.
 
 - A select loop that recreates and drops a non-cancel-safe read each pass.
 - Cleanup after an await, on a path that can be cancelled.
-- A blocking lock guard held across a suspension.
+- A std lock guard held across an await: a compile error where `Send` is required, a hang where it is not.
 - Blocking I/O on the runtime, diagnosed as a slow database.
 - A sequential await loop presented as concurrency.
 - One spawned task per input item, unbounded.
 - A detached task whose panic nobody observes.
 - Assuming a dropped task handle detaches, which inverts between tokio and smol.
-- Reaching for an async mutex by default, against tokio's own recommendation.
+- Reaching for an async mutex by default, where the guard never reaches an await.

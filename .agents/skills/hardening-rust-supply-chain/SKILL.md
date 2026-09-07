@@ -161,8 +161,6 @@ end condition is how an advisory becomes permanently invisible.
 
 - Configuring a lint level for vulnerabilities or unlicensed crates, which are always errors.
 - Assuming `wildcards` is on: it defaults to `allow` and reports nothing until set.
-- An `expires` key in an ignore entry, which is a parse error, not a deferral.
-- A committed lockfile with nothing ever resolving fresh, so CI tests one pinned set forever.
 - An advisory ignored permanently because the fix was inconvenient once.
 - Treating a dependency's unsafe count as a quality score.
 - Auditing only on dependency changes, when advisories arrive independently.

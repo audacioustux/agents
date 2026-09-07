@@ -174,7 +174,6 @@ reach. None of these substitute for the per-operation argument; they check it.
 - Reaching for `unsafe` because the borrow checker rejected the design.
 - A null check presented as a soundness argument.
 - A safe function documenting a precondition it does not enforce.
-- Assuming a length supplied by foreign code.
 - Trusting a clean Clippy run as evidence about unsafe code.
 - Treating a "five capabilities" list as current: inline asm and, in edition 2024, unsafe attributes also qualify.
 - Assuming an escaping panic is UB rather than an abort, and skipping the catch because "it works".

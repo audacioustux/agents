@@ -182,7 +182,6 @@ explicitly rather than by dropping the handle and hoping.
 - Does any guard that spans an await come from a std lock rather than an async one?
 - Conversely, is an async mutex used where a short critical section never reaches an await?
 - Is anything non-`Send` held across an await in a future that must be spawned across threads?
-- Is any blocking or CPU-bound call sitting on the async path?
 - Are sequential awaits intended, or meant to overlap?
 - Is per-item concurrency bounded?
 - Does every spawned task have an owner that observes its outcome?
@@ -190,12 +189,9 @@ explicitly rather than by dropping the handle and hoping.
 
 ## Anti-patterns
 
-- A select loop that recreates and drops a non-cancel-safe read each pass.
-- Cleanup after an await, on a path that can be cancelled.
 - A std lock guard held across an await: a compile error where `Send` is required, a hang where it is not.
 - Blocking I/O on the runtime, diagnosed as a slow database.
 - A sequential await loop presented as concurrency.
-- One spawned task per input item, unbounded.
 - A detached task whose panic nobody observes.
 - Assuming a dropped task handle detaches, which inverts between tokio and smol.
 - Reaching for an async mutex by default, where the guard never reaches an await.

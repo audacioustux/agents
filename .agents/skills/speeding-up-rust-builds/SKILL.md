@@ -177,11 +177,8 @@ schedule rather than once.
 
 - Optimising a crate that was never on the critical path.
 - Planning a split across a mutually-referencing module pair, which Cargo will reject.
-- LTO enabled in a dev profile.
 - Full debug info where line tables would do.
 - Using a `-fuse-ld` override to turn lld off: the supported opt-out is `-Clinker-features=-lld`.
 - Enabling lld without capping its threads, making links slower than the linker replaced.
 - Assuming a linker default is toolchain-wide when it landed for one target and one distribution.
-- Stripping debug info from `[profile.bench]`, where profilers need it.
-- `opt-level = 3` on dependencies, losing shared monomorphised generics.
 - Assuming Cranelift is available on stable.

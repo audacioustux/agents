@@ -187,4 +187,3 @@ internals usually know their type.
 - A match chain wrapping a single fallible call.
 - An opaque or boxed error in a library, forcing callers to string-match.
 - `iter()` plus `cloned()` where `into_iter()` was meant.
-- Boxing a trait object inside a module that knows the concrete type.

@@ -56,12 +56,13 @@ Current UI ownership boundaries:
 
 | Skill | Owns |
 | --- | --- |
-| `building-accessible-interfaces` | Semantics, keyboard, focus, forms, targets, motion requirements, whether contrast is required |
+| `building-accessible-interfaces` | Semantics, keyboard, focus, forms, targets, motion constraints, whether contrast is required |
 | `building-responsive-layouts` | Responsive adaptation, overlay stability, stacking order, safe areas, direction and locale resilience |
 | `building-color-systems` | Ramp construction, color token tiers, notation and gamut, measuring rendered pairs, dark-mode palettes |
 | `refining-typography` | Text rendering: scale, line-height, measure, wrapping, truncation, numerals, font faces |
 | `writing-interface-copy` | User-facing wording: labels, errors, empty states, terminology, translation-safe strings |
 | `designing-component-systems` | Component APIs, composition, state ownership, token consumption |
+| `animating-interface-motion` | Whether to animate, continuity, entrance and exit shaping, technique choice |
 | `following-repo-ui-conventions` | Repository convention precedence, theme safety, styling discipline |
 | `improving-web-performance` | Loading, runtime responsiveness, visual stability, resilience |
 | `reviewing-ux-in-browser` | Browser verification procedure |
@@ -81,15 +82,17 @@ flowchart TD
   copy["writing-interface-copy<br/>wording"]
   comp["designing-component-systems<br/>component APIs"]
   perf["improving-web-performance<br/>loading, runtime"]
+  motion["animating-interface-motion<br/>motion craft"]
   browser["reviewing-ux-in-browser<br/>verification"]
 
   conv --> a11y & layout & type & color & copy
-  a11y --> color & type & copy & layout
+  a11y --> color & type & copy & layout & motion
   layout --> type & a11y
   type --> a11y & color & copy & perf & layout
   color --> a11y & comp & type
   copy --> type & a11y
   comp --> color & type
+  motion --> a11y
 
   browser -.->|verifies| conv
 ```

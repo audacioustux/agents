@@ -104,6 +104,33 @@ rules upward. `reviewing-ux-in-browser` is a procedure rather than a domain, so 
 verifies the others rather than owning rules they defer to it, which is why its one
 arrow is dashed.
 
+Rust ownership boundaries:
+
+| Skill | Owns |
+| --- | --- |
+| `writing-idiomatic-rust` | Ownership at API boundaries, clones, fallibility, iterators, dispatch |
+| `reviewing-unsafe-rust` | What each unsafe operation requires, safe-abstraction contracts, FFI boundaries |
+| `hardening-rust-supply-chain` | Dependency policy, lockfile discipline, advisory response |
+| `speeding-up-rust-builds` | Compile time: crate graph, dev profiles, linking |
+
+```mermaid
+flowchart TD
+  idio["writing-idiomatic-rust<br/>ownership, errors, dispatch"]
+  unsafe_["reviewing-unsafe-rust<br/>soundness, FFI"]
+  supply["hardening-rust-supply-chain<br/>dependency policy"]
+  builds["speeding-up-rust-builds<br/>compile time"]
+
+  idio --> unsafe_ & builds
+  unsafe_ --> idio & supply
+  supply --> unsafe_
+  builds --> idio
+```
+
+`writing-idiomatic-rust` is the entry point for Rust work. The split between it and
+`reviewing-unsafe-rust` is what the compiler checks: ownership questions the borrow
+checker settles belong to the first, and obligations it cannot see belong to the
+second.
+
 ## Upstream tracking
 
 `provenance.json` at the repository root records, for every skill, where it came

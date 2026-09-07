@@ -1,0 +1,146 @@
+---
+name: reviewing-unsafe-rust
+description: Use when writing or reviewing an unsafe block, a safe wrapper over unsafe internals, a raw pointer, a union, or an FFI boundary — establishing what each unsafe operation requires and who is responsible for guaranteeing it.
+uses:
+  - name: writing-idiomatic-rust
+    source: audacioustux/agents
+  - name: hardening-rust-supply-chain
+    source: audacioustux/agents
+---
+
+# Reviewing Unsafe Rust
+
+## Overview
+
+`unsafe` does not switch off the borrow checker. It unlocks five specific operations
+the compiler cannot verify, and leaves every other rule in force.
+
+Reviewing unsafe code is therefore not a search for danger in general. It is checking,
+per operation, what that operation requires and whether something guarantees it.
+
+## When to use
+
+Use for:
+
+- any `unsafe` block or `unsafe fn`
+- a safe API whose implementation is unsafe
+- raw pointers, unions, `static mut`, or manual `Send`/`Sync`
+- any FFI boundary in either direction
+
+Ordinary ownership and API-shape questions belong to `writing-idiomatic-rust`.
+Auditing dependencies for unsafe code belongs to `hardening-rust-supply-chain`.
+
+## What unsafe actually grants
+
+Exactly five capabilities: dereferencing a raw pointer, calling an unsafe function,
+accessing or modifying a mutable static, implementing an unsafe trait, and reading a
+union field.
+
+Everything else follows safe rules inside the block. Borrowing, lifetimes, and
+allocation behave as they always do. This matters because a block wrapping fifty
+lines to cover one dereference tells a reviewer nothing about which line is
+load-bearing. Keep the block around the operation that needs it.
+
+That principle has a consequence worth stating on its own: `unsafe` is not an escape
+hatch. Reaching for it because the borrow checker rejected a design converts a
+compile-time error into a runtime one and moves the proof obligation from the compiler
+to a person who may not know they inherited it.
+
+Nor is it a performance tool by default. Bounds checks are frequently eliminated
+where the optimiser can prove the index is in range, so removing them by hand often
+buys nothing. Measure before trading a guarantee for a number nobody has seen.
+
+## Preconditions, per operation
+
+A raw pointer dereference requires all of: the pointer is non-null, it is aligned for
+its type, the memory is initialised for that type, the aliasing rules hold, and the
+memory stays valid for the lifetime of any reference produced from it. All five, every
+time. A null check alone is not a soundness argument.
+
+Aliasing is the one most often skipped, because nothing crashes when it is violated.
+Producing two `&mut` to the same location is undefined behaviour whether or not both
+are used, and the optimiser is entitled to assume it never happened.
+
+A manual `Send` or `Sync` implementation is a claim about every field, transitively.
+The compiler derives these automatically wherever it can, so writing one by hand means
+overriding a decision it declined to make, and the reason belongs in a comment beside
+it.
+
+Reading a union field asserts that the field last written is the field being read.
+Nothing tracks that; the code has to.
+
+## Safe abstractions
+
+The purpose of a safe wrapper is to make the unsafe operation unreachable in a way
+that violates its preconditions. If a caller can trigger undefined behaviour without
+writing `unsafe` themselves, the wrapper is unsound, however small the gap.
+
+Which means a safe function containing unsafe code owes an argument that no input can
+break it. Validate at the boundary — lengths, null, alignment, ranges — rather than
+documenting the requirement and hoping. A documented precondition on a safe function
+is not enforcement; the safety marker the caller would have seen is exactly what the
+wrapper removed.
+
+Where the caller genuinely must uphold something, the function should be `unsafe fn`
+and say so in a `# Safety` section. That is not a formality: it is the only mechanism
+that puts the obligation where the caller can see it, and it restores the marker the
+wrapper would otherwise have deleted.
+
+For the same reason, do not alias, re-export, or wrap unsafe operations under names
+that hide their nature. The word is a warning channel, and renaming it closes the
+channel while leaving the hazard.
+
+## FFI boundaries
+
+Foreign code has none of Rust's guarantees, so the boundary is where they have to be
+re-established.
+
+Anything crossing in is untrusted. A pointer from foreign code needs the same five
+checks as any other raw pointer, plus a length that is validated rather than assumed —
+including an upper bound, since a plausible-looking length can still be absurd.
+
+Ownership has to be settled explicitly and in one direction. Which side allocates,
+which side frees, and with which allocator. Freeing foreign memory with Rust's
+allocator, or the reverse, is undefined behaviour that usually appears to work.
+
+A Rust panic unwinding into foreign frames is undefined behaviour. Any `extern` entry
+point that could panic needs the unwind caught at the boundary and converted into
+something the other side understands, typically an error code.
+
+Types crossing the boundary need a guaranteed layout. Rust's default representation
+gives no ordering or padding promises, so anything shared with C needs an explicit C
+representation rather than an assumption that the fields land where they look like
+they land.
+
+## Verification
+
+Miri interprets Rust and detects undefined behaviour that testing alone will not
+surface: out-of-bounds access, use-after-free, misaligned access, and aliasing
+violations. It runs the code paths your tests reach, so its coverage is your tests'
+coverage.
+
+Clippy catches only a small share of unsafe defects, and that is by design rather
+than a gap to be closed — most soundness obligations are not lint-shaped. Treat a
+clean lint run as no evidence at all about unsafe correctness.
+
+Sanitisers are the third layer, catching at run time what static analysis cannot
+reach. None of these substitute for the per-operation argument; they check it.
+
+## Review checklist
+
+- Does each `unsafe` block wrap only the operation that needs it?
+- For each dereference: non-null, aligned, initialised, aliasing-respecting, still valid?
+- Does any safe function let a caller reach undefined behaviour with valid-looking input?
+- Does every `unsafe fn` carry a `# Safety` section stating the caller's obligation?
+- Is every manual `Send`/`Sync` justified against every field?
+- At each FFI boundary: lengths bounded, ownership assigned, unwind caught, layout guaranteed?
+- Has Miri run over the tests that exercise the unsafe paths?
+
+## Anti-patterns
+
+- A large `unsafe` block wrapping one unsafe line.
+- Reaching for `unsafe` because the borrow checker rejected the design.
+- A null check presented as a soundness argument.
+- A safe function documenting a precondition it does not enforce.
+- Assuming a length supplied by foreign code.
+- Trusting a clean Clippy run as evidence about unsafe code.

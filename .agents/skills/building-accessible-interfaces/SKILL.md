@@ -50,6 +50,8 @@ Use for:
 - Modals mark background content inert and contain overscroll, so neither focus nor scroll leaks behind the overlay.
 - Do not create keyboard traps. Dialogs may trap focus while open but must provide Escape and visible close behavior unless the flow is intentionally blocking.
 - Sticky headers, footers, toasts, and overlays must not fully obscure focused elements.
+- Where repeated navigation or chrome precedes the content, a skip link is the first focusable element on the page, so a keyboard user does not tab the whole header on every view.
+- Give anchor targets scroll margin clearing any sticky header. Without it, following an in-page link parks the destination heading underneath the header, out of sight.
 
 ### Forms
 
@@ -62,6 +64,7 @@ Use for:
 - Do not force redundant re-entry across multi-step flows unless security or data freshness requires it.
 - Never block paste. Users paste passwords and one-time codes, and blocking it breaks password managers rather than improving security.
 - Keep submit enabled until the request starts, then disable it with a pending indicator. A submit button disabled until the form validates hides why it cannot be pressed.
+- Native disabled and the ARIA disabled state are different tools and never belong on the same element. The native attribute removes the control from focus order entirely, which also means any tooltip explaining why it is unavailable can never be reached by keyboard or touch; the ARIA state only announces, leaving focus, behaviour, and styling to you. Reach for the native one when the control is genuinely inert, the ARIA one when the user still needs to discover why.
 - Give each input a meaningful autocomplete token and name, and the input type and inputmode that summon the right keyboard. This is an accessibility affordance, not a convenience: it removes typing from users who find typing costly.
 - Turn spellcheck off on emails, usernames, codes, and identifiers, where red squiggles flag correct input as wrong.
 - A checkbox or radio and its label share one hit target, with no dead zone between them.
@@ -91,8 +94,11 @@ Use for:
 - Keep focus feedback subtle. It fires on every keyboard step, so motion sized for a deliberate click becomes disorienting when it repeats down a whole form.
 - Content revealed on scroll must not depend on the reveal to exist. Anything gated on entering the viewport should already be in the document and readable if the animation never runs, since an observer that does not fire leaves it permanently invisible to search, assistive technology, and anyone whose reduced-motion setting cancelled the transition.
 - Respect reduced-motion preferences: ship a reduced variant rather than only disabling, so the state change still reads.
+- Motion is never the only feedback channel. Every animated state change also needs a static cue in colour, an icon, or a label, because the animation is gone a moment later and absent entirely under reduced motion.
+- When cancelling animation for reduced motion, collapse the duration to a near-zero value rather than removing the animation, so completion events still fire and any logic waiting on them does not hang.
 - Motion that autoplays longer than a few seconds beside other content needs a pause, stop, or hide control.
 - Animations must stay interruptible and respond to input mid-flight; a user who acts again should not wait out the previous animation.
+- Interruptibility is a property of the technique, not of care taken. A transition interpolates toward whatever the current target is, so a new intent mid-flight retargets it; a keyframe sequence runs a fixed timeline and cannot change course once started. Drive interactive state changes with transitions, and reserve keyframes for staged sequences that run once.
 - Stagger a composite entrance instead of animating one large block: animate the heading, body, and actions as separate pieces a short beat apart, so the eye is led through the content in reading order rather than meeting all of it at once.
 - Exits should be quieter than entrances. An element leaving does not need the attention one arriving does, so let fade and softening carry most of a dismissal rather than travelling the full distance back out.
 - Provide immediate visual feedback for user actions.
@@ -103,6 +109,9 @@ Use for:
 - Announce important async changes without stealing focus unless the user's next step requires it.
 - Loading, empty, error, partial, and success states must be understandable without color alone.
 - Toasts and banners should be reachable or mirrored in-page when they contain critical information.
+- A live region must already be in the document before its text changes. Inserting the region and its message together is the most common reason an announcement never fires, because the assistive technology had nothing to watch.
+- Default announcements to polite. Reserve the assertive level for something the user must act on now, since it interrupts whatever is being read mid-sentence.
+- On a client-side route change, update the document title and move focus to the new view's heading or main landmark. Without it the page silently replaces itself while focus stays on a control that no longer exists.
 
 ## Multi-step flows
 

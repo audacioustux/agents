@@ -81,8 +81,10 @@ Do not bury important state transitions in styling-only hooks or side effects.
 - If the same styling combination appears repeatedly, extract a shared composition rather than copying drift.
 - Use one corner-radius scale per surface. Mixing radius systems is one of the most common reasons an interface reads as unfinished, and a deliberate mix needs a stated rule.
 - Nested corners are concentric: an inner radius plus its padding gives the outer radius. Equal radii on nested elements look wrong at the corner.
+- Centre by eye, not by arithmetic. A glyph whose visual mass sits off its bounding box, a play triangle or a chevron most often, looks wrong when its box is centred, and a button pairing an icon with a label wants slightly less padding on the icon side. Correct these where the asset is defined rather than nudging each usage, so the fix travels with the icon instead of being rediscovered at every callsite.
 - Borders communicate structure and state; depth is better carried by layered shadows. Where a border exists only to suggest elevation, prefer a shadow built from several low-alpha layers (a hairline, a tight contact shadow, a wider diffuse one) rather than one large blur.
 - A translucent shadow adapts to whatever sits behind it. A solid border colour only works against the background it was picked for, so surfaces over images or varied backgrounds should carry shadow rather than border.
+- Where a surface responds to hover, deepen the shadow it already has rather than swapping in a different recipe. Changing the layer geometry mid-interaction reads as the element resizing, and the transition should name the shadow property rather than animating everything.
 - Images need their own edge. A shadow sits outside the element and cannot stop light content dissolving into a light surface, so give media a hairline inset outline at about ten percent opacity, dark on light themes and light on dark. Inset it over the image's own edge so it follows the corner radius and adds no layout box, which a border would.
 
 ## Component states to cover

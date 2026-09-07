@@ -33,6 +33,8 @@ Use for:
 - A fallback trigger must not appear while its fallback panel is unavailable.
 - Navigation should collapse before it wraps into a broken or ambiguous half-state.
 - Search/filter/result flows should keep the user's input, context, and primary next action visible.
+- Hidden content needs a visible cue that it exists. Let a scrolling row's next item peek past the edge rather than aligning it flush, since a clean edge reads as the end of the list.
+- Label a disclosure with what it hides. "Show 12 more results" tells the user whether opening it is worth it; a bare "More" makes them open it to find out.
 
 ### Collapse by importance
 

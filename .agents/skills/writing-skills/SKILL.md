@@ -18,7 +18,7 @@ uses:
 
 **Writing skills IS Test-Driven Development applied to process documentation.**
 
-**Personal skills live in agent-specific directories (`~/.claude/skills` for Claude Code, `~/.agents/skills/` for Codex)** 
+**Personal skills live in agent-specific directories (`~/.claude/skills` for Claude Code, `~/.agents/skills/` for Codex)**
 
 You write test cases (pressure scenarios with subagents), watch them fail (baseline behavior), write the skill (documentation), watch tests pass (agents comply), and refactor (close loopholes).
 
@@ -123,7 +123,7 @@ description: Use when [specific triggering conditions and symptoms]
 ## Overview
 What is this? Core principle in 1-2 sentences.
 
-## When to Use
+## When to use
 [Small inline flowchart IF decision non-obvious]
 
 Bullet list with SYMPTOMS and use cases
@@ -267,7 +267,7 @@ pptx/
 ```
 When: Reference material too large for inline
 
-## Anti-Patterns
+## Anti-patterns
 
 ### ❌ Narrative Example
 "In session 2025-10-03, we found empty projectDir caused..."

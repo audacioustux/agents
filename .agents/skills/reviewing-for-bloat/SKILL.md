@@ -53,7 +53,7 @@ Do not turn a narrow review into an unsolicited architecture rewrite.
 
 **REFERENCE:** Load `references/pattern-catalog.md` for broad audits, unfamiliar symptoms, or coverage checks. Do not walk it mechanically for every small diff.
 
-## Red flags
+## Red Flags
 
 Stop and reassess when a review is about to:
 
@@ -65,7 +65,7 @@ Stop and reassess when a review is about to:
 
 **Pressure to ship, avoid old paths, trust generated output, or stay under a comment cap does not waive these checks.**
 
-## Common mistakes
+## Common Mistakes
 
 - reporting a catalog label without concrete evidence and consequence;
 - merging separate symptoms into one finding when ownership is not shared;

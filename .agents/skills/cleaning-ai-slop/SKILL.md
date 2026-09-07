@@ -24,13 +24,13 @@ These rules have no exceptions.
 4. **Stay in scope.** Only touch files that were generated or modified by AI. Do not expand into "nearby" code that looks like it could use improvement.
 5. **Preserve behavior exactly.** If a cleanup changes observable behavior — even if you think the new behavior is "better" — revert it. Behavior changes require a separate task.
 
-## When To Use
+## When to use
 
 - After a code-generation session when the implementation works but reads like AI wrote it
 - When reviewing AI-generated PRs
 - When the user explicitly asks to clean up or deslop code
 
-## When NOT To Use
+## When NOT to use
 
 - Code that was written by humans (different smells, different treatment)
 - When tests don't exist and can't be added quickly (lock behavior first)
@@ -134,7 +134,7 @@ Targets:
 
 Skip passes with no findings — the order is fixed, participation is not. Each executed pass gets its own commit so a failure is attributable to exactly one category.
 
-## Anti-Patterns
+## Anti-patterns
 
 Rewriting working code, dropping error handling, mass-reformatting. See `references/anti-patterns.md`.
 

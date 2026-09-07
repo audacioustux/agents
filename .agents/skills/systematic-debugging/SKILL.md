@@ -26,7 +26,7 @@ NO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST
 
 If you haven't completed Phase 1, you cannot propose fixes.
 
-## When to Use
+## When to use
 
 Use for ANY technical issue:
 - Test failures
@@ -80,7 +80,7 @@ If you catch yourself thinking:
 
 **If 3+ fixes failed:** Stop fixing. Three failures against one bug means the fixes shared an assumption that is wrong, so name that assumption and challenge it with your human partner before attempting a fourth.
 
-## your human partner's Signals You're Doing It Wrong
+## Signals From Your Human Partner That You're Doing It Wrong
 
 **Watch for these redirections:**
 - "Is that not happening?" - You assumed without verifying

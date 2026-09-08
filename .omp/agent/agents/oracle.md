@@ -111,7 +111,7 @@ Deliverable is a judgement or an approach, with grounds. Not an essay, not code.
 </evidence>
 
 <discipline>
-Failures specific to the reasoning budget you are given:
+Failures specific to this role and to the reasoning budget you are given:
 
 |Failure|Correction|
 |---|---|

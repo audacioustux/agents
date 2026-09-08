@@ -71,10 +71,18 @@ save. Moving it to a leaf costs nothing and stops the cascade.
 
 Debug information is usually the largest single dev-profile cost, and the dev default
 is full info. `debug = "line-tables-only"` is the cheapest setting that still gives
-backtraces with file and line. Measured on the same 33-binary relink: `debug = true`
-29.2s, `line-tables-only` 10.1s, `debug = 0` 6.6s. Backtrace quality between the first
-two was identical — 41 resolved frames each, against 0 with `debug = 0` — so the 2.9x
-is bought by dropping variable inspection in a debugger, not backtraces.
+backtraces with file and line.
+
+Same 33-binary relink:
+
+| `debug` | Time | Resolved frames |
+| --- | --- | --- |
+| `true` | 29.2s | 41 |
+| `"line-tables-only"` | 10.1s | 41 |
+| `0` | 6.6s | 0 |
+
+Backtrace quality between the first two is identical, so the 2.9x is bought by
+dropping variable inspection in a debugger, not backtraces.
 
 That makes the tradeoff a per-session one rather than a project-wide loss:
 `CARGO_PROFILE_DEV_DEBUG=true cargo build` restores full info for a `gdb` or `lldb`
@@ -116,13 +124,21 @@ strips only the exact string `-fuse-ld=lld`, so a differently-spelled override c
 survive a retry that was meant to drop it.
 
 If you enable lld, cap its threads in the same change. This is the part usually
-omitted and it inverts the result. lld defaults to one thread per core *per link*, and
-cargo already links binaries concurrently, so a workspace linking dozens of test
-binaries oversubscribes the machine by the product of the two. Measured on a 12-core
-box relinking 33 test binaries after a one-line change: GNU bfd 38.3s, lld with
-`--threads=1` 13.1s, lld with default threads 120-150s. The fast linker was four times
-slower than the one it replaced until its internal parallelism was capped —
-`-Clink-arg=-Wl,--threads=1` leaves the parallelism where cargo can schedule it.
+omitted and it inverts the result. lld defaults to one thread per core *per link*,
+and cargo already links binaries concurrently, so a workspace linking dozens of test
+binaries oversubscribes the machine by the product of the two.
+
+Relinking 33 test binaries on a 12-core box after a one-line change:
+
+| Linker | Time |
+| --- | --- |
+| GNU bfd | 38.3s |
+| lld, `--threads=1` | 13.1s |
+| lld, default threads | 120-150s |
+
+The fast linker was four times slower than the one it replaced until its internal
+parallelism was capped. `-Clink-arg=-Wl,--threads=1` leaves the parallelism where
+cargo can schedule it.
 
 ## Optimising dependencies
 

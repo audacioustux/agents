@@ -57,6 +57,8 @@ Reversing the light palette is a starting point, not the output. Vividness usual
 
 Declare the document's color scheme so the browser themes what you do not paint: scrollbars, form controls, and the native select popup. Without it a dark page keeps light scrollbars and unreadable native menus, and no token audit catches it because no token is involved.
 
+Elevation changes hands in dark mode. A shadow reads as depth by darkening what is behind it, and there is little left to darken on a near-black surface, so a raised element has to separate by getting lighter instead. Give the dark theme a small ladder of surface steps and let height select a step; keep the shadow for contact, not for the whole effect. A dark theme that ships the light theme's shadows has no depth at all, and the usual response - deepening the shadow further - cannot produce any.
+
 ## Gamut and interpolation
 
 Generate ramps against sRGB unless display-restricted, and layer P3 as an enhancement: sRGB first, override inside a P3 media query, so every display gets something. A P3 color with no sRGB fallback fails outright.
@@ -66,6 +68,8 @@ Interpolation space is a look, not a correctness setting. An even, perceptually 
 Polar spaces carry one hazard worth knowing before choosing one: hue is an angle, so interpolating it sweeps an arc and the gradient passes through hues neither stop declared. Blue to yellow can travel via green or via pink depending on which way round the wheel is shorter. A rectangular space interpolates in a straight line and cannot introduce a hue you did not pick, so prefer it whenever the surprise matters more than the extra chroma.
 
 To move where a blend happens without inventing a colour, bias the midpoint between two stops rather than inserting a third one. A third stop pins a colour at a position and changes what the gradient contains; a midpoint hint only changes how fast one stop gives way to the next. Reach for the hint when a gradient is technically correct but weighted wrong, since adding a stop to fix a rate is what produces the extra bands nobody chose.
+
+Perceived lightness must move in one direction across a gradient's stops. A stop that dips or rises against the run reads as a band at that position, and no interpolation space removes it, because the reversal is in the stops rather than the blend. Check lightness alone before reaching for a different colour space: an even space fixes how two stops meet, never a third stop placed out of order between them.
 
 ## Before you finish
 

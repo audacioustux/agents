@@ -49,8 +49,8 @@ Use for:
 - Style the focus-visible state rather than bare focus, so keyboard users get an indicator without forcing one onto every mouse click. Never remove the outline without a verified replacement.
 - Focus indicators must be visible and high-contrast in both light and dark themes, checked against every adjacent color the indicator crosses.
 - Opening overlays should move focus to an appropriate element; closing overlays should restore focus to the trigger when practical.
-- Modals mark background content inert and contain overscroll, so neither focus nor scroll leaks behind the overlay.
-- Do not create keyboard traps. Dialogs may trap focus while open but must provide Escape and visible close behavior unless the flow is intentionally blocking.
+- Modals mark background content inert and contain overscroll, so neither focus nor scroll leaks behind the overlay. The backdrop must also visibly recede — dimmed or blurred, not merely present — because a modal that only differs from the page behind it by elevation gives no cue that the rest of the interface stopped responding.
+- Do not create keyboard traps. Dialogs may trap focus while open but must provide Escape and visible close behavior unless the flow is intentionally blocking. Where surfaces stack, Escape dismisses one layer per press, innermost first, so a menu inside a dialog closes the menu rather than discarding the dialog and the work in it.
 - Sticky headers, footers, toasts, and overlays must not fully obscure focused elements.
 - Where repeated navigation or chrome precedes the content, a skip link is the first focusable element on the page, so a keyboard user does not tab the whole header on every view.
 - Give anchor targets scroll margin clearing any sticky header. Without it, following an in-page link parks the destination heading underneath the header, out of sight.
@@ -71,6 +71,7 @@ Use for:
 - Turn spellcheck off on emails, usernames, codes, and identifiers, where red squiggles flag correct input as wrong.
 - A checkbox or radio and its label share one hit target, with no dead zone between them.
 - Warn before discarding unsaved changes on navigation.
+- Prefer a reversal window to a confirmation prompt where the action can be undone: perform it, announce it, and offer undo for long enough to notice and act. A prompt taxes every correct invocation to catch the rare wrong one, and is dismissed reflexively by exactly the users who most needed to read it. Reserve typed confirmation for actions that are genuinely irreversible, and make the reversal reachable by keyboard rather than only by a toast that times out.
 
 ### Targets and gestures
 

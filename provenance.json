@@ -138,7 +138,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "62261185db33ce7df9e147f41ace57001fdc215acb93d72428bfa6db3df7d67e",
+          "sha256": "7a868b19d2b46ce8f4b872588d6313c4a8a0be325119f60ef89b98d42674fe3b",
           "upstream": {
             "status": "identical",
             "sha256": "6b526f7552bfd3a596ccf246f68da3b2c389026b987c65e6dbea9f59e6b8077a"
@@ -222,7 +222,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "f389202cbb2b372ddab1c57759d4b740d902853c58e934cf5f169f376c53aeef",
+          "sha256": "de0b05b3c15f1bd610210a434ec1d612037115b609eb9ac4c263b376df41989c",
           "upstream": {
             "status": "identical",
             "sha256": "b01dfb838a4f2e72c5287e6f56beb374fc65b61b422a230107964c2db28ee637"
@@ -1011,7 +1011,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "f9293b31ac7dc7516b96e74eb0184d414e5fc2d7db9bccfa5046f5738999d02b",
+          "sha256": "7ff76a965e48492ad59fc196fa4fba12b2f04cd799ce00fadc9d0a7c040a9c0f",
           "upstream": {
             "status": "rewritten"
           }
@@ -1068,7 +1068,7 @@
       "note": "Split out of building-accessible-interfaces on 2026-09-07. Holds the seven motion-craft rules that carry no accessibility failure mode; the constraints they must satisfy stayed behind.",
       "files": {
         "SKILL.md": {
-          "sha256": "73863c04c9a073451e84e789baecdc89e388bed8275789edfdb6535e6fa50157"
+          "sha256": "c30a26c982d49b8f62690d92cab56b2fd994dbe64a31a1fc14a5e9b1caf36d5e"
         }
       }
     },
@@ -1206,7 +1206,7 @@
     "diagrams": "Diagrams are mermaid fences, not graphviz. graphviz needs a `dot` binary that is not installed here, so the 11 dot fences were unrendered source text; mermaid renders natively in GitHub, VS Code, and agent UIs. TheGrid's docs/conventions/diagramming.md already mandates mermaid, and diagramming-with-mermaid explicitly defers format choice to the consuming repo. 9 fences converted and validated with mermaid.parse; one deliberately-bad example left as dot; graphviz-conventions.dot and render-graphs.js deleted as dead.",
     "mermaid-validation": "Validated against mermaid 11.17.2: Pass A mermaid.parse under jsdom 9/9; Pass B mermaid.render in real Chromium 9/9 with no error-SVG and min SVG 13,895 bytes (real diagrams, not stubs). Both passes teeth-checked 5/5 against unclosed brackets, misspelled type, ':: ' in state label, ';' in sequence message, malformed ER cardinality. Silent-pitfall scan clean; parenthesised labels confirmed verbatim via getDiagramFromText. Note: this repo pins no mermaid dependency and has no CI check, so GitHub's renderer version may differ.",
     "ui-domain-gaps": "Measured 2026-09-06: zero corpus hits for text-wrap, tabular-nums, OpenType, variable-font, oklch, gamut, contrast-ratio, microcopy, font-size, line-height, letter-spacing. Typography, color-system construction and interface copy were genuinely uncovered - existing skills detected the symptoms (reviewing-ux-in-browser 'wrapping, overflow, clipped controls'; following-repo-ui-conventions grading 'inconsistent spacing/copy') without owning any fix. Closed with three new skills rewritten from jakubkrehel/skills (MIT). His orchestration layer (better-interface, interface-review, variant, break, explain-interface) rejected: duplicates requesting-code-review and reviewing-ux-in-browser machinery.",
-    "source-rejections": "Leonxlnx/taste-skill REJECTED: self-scopes to marketing pages ('NOT for: Dashboards / dense product UI / admin panels'), prescribes a visual style that following-repo-ui-conventions:19 forbids inventing, 1207-line body against a <1000-word target. designmotionhq.com/patterns REJECTED as a source: quality spread within one site - z-index-mastery is correct CSS mechanics while golden-ratio is myth ('seashells, galaxies', unsourced Stripe/Linear claim) whose 1.618 type scale contradicts the measured typography rules; unsourced motion ms dials conflict with exact values held elsewhere. One verified line adopted: stacking-context behaviour into building-responsive-layouts. jakub.kr blog articles superseded by his skills repo, which is the same author's material in reviewable form.",
+    "source-rejections": "Leonxlnx/taste-skill REJECTED: self-scopes to marketing pages ('NOT for: Dashboards / dense product UI / admin panels'), prescribes a visual style that following-repo-ui-conventions:19 forbids inventing, 1207-line body against a <1000-word target. designmotionhq.com/patterns REJECTED as a source: quality spread within one site - z-index-mastery is correct CSS mechanics while golden-ratio is myth ('seashells, galaxies', unsourced Stripe/Linear claim) whose 1.618 type scale contradicts the measured typography rules; unsourced motion ms dials conflict with exact values held elsewhere. One verified line adopted: stacking-context behaviour into building-responsive-layouts. jakub.kr blog articles superseded by his skills repo, which is the same author's material in reviewable form. REVISITED 2026-09-08: designmotionhq.com/patterns re-crawled in full (76 detail pages via browser, not the index) and audited against the corpus. The original rejection holds for the source as a whole and for its numeric motion dials specifically - a primary-source check found no published basis for any duration figure, Apple publishes none at all, and Material moved from prose bands to per-component numbers to an unlabelled token scale carrying no thresholds. The commonly repeated derivation from the 100ms response-time limit is a scope error: that figure bounds when a system starts responding, not how long motion runs. Nine mechanism-level gaps were adopted on their own merit rather than on the site's authority, plus two rules from pages previously rejected wholesale. Two motion rules are sourced: the enter-decelerates/exit-accelerates split and shorter exits, both stated by Material across three versions with a rationale, and the reduced-motion obligation for scroll-linked motion, which comes from WCAG SC 2.3.3 (AAA) rather than the scroll-animations spec, which mentions accessibility nowhere.",
     "rule-ownership": "Each rule lives in exactly one skill; siblings state a hand-off rather than restating. Contrast splits deliberately: building-accessible-interfaces decides whether a ratio is required, building-color-systems measures the rendered pair and changes values. Typography owns text rendering, writing-interface-copy owns the words. Hand-off lines added to building-accessible-interfaces, designing-component-systems and following-repo-ui-conventions so ownership survives the corpus growing.",
     "authoring-conventions": "Adopted 2026-09-06 from jakubkrehel/skills AGENTS.md: calibration (state how hard to press), detection-pattern mistake tables (left column an observable symptom, not a restated principle), and one-home-per-rule with explicit hand-off lines. The SKILL.md template block and the creation checklist were updated in the same pass so the template does not teach prose for a section the rule requires as a table. Rejected his no-trigger-list description philosophy: it contradicts this corpus's routing constraint that descriptions carry a 'Use when' trigger.",
     "vendor-snapshot-removed": "Removed 2026-09-06. vendor-snapshot/local (584K) was byte-identical to the pre-consolidation tree already in git history - verified by comparing blob sha256 at 2e3c5aa~1. vendor-snapshot/upstream (568K) was verified fetchable on demand at each pinned SHA with matching sha256. What is load-bearing for re-merge is the pinned SHA plus the recorded hash, not the bytes. Cost of the removal: a re-merge now needs network, and a force-pushed or deleted upstream is unrecoverable - accepted, since the pins are public repos and the recorded hashes still prove drift.",

@@ -71,14 +71,15 @@ rest and departing at speed. Material has specified this split across all three 
 versions, with the reason that a dismissal needs less attention than whatever the user
 is doing next, and the same reasoning makes an exit shorter than its entrance.
 
-No published source supports a specific duration. Material's own numbers moved from
-global prose bands to per-component figures to an unlabelled token scale carrying no
-thresholds at all, and Apple publishes none. The response-time limits often quoted
-here — a tenth of a second for instantaneous, one second for unbroken flow — are
-latency budgets for the system to begin responding, not durations for the motion that
-follows. Pick durations as a project convention, state them once as tokens, and scale
-them with the distance travelled rather than deriving them from perception research
-that measured something else.
+No published source gives an empirical basis for any specific duration. Material
+publishes concrete values — a token scale from 50ms upward — but they are vendor
+convention, and each revision has removed more of the prose that once justified them;
+Apple publishes no figure at all. The response-time limits often quoted here — a tenth
+of a second for instantaneous, one second for unbroken flow — are latency budgets for
+the system to begin responding, not durations for the motion that follows. Adopt a
+vendor scale or declare your own, state it once as tokens, and scale with the distance
+travelled rather than deriving a number from perception research that measured
+something else.
 
 ## Technique
 
@@ -93,10 +94,11 @@ that sets it. A swap flips to the end value immediately while the rest of the
 transition still runs, so corners and colours snap mid-flight even though the movement
 itself is smooth.
 
-A hover effect must not change the element's footprint. Scaling a card moves its
-neighbours and reflows the grid under the cursor, so animate what sits inside the box —
-lift it, deepen its shadow, scale the image within a clipped frame — and let the box
-itself hold still.
+A hover effect must not change the element's layout box. Growing a card by width or
+height reflows its neighbours under the cursor; a transform scale avoids that but
+overlaps whatever sits next to it and resamples text mid-flight. Either way the
+cheapest correct move is to leave the box alone — lift the whole card, deepen its
+shadow, scale an image inside a clipped frame — so nothing around it has to respond.
 
 Motion tied to scroll position belongs on a scroll timeline rather than a scroll
 listener. `animation-timeline: scroll()` drives an animation from a scroller's
@@ -104,7 +106,7 @@ progress and `view()` from an element's passage through the viewport, both off t
 main thread, where the hand-rolled equivalent measures geometry on every scroll event.
 Firefox ships neither outside preview, so put them behind `@supports` and make the
 un-animated state the readable one. The reduced-motion obligation is external to this
-feature — the scroll-animations spec says nothing about it — and scroll-triggered
+feature — the scroll-animations spec's normative text imposes none — and scroll-triggered
 decoration is exactly the non-essential motion WCAG names, parallax included.
 
 ## Review checklist
@@ -127,6 +129,6 @@ decoration is exactly the non-essential motion WCAG names, parallax included.
 - Keyframes driving an interactive state change, so a second click waits out the first.
 - A duration justified by the hundred-millisecond response-time limit, which measures
   when the system starts responding rather than how long the motion runs.
-- Scaling a whole card on hover, reflowing the grid under the cursor.
+- Growing a card's width or height on hover, reflowing its neighbours under the cursor.
 - Parallax or scroll reveals hand-rolled on a scroll listener with no reduced-motion path.
 - Motion added because a surface looked static, with no state change to explain.

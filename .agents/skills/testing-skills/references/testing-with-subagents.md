@@ -186,12 +186,15 @@ copy and goes stale in the other.
 Use when the rule itself can be tightened so the excuse has nothing to attach to.
 
 <Before>
+
 ```markdown
 Write code before test? Delete it.
 ```
+
 </Before>
 
 <After>
+
 ```markdown
 Write code before test? Delete it. Start over.
 
@@ -201,6 +204,7 @@ Write code before test? Delete it. Start over.
 - Don't look at it
 - Delete means delete
 ```
+
 </After>
 
 ### 2. Entry in Rationalization Table

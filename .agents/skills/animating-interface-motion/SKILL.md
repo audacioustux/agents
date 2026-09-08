@@ -118,7 +118,7 @@ decoration is exactly the non-essential motion WCAG names, parallax included.
 - Can every interactive animation be interrupted by a new intent?
 - Does any value snap mid-transition because it is set by a class swap?
 - Does an entrance decelerate and its exit accelerate, or do both share one curve?
-- Does any hover state change an element's footprint and move its neighbours?
+- Does any hover state resize the element, reflowing or overlapping what sits beside it?
 - Is scroll-linked motion driven by a scroll timeline, and readable where unsupported?
 
 ## Anti-patterns

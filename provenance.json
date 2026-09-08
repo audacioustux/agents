@@ -1065,10 +1065,10 @@
       "owned": true,
       "presentInTree": true,
       "origin": "native",
-      "note": "Split out of building-accessible-interfaces on 2026-09-07. Holds the seven motion-craft rules that carry no accessibility failure mode; the constraints they must satisfy stayed behind.",
+      "note": "Split out of building-accessible-interfaces on 2026-09-07. Holds the motion-craft rules that carry no accessibility failure mode; the constraints they must satisfy stayed behind. Stated as a boundary rather than a count, since the rule set grows.",
       "files": {
         "SKILL.md": {
-          "sha256": "b62640fa2627d7f102d2a9837b0f643ad900c7365936e162a46d977cb4d1a0a5"
+          "sha256": "15f7fb4b8d42245259840fed6628d0980621094f12e558aa0b2b6064ff3865b5"
         }
       }
     },

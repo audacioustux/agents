@@ -60,7 +60,7 @@
       "note": "Terminal/TUI verification harness. Adopted as a new skill: no corpus owner exists and it cannot be housed in reviewing-ux-in-browser, which scopes itself to browser surfaces. The Node/Bun inspector profiling section was dropped as runtime-specific.",
       "audit": "AuditTeamKitThermos",
       "status": "landed",
-      "landedIn": "pending — new skill verifying-terminal-interfaces",
+      "landedIn": "527dbca — new skill verifying-terminal-interfaces",
       "evidence": "read in full (630w). Oracle scope gate confirmed no host; verified zero corpus hits for tmux/PTY/capture-pane/TUI."
     },
     "cursor-team-kit/skills/control-ui": {

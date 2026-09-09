@@ -66,7 +66,7 @@
       "note": "adopt-rule → reviewing-ux-in-browser (which owns the domain: 'Use available tools such as browser automation, DevTools, Playwright, screenshots, accessibility snapshots, console logs, network inspection, and performance traces'). Missing mechanism: drive the UI through roles, labels, and stable `dat",
       "audit": "AuditTeamKitThermos",
       "status": "landed",
-      "landedIn": "reviewing-ux-in-browser — role/name/test-id selector discipline"
+      "landedIn": "37e08e3 — reviewing-ux-in-browser, role/name/test-id selector discipline"
     },
     "cursor-team-kit/skills/deslop": {
       "disposition": "duplicate",
@@ -85,7 +85,7 @@
       "note": "adopt-rule → finishing-a-development-branch. Not a duplicate of using-git-worktrees: that skill is workspace setup ('This is workspace setup, not plan execution') and never mentions conflicts; the corpus has no merge-conflict owner. Worth taking as one rule: resolve conflicts in generated files (loc",
       "audit": "AuditTeamKitThermos",
       "status": "landed",
-      "landedIn": "finishing-a-development-branch — regenerate generated files on conflict"
+      "landedIn": "37e08e3 — finishing-a-development-branch, regenerate generated files on conflict"
     },
     "cursor-team-kit/skills/get-pr-comments": {
       "disposition": "reject",
@@ -131,10 +131,9 @@
     },
     "cursor-team-kit/skills/thermo-nuclear-code-quality-review": {
       "disposition": "duplicate",
-      "note": "duplicate — reviewing-for-bloat (and byte-identical to the thermos copy). Its flag list maps onto references/pattern-catalog.md line-for-line: 'A file crossing 1000 lines' = 'File fragmentation or monoliths — related logic is split across meaningless files, or unrelated responsibilities accumulate i",
+      "note": "duplicate — reviewing-for-bloat (and byte-identical to the thermos copy). Its flag list maps onto references/pattern-catalog.md line-for-line: 'A file crossing 1000 lines' = 'File fragmentation or monoliths — related logic is split across m Byte-identical to thermos/skills/thermo-nuclear-review, whose anchoring guard was adopted in 13eda09; this copy contributed nothing of its own and is not counted as landed.",
       "audit": "AuditTeamKitThermos",
-      "status": "landed",
-      "landedIn": "13eda09 — byte-identical duplicate of the thermos copy; same adoption"
+      "status": "no-action"
     },
     "cursor-team-kit/skills/verify-this": {
       "disposition": "adopt-rule",
@@ -208,7 +207,7 @@
       "audit": "AuditPstackWorkflows",
       "note": "Slack/Cursor-automation bound overall (marker gating, frozen channel coordinates, fail-closed config), but the sole source of two stack-agnostic rules the corpus lacked: 'The exact discriminating symptom must appear twice through real UI interaction' (line 25) and 'State inspection may confirm an observation. It must not inject or force the symptom.' (line 26). Both adopted into systematic-debugging/references/four-phases.md.",
       "status": "landed",
-      "landedIn": "uncommitted — twice-from-reset + no-injection into systematic-debugging/references/four-phases.md"
+      "landedIn": "37e08e3 — systematic-debugging/references/four-phases.md, twice-from-reset repro plus the no-injection rule"
     },
     "pstack/automations/benny/skills/setup-benny": {
       "disposition": "product-specific",
@@ -277,7 +276,7 @@
       "note": "Multi-model adversarial review with consensus weighting and act-on/consider/noted/dismissed lead judgment.",
       "audit": "AuditPstackWorkflows",
       "status": "landed",
-      "landedIn": "requesting-code-review — independent-agreement weighting"
+      "landedIn": "37e08e3 — requesting-code-review, independent-agreement weighting"
     },
     "pstack/skills/maintain-verification-skill": {
       "disposition": "reject",
@@ -296,7 +295,7 @@
       "note": "Comment removal via a named subagent; carries an encode-then-delete rule for constraint comments.",
       "audit": "AuditPstackWorkflows",
       "status": "landed",
-      "landedIn": "cleaning-ai-slop Pass 2 — encode-then-delete"
+      "landedIn": "37e08e3 — cleaning-ai-slop Pass 2, encode-then-delete"
     },
     "pstack/skills/poteto-mode": {
       "disposition": "reject",
@@ -321,7 +320,7 @@
       "note": "read in full by AuditPstackPrinciples",
       "audit": "AuditPstackPrinciples",
       "status": "landed",
-      "landedIn": "dispatching-parallel-agents — deterministic-lever exclusion"
+      "landedIn": "37e08e3 — dispatching-parallel-agents, deterministic-lever exclusion"
     },
     "pstack/skills/principle-encode-lessons-in-structure": {
       "disposition": "adopt-rule",
@@ -436,7 +435,7 @@
       "note": "read in full by AuditPstackPrinciples",
       "audit": "AuditPstackPrinciples",
       "status": "landed",
-      "landedIn": "testing-anti-patterns.md — Anti-Pattern 6"
+      "landedIn": "37e08e3 — testing-anti-patterns.md, Anti-Pattern 6"
     },
     "pstack/skills/principle-type-system-discipline": {
       "disposition": "adopt-skill",
@@ -576,8 +575,8 @@
   "method": "All 91 SKILL.md files enumerated from the tree at the pinned sha; every file carries exactly one disposition. 74 were assessed by three scout audits; the remaining 17 were read directly during ledger reconciliation and dispositioned product-specific.",
   "statusCounts": {
     "pending": 20,
-    "no-action": 60,
-    "landed": 11
+    "no-action": 61,
+    "landed": 10
   },
   "caveat": "Verdicts come from three scout audits of differing strictness. AuditPstackWorkflows applied a visibly laxer bar than AuditTeamKitThermos: it returned adopt-rule for workflow recipes with hardcoded model slugs (arena, architect, why, teach, figure-it-out) of the same class AuditTeamKitThermos rejected (review-and-ship, new-branch-and-pr). An independent oracle pass read 14 of the 19 unlanded adopt-rule rows and found roughly 20% survive as stated, 30-40% yield any edit at all, none yields a section. Treat adopt-* as a lead list, not a work queue.",
   "statusMeaning": {

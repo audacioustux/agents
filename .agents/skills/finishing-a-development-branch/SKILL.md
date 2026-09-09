@@ -247,10 +247,11 @@ a failure.
 
 For a moved base, read
 `git range-diff --creation-factor=99 <old-base>..<old-tip> <new-base>..<new-tip>`.
-It pairs commits by similarity and marks each `=` unchanged, `!` changed, or `<`
-unpaired. Raise the creation factor: at the default a commit whose context
-upstream shifted can score as unpaired and print `<` even though it carried
-perfectly, sending you after a commit that never went missing.
+It pairs commits by similarity and marks each `=` unchanged, `!` changed, `<`
+present only before, or `>` present only after. Raise the creation factor: at
+the default a commit whose context upstream shifted can score as unpaired and
+print `<` even though it carried perfectly, sending you after a commit that
+never went missing.
 
 Every marker other than `=` is a prompt to look, never a verdict. A conflict
 resolved correctly shows as changed for the same reason a botched one does, and

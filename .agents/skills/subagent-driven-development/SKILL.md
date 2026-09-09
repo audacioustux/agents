@@ -14,6 +14,8 @@ uses:
     source: audacioustux/agents
   - name: test-driven-development
     source: audacioustux/agents
+  - name: systematic-debugging
+    source: audacioustux/agents
 ---
 
 # Subagent-Driven Development

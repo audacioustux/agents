@@ -349,7 +349,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "1c638920d9456623cbd3d4cecf54e1df5dec3240db770e6f7869bd7fc063656e",
+          "sha256": "2a150cf17faae584ee41c11147e38206030067538fa65f5dfc26c2bc7877a625",
           "upstream": {
             "status": "diverged",
             "sha256": "8db5a922b242dd4e1bf824cb91c13b3e8d8e8a86d6ceaf7f0774eb9cce909d65"
@@ -572,7 +572,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "e0ce064bd1b81f10efabf94b597a46c0b91588bc2a10f12f2bad52ddbbb01e17",
+          "sha256": "2d99be87b6c5c0457804768e71791a4cdec59177b65242811fdcf2cfb0f7417c",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"

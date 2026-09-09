@@ -191,7 +191,7 @@
       "reason": "Grok voice session diagnostics",
       "status": "landed",
       "evidence": "read in full (198 lines). Line 16 states 'Works for any stack'; the prior product-specific verdict was taken from the description and was WRONG.",
-      "landedIn": "pending — systematic-debugging/references/four-phases.md, unobservable-failure instrumentation",
+      "landedIn": "f068bda — systematic-debugging/references/four-phases.md, unobservable-failure instrumentation",
       "note": "Symptom-to-signature fix loop over a dev-only structured log. The Grok API surface is product-bound, but the diagnostic discipline is not: when the failure is one the agent cannot observe, build the record first, agree the instrumentation before writing it, count high-volume data rather than logging it, and never log secrets or user content."
     },
     "orchestrate/skills/orchestrate": {
@@ -199,7 +199,7 @@
       "reason": "Cursor cloud-agent spawning via SDK; its one portable idea (no lateral worker talk, structured handoffs upward) is owned by dispatching-parallel-agents",
       "status": "landed",
       "evidence": "read in full (47 lines + references/planner.md, handoffs.md). The six Core principles at lines 22-27 reference no SDK; prior verdict WRONG.",
-      "landedIn": "pending — dispatching-parallel-agents, Topology section",
+      "landedIn": "f068bda — dispatching-parallel-agents, Topology section",
       "note": "Cloud-agent spawning is product-bound, but three topology rules are not and the corpus had zero coverage: the dispatcher does not also do the work, agents never talk sideways, and a late result reopens the plan."
     },
     "pr-review-canvas/skills/pr-review-canvas": {

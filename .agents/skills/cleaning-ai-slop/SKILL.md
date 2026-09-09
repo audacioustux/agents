@@ -88,11 +88,13 @@ Targets:
 
 - Null checks on values that are guaranteed non-null by the type system
 - Try-catch blocks around code that cannot throw
-- Validation of internal function parameters (validate at system boundaries only)
+- Speculative validation of internal function parameters, where no observed failure produced the check
 - Fallback values for required fields
 - Redundant type assertions
 
-Keep: validation at system boundaries (user input, external APIs, file I/O). Error handling where the runtime genuinely can fail. Also keep an internal check that a real bug put there — `systematic-debugging` prescribes layered validation once a value has been observed arriving invalid, and that check is evidence, not paranoia. Where the distinction is unclear, git blame separates the two: a check introduced alongside a regression test is earning its place.
+Keep: validation at system boundaries (user input, external APIs, file I/O). Error handling where the runtime genuinely can fail. Also keep an internal check that a demonstrated failure put there — `systematic-debugging` prescribes layered validation once a value has been observed arriving invalid, and such a check is evidence rather than paranoia.
+
+Decide it by behaviour, not by history. Delete the check and run the suite. A test that now fails is describing the invalid-value path the check exists to close, so restore it. A green suite is not yet permission to delete: it says no test covers that path, which is equally consistent with a speculative check and with a real guard whose coverage was never written. Resolve it by trying to reach the check — construct the input that would trip it. If you can, the path is real: restore the check and leave the test behind. If the type system or the call graph makes it unreachable, the check was paranoia and the deletion stands. Commit co-location settles nothing here, since a model writing new code commits speculative checks and their tests together.
 
 ### Pass 5: Verbose Naming
 

@@ -51,6 +51,12 @@
     "jakubkrehel/oklch-skill": {
       "ref": "main",
       "captured": "2026-09-06"
+    },
+    "cursor/plugins": {
+      "sha": "df3fb154fb982fb83f649de8646d4af6a0cb16b3",
+      "license": "MIT",
+      "retrieved": "2026-09-09",
+      "note": "Official Cursor plugin marketplace. Audited in full; three items adopted."
     }
   },
   "skills": {
@@ -180,7 +186,7 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "78a3dd0c410beec670345b645f3fd328e29bd0056ca6ab9a677116731b68116d",
+          "sha256": "16d6bf324867b41b2c2d7bf4a496cbde2acec7607909f7afa5d94082b2c2775f",
           "upstream": {
             "status": "native"
           }
@@ -495,7 +501,9 @@
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-09-09: adopted the reviewer anchoring guard from cursor/plugins thermos/skills/thermo-nuclear-review/SKILL.md (MIT, author Cursor) at df3fb154fb98. Rewritten, not copied; extended to cover re-review after fixes, which the upstream does not address."
+      ],
       "rationale": "hardcodes docs/superpowers/plans",
       "owned": true
     },
@@ -640,7 +648,7 @@
           }
         },
         "references/defense-in-depth.md": {
-          "sha256": "e41f5df380b380734995c61c861c2b485ce05fad02762cc60c255a68f142c150",
+          "sha256": "fe3c96f42f4ede8b1cbdd01ee13dd94eae2d7562ce41b875e52f43dc64366298",
           "upstream": {
             "status": "diverged",
             "sha256": "1e175fb86fc357e58c6aebf5441e481e1b7868b4380c0456b63a17eefbd18ba7",
@@ -873,7 +881,9 @@
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-09-09: adopted the INCONCLUSIVE verification outcome from cursor/plugins cursor-team-kit/skills/verify-this/SKILL.md (MIT, author Cursor) at df3fb154fb98. Rewritten, not copied; the corpus gate previously offered only claim/no-claim."
+      ],
       "rationale": "core workflow skill",
       "owned": true
     },
@@ -1192,13 +1202,18 @@
           "repo": "cursor/plugins",
           "path": "cli-for-agent/skills/cli-for-agents",
           "license": "MIT",
-          "author": "Eric Zakariasson"
+          "author": "Eric Zakariasson",
+          "sha": "df3fb154fb982fb83f649de8646d4af6a0cb16b3"
         }
       ],
       "state": "rewritten",
       "files": {
         "SKILL.md": {
-          "sha256": "79ba835bc4b86966aef9fd2e50cdfb60f3816f937126ef574b523a0dde3d0606"
+          "sha256": "79ba835bc4b86966aef9fd2e50cdfb60f3816f937126ef574b523a0dde3d0606",
+          "upstream": {
+            "status": "rewritten",
+            "sha256": "1cddd028d24ece48cd538fc1d84e49f5922dc8d04ee88caf12666b0557575e09"
+          }
         }
       },
       "decisions": [],

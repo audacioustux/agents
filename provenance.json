@@ -1219,6 +1219,31 @@
       "decisions": [],
       "rationale": "Adopted from cursor/plugins (MIT) after a full-repo audit. Rewritten to corpus form rather than copied: each rule states its failure mode, product-coupled framing dropped, and exit-code semantics added, which the upstream skill omits despite being the one signal every non-interactive caller reads.",
       "owned": true
+    },
+    "verifying-terminal-interfaces": {
+      "disposition": "keep-as-is",
+      "owned": true,
+      "decisions": [],
+      "upstream": [
+        {
+          "repo": "cursor/plugins",
+          "path": "cursor-team-kit/skills/control-cli",
+          "license": "MIT",
+          "author": "Cursor",
+          "sha": "df3fb154fb982fb83f649de8646d4af6a0cb16b3"
+        }
+      ],
+      "state": "rewritten",
+      "files": {
+        "SKILL.md": {
+          "sha256": "ff3a0118bbddbacd3266db622d35156d2ba67e13f6cdbc36a8f8756b28faff2b",
+          "upstream": {
+            "status": "rewritten",
+            "sha256": "13ac93e595bbda2000849bdb815d5f2ca03f7c2ca63788c8335f9212b9b422a2"
+          }
+        }
+      },
+      "rationale": "Adopted from cursor/plugins (MIT) after the full-repo audit; the oracle scope gate independently confirmed no corpus host — reviewing-ux-in-browser self-scopes to browser surfaces in its own description, and designing-agent-friendly-clis is design-side, not verification-side. Verified zero corpus hits for tmux, PTY, capture-pane, or TUI. Rewritten to corpus form: each rule carries its failure mode, the wait-for-screen rule is tied to the existing condition-based-waiting owner rather than restated, and the Node-inspector profiling third of the source is dropped as runtime-specific."
     }
   },
   "dispositionsRecorded": "2026-09-04",

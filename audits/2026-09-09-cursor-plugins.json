@@ -57,9 +57,11 @@
     },
     "cursor-team-kit/skills/control-cli": {
       "disposition": "adopt-skill",
-      "note": "adopt-skill — terminal/TUI verification harness. No corpus skill can host it: reviewing-ux-in-browser is scoped by its own description to 'a runnable app, preview URL, local server, or built page' and the README pins it to 'Browser verification procedure'; verifying-before-completion owns claim disc",
+      "note": "Terminal/TUI verification harness. Adopted as a new skill: no corpus owner exists and it cannot be housed in reviewing-ux-in-browser, which scopes itself to browser surfaces. The Node/Bun inspector profiling section was dropped as runtime-specific.",
       "audit": "AuditTeamKitThermos",
-      "status": "pending"
+      "status": "landed",
+      "landedIn": "pending — new skill verifying-terminal-interfaces",
+      "evidence": "read in full (630w). Oracle scope gate confirmed no host; verified zero corpus hits for tmux/PTY/capture-pane/TUI."
     },
     "cursor-team-kit/skills/control-ui": {
       "disposition": "adopt-rule",
@@ -578,9 +580,9 @@
   },
   "method": "All 91 SKILL.md files enumerated from the tree at the pinned sha; every file carries exactly one disposition, asserted to sum to 91. 74 were assessed by three scout audits. The remaining 17 were initially dispositioned from descriptions alone, then read in full (plus 11 companion files), which overturned that verdict on 8 and produced 3 further adoptions. Two Benny rows outside those 17 were verified by targeted grep rather than a full read; their evidence fields say so.",
   "statusCounts": {
-    "pending": 20,
+    "pending": 19,
     "no-action": 58,
-    "landed": 13
+    "landed": 14
   },
   "caveat": "Verdicts come from three scout audits of differing strictness. AuditPstackWorkflows applied a visibly laxer bar than AuditTeamKitThermos: it returned adopt-rule for workflow recipes with hardcoded model slugs (arena, architect, why, teach, figure-it-out) of the same class AuditTeamKitThermos rejected (review-and-ship, new-branch-and-pr). An independent oracle pass read 14 of the 19 unlanded adopt-rule rows and found roughly 20% survive as stated, 30-40% yield any edit at all, none yields a section. Treat adopt-* as a lead list, not a work queue.",
   "statusMeaning": {

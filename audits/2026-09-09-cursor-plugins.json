@@ -324,7 +324,7 @@
     },
     "pstack/skills/principle-build-the-lever": {
       "disposition": "adopt-rule",
-      "note": "adopt-rule: dispatching-parallel-agents owns this.",
+      "note": "adopt-rule: destination dispatching-parallel-agents.",
       "audit": "AuditPstackPrinciples",
       "status": "landed",
       "landedIn": "37e08e3 — dispatching-parallel-agents, deterministic-lever exclusion",
@@ -332,7 +332,7 @@
     },
     "pstack/skills/principle-encode-lessons-in-structure": {
       "disposition": "adopt-rule",
-      "note": "adopt-rule: writing-skills owns this.",
+      "note": "adopt-rule: destination writing-skills.",
       "audit": "AuditPstackPrinciples",
       "status": "pending",
       "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
@@ -346,7 +346,7 @@
     },
     "pstack/skills/principle-experience-first": {
       "disposition": "reject",
-      "note": "reject: taste-only owns this.",
+      "note": "reject: taste-only, states a preference with no mechanism or failure mode.",
       "audit": "AuditPstackPrinciples",
       "status": "no-action",
       "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
@@ -360,14 +360,14 @@
     },
     "pstack/skills/principle-foundational-thinking": {
       "disposition": "reject",
-      "note": "reject: already implied / multi-rule bundle owns this.",
+      "note": "reject: a multi-rule bundle whose parts are already implied by stronger corpus rules.",
       "audit": "AuditPstackPrinciples",
       "status": "no-action",
       "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
     },
     "pstack/skills/principle-guard-the-context-window": {
       "disposition": "adopt-rule",
-      "note": "adopt-rule: dispatching-parallel-agents owns this.",
+      "note": "adopt-rule: destination dispatching-parallel-agents.",
       "audit": "AuditPstackPrinciples",
       "status": "pending",
       "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
@@ -381,14 +381,14 @@
     },
     "pstack/skills/principle-make-operations-idempotent": {
       "disposition": "adopt-rule",
-      "note": "adopt-rule: reviewing-for-bloat owns this.",
+      "note": "adopt-rule: destination reviewing-for-bloat.",
       "audit": "AuditPstackPrinciples",
       "status": "pending",
       "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
     },
     "pstack/skills/principle-migrate-callers-then-delete-legacy-apis": {
       "disposition": "adopt-rule",
-      "note": "adopt-rule: reviewing-for-bloat owns this.",
+      "note": "adopt-rule: destination reviewing-for-bloat.",
       "audit": "AuditPstackPrinciples",
       "status": "pending",
       "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
@@ -416,7 +416,7 @@
     },
     "pstack/skills/principle-outcome-oriented-execution": {
       "disposition": "reject",
-      "note": "reject: workflow-recipe owns this.",
+      "note": "reject: workflow-recipe, no mechanism of its own.",
       "audit": "AuditPstackPrinciples",
       "status": "no-action",
       "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
@@ -437,7 +437,7 @@
     },
     "pstack/skills/principle-separate-before-serializing-shared-state": {
       "disposition": "adopt-rule",
-      "note": "adopt-rule: dispatching-parallel-agents owns this.",
+      "note": "adopt-rule: destination dispatching-parallel-agents.",
       "audit": "AuditPstackPrinciples",
       "status": "pending",
       "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"

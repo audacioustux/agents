@@ -204,7 +204,7 @@
       "status": "landed",
       "evidence": "read in full (66 lines). Reversal recorded: I first rejected this claiming requesting-code-review owned review structuring. Grep of all four review skills for diff ordering, file-tree order, boilerplate grouping returned zero hits — the claim was asserted from the domain, not the text.",
       "note": "Canvas SDK rendering and `gh pr diff` mechanics are product-bound and excluded. The portable half is unowned: order a change by reviewer value (core logic, then wiring, then mechanical churn as filenames) rather than by file tree, and put pseudocode beside a dense core change so intent can be confirmed before the code is read.",
-      "landedIn": "pending — requesting-code-review, order the change for reading"
+      "landedIn": "45de0fc — requesting-code-review, order the change for reading"
     },
     "pstack/automations/benny/skills/reproduce-and-fix-issues": {
       "disposition": "adopt-rule",

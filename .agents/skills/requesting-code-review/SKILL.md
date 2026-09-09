@@ -87,6 +87,14 @@ You: [Fix progress indicators]
 - Review before merge
 - Review when stuck
 
+**When earlier findings already exist:**
+
+A reviewer that reads prior comments first anchors on them and returns a verdict on
+someone else's list. Have it complete its own pass, then read what came before, then
+fold in what it missed and attribute it. The same applies to a re-review after fixes:
+point it at the current state, not at the earlier verdict, or it grades the diff
+against a list rather than the code.
+
 ## Red Flags
 
 **Never:**

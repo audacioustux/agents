@@ -180,7 +180,7 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "2924a327cd4139ed95b7aa099429badaaf54de2e6d21fd457e435c1274b2d62b",
+          "sha256": "78a3dd0c410beec670345b645f3fd328e29bd0056ca6ab9a677116731b68116d",
           "upstream": {
             "status": "native"
           }
@@ -480,7 +480,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "9b48788b04c253aeffeed53d0abd2009f11c6c7206121956084878555f44ecb9",
+          "sha256": "d41e00aa0f03c77f80db4fc823219a5bb0ae6632a304d33257318a579878888c",
           "upstream": {
             "status": "diverged",
             "sha256": "d71cc01ba56d2325cf8af5f7c11837819b63ecd57de0bfdb812f7f3ff7751df8"
@@ -640,9 +640,9 @@
           }
         },
         "references/defense-in-depth.md": {
-          "sha256": "1e175fb86fc357e58c6aebf5441e481e1b7868b4380c0456b63a17eefbd18ba7",
+          "sha256": "e41f5df380b380734995c61c861c2b485ce05fad02762cc60c255a68f142c150",
           "upstream": {
-            "status": "identical",
+            "status": "diverged",
             "sha256": "1e175fb86fc357e58c6aebf5441e481e1b7868b4380c0456b63a17eefbd18ba7",
             "upstreamPath": "defense-in-depth.md"
           }
@@ -866,7 +866,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "b702262212181f7b24aa108d2b9607c377cc42fcd1b2de5d7dc25c9b7d25d951",
+          "sha256": "265b861afbfca18486e21303a5bc745369baf373788f1c82e23ddbe740c7ceae",
           "upstream": {
             "status": "diverged",
             "sha256": "2befe7fc55bcadaa3d97dd9e8efeb633d2561c0ebe74c5a8b17c4d9e7e4520b3"
@@ -1184,6 +1184,26 @@
           }
         }
       }
+    },
+    "designing-agent-friendly-clis": {
+      "disposition": "keep-as-is",
+      "upstream": [
+        {
+          "repo": "cursor/plugins",
+          "path": "cli-for-agent/skills/cli-for-agents",
+          "license": "MIT",
+          "author": "Eric Zakariasson"
+        }
+      ],
+      "state": "rewritten",
+      "files": {
+        "SKILL.md": {
+          "sha256": "79ba835bc4b86966aef9fd2e50cdfb60f3816f937126ef574b523a0dde3d0606"
+        }
+      },
+      "decisions": [],
+      "rationale": "Adopted from cursor/plugins (MIT) after a full-repo audit. Rewritten to corpus form rather than copied: each rule states its failure mode, product-coupled framing dropped, and exit-code semantics added, which the upstream skill omits despite being the one signal every non-interactive caller reads.",
+      "owned": true
     }
   },
   "dispositionsRecorded": "2026-09-04",
@@ -1206,7 +1226,7 @@
     "diagrams": "Diagrams are mermaid fences, not graphviz. graphviz needs a `dot` binary that is not installed here, so the 11 dot fences were unrendered source text; mermaid renders natively in GitHub, VS Code, and agent UIs. TheGrid's docs/conventions/diagramming.md already mandates mermaid, and diagramming-with-mermaid explicitly defers format choice to the consuming repo. 9 fences converted and validated with mermaid.parse; one deliberately-bad example left as dot; graphviz-conventions.dot and render-graphs.js deleted as dead.",
     "mermaid-validation": "Validated against mermaid 11.17.2: Pass A mermaid.parse under jsdom 9/9; Pass B mermaid.render in real Chromium 9/9 with no error-SVG and min SVG 13,895 bytes (real diagrams, not stubs). Both passes teeth-checked 5/5 against unclosed brackets, misspelled type, ':: ' in state label, ';' in sequence message, malformed ER cardinality. Silent-pitfall scan clean; parenthesised labels confirmed verbatim via getDiagramFromText. Note: this repo pins no mermaid dependency and has no CI check, so GitHub's renderer version may differ.",
     "ui-domain-gaps": "Measured 2026-09-06: zero corpus hits for text-wrap, tabular-nums, OpenType, variable-font, oklch, gamut, contrast-ratio, microcopy, font-size, line-height, letter-spacing. Typography, color-system construction and interface copy were genuinely uncovered - existing skills detected the symptoms (reviewing-ux-in-browser 'wrapping, overflow, clipped controls'; following-repo-ui-conventions grading 'inconsistent spacing/copy') without owning any fix. Closed with three new skills rewritten from jakubkrehel/skills (MIT). His orchestration layer (better-interface, interface-review, variant, break, explain-interface) rejected: duplicates requesting-code-review and reviewing-ux-in-browser machinery.",
-    "source-rejections": "Leonxlnx/taste-skill REJECTED: self-scopes to marketing pages ('NOT for: Dashboards / dense product UI / admin panels'), prescribes a visual style that following-repo-ui-conventions:19 forbids inventing, 1207-line body against a <1000-word target. designmotionhq.com/patterns REJECTED as a source: quality spread within one site - z-index-mastery is correct CSS mechanics while golden-ratio is myth ('seashells, galaxies', unsourced Stripe/Linear claim) whose 1.618 type scale contradicts the measured typography rules; unsourced motion ms dials conflict with exact values held elsewhere. One verified line adopted: stacking-context behaviour into building-responsive-layouts. jakub.kr blog articles superseded by his skills repo, which is the same author's material in reviewable form. REVISITED 2026-09-08: designmotionhq.com/patterns re-crawled in full (76 detail pages via browser, not the index) and audited against the corpus. The original rejection holds for the source as a whole and for its numeric motion dials specifically - a primary-source check found no published basis for any duration figure, Apple publishes none at all, and Material moved from prose bands to per-component numbers to a token scale published without the prose thresholds earlier versions carried. The commonly repeated derivation from the 100ms response-time limit is a scope error: that figure bounds when a system starts responding, not how long motion runs. Nine mechanism-level gaps were adopted on their own merit rather than on the site's authority, plus two rules from pages previously rejected wholesale. Two motion rules are sourced: the enter-decelerates/exit-accelerates split and shorter exits, both stated by Material across three versions with a rationale, and the reduced-motion obligation for scroll-linked motion, which comes from WCAG SC 2.3.3 (AAA) rather than the scroll-animations spec, whose normative text imposes none.",
+    "source-rejections": "Leonxlnx/taste-skill REJECTED: self-scopes to marketing pages ('NOT for: Dashboards / dense product UI / admin panels'), prescribes a visual style that following-repo-ui-conventions:19 forbids inventing, 1207-line body against a <1000-word target. designmotionhq.com/patterns REJECTED as a source: quality spread within one site - z-index-mastery is correct CSS mechanics while golden-ratio is myth ('seashells, galaxies', unsourced Stripe/Linear claim) whose 1.618 type scale contradicts the measured typography rules; unsourced motion ms dials conflict with exact values held elsewhere. One verified line adopted: stacking-context behaviour into building-responsive-layouts. jakub.kr blog articles superseded by his skills repo, which is the same author's material in reviewable form. REVISITED 2026-09-08: designmotionhq.com/patterns re-crawled in full (76 detail pages via browser, not the index) and audited against the corpus. The original rejection holds for the source as a whole and for its numeric motion dials specifically - a primary-source check found no published basis for any duration figure, Apple publishes none at all, and Material moved from prose bands to per-component numbers to a token scale published without the prose thresholds earlier versions carried. The commonly repeated derivation from the 100ms response-time limit is a scope error: that figure bounds when a system starts responding, not how long motion runs. Nine mechanism-level gaps were adopted on their own merit rather than on the site's authority, plus two rules from pages previously rejected wholesale. Two motion rules are sourced: the enter-decelerates/exit-accelerates split and shorter exits, both stated by Material across three versions with a rationale, and the reduced-motion obligation for scroll-linked motion, which comes from WCAG SC 2.3.3 (AAA) rather than the scroll-animations spec, whose normative text imposes none. cursor/plugins audited in full on 2026-09-09: 90 first-party skills across 15 plugins, plus 66 third-party SaaS integrations ignored as out of scope. Most first-party skills are product-coupled (Cursor canvases, SDK, cloud agents, voice) or gh-command recipes. pstack's 23 principle-* skills are the closest match to this corpus and are mostly duplicates of existing owners - root-cause debugging, prove-it-works, subtract-before-you-add, test-behaviour-not-implementation. Three items adopted: cli-for-agents as a new skill (MIT, attributed, rewritten), the INCONCLUSIVE verification outcome into verifying-before-completion, and the anchoring guard into requesting-code-review. The audit's most valuable finding was about this corpus rather than theirs: systematic-debugging/references/defense-in-depth.md said validate at EVERY layer while cleaning-ai-slop said validate at boundaries only and listed internal validation as slop to delete. Both now state their scope - layered validation is earned by a demonstrated bug, speculative internal checks are not.",
     "rule-ownership": "Each rule lives in exactly one skill; siblings state a hand-off rather than restating. Contrast splits deliberately: building-accessible-interfaces decides whether a ratio is required, building-color-systems measures the rendered pair and changes values. Typography owns text rendering, writing-interface-copy owns the words. Hand-off lines added to building-accessible-interfaces, designing-component-systems and following-repo-ui-conventions so ownership survives the corpus growing.",
     "authoring-conventions": "Adopted 2026-09-06 from jakubkrehel/skills AGENTS.md: calibration (state how hard to press), detection-pattern mistake tables (left column an observable symptom, not a restated principle), and one-home-per-rule with explicit hand-off lines. The SKILL.md template block and the creation checklist were updated in the same pass so the template does not teach prose for a section the rule requires as a table. Rejected his no-trigger-list description philosophy: it contradicts this corpus's routing constraint that descriptions carry a 'Use when' trigger.",
     "vendor-snapshot-removed": "Removed 2026-09-06. vendor-snapshot/local (584K) was byte-identical to the pre-consolidation tree already in git history - verified by comparing blob sha256 at 2e3c5aa~1. vendor-snapshot/upstream (568K) was verified fetchable on demand at each pinned SHA with matching sha256. What is load-bearing for re-merge is the pinned SHA plus the recorded hash, not the bytes. Cost of the removal: a re-merge now needs network, and a force-pushed or deleted upstream is unrecoverable - accepted, since the pins are public repos and the recorded hashes still prove drift.",

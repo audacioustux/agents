@@ -4,7 +4,9 @@
 
 When you fix a bug caused by invalid data, adding validation at one place feels sufficient. But that single check can be bypassed by different code paths, refactoring, or mocks.
 
-**Core principle:** Validate at EVERY layer data passes through. Make the bug structurally impossible.
+**Core principle:** Once a bug has proven a value can arrive invalid, validate at every layer that value passes through, and make the bug structurally impossible.
+
+**Scope.** This applies to a demonstrated failure, not to new code. `cleaning-ai-slop` owns the opposite case and is right about it: validating internal parameters nobody has seen fail is slop, and it says to delete exactly the checks this page says to add. The difference is evidence. A layer here earns its place by catching something a real bypass produced; without that bug, the same check is speculative and belongs deleted. When a cleanup pass meets validation, ask which of the two it is before removing it.
 
 ## Why Multiple Layers
 

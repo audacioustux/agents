@@ -92,7 +92,7 @@ Targets:
 - Fallback values for required fields
 - Redundant type assertions
 
-Keep: validation at system boundaries (user input, external APIs, file I/O). Error handling where the runtime genuinely can fail.
+Keep: validation at system boundaries (user input, external APIs, file I/O). Error handling where the runtime genuinely can fail. Also keep an internal check that a real bug put there — `systematic-debugging` prescribes layered validation once a value has been observed arriving invalid, and that check is evidence, not paranoia. Where the distinction is unclear, git blame separates the two: a check introduced alongside a regression test is earning its place.
 
 ### Pass 5: Verbose Naming
 

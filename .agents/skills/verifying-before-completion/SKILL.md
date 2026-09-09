@@ -32,10 +32,18 @@ BEFORE claiming any status or expressing satisfaction:
 4. VERIFY: Does output confirm the claim?
    - If NO: State actual status with evidence
    - If YES: State claim WITH evidence
+   - If the measurement itself is unsound: INCONCLUSIVE
 5. ONLY THEN: Make the claim
 
 Skip any step = lying, not verifying
 ```
+
+A run can fail to answer the question rather than answering it either way. No valid
+baseline, a probe that cannot observe the thing claimed, a confound between the two
+states, an environment that differs from the one in question — each produces output
+that looks like a result and is not one. Report that as inconclusive and say what
+would settle it. A green that the check could not have turned red is the most
+expensive outcome here, because it ends the investigation while the defect survives.
 
 ## Common Failures
 

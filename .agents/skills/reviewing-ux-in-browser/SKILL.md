@@ -68,6 +68,13 @@ Use mouse and keyboard:
 - test Escape/back/cancel behavior,
 - confirm focus restoration.
 
+Address elements by role, accessible name, or a stable test id — never by
+position, nth-child, or generated class names. A positional selector keeps
+working while pointing at a different element after any reorder, so the
+walkthrough reports a pass for a control it never touched. If nothing stable
+can address an element, that is itself a finding: it usually means the control
+has no accessible name.
+
 ### 5. Check diagnostics
 
 When tools allow, check:

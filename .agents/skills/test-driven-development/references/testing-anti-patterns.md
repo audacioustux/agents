@@ -248,6 +248,31 @@ TDD cycle:
 4. THEN claim complete
 ```
 
+## Anti-Pattern 6: Tests That Pin the Implementation
+
+**The violation:**
+```
+expect(formatPrice(1000)).toBe(formatPrice(1000))   // self-referential
+expect(SETTINGS.timeout).toBe(30)                   // restates a constant
+expect(render(fixture)).toEqual(fixture.expected)   // fixture asserts itself
+```
+
+**Why this is wrong:**
+- Each passes against any implementation, including a broken one
+- The first two pass if the function is deleted and the constant inlined
+- The third moves the assertion into the fixture, where nobody reviews it
+- All three go red on a rename and stay green on a behavior change — exactly
+  inverted from what a test is for
+
+**The fix:**
+```
+expect(formatPrice(1000)).toBe("$10.00")   // an independently known answer
+```
+
+Write the expected value by hand, from the requirement. If you cannot state it
+without running the code, you do not yet know what the code should do, and the
+test would only record what it currently does.
+
 ## When Mocks Become Too Complex
 
 **Warning signs:**

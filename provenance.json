@@ -186,7 +186,7 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "8804ba95b1d0b789492a67702b732ca54681d2ebe6fd1a6d10761f2573b7f1a9",
+          "sha256": "24b1b75cd688aa512d9445bf72925155791dc13ea1d919d6d56ba2262bd8999e",
           "upstream": {
             "status": "native"
           }
@@ -287,7 +287,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "446ce6ddc2d1379089449aebe7e5f8a3f1491565ae7faaceb8840cec8dca01e7",
+          "sha256": "d31bc64bda880b3aa9b18f23a8c7c3877cbc227d07137661597f250de0a7f391",
           "upstream": {
             "status": "diverged",
             "sha256": "1968923066f3b707eb01d1992cdf4c42284c3855f70253b9cd5000ff45fca13c"
@@ -349,7 +349,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "335d80b857632d8a58c2d85247d25091384317ebc5120e2bd31f9560bc564e1e",
+          "sha256": "3d800ae66ab49cf06b68db231a32fe4620578cef4c9bd0eb020d1d79738157fe",
           "upstream": {
             "status": "diverged",
             "sha256": "8db5a922b242dd4e1bf824cb91c13b3e8d8e8a86d6ceaf7f0774eb9cce909d65"
@@ -486,7 +486,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "d41e00aa0f03c77f80db4fc823219a5bb0ae6632a304d33257318a579878888c",
+          "sha256": "98dca91035908cd674dd375b90959a4bbb37519d863ae2fe3d1c152cdf7fa8b0",
           "upstream": {
             "status": "diverged",
             "sha256": "d71cc01ba56d2325cf8af5f7c11837819b63ecd57de0bfdb812f7f3ff7751df8"
@@ -549,7 +549,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "82e644dbffd9d4c19af27810c4152af3bf72709f50dcf8197704d091c28e4fdd",
+          "sha256": "3d8cbe2c65059b4d94a0b89720311869007944b43401260f86009e97f25f86ee",
           "upstream": {
             "status": "diverged",
             "sha256": "6726079ea77a416c18d1753d9bf0c54eea469f3854757a586af7e6df903f4931"
@@ -656,7 +656,7 @@
           }
         },
         "references/four-phases.md": {
-          "sha256": "209d46bc15220906c3d57be0de7a6cb958ae54d98dbd13fc3cd159785d939bdb",
+          "sha256": "340f4f33d39790d7dde1b85ed8bcec2399c4859e918f824ddc0005d332b62f10",
           "upstream": {
             "status": "added-locally"
           }
@@ -741,7 +741,7 @@
           }
         },
         "references/testing-anti-patterns.md": {
-          "sha256": "229e5a8c71ad5604f998490651f46f421c654705e573d6852ac47252cec44404",
+          "sha256": "c4f4f45f576252476c2f01ae0f7eefc960f0db612a012d09bb574299cc75f959",
           "upstream": {
             "status": "added-locally"
           }

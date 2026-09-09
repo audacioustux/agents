@@ -95,6 +95,10 @@ fold in what it missed and attribute it. The same applies to a re-review after f
 point it at the current state, not at the earlier verdict, or it grades the diff
 against a list rather than the code.
 
+That independence is also what makes agreement informative: a finding two reviewers
+reach separately is worth more than one raised twice, and worth far more than one
+echoed after reading the other's report. Order the fixes by that weight.
+
 ## Red Flags
 
 **Never:**

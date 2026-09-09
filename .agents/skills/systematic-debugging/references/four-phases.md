@@ -17,7 +17,14 @@ You MUST complete each phase before proceeding to the next.
 2. **Reproduce Consistently**
    - Can you trigger it reliably?
    - What are the exact steps?
-   - Does it happen every time?
+   - Trigger the discriminating symptom at least twice, from a reset starting
+     state, through the same entry point production traffic uses — the UI, the
+     API, the CLI. Two hits without an intervening reset can be one stuck value
+     observed twice, and a hit through a test-only hook says nothing about
+     whether the path users take can reach it
+   - Confirm state by inspecting it; never inject or force the symptom. A bug you
+     put there by writing the bad value yourself tells you nothing about how the
+     value actually arrives, and the fix will target a path production never takes
    - If not reproducible → gather more data, don't guess
 
 3. **Check Recent Changes**

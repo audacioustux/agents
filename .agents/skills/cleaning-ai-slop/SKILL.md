@@ -66,6 +66,8 @@ Targets:
 
 Keep: comments that explain *why*, not *what*. Comments about non-obvious constraints. Links to external documentation or issues.
 
+Where a constraint comment can become executable, encode it first, then delete it: a type that makes the bad state unrepresentable, a named constant, an assertion, a test. A comment saying the buffer must stay under 4 KB is advice a reader can miss; a check that fails at 4 KB is not. Only delete once the constraint is enforced somewhere — otherwise the comment was the only thing holding it.
+
 ### Pass 3: Unnecessary Abstractions
 
 Remove indirection that serves no purpose.

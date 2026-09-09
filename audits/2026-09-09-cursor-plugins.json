@@ -1,0 +1,588 @@
+{
+  "audited": "cursor/plugins",
+  "sha": "df3fb154fb982fb83f649de8646d4af6a0cb16b3",
+  "date": "2026-09-09",
+  "total": 91,
+  "firstParty": 90,
+  "thirdParty": 1,
+  "dispositions": {
+    "advisor/skills/advisor": {
+      "disposition": "adopt-skill",
+      "note": "adopt-skill — second-opinion consultation policy. Nothing in the corpus owns it and it cannot be housed without breaking one-home-per-rule: systematic-debugging escalates to the human partner and only after three failed fixes ('Three failures against one bug means the fixes shared an assumption that",
+      "audit": "AuditTeamKitThermos",
+      "status": "pending"
+    },
+    "agent-compatibility/skills/check-agent-compatibility": {
+      "disposition": "product-specific",
+      "reason": "Cursor plugin-repo compatibility scanner",
+      "read": true,
+      "status": "no-action"
+    },
+    "cli-for-agent/skills/cli-for-agents": {
+      "disposition": "adopt-skill",
+      "note": "adopt-skill — strongest find in the repo. Corpus coverage is zero (no skill mentions idempotency, --dry-run, exit codes, stdin, or help-text design; the only `--help` hits are an example finding inside a review prompt and a keyword note in writing-skills/references). No host exists: designing-compon",
+      "audit": "AuditTeamKitThermos",
+      "status": "landed",
+      "landedIn": "13eda09 — new skill designing-agent-friendly-clis"
+    },
+    "continual-learning/skills/continual-learning": {
+      "disposition": "reject",
+      "note": "reject — product-coupled workflow-recipe with no mechanism. Fifteen lines whose entire body is 'Call `agents-memory-updater`. Return the updater result.' plus guardrails forbidding you to do anything else. Depends on a named subagent that does not exist outside this plugin.",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "create-plugin/skills/create-plugin-scaffold": {
+      "disposition": "product-specific",
+      "reason": "Cursor plugin marketplace scaffolding",
+      "read": true,
+      "status": "no-action"
+    },
+    "create-plugin/skills/review-plugin-submission": {
+      "disposition": "product-specific",
+      "reason": "Cursor marketplace submission audit",
+      "read": true,
+      "status": "no-action"
+    },
+    "cursor-sdk/skills/cursor-sdk": {
+      "disposition": "product-specific",
+      "reason": "@cursor/sdk API guide",
+      "read": true,
+      "status": "no-action"
+    },
+    "cursor-team-kit/skills/check-compiler-errors": {
+      "disposition": "duplicate",
+      "note": "duplicate — verifying-before-completion, which owns the whole loop and states the failure mode this skill exists for: '| Build succeeds | Build command: exit 0 | Linter passing, logs look good |' and '| \"Linter passed\" | Linter ≠ compiler |'. Its one addition, 'Fix the highest-confidence issues firs",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "cursor-team-kit/skills/control-cli": {
+      "disposition": "adopt-skill",
+      "note": "adopt-skill — terminal/TUI verification harness. No corpus skill can host it: reviewing-ux-in-browser is scoped by its own description to 'a runnable app, preview URL, local server, or built page' and the README pins it to 'Browser verification procedure'; verifying-before-completion owns claim disc",
+      "audit": "AuditTeamKitThermos",
+      "status": "pending"
+    },
+    "cursor-team-kit/skills/control-ui": {
+      "disposition": "adopt-rule",
+      "note": "adopt-rule → reviewing-ux-in-browser (which owns the domain: 'Use available tools such as browser automation, DevTools, Playwright, screenshots, accessibility snapshots, console logs, network inspection, and performance traces'). Missing mechanism: drive the UI through roles, labels, and stable `dat",
+      "audit": "AuditTeamKitThermos",
+      "status": "landed",
+      "landedIn": "reviewing-ux-in-browser — role/name/test-id selector discipline"
+    },
+    "cursor-team-kit/skills/deslop": {
+      "disposition": "duplicate",
+      "note": "duplicate — cleaning-ai-slop. Every focus area is a subset of a named pass: 'Extra comments that are unnecessary' = Pass 2 Over-Commenting; 'Defensive checks or try/catch blocks that are abnormal for trusted code paths' = Pass 4 'Try-catch blocks around code that cannot throw'; 'Casts to `any` used ",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "cursor-team-kit/skills/fix-ci": {
+      "disposition": "reject",
+      "note": "reject — workflow-recipe, product-coupled. Four steps around `gh pr checks --json name,bucket,state,workflow,link`. GitHub CLI surface belongs to its publisher per the corpus README.",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "cursor-team-kit/skills/fix-merge-conflicts": {
+      "disposition": "adopt-rule",
+      "note": "adopt-rule → finishing-a-development-branch. Not a duplicate of using-git-worktrees: that skill is workspace setup ('This is workspace setup, not plan execution') and never mentions conflicts; the corpus has no merge-conflict owner. Worth taking as one rule: resolve conflicts in generated files (loc",
+      "audit": "AuditTeamKitThermos",
+      "status": "landed",
+      "landedIn": "finishing-a-development-branch — regenerate generated files on conflict"
+    },
+    "cursor-team-kit/skills/get-pr-comments": {
+      "disposition": "reject",
+      "note": "reject — workflow-recipe. Four steps, no mechanism. Handling review feedback is owned by receiving-code-review, which already covers the GitHub specifics it omits: 'reply in the comment thread (gh api repos/{owner}/{repo}/pulls/{pr}/comments/{id}/replies), not as a top-level PR comment.'",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "cursor-team-kit/skills/loop-on-ci": {
+      "disposition": "reject",
+      "note": "reject — workflow-recipe, product-coupled, and near-duplicate of fix-ci within its own repo. Its real content is GitHub product knowledge ('gh pr checks includes all PR-attached checks, while gh run list only covers GitHub Actions'), which is the publisher's to maintain.",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "cursor-team-kit/skills/make-pr-easy-to-review": {
+      "disposition": "adopt-rule",
+      "note": "adopt-rule → finishing-a-development-branch. Mechanism the corpus has nowhere: capture the branch's tree hash before rewriting history (`git rev-parse origin/<head>^{tree}`), compare it after, and refuse to push if it differs — a history reorganization must not change content. Corpus has no history-",
+      "audit": "AuditTeamKitThermos",
+      "status": "pending"
+    },
+    "cursor-team-kit/skills/new-branch-and-pr": {
+      "disposition": "reject",
+      "note": "reject — workflow-recipe. Five generic steps; finishing-a-development-branch owns branch completion including the exact push/PR path (`git push -u origin <feature-branch>` then `gh pr create` with Summary/Test Plan), and using-git-worktrees owns isolated workspace creation.",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "cursor-team-kit/skills/pr-review-canvas": {
+      "disposition": "reject",
+      "note": "reject — product-coupled. Generates an HTML review page from `gh api` output using bundled styles.css/renderer.js/template.html, served from a fixed local port. Tightly bound to GitHub's API and its own asset files; the corpus is stack-agnostic and vendors no runtime assets.",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "cursor-team-kit/skills/review-and-ship": {
+      "disposition": "reject",
+      "note": "reject — workflow-recipe. Its six steps are split across owners that each state them more precisely: review dispatch (requesting-code-review), test-before-claiming (verifying-before-completion 'The Iron Law'), and merge/PR options (finishing-a-development-branch Step 4's exact 4-option menu). Its on",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "cursor-team-kit/skills/run-smoke-tests": {
+      "disposition": "reject",
+      "note": "reject — framework-specific, and its portable guardrail is already implied by a stronger corpus rule. Body is Playwright plus repo-local script names (`npm run smoketest-no-compile`). 'Prefer deterministic waits and assertions over brittle timeouts' is owned by systematic-debugging/references/condit",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "cursor-team-kit/skills/thermo-nuclear-code-quality-review": {
+      "disposition": "duplicate",
+      "note": "duplicate — reviewing-for-bloat (and byte-identical to the thermos copy). Its flag list maps onto references/pattern-catalog.md line-for-line: 'A file crossing 1000 lines' = 'File fragmentation or monoliths — related logic is split across meaningless files, or unrelated responsibilities accumulate i",
+      "audit": "AuditTeamKitThermos",
+      "status": "landed",
+      "landedIn": "13eda09 — byte-identical duplicate of the thermos copy; same adoption"
+    },
+    "cursor-team-kit/skills/verify-this": {
+      "disposition": "adopt-rule",
+      "note": "adopt-rule → verifying-before-completion. Falsifiable restatement + baseline/treatment capture is already owned (`| Bug fixed | Test original symptom: passes |`, `| Regression test works | Red-green cycle verified |`). The genuinely missing mechanism is the third outcome: a measurement with no valid",
+      "audit": "AuditTeamKitThermos",
+      "status": "landed",
+      "landedIn": "13eda09 — INCONCLUSIVE outcome into verifying-before-completion:35,41-46"
+    },
+    "cursor-team-kit/skills/weekly-review": {
+      "disposition": "reject",
+      "note": "reject — workflow-recipe, out of corpus scope. Status reporting from git log, not cross-cutting craft knowledge; nothing here constrains how code is written or reviewed.",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "cursor-team-kit/skills/what-did-i-get-done": {
+      "disposition": "reject",
+      "note": "reject — workflow-recipe, out of scope, and a near-duplicate of weekly-review within its own repo (same git-log-by-author summarization with a different time window).",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "cursor-team-kit/skills/workflow-from-chats": {
+      "disposition": "reject",
+      "note": "reject — already implied by a stronger corpus rule, and product-coupled to Cursor transcripts. writing-skills owns artifact choice ('Create when: Technique wasn't intuitively obvious… Don't create for: One-off solutions… Project-specific conventions (put in CLAUDE.md)') and outranks a transcript-der",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "docs-canvas/skills/docs-canvas": {
+      "disposition": "product-specific",
+      "reason": "Cursor Canvas rendering surface",
+      "read": true,
+      "status": "no-action"
+    },
+    "grok-voice/skills/add-dictation": {
+      "disposition": "product-specific",
+      "reason": "Grok speech-to-text integration",
+      "read": true,
+      "status": "no-action"
+    },
+    "grok-voice/skills/add-read-aloud": {
+      "disposition": "product-specific",
+      "reason": "Grok text-to-speech integration",
+      "read": true,
+      "status": "no-action"
+    },
+    "grok-voice/skills/add-voice": {
+      "disposition": "product-specific",
+      "reason": "Grok realtime voice integration",
+      "read": true,
+      "status": "no-action"
+    },
+    "grok-voice/skills/debug-voice": {
+      "disposition": "product-specific",
+      "reason": "Grok voice session diagnostics",
+      "read": true,
+      "status": "no-action"
+    },
+    "orchestrate/skills/orchestrate": {
+      "disposition": "product-specific",
+      "reason": "Cursor cloud-agent spawning via SDK; its one portable idea (no lateral worker talk, structured handoffs upward) is owned by dispatching-parallel-agents",
+      "read": true,
+      "status": "no-action"
+    },
+    "pr-review-canvas/skills/pr-review-canvas": {
+      "disposition": "product-specific",
+      "reason": "Cursor Canvas rendering surface",
+      "read": true,
+      "status": "no-action"
+    },
+    "pstack/automations/benny/skills/reproduce-and-fix-issues": {
+      "disposition": "adopt-rule",
+      "audit": "AuditPstackWorkflows",
+      "note": "Slack/Cursor-automation bound overall (marker gating, frozen channel coordinates, fail-closed config), but the sole source of two stack-agnostic rules the corpus lacked: 'The exact discriminating symptom must appear twice through real UI interaction' (line 25) and 'State inspection may confirm an observation. It must not inject or force the symptom.' (line 26). Both adopted into systematic-debugging/references/four-phases.md.",
+      "status": "landed",
+      "landedIn": "uncommitted — twice-from-reset + no-injection into systematic-debugging/references/four-phases.md"
+    },
+    "pstack/automations/benny/skills/setup-benny": {
+      "disposition": "product-specific",
+      "read": true,
+      "audit": "AuditPstackWorkflows",
+      "reason": "Installs the Benny automation pack into a repo and creates two Cursor Automations; body is Slack channel wiring and config scaffolding. Restates the twice-through-real-UI rule at line 209 as part of its acceptance checklist, but is not its source and adds nothing to it; carries no injection ban.",
+      "status": "no-action"
+    },
+    "pstack/automations/benny/skills/triage-issue-reports": {
+      "disposition": "product-specific",
+      "read": true,
+      "audit": "AuditPstackWorkflows",
+      "reason": "Slack-thread issue triage with immutable source coordinates and fail-closed tracker writes. Verified to contain neither adopted rule; entirely bound to Slack thread identity and tracker APIs.",
+      "status": "no-action"
+    },
+    "pstack/skills/architect": {
+      "disposition": "adopt-rule",
+      "note": "Sketch-first design with a Phase E list of observable signals that the design (not the code) is wrong.",
+      "audit": "AuditPstackWorkflows",
+      "status": "pending"
+    },
+    "pstack/skills/arena": {
+      "disposition": "adopt-rule",
+      "note": "N candidates on one task, rubric-scored, base picked, losers grafted; reads convergence/divergence as a signal about the prompt.",
+      "audit": "AuditPstackWorkflows",
+      "status": "pending"
+    },
+    "pstack/skills/automate-me": {
+      "disposition": "reject",
+      "note": "Generates a personal '<handle>-mode' skill by mining Cursor transcripts.",
+      "audit": "AuditPstackWorkflows",
+      "status": "no-action"
+    },
+    "pstack/skills/blast-radius": {
+      "disposition": "adopt-rule",
+      "note": "Downstream-breakage analysis with a five-rung proof ladder and a grep-blind coupling checklist.",
+      "audit": "AuditPstackWorkflows",
+      "status": "pending"
+    },
+    "pstack/skills/bro": {
+      "disposition": "reject",
+      "note": "Four-sentence prompt to restate the last message plainly.",
+      "audit": "AuditPstackWorkflows",
+      "status": "no-action"
+    },
+    "pstack/skills/create-verification-skill": {
+      "disposition": "adopt-skill",
+      "note": "Generates a project-local harness that drives the real app on any surface (web, CLI/TUI, service, desktop) and captures evidence.",
+      "audit": "AuditPstackWorkflows",
+      "status": "pending"
+    },
+    "pstack/skills/figure-it-out": {
+      "disposition": "adopt-rule",
+      "note": "Designs a bespoke playbook when none fits; carries the 'suspect the observation method when a check passes too easily' rule.",
+      "audit": "AuditPstackWorkflows",
+      "status": "pending"
+    },
+    "pstack/skills/how": {
+      "disposition": "reject",
+      "note": "Subsystem walkthrough via explorer fan-out plus synthesizer. Mechanism already owned by dispatching-parallel-agents.",
+      "audit": "AuditPstackWorkflows",
+      "status": "no-action"
+    },
+    "pstack/skills/interrogate": {
+      "disposition": "adopt-rule",
+      "note": "Multi-model adversarial review with consensus weighting and act-on/consider/noted/dismissed lead judgment.",
+      "audit": "AuditPstackWorkflows",
+      "status": "landed",
+      "landedIn": "requesting-code-review — independent-agreement weighting"
+    },
+    "pstack/skills/maintain-verification-skill": {
+      "disposition": "reject",
+      "note": "Upkeep loop for the generated harness and its feature map.",
+      "audit": "AuditPstackWorkflows",
+      "status": "no-action"
+    },
+    "pstack/skills/make-bot-ui": {
+      "disposition": "reject",
+      "note": "Builds a webhook UI for a Grok Bot over Cursor routines and Tailscale.",
+      "audit": "AuditPstackWorkflows",
+      "status": "no-action"
+    },
+    "pstack/skills/no-comments": {
+      "disposition": "adopt-rule",
+      "note": "Comment removal via a named subagent; carries an encode-then-delete rule for constraint comments.",
+      "audit": "AuditPstackWorkflows",
+      "status": "landed",
+      "landedIn": "cleaning-ai-slop Pass 2 — encode-then-delete"
+    },
+    "pstack/skills/poteto-mode": {
+      "disposition": "reject",
+      "note": "The author's personal mode skill: playbook index, model slugs, per-author reply style.",
+      "audit": "AuditPstackWorkflows",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-attack-the-premise": {
+      "disposition": "duplicate",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-boundary-discipline": {
+      "disposition": "duplicate",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-build-the-lever": {
+      "disposition": "adopt-rule",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "landed",
+      "landedIn": "dispatching-parallel-agents — deterministic-lever exclusion"
+    },
+    "pstack/skills/principle-encode-lessons-in-structure": {
+      "disposition": "adopt-rule",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "pending"
+    },
+    "pstack/skills/principle-exhaust-the-design-space": {
+      "disposition": "duplicate",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-experience-first": {
+      "disposition": "reject",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-fix-root-causes": {
+      "disposition": "duplicate",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-foundational-thinking": {
+      "disposition": "reject",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-guard-the-context-window": {
+      "disposition": "adopt-rule",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "pending"
+    },
+    "pstack/skills/principle-laziness-protocol": {
+      "disposition": "duplicate",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-make-operations-idempotent": {
+      "disposition": "adopt-rule",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "pending"
+    },
+    "pstack/skills/principle-migrate-callers-then-delete-legacy-apis": {
+      "disposition": "adopt-rule",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "pending"
+    },
+    "pstack/skills/principle-minimize-reader-load": {
+      "disposition": "duplicate",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-model-the-domain": {
+      "disposition": "duplicate",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-never-block-on-the-human": {
+      "disposition": "reject",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-outcome-oriented-execution": {
+      "disposition": "reject",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-prove-it-works": {
+      "disposition": "duplicate",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-redesign-from-first-principles": {
+      "disposition": "reject",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-separate-before-serializing-shared-state": {
+      "disposition": "adopt-rule",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "pending"
+    },
+    "pstack/skills/principle-sequence-verifiable-units": {
+      "disposition": "duplicate",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-subtract-before-you-add": {
+      "disposition": "duplicate",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "no-action"
+    },
+    "pstack/skills/principle-test-behavior-not-implementation": {
+      "disposition": "adopt-rule",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "landed",
+      "landedIn": "testing-anti-patterns.md — Anti-Pattern 6"
+    },
+    "pstack/skills/principle-type-system-discipline": {
+      "disposition": "adopt-skill",
+      "note": "read in full by AuditPstackPrinciples",
+      "audit": "AuditPstackPrinciples",
+      "status": "pending"
+    },
+    "pstack/skills/recall": {
+      "disposition": "reject",
+      "note": "Rebuilds working context from transcripts plus the shared record. Bound to Cursor transcript layout and MCP categories.",
+      "audit": "AuditPstackWorkflows",
+      "status": "no-action"
+    },
+    "pstack/skills/reflect": {
+      "disposition": "reject",
+      "note": "Three-lens transcript mining routed into skill edits. Cursor-transcript bound; its structural-enforcement rule is already in corpus writing-skills.",
+      "audit": "AuditPstackWorkflows",
+      "status": "no-action"
+    },
+    "pstack/skills/setup-pstack": {
+      "disposition": "reject",
+      "note": "Writes ~/.cursor/rules/pstack-models.mdc mapping roles to model slugs.",
+      "audit": "AuditPstackWorkflows",
+      "status": "no-action"
+    },
+    "pstack/skills/show-me-your-work": {
+      "disposition": "adopt-rule",
+      "note": "Append-only TSV decision log with pointer-only evidence, audited against the transcript before handoff.",
+      "audit": "AuditPstackWorkflows",
+      "status": "pending"
+    },
+    "pstack/skills/swarm": {
+      "disposition": "duplicate",
+      "note": "Partitioned or racing fan-out with aggregation. Partition mode is the corpus dispatching-parallel-agents pattern verbatim.",
+      "audit": "AuditPstackWorkflows",
+      "status": "no-action"
+    },
+    "pstack/skills/tdd": {
+      "disposition": "duplicate",
+      "note": "Permissive bug-fix TDD; explicitly allows skipping the failing test. Collides head-on with corpus test-driven-development.",
+      "audit": "AuditPstackWorkflows",
+      "status": "no-action"
+    },
+    "pstack/skills/teach": {
+      "disposition": "adopt-rule",
+      "note": "Human-facing explanation mode; carries a cumulative-diagram-series rule for 3+ moving parts.",
+      "audit": "AuditPstackWorkflows",
+      "status": "pending"
+    },
+    "pstack/skills/technical-writing": {
+      "disposition": "adopt-skill",
+      "note": "Four-layer doc standard: Diataxis mode selection, Google style, STE, Global English. No corpus owner.",
+      "audit": "AuditPstackWorkflows",
+      "status": "pending"
+    },
+    "pstack/skills/typescript-best-practices": {
+      "disposition": "adopt-skill",
+      "note": "Dense TS rule table (discriminated unions, branded types, narrowing hierarchy, exhaustiveness). Same shape as corpus writing-idiomatic-rust.",
+      "audit": "AuditPstackWorkflows",
+      "status": "pending"
+    },
+    "pstack/skills/unslop": {
+      "disposition": "adopt-skill",
+      "note": "Numbered catalog of ~30 AI prose tells. Prose-scoped, not code-scoped; corpus cleaning-ai-slop does not reach it.",
+      "audit": "AuditPstackWorkflows",
+      "status": "pending"
+    },
+    "pstack/skills/why": {
+      "disposition": "adopt-rule",
+      "note": "Design-rationale investigation: git/PR anchor, one investigator per evidence source, explicit nulls, confidence tiers.",
+      "audit": "AuditPstackWorkflows",
+      "status": "pending"
+    },
+    "ralph-loop/skills/cancel-ralph": {
+      "disposition": "product-specific",
+      "reason": "Cursor stop-hook loop control",
+      "read": true,
+      "status": "no-action"
+    },
+    "ralph-loop/skills/ralph-loop": {
+      "disposition": "product-specific",
+      "reason": "Cursor stop-hook re-feeds the prompt each turn; mechanism does not survive removal from that runtime",
+      "read": true,
+      "status": "no-action"
+    },
+    "ralph-loop/skills/ralph-loop-help": {
+      "disposition": "product-specific",
+      "reason": "Documentation for the ralph-loop plugin",
+      "read": true,
+      "status": "no-action"
+    },
+    "teaching/skills/create-learning-path": {
+      "disposition": "product-specific",
+      "reason": "Human-learner roadmap, not an engineering practice",
+      "read": true,
+      "status": "no-action"
+    },
+    "teaching/skills/run-learning-retrospective": {
+      "disposition": "product-specific",
+      "reason": "Human-learner progress review",
+      "read": true,
+      "status": "no-action"
+    },
+    "thermos/skills/thermo-nuclear-code-quality-review": {
+      "disposition": "duplicate",
+      "note": "duplicate — byte-identical to cursor-team-kit/skills/thermo-nuclear-code-quality-review/SKILL.md (confirmed: both 193 lines, same frontmatter, same content at every sampled offset), and therefore duplicate of reviewing-for-bloat for the same reasons.",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "thermos/skills/thermo-nuclear-review": {
+      "disposition": "adopt-rule",
+      "note": "adopt-rule → requesting-code-review. Bug/security/regression review is owned by prompts/code-reviewer.md ('Security concerns?', severity categorization, 'Categorize issues by actual severity. Not everything is Critical.'). The mechanism the corpus lacks is an anchoring guard: a reviewer must complet",
+      "audit": "AuditTeamKitThermos",
+      "status": "landed",
+      "landedIn": "13eda09 — anchoring guard into requesting-code-review"
+    },
+    "thermos/skills/thermos": {
+      "disposition": "reject",
+      "note": "reject — product-coupled workflow-recipe. Five steps that launch two hardcoded Cursor subagent slugs (`thermo-nuclear-review-subagent`, `thermo-nuclear-code-quality-review-subagent`) with `run_in_background: true`, then summarize. The one portable idea (weight findings that two independent reviewers",
+      "audit": "AuditTeamKitThermos",
+      "status": "no-action"
+    },
+    "third_party/x/skills/x-api-mcp-guide": {
+      "disposition": "product-specific",
+      "reason": "X MCP connection guide (third-party)",
+      "read": true,
+      "status": "no-action"
+    }
+  },
+  "counts": {
+    "adopt-skill": 8,
+    "product-specific": 19,
+    "reject": 26,
+    "duplicate": 16,
+    "adopt-rule": 22
+  },
+  "method": "All 91 SKILL.md files enumerated from the tree at the pinned sha; every file carries exactly one disposition. 74 were assessed by three scout audits; the remaining 17 were read directly during ledger reconciliation and dispositioned product-specific.",
+  "statusCounts": {
+    "pending": 20,
+    "no-action": 60,
+    "landed": 11
+  },
+  "caveat": "Verdicts come from three scout audits of differing strictness. AuditPstackWorkflows applied a visibly laxer bar than AuditTeamKitThermos: it returned adopt-rule for workflow recipes with hardcoded model slugs (arena, architect, why, teach, figure-it-out) of the same class AuditTeamKitThermos rejected (review-and-ship, new-branch-and-pr). An independent oracle pass read 14 of the 19 unlanded adopt-rule rows and found roughly 20% survive as stated, 30-40% yield any edit at all, none yields a section. Treat adopt-* as a lead list, not a work queue.",
+  "statusMeaning": {
+    "landed": "Adopted into the corpus; landedIn names the destination.",
+    "pending": "adopt-* verdict from a scout audit, NOT yet assessed by the oracle pass or actioned. See `caveat` — roughly 20% survive scrutiny as stated. A lead, not a task.",
+    "no-action": "duplicate, reject, or product-specific. No corpus change warranted."
+  }
+}

@@ -126,6 +126,7 @@ Return: Summary of what you found and what you fixed.
 **Need full context:** Understanding requires seeing entire system
 **Exploratory debugging:** You don't know what's broken yet
 **Shared state:** Agents would interfere (editing same files, using same resources)
+**A deterministic lever exists:** A codemod, query, or script answers it exactly. Fan-out costs more and returns judgement where a tool returns a fact.
 
 ## Real Example from Session
 

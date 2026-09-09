@@ -112,6 +112,12 @@ git merge <feature-branch>
 # Only after merge succeeds: cleanup worktree (Step 6), then delete branch
 ```
 
+If the merge stops on a conflict, resolve generated files by regenerating rather
+than editing: lockfiles, schema dumps, compiled assets, snapshot fixtures. A
+hand-merged lockfile describes a dependency graph neither branch ever resolved
+or tested, and it passes review because nobody reads one. Take either side
+wholesale, re-run the generator, and commit its output.
+
 Then: Cleanup worktree (Step 6), then delete branch:
 
 ```bash

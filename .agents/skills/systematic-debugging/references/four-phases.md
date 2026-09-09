@@ -57,6 +57,10 @@ You MUST complete each phase before proceeding to the next.
    with timestamps and a correlation id, counts rather than payloads for
    high-volume data, and never secrets or raw user content.
 
+   Instrumentation must swallow its own errors. A logger that throws into the
+   path it observes converts a bug you were measuring into a different bug you
+   caused, and the log stops at exactly the moment of interest.
+
    Show the instrumentation plan and get agreement before writing it. It touches
    files the bug never touched, so an unreviewed pass makes the diff harder to
    read than the defect it chases.

@@ -33,6 +33,19 @@ HEAD_SHA=$(git rev-parse HEAD)
 
 Use Task tool with `general-purpose` type, fill template at `prompts/code-reviewer.md`
 
+**Order the change for reading, not for the file tree.** Alphabetical order puts
+a generated file above the one behavior actually changed in. Lead with core
+logic — new behavior, algorithm and state changes, API surface — then the wiring
+that connects it, then mechanical churn (renames, imports, formatting,
+generated output) as a list of filenames rather than diffs. Attention is
+freshest at the top; spend it on the part that can be wrong.
+
+Where a core change is dense — nested conditions, a state machine, retry and
+backoff — put a few lines of pseudocode beside it, stripped of syntax and error
+handling, so the reviewer can confirm the intent before reading the code. Only
+where the diff is genuinely hard to scan; a straightforward change does not need
+a second description of itself.
+
 **Placeholders:**
 - `{DESCRIPTION}` - Brief summary of what you built
 - `{PLAN_OR_REQUIREMENTS}` - What it should do

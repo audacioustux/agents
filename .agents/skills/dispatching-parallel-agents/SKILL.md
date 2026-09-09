@@ -122,6 +122,11 @@ Sibling-to-sibling messaging reintroduces the coordination cost that fanning out
 was meant to avoid, and makes any failure ambiguous — you can no longer tell
 whether an agent was wrong or was told something wrong.
 
+**Delegation is recursive.** An agent whose slice turns out to hold independent
+parts can fan out over them itself and return one aggregated result. The rules
+above apply unchanged at that level: you still see one result from one agent,
+and you do not need to know it split the work.
+
 **A late result reopens the plan.** Treat "done" as your decision to stop
 dispatching, not as a state the agents reach. A result that lands after you
 thought you were finished is information, not noise.

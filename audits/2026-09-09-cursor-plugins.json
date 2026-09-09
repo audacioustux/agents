@@ -14,7 +14,6 @@
     },
     "agent-compatibility/skills/check-agent-compatibility": {
       "disposition": "reject",
-      "reason": "Cursor plugin-repo compatibility scanner",
       "status": "no-action",
       "evidence": "read in full (46 lines + 4 companion agent files). Portable content is a weighted-composite scoring scheme.",
       "note": "Fans four read-only reviewers into a 0.7/0.3 weighted composite. The fan-out is owned by dispatching-parallel-agents; the weighting is arbitrary and repo-specific. Prior product-specific verdict was imprecise but the adopt answer is still no."
@@ -46,7 +45,6 @@
     },
     "cursor-sdk/skills/cursor-sdk": {
       "disposition": "reject",
-      "reason": "@cursor/sdk API guide",
       "status": "no-action",
       "evidence": "read in full (239 lines + references/error-handling.md, patterns.md).",
       "note": "Two portable ideas — separate transport failure from application failure, and respect the server's own retryable flag rather than guessing from a status code. Neither has a corpus host; designing-agent-friendly-clis is design-side, not client-side. Host-less rather than product-specific."
@@ -166,7 +164,8 @@
       "disposition": "product-specific",
       "reason": "Cursor Canvas rendering surface",
       "status": "no-action",
-      "evidence": "frontmatter description + word count; body not read in full at disposition time"
+      "evidence": "read in full (54 lines); self-declares placeholder at line 16: 'Status: placeholder ... the full skill body still needs to be written'",
+      "note": "Cursor Canvas SDK surface, and incomplete by its own admission. Nothing to adopt."
     },
     "grok-voice/skills/add-dictation": {
       "disposition": "product-specific",
@@ -188,26 +187,24 @@
     },
     "grok-voice/skills/debug-voice": {
       "disposition": "adopt-rule",
-      "reason": "Grok voice session diagnostics",
       "status": "landed",
       "evidence": "read in full (198 lines). Line 16 states 'Works for any stack'; the prior product-specific verdict was taken from the description and was WRONG.",
       "landedIn": "f068bda — systematic-debugging/references/four-phases.md, unobservable-failure instrumentation",
-      "note": "Symptom-to-signature fix loop over a dev-only structured log. The Grok API surface is product-bound, but the diagnostic discipline is not: when the failure is one the agent cannot observe, build the record first, agree the instrumentation before writing it, count high-volume data rather than logging it, and never log secrets or user content."
+      "note": "Symptom-to-signature fix loop over a dev-only structured log. The Grok API surface is product-bound, but the diagnostic discipline is not: when the failure is one the agent cannot observe, build the record first, agree the instrumentation before writing it, count high-volume data rather than logging it, and never log secrets or user content. Adopted: build the record before theorising, agree the instrumentation first, and instrumentation must swallow its own errors. Deliberately excluded: the NDJSON sink and logger contract (product shape, not a rule) and 'one change per re-test', which four-phases.md line 158 already owns as 'ONE change at a time'."
     },
     "orchestrate/skills/orchestrate": {
       "disposition": "adopt-rule",
-      "reason": "Cursor cloud-agent spawning via SDK; its one portable idea (no lateral worker talk, structured handoffs upward) is owned by dispatching-parallel-agents",
       "status": "landed",
       "evidence": "read in full (47 lines + references/planner.md, handoffs.md). The six Core principles at lines 22-27 reference no SDK; prior verdict WRONG.",
       "landedIn": "f068bda — dispatching-parallel-agents, Topology section",
-      "note": "Cloud-agent spawning is product-bound, but three topology rules are not and the corpus had zero coverage: the dispatcher does not also do the work, agents never talk sideways, and a late result reopens the plan."
+      "note": "Cloud-agent spawning is product-bound, but three topology rules are not and the corpus had zero coverage: the dispatcher does not also do the work, agents never talk sideways, and a late result reopens the plan. All four unowned principles landed, including recursive delegation — an agent may fan out over its own slice and return one aggregated result."
     },
     "pr-review-canvas/skills/pr-review-canvas": {
-      "disposition": "reject",
-      "reason": "Cursor Canvas rendering surface",
-      "status": "no-action",
-      "evidence": "read in full (66 lines). Line 17 makes the Cursor Canvas SDK a hard prerequisite.",
-      "note": "Reorganize a diff by reviewer comprehension rather than file-tree order is a portable sentence, but requesting-code-review already owns review structuring and the rest is Canvas SDK."
+      "disposition": "adopt-rule",
+      "status": "landed",
+      "evidence": "read in full (66 lines). Reversal recorded: I first rejected this claiming requesting-code-review owned review structuring. Grep of all four review skills for diff ordering, file-tree order, boilerplate grouping returned zero hits — the claim was asserted from the domain, not the text.",
+      "note": "Canvas SDK rendering and `gh pr diff` mechanics are product-bound and excluded. The portable half is unowned: order a change by reviewer value (core logic, then wiring, then mechanical churn as filenames) rather than by file tree, and put pseudocode beside a dense core change so intent can be confirmed before the code is read.",
+      "landedIn": "pending — requesting-code-review, order the change for reading"
     },
     "pstack/automations/benny/skills/reproduce-and-fix-issues": {
       "disposition": "adopt-rule",
@@ -536,14 +533,12 @@
     },
     "teaching/skills/create-learning-path": {
       "disposition": "product-specific",
-      "reason": "Human-learner roadmap, not an engineering practice",
       "status": "no-action",
       "evidence": "read in full",
       "note": "Bound to no product, but contains no rule — a generic milestone/retrospective template. Not adoptable."
     },
     "teaching/skills/run-learning-retrospective": {
       "disposition": "product-specific",
-      "reason": "Human-learner progress review",
       "status": "no-action",
       "evidence": "read in full",
       "note": "Bound to no product, but contains no rule — a generic milestone/retrospective template. Not adoptable."
@@ -569,7 +564,6 @@
     },
     "third_party/x/skills/x-api-mcp-guide": {
       "disposition": "reject",
-      "reason": "X MCP connection guide (third-party)",
       "status": "no-action",
       "evidence": "read in full (3116w). Frontmatter carries the policy; body is X API surface.",
       "note": "Portable shape is real: check the balance before the operation, estimate cost before an expensive call, and distinguish an empty account from a broken setup (tools=0 is a setup failure, not a paywall). No corpus skill owns paid-API cost policy, and one rule harvested from a vendor guide does not justify a new skill."
@@ -577,16 +571,16 @@
   },
   "counts": {
     "adopt-skill": 8,
-    "reject": 30,
+    "reject": 29,
     "product-specific": 13,
     "duplicate": 16,
-    "adopt-rule": 24
+    "adopt-rule": 25
   },
   "method": "All 91 SKILL.md files enumerated from the tree at the pinned sha; every file carries exactly one disposition. 74 were assessed by three scout audits; the remaining 17 were initially dispositioned from descriptions alone; all 17 were subsequently read in full (plus 11 companion files), which overturned that verdict on 8 of them and produced 2 further adoptions.",
   "statusCounts": {
     "pending": 20,
-    "no-action": 59,
-    "landed": 12
+    "no-action": 58,
+    "landed": 13
   },
   "caveat": "Verdicts come from three scout audits of differing strictness. AuditPstackWorkflows applied a visibly laxer bar than AuditTeamKitThermos: it returned adopt-rule for workflow recipes with hardcoded model slugs (arena, architect, why, teach, figure-it-out) of the same class AuditTeamKitThermos rejected (review-and-ship, new-branch-and-pr). An independent oracle pass read 14 of the 19 unlanded adopt-rule rows and found roughly 20% survive as stated, 30-40% yield any edit at all, none yields a section. Treat adopt-* as a lead list, not a work queue.",
   "statusMeaning": {

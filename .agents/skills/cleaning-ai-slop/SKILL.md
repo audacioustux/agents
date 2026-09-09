@@ -96,6 +96,8 @@ Keep: validation at system boundaries (user input, external APIs, file I/O). Err
 
 Decide it by behaviour, not by history. Delete the check and run the suite. A test that now fails is describing the invalid-value path the check exists to close, so restore it. A green suite is not yet permission to delete: it says no test covers that path, which is equally consistent with a speculative check and with a real guard whose coverage was never written. Resolve it by trying to reach the check — construct the input that would trip it. If you can, the path is real: restore the check and leave the test behind. If the type system or the call graph makes it unreachable, the check was paranoia and the deletion stands. Commit co-location settles nothing here, since a model writing new code commits speculative checks and their tests together.
 
+Unreachability is only as strong as what the compiler actually controls. Trace the value back: if it entered through a cast, a deserializer, an FFI or RPC boundary, or any `any`-typed hop, its type is an assertion someone wrote, not a proof, and the check is a boundary guard that this pass keeps.
+
 ### Pass 5: Verbose Naming
 
 Shorten names that carry redundant information.

@@ -4,6 +4,10 @@ description: Use when verifying an interactive CLI or TUI - prompt flows, keyboa
 uses:
   - name: systematic-debugging
     source: audacioustux/agents
+  - name: reviewing-ux-in-browser
+    source: audacioustux/agents
+  - name: verifying-before-completion
+    source: audacioustux/agents
 ---
 
 # Verifying Terminal Interfaces
@@ -11,6 +15,10 @@ uses:
 A TUI's behaviour lives in what the terminal shows after a sequence of keys.
 Reading the source tells you what it intends; driving it tells you what it does.
 Manual poking finds the bug once and cannot show it again.
+
+The surface here is a terminal. For a browser UI see `reviewing-ux-in-browser`;
+for whether a completion claim is backed by evidence at all, regardless of
+surface, see `verifying-before-completion`.
 
 ## Reuse before you build
 

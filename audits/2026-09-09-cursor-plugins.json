@@ -107,7 +107,7 @@
       "note": "adopt-rule: destination finishing-a-development-branch, which held only \"Force-push without explicit request\" and no content-preservation guard. Adopted as the principle, not the source's recipe: its check captures origin/<head>^{tree}, so any unpushed commit makes it false-alarm. Two further drafts were disproved in scratch repos before this landed. Tree-hash equality survives squash, reorder, reword and --force-rebase, but only while the base is unchanged. Across a moved base neither literal `git diff` equality nor `git patch-id` is sound: the former breaks whenever upstream touches the same file at all, the latter once upstream changes a line inside the few lines of context around the hunk (a distant edit leaves patch-id intact, measured at 3 lines of context), and both then report a clean carry as a failure. What shipped is `git range-diff` with an explicit --creation-factor=99, because at the default a cleanly carried commit whose context moved can print `<` as though it had vanished, and every marker other than `=` is stated as a prompt to inspect rather than a verdict — a correctly resolved conflict is marked the same as a botched one.",
       "audit": "AuditTeamKitThermos",
       "status": "landed",
-      "landedIn": "pending — finishing-a-development-branch, history rewrites preserve content",
+      "landedIn": "3b6c3e3 — finishing-a-development-branch, history rewrites preserve content",
       "evidence": "read in full; destination Red Flags list read and quoted (:219); three successive drafts tested in throwaway repos, two of them disproved, with the negative case (dropped hunk) asserted by exit code"
     },
     "cursor-team-kit/skills/new-branch-and-pr": {
@@ -236,7 +236,7 @@
       "note": "adopt-rule: destination subagent-driven-development. Two concerns of the same shape from unrelated tasks is the plan failing, not the tasks. The corpus stated the outcome (BLOCKED item 4, escalate) with no detection rule at the plan-execution seam; systematic-debugging owns the same conclusion at the debugging seam with a different trigger, so this is a hand-off rather than a restatement. The rest is duplicate (shallow module, pass-through, leaky abstraction all in pattern-catalog and deep-modules) or carries hardcoded model slugs.",
       "audit": "AuditPstackWorkflows",
       "status": "landed",
-      "landedIn": "pending — subagent-driven-development, repeated-deviation signal",
+      "landedIn": "3b6c3e3 — subagent-driven-development, repeated-deviation signal",
       "evidence": "read in full by UnreadFive; destination read and quoted at DONE_WITH_CONCERNS and BLOCKED item 4"
     },
     "pstack/skills/arena": {
@@ -257,7 +257,7 @@
       "note": "adopt-rule: destination verifying-before-completion. Strongest surviving row, verified by a negative sweep — pattern-catalog:66-67 names hidden coupling and accidental public APIs as bloat symptoms, the reviewer prompt has a backward-compatibility checkbox, writing-plans has zero hits for downstream/caller/break, and none is a procedure. Landed as a table row plus two paragraphs: name the load-bearing fact, say how far its proof got, and treat a clean symbol search as a bound on where you looked rather than on what breaks.",
       "audit": "AuditPstackWorkflows",
       "status": "landed",
-      "landedIn": "pending — verifying-before-completion, proof ladder and grep bounds",
+      "landedIn": "3b6c3e3 — verifying-before-completion, proof ladder and grep bounds",
       "evidence": "read in full by UnreadFive; five candidate hosts read and quoted, including a verified zero-hit claim"
     },
     "pstack/skills/bro": {
@@ -451,7 +451,7 @@
       "audit": "AuditPstackPrinciples",
       "status": "landed",
       "evidence": "read in full by UnreadFive; destination line 153 and flowchart line 29 read and quoted; mermaid re-parsed after the edit",
-      "landedIn": "pending — dispatching-parallel-agents, partition before serialize"
+      "landedIn": "3b6c3e3 — dispatching-parallel-agents, partition before serialize"
     },
     "pstack/skills/principle-sequence-verifiable-units": {
       "disposition": "duplicate",
@@ -552,7 +552,7 @@
       "note": "adopt-rule: destination receiving-code-review, whose check 3 asks for the reason behind the current implementation and gave no way to establish it. Landed as one paragraph: take the reason from blame, the merging PR, or the ticket; code is not evidence of its own intent; label inference as inference and say where a null search looked. The MCP investigator roster and model slugs are Cursor-bound and rejected.",
       "audit": "AuditPstackWorkflows",
       "status": "landed",
-      "landedIn": "pending — receiving-code-review, rationale from the record",
+      "landedIn": "3b6c3e3 — receiving-code-review, rationale from the record",
       "evidence": "read in full by UnreadFive; destination check 3 read and quoted"
     },
     "ralph-loop/skills/cancel-ralph": {

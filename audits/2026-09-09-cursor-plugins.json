@@ -33,15 +33,15 @@
     },
     "create-plugin/skills/create-plugin-scaffold": {
       "disposition": "product-specific",
-      "reason": "Cursor plugin marketplace scaffolding",
       "status": "no-action",
-      "evidence": "frontmatter description + word count; body not read in full at disposition time"
+      "evidence": "read in full (70 lines)",
+      "note": "Writes a Cursor plugin tree and plugin.json. Bound to the Cursor plugin manifest schema, the ~/.cursor/plugins/local/ install path, and .mdc/SKILL.md/agents/ discovery conventions."
     },
     "create-plugin/skills/review-plugin-submission": {
       "disposition": "product-specific",
-      "reason": "Cursor marketplace submission audit",
       "status": "no-action",
-      "evidence": "frontmatter description + word count; body not read in full at disposition time"
+      "evidence": "read in full (49 lines)",
+      "note": "Pass/fail marketplace-readiness checklist over .cursor-plugin/plugin.json, marketplace.json, hooks/hooks.json, mcp.json. Nothing survives removal of the marketplace."
     },
     "cursor-sdk/skills/cursor-sdk": {
       "disposition": "reject",
@@ -169,21 +169,21 @@
     },
     "grok-voice/skills/add-dictation": {
       "disposition": "product-specific",
-      "reason": "Grok speech-to-text integration",
       "status": "no-action",
-      "evidence": "frontmatter description + word count; body not read in full at disposition time"
+      "evidence": "read in full (164 lines)",
+      "note": "Wires Grok speech-to-text, batch POST /v1/stt versus a WebSocket relay. Bound to api.x.ai/v1/stt, its form-field ordering quirk, transcript.* event names, and PCM16 frame sizing."
     },
     "grok-voice/skills/add-read-aloud": {
       "disposition": "product-specific",
-      "reason": "Grok text-to-speech integration",
       "status": "no-action",
-      "evidence": "frontmatter description + word count; body not read in full at disposition time"
+      "evidence": "read in full (183 lines)",
+      "note": "Wires Grok text-to-speech. Bound to api.x.ai/v1/tts, a 15,000-character limit, the voice_id roster, and a speech-tag vocabulary. One near-miss at line 176 (grep the bundle actually served, not the source) is already owned by verifying-before-completion."
     },
     "grok-voice/skills/add-voice": {
       "disposition": "product-specific",
-      "reason": "Grok realtime voice integration",
       "status": "no-action",
-      "evidence": "frontmatter description + word count; body not read in full at disposition time"
+      "evidence": "read in full (123 lines)",
+      "note": "Wires Grok realtime duplex speech-to-speech. Bound to wss://api.x.ai/v1/realtime, the session.update shape, and ephemeral client_secrets. Its composer-icon guidance is house style, not a rule."
     },
     "grok-voice/skills/debug-voice": {
       "disposition": "adopt-rule",
@@ -515,21 +515,21 @@
     },
     "ralph-loop/skills/cancel-ralph": {
       "disposition": "product-specific",
-      "reason": "Cursor stop-hook loop control",
       "status": "no-action",
-      "evidence": "frontmatter description + word count; body not read in full at disposition time"
+      "evidence": "read in full (117 words)",
+      "note": "Cancels an active loop by clearing Cursor stop-hook state. No mechanism outside that runtime."
     },
     "ralph-loop/skills/ralph-loop": {
       "disposition": "product-specific",
-      "reason": "Cursor stop-hook re-feeds the prompt each turn; mechanism does not survive removal from that runtime",
       "status": "no-action",
-      "evidence": "frontmatter description + word count; body not read in full at disposition time"
+      "evidence": "read in full (285 words)",
+      "note": "A Cursor stop hook re-feeds the same prompt each turn as '[Ralph loop iteration N.]'. The iteration mechanism IS the hook; it does not survive removal from Cursor."
     },
     "ralph-loop/skills/ralph-loop-help": {
       "disposition": "product-specific",
-      "reason": "Documentation for the ralph-loop plugin",
       "status": "no-action",
-      "evidence": "frontmatter description + word count; body not read in full at disposition time"
+      "evidence": "read in full (383 words)",
+      "note": "Explains the ralph-loop plugin and its sibling skills. Documentation for a product feature."
     },
     "teaching/skills/create-learning-path": {
       "disposition": "product-specific",
@@ -576,7 +576,7 @@
     "duplicate": 16,
     "adopt-rule": 25
   },
-  "method": "All 91 SKILL.md files enumerated from the tree at the pinned sha; every file carries exactly one disposition. 74 were assessed by three scout audits; the remaining 17 were initially dispositioned from descriptions alone; all 17 were subsequently read in full (plus 11 companion files), which overturned that verdict on 8 of them and produced 2 further adoptions.",
+  "method": "All 91 SKILL.md files enumerated from the tree at the pinned sha; every file carries exactly one disposition, asserted to sum to 91. 74 were assessed by three scout audits. The remaining 17 were initially dispositioned from descriptions alone, then read in full (plus 11 companion files), which overturned that verdict on 8 and produced 3 further adoptions. Two Benny rows outside those 17 were verified by targeted grep rather than a full read; their evidence fields say so.",
   "statusCounts": {
     "pending": 20,
     "no-action": 58,

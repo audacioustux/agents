@@ -50,6 +50,17 @@ You MUST complete each phase before proceeding to the next.
    THEN investigate that specific component
    ```
 
+   **WHEN the failure is one you cannot observe** (audio, video, animation,
+   timing, a device you do not hold, anything a user reports and you cannot
+   watch): the log is your only sense organ and the user is the judge. Build the
+   record before theorising, and make it answer the question — ordered events
+   with timestamps and a correlation id, counts rather than payloads for
+   high-volume data, and never secrets or raw user content.
+
+   Show the instrumentation plan and get agreement before writing it. It touches
+   files the bug never touched, so an unreviewed pass makes the diff harder to
+   read than the defect it chases.
+
    **Example (multi-layer system):**
    ```bash
    # Layer 1: Workflow

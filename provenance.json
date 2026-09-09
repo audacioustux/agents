@@ -287,7 +287,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "d31bc64bda880b3aa9b18f23a8c7c3877cbc227d07137661597f250de0a7f391",
+          "sha256": "46041d05950b605d5fb76e8db26fd1143c3fd659ac5c7da9b94fee7e2f9329d3",
           "upstream": {
             "status": "diverged",
             "sha256": "1968923066f3b707eb01d1992cdf4c42284c3855f70253b9cd5000ff45fca13c"
@@ -656,7 +656,7 @@
           }
         },
         "references/four-phases.md": {
-          "sha256": "340f4f33d39790d7dde1b85ed8bcec2399c4859e918f824ddc0005d332b62f10",
+          "sha256": "7e4f938d99381c3175420a38a6a1095609247cb3bbacce317d531b800d20c39e",
           "upstream": {
             "status": "added-locally"
           }

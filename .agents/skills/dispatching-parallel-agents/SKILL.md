@@ -106,6 +106,26 @@ Do NOT just increase timeouts - find the real issue.
 Return: Summary of what you found and what you fixed.
 ```
 
+## Topology
+
+These hold at any depth, and they are what let a fan-out converge without a
+coordinator.
+
+**The dispatcher does not also do the work.** Splitting scopes, reading results,
+and deciding what comes next is one job; editing files is another. A dispatcher
+that starts fixing something itself stops reading incoming results, and the
+agents it launched drift or duplicate work. If you feel the urge to fix it
+yourself, dispatch it as one more task.
+
+**Agents do not talk sideways.** Each gets one scope and reports once, upward.
+Sibling-to-sibling messaging reintroduces the coordination cost that fanning out
+was meant to avoid, and makes any failure ambiguous — you can no longer tell
+whether an agent was wrong or was told something wrong.
+
+**A late result reopens the plan.** Treat "done" as your decision to stop
+dispatching, not as a state the agents reach. A result that lands after you
+thought you were finished is information, not noise.
+
 ## Common Mistakes
 
 **❌ Too broad:** "Fix all the tests" - agent gets lost

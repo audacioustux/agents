@@ -13,10 +13,11 @@
       "status": "pending"
     },
     "agent-compatibility/skills/check-agent-compatibility": {
-      "disposition": "product-specific",
+      "disposition": "reject",
       "reason": "Cursor plugin-repo compatibility scanner",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "read in full (46 lines + 4 companion agent files). Portable content is a weighted-composite scoring scheme.",
+      "note": "Fans four read-only reviewers into a 0.7/0.3 weighted composite. The fan-out is owned by dispatching-parallel-agents; the weighting is arbitrary and repo-specific. Prior product-specific verdict was imprecise but the adopt answer is still no."
     },
     "cli-for-agent/skills/cli-for-agents": {
       "disposition": "adopt-skill",
@@ -34,20 +35,21 @@
     "create-plugin/skills/create-plugin-scaffold": {
       "disposition": "product-specific",
       "reason": "Cursor plugin marketplace scaffolding",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "frontmatter description + word count; body not read in full at disposition time"
     },
     "create-plugin/skills/review-plugin-submission": {
       "disposition": "product-specific",
       "reason": "Cursor marketplace submission audit",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "frontmatter description + word count; body not read in full at disposition time"
     },
     "cursor-sdk/skills/cursor-sdk": {
-      "disposition": "product-specific",
+      "disposition": "reject",
       "reason": "@cursor/sdk API guide",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "read in full (239 lines + references/error-handling.md, patterns.md).",
+      "note": "Two portable ideas — separate transport failure from application failure, and respect the server's own retryable flag rather than guessing from a status code. Neither has a corpus host; designing-agent-friendly-clis is design-side, not client-side. Host-less rather than product-specific."
     },
     "cursor-team-kit/skills/check-compiler-errors": {
       "disposition": "duplicate",
@@ -163,44 +165,49 @@
     "docs-canvas/skills/docs-canvas": {
       "disposition": "product-specific",
       "reason": "Cursor Canvas rendering surface",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "frontmatter description + word count; body not read in full at disposition time"
     },
     "grok-voice/skills/add-dictation": {
       "disposition": "product-specific",
       "reason": "Grok speech-to-text integration",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "frontmatter description + word count; body not read in full at disposition time"
     },
     "grok-voice/skills/add-read-aloud": {
       "disposition": "product-specific",
       "reason": "Grok text-to-speech integration",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "frontmatter description + word count; body not read in full at disposition time"
     },
     "grok-voice/skills/add-voice": {
       "disposition": "product-specific",
       "reason": "Grok realtime voice integration",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "frontmatter description + word count; body not read in full at disposition time"
     },
     "grok-voice/skills/debug-voice": {
-      "disposition": "product-specific",
+      "disposition": "adopt-rule",
       "reason": "Grok voice session diagnostics",
-      "read": true,
-      "status": "no-action"
+      "status": "landed",
+      "evidence": "read in full (198 lines). Line 16 states 'Works for any stack'; the prior product-specific verdict was taken from the description and was WRONG.",
+      "landedIn": "pending — systematic-debugging/references/four-phases.md, unobservable-failure instrumentation",
+      "note": "Symptom-to-signature fix loop over a dev-only structured log. The Grok API surface is product-bound, but the diagnostic discipline is not: when the failure is one the agent cannot observe, build the record first, agree the instrumentation before writing it, count high-volume data rather than logging it, and never log secrets or user content."
     },
     "orchestrate/skills/orchestrate": {
-      "disposition": "product-specific",
+      "disposition": "adopt-rule",
       "reason": "Cursor cloud-agent spawning via SDK; its one portable idea (no lateral worker talk, structured handoffs upward) is owned by dispatching-parallel-agents",
-      "read": true,
-      "status": "no-action"
+      "status": "landed",
+      "evidence": "read in full (47 lines + references/planner.md, handoffs.md). The six Core principles at lines 22-27 reference no SDK; prior verdict WRONG.",
+      "landedIn": "pending — dispatching-parallel-agents, Topology section",
+      "note": "Cloud-agent spawning is product-bound, but three topology rules are not and the corpus had zero coverage: the dispatcher does not also do the work, agents never talk sideways, and a late result reopens the plan."
     },
     "pr-review-canvas/skills/pr-review-canvas": {
-      "disposition": "product-specific",
+      "disposition": "reject",
       "reason": "Cursor Canvas rendering surface",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "read in full (66 lines). Line 17 makes the Cursor Canvas SDK a hard prerequisite.",
+      "note": "Reorganize a diff by reviewer comprehension rather than file-tree order is a portable sentence, but requesting-code-review already owns review structuring and the rest is Canvas SDK."
     },
     "pstack/automations/benny/skills/reproduce-and-fix-issues": {
       "disposition": "adopt-rule",
@@ -211,17 +218,17 @@
     },
     "pstack/automations/benny/skills/setup-benny": {
       "disposition": "product-specific",
-      "read": true,
       "audit": "AuditPstackWorkflows",
       "reason": "Installs the Benny automation pack into a repo and creates two Cursor Automations; body is Slack channel wiring and config scaffolding. Restates the twice-through-real-UI rule at line 209 as part of its acceptance checklist, but is not its source and adds nothing to it; carries no injection ban.",
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "grep-verified: restates the twice-through-real-UI rule at line 209 as an acceptance item, carries no injection ban; body not read in full"
     },
     "pstack/automations/benny/skills/triage-issue-reports": {
       "disposition": "product-specific",
-      "read": true,
       "audit": "AuditPstackWorkflows",
       "reason": "Slack-thread issue triage with immutable source coordinates and fail-closed tracker writes. Verified to contain neither adopted rule; entirely bound to Slack thread identity and tracker APIs.",
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "grep-verified: contains neither adopted rule (zero hits for twice/inject/real UI); body not read in full"
     },
     "pstack/skills/architect": {
       "disposition": "adopt-rule",
@@ -512,32 +519,34 @@
     "ralph-loop/skills/cancel-ralph": {
       "disposition": "product-specific",
       "reason": "Cursor stop-hook loop control",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "frontmatter description + word count; body not read in full at disposition time"
     },
     "ralph-loop/skills/ralph-loop": {
       "disposition": "product-specific",
       "reason": "Cursor stop-hook re-feeds the prompt each turn; mechanism does not survive removal from that runtime",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "frontmatter description + word count; body not read in full at disposition time"
     },
     "ralph-loop/skills/ralph-loop-help": {
       "disposition": "product-specific",
       "reason": "Documentation for the ralph-loop plugin",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "frontmatter description + word count; body not read in full at disposition time"
     },
     "teaching/skills/create-learning-path": {
       "disposition": "product-specific",
       "reason": "Human-learner roadmap, not an engineering practice",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "read in full",
+      "note": "Bound to no product, but contains no rule — a generic milestone/retrospective template. Not adoptable."
     },
     "teaching/skills/run-learning-retrospective": {
       "disposition": "product-specific",
       "reason": "Human-learner progress review",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "read in full",
+      "note": "Bound to no product, but contains no rule — a generic milestone/retrospective template. Not adoptable."
     },
     "thermos/skills/thermo-nuclear-code-quality-review": {
       "disposition": "duplicate",
@@ -559,24 +568,25 @@
       "status": "no-action"
     },
     "third_party/x/skills/x-api-mcp-guide": {
-      "disposition": "product-specific",
+      "disposition": "reject",
       "reason": "X MCP connection guide (third-party)",
-      "read": true,
-      "status": "no-action"
+      "status": "no-action",
+      "evidence": "read in full (3116w). Frontmatter carries the policy; body is X API surface.",
+      "note": "Portable shape is real: check the balance before the operation, estimate cost before an expensive call, and distinguish an empty account from a broken setup (tools=0 is a setup failure, not a paywall). No corpus skill owns paid-API cost policy, and one rule harvested from a vendor guide does not justify a new skill."
     }
   },
   "counts": {
     "adopt-skill": 8,
-    "product-specific": 19,
-    "reject": 26,
+    "reject": 30,
+    "product-specific": 13,
     "duplicate": 16,
-    "adopt-rule": 22
+    "adopt-rule": 24
   },
-  "method": "All 91 SKILL.md files enumerated from the tree at the pinned sha; every file carries exactly one disposition. 74 were assessed by three scout audits; the remaining 17 were read directly during ledger reconciliation and dispositioned product-specific.",
+  "method": "All 91 SKILL.md files enumerated from the tree at the pinned sha; every file carries exactly one disposition. 74 were assessed by three scout audits; the remaining 17 were initially dispositioned from descriptions alone; all 17 were subsequently read in full (plus 11 companion files), which overturned that verdict on 8 of them and produced 2 further adoptions.",
   "statusCounts": {
     "pending": 20,
-    "no-action": 61,
-    "landed": 10
+    "no-action": 59,
+    "landed": 12
   },
   "caveat": "Verdicts come from three scout audits of differing strictness. AuditPstackWorkflows applied a visibly laxer bar than AuditTeamKitThermos: it returned adopt-rule for workflow recipes with hardcoded model slugs (arena, architect, why, teach, figure-it-out) of the same class AuditTeamKitThermos rejected (review-and-ship, new-branch-and-pr). An independent oracle pass read 14 of the 19 unlanded adopt-rule rows and found roughly 20% survive as stated, 30-40% yield any edit at all, none yields a section. Treat adopt-* as a lead list, not a work queue.",
   "statusMeaning": {

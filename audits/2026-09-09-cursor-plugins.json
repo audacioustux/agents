@@ -7,10 +7,11 @@
   "thirdParty": 1,
   "dispositions": {
     "advisor/skills/advisor": {
-      "disposition": "adopt-skill",
-      "note": "adopt-skill — second-opinion consultation policy. Nothing in the corpus owns it and it cannot be housed without breaking one-home-per-rule: systematic-debugging escalates to the human partner and only after three failed fixes ('Three failures against one bug means the fixes shared an assumption that is wrong'); subagent-driven-development's Model Selection assigns a model per task, never consults one about a decision; requesting-code-review dispatches a reviewer for finished work, not a decision checkpoint. The transferable mechanism is the checkpoint set plus its budget: consult before a hard-to-reverse or wide-blast-radius decision (once you have a concrete plan, not before), when stuck or reaching for a workaround, and before declaring done; at most one follow-up per checkpoint, ~4 per task or the task should be split; the advisor is read-only and you stay accountable. Drop all Cursor machinery: `/advisor` commands, `.cursor/advisor/state.json`, stop hooks, and model slugs.",
+      "disposition": "reject",
+      "note": "reject: a second-opinion consultation policy. This environment already provides an oracle agent for the role, and the corpus prescribes when to escalate — systematic-debugging after three failed fixes, requesting-code-review for dispatching a reviewer. A skill whose content is 'ask a stronger model' duplicates a capability rather than adding a rule.",
       "audit": "AuditTeamKitThermos",
-      "status": "pending"
+      "status": "no-action",
+      "evidence": "read in full by AuditTeamKitThermos; role compared against the agent roster and the two escalation owners"
     },
     "agent-compatibility/skills/check-agent-compatibility": {
       "disposition": "reject",
@@ -103,9 +104,11 @@
     },
     "cursor-team-kit/skills/make-pr-easy-to-review": {
       "disposition": "adopt-rule",
-      "note": "adopt-rule → finishing-a-development-branch. Mechanism the corpus has nowhere: capture the branch's tree hash before rewriting history (`git rev-parse origin/<head>^{tree}`), compare it after, and refuse to push if it differs — a history reorganization must not change content. Corpus has no history-rewrite coverage at all (no rebase/squash/force-push rule anywhere), and this converts 'don't hide behavior changes inside cleanup' from a wish into a check. The rest (PR description guidance, commit groupings) is taste.",
+      "note": "adopt-rule: destination finishing-a-development-branch, which held only \"Force-push without explicit request\" and no content-preservation guard. Adopted as the principle, not the source's recipe: its check captures origin/<head>^{tree}, so any unpushed commit makes it false-alarm. Two further drafts were disproved in scratch repos before this landed. Tree-hash equality survives squash, reorder, reword and --force-rebase, but only while the base is unchanged. Across a moved base neither literal `git diff` equality nor `git patch-id` is sound: the former breaks whenever upstream touches the same file at all, the latter once upstream changes a line inside the few lines of context around the hunk (a distant edit leaves patch-id intact, measured at 3 lines of context), and both then report a clean carry as a failure. What shipped is `git range-diff` with an explicit --creation-factor=99, because at the default a cleanly carried commit whose context moved can print `<` as though it had vanished, and every marker other than `=` is stated as a prompt to inspect rather than a verdict — a correctly resolved conflict is marked the same as a botched one.",
       "audit": "AuditTeamKitThermos",
-      "status": "pending"
+      "status": "landed",
+      "landedIn": "pending — finishing-a-development-branch, history rewrites preserve content",
+      "evidence": "read in full; destination Red Flags list read and quoted (:219); three successive drafts tested in throwaway repos, two of them disproved, with the negative case (dropped hunk) asserted by exit code"
     },
     "cursor-team-kit/skills/new-branch-and-pr": {
       "disposition": "reject",
@@ -230,15 +233,18 @@
     },
     "pstack/skills/architect": {
       "disposition": "adopt-rule",
-      "note": "Sketch-first design with a Phase E list of observable signals that the design (not the code) is wrong.",
+      "note": "adopt-rule: destination subagent-driven-development. Two concerns of the same shape from unrelated tasks is the plan failing, not the tasks. The corpus stated the outcome (BLOCKED item 4, escalate) with no detection rule at the plan-execution seam; systematic-debugging owns the same conclusion at the debugging seam with a different trigger, so this is a hand-off rather than a restatement. The rest is duplicate (shallow module, pass-through, leaky abstraction all in pattern-catalog and deep-modules) or carries hardcoded model slugs.",
       "audit": "AuditPstackWorkflows",
-      "status": "pending"
+      "status": "landed",
+      "landedIn": "pending — subagent-driven-development, repeated-deviation signal",
+      "evidence": "read in full by UnreadFive; destination read and quoted at DONE_WITH_CONCERNS and BLOCKED item 4"
     },
     "pstack/skills/arena": {
-      "disposition": "adopt-rule",
-      "note": "N candidates on one task, rubric-scored, base picked, losers grafted; reads convergence/divergence as a signal about the prompt.",
+      "disposition": "reject",
+      "note": "reject: workflow recipe with hardcoded model slugs. Its one genuinely absent idea — independent agreement outweighs echoed agreement — landed in requesting-code-review at 37e08e3. The remainder (rubric-scoring N candidates, grafting losers onto a base) has no corpus owner and was not adopted: it is a procedure for running a contest, not a rule about when to.",
       "audit": "AuditPstackWorkflows",
-      "status": "pending"
+      "status": "no-action",
+      "evidence": "assessed by AuditPstackWorkflows; the 37e08e3 attribution verified with git log -S, and dispatching-parallel-agents checked for convergence-as-signal — its single hit is the Topology sentence about fan-outs converging, which is not the same rule"
     },
     "pstack/skills/automate-me": {
       "disposition": "reject",
@@ -248,9 +254,11 @@
     },
     "pstack/skills/blast-radius": {
       "disposition": "adopt-rule",
-      "note": "Downstream-breakage analysis with a five-rung proof ladder and a grep-blind coupling checklist.",
+      "note": "adopt-rule: destination verifying-before-completion. Strongest surviving row, verified by a negative sweep — pattern-catalog:66-67 names hidden coupling and accidental public APIs as bloat symptoms, the reviewer prompt has a backward-compatibility checkbox, writing-plans has zero hits for downstream/caller/break, and none is a procedure. Landed as a table row plus two paragraphs: name the load-bearing fact, say how far its proof got, and treat a clean symbol search as a bound on where you looked rather than on what breaks.",
       "audit": "AuditPstackWorkflows",
-      "status": "pending"
+      "status": "landed",
+      "landedIn": "pending — verifying-before-completion, proof ladder and grep bounds",
+      "evidence": "read in full by UnreadFive; five candidate hosts read and quoted, including a verified zero-hit claim"
     },
     "pstack/skills/bro": {
       "disposition": "reject",
@@ -259,16 +267,18 @@
       "status": "no-action"
     },
     "pstack/skills/create-verification-skill": {
-      "disposition": "adopt-skill",
-      "note": "Generates a project-local harness that drives the real app on any surface (web, CLI/TUI, service, desktop) and captures evidence.",
+      "disposition": "reject",
+      "note": "reject: it generates a project-local harness skill per repo. The corpus now owns both verification surfaces directly — reviewing-ux-in-browser for browser, verifying-terminal-interfaces for CLI and TUI (527dbca) — and verifying-before-completion owns the claim gate. A meta-skill that writes more skills adds maintenance surface without adding a rule.",
       "audit": "AuditPstackWorkflows",
-      "status": "pending"
+      "status": "no-action",
+      "evidence": "read in full by AuditPstackWorkflows; checked against the two verification skills and the claim gate"
     },
     "pstack/skills/figure-it-out": {
-      "disposition": "adopt-rule",
-      "note": "Designs a bespoke playbook when none fits; carries the 'suspect the observation method when a check passes too easily' rule.",
+      "disposition": "duplicate",
+      "note": "duplicate: verifying-before-completion owns the cited rule at :45 — \"A green that the check could not have turned red is the most expensive outcome\". The rest is a bespoke-playbook wrapper with no mechanism.",
       "audit": "AuditPstackWorkflows",
-      "status": "pending"
+      "status": "no-action",
+      "evidence": "corpus destination read and quoted at the cited lines"
     },
     "pstack/skills/how": {
       "disposition": "reject",
@@ -331,11 +341,11 @@
       "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
     },
     "pstack/skills/principle-encode-lessons-in-structure": {
-      "disposition": "adopt-rule",
-      "note": "adopt-rule: destination writing-skills.",
+      "disposition": "duplicate",
+      "note": "duplicate: writing-skills owns the core at :70 — \"Mechanical constraints (if it's enforceable with regex/validation, automate it—save documentation for judgment calls)\". The strength ranking above that is novel but has no host and does not justify one.",
       "audit": "AuditPstackPrinciples",
-      "status": "pending",
-      "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
+      "status": "no-action",
+      "evidence": "corpus destination read and quoted at the cited lines"
     },
     "pstack/skills/principle-exhaust-the-design-space": {
       "disposition": "duplicate",
@@ -366,11 +376,11 @@
       "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
     },
     "pstack/skills/principle-guard-the-context-window": {
-      "disposition": "adopt-rule",
-      "note": "adopt-rule: destination dispatching-parallel-agents.",
+      "disposition": "duplicate",
+      "note": "duplicate: all three substantive bullets are owned — subagent-driven-development:23 on fresh context per task, writing-skills:94-101 on what belongs in a body versus a reference, and dispatching-parallel-agents on curated inputs per agent.",
       "audit": "AuditPstackPrinciples",
-      "status": "pending",
-      "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
+      "status": "no-action",
+      "evidence": "assessed by AuditPstackPrinciples; the earlier oracle pass read the three destinations and reported them owned"
     },
     "pstack/skills/principle-laziness-protocol": {
       "disposition": "duplicate",
@@ -380,18 +390,18 @@
       "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
     },
     "pstack/skills/principle-make-operations-idempotent": {
-      "disposition": "adopt-rule",
-      "note": "adopt-rule: destination reviewing-for-bloat.",
+      "disposition": "duplicate",
+      "note": "duplicate: reviewing-for-bloat owns this. SKILL.md:60 refuses \"a retry around a non-idempotent side effect without a verified idempotency contract\" and pattern-catalog.md:116 names \"Idempotency by accident — retries happen to work without an explicit contract\". The CLI half is owned by designing-agent-friendly-clis.",
       "audit": "AuditPstackPrinciples",
-      "status": "pending",
-      "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
+      "status": "no-action",
+      "evidence": "corpus destination read and quoted at the cited lines"
     },
     "pstack/skills/principle-migrate-callers-then-delete-legacy-apis": {
-      "disposition": "adopt-rule",
-      "note": "adopt-rule: destination reviewing-for-bloat.",
+      "disposition": "duplicate",
+      "note": "duplicate: reviewing-for-bloat owns this. pattern-catalog.md:81 \"Migration shadow paths\", :103 \"Migration residue, dual-read, or dual-write persistence\", :186 \"No migration completion criteria or lifecycle ownership\".",
       "audit": "AuditPstackPrinciples",
-      "status": "pending",
-      "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
+      "status": "no-action",
+      "evidence": "corpus destination read and quoted at the cited lines"
     },
     "pstack/skills/principle-minimize-reader-load": {
       "disposition": "duplicate",
@@ -437,10 +447,11 @@
     },
     "pstack/skills/principle-separate-before-serializing-shared-state": {
       "disposition": "adopt-rule",
-      "note": "adopt-rule: destination dispatching-parallel-agents.",
+      "note": "adopt-rule: destination dispatching-parallel-agents, correcting the corpus rather than extending it. Its only answer to shared state was to go sequential — the source's last resort — and its isolation mechanism was a prompt instruction, which the source correctly names as not concurrency control. Line 153 now partitions ownership first and serializes structurally where a single writer is a real invariant; the flowchart edge became 'Partition ownership, else sequential' and was re-parsed.",
       "audit": "AuditPstackPrinciples",
-      "status": "pending",
-      "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
+      "status": "landed",
+      "evidence": "read in full by UnreadFive; destination line 153 and flowchart line 29 read and quoted; mermaid re-parsed after the edit",
+      "landedIn": "pending — dispatching-parallel-agents, partition before serialize"
     },
     "pstack/skills/principle-sequence-verifiable-units": {
       "disposition": "duplicate",
@@ -465,11 +476,11 @@
       "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
     },
     "pstack/skills/principle-type-system-discipline": {
-      "disposition": "adopt-skill",
-      "note": "adopt-skill: no possible host.",
+      "disposition": "reject",
+      "note": "reject on evidence: six of the source's eight patterns were demonstrated unaided by control agents with no skill loaded. Told only to build a review service, then a scheduling window and an average, they produced branded ids, a discriminated union (explicitly rejecting the optional-field shape), assertNever exhaustiveness, an unknown-typed boundary parser with JSON-path errors, a single-constructor branded Window whose operations \"may assume startMs <= endMs with no defensive re-check\", and `number | null` for an empty average with NaN and 0 argued against by name — one of them adding a @ts-expect-error negative-check file unprompted. Two patterns were NOT demonstrated. Schema derivation was untestable by construction: no scenario supplied a protobuf, OpenAPI, GraphQL, or migration schema. And \"don't lie to the type system\" was not shown: both outputs are cast-heavy (`{ startMs, endMs } as Window`, `requireString(...) as UserId`), which is the ordinary way to mint a brand after validation, but no agent argued any cast the way the source requires. That residue is two rules with no corpus host, not a skill.",
       "audit": "AuditPstackPrinciples",
-      "status": "pending",
-      "evidence": "read in full by AuditPstackPrinciples; verdict and corpus owner recovered from its report table"
+      "status": "no-action",
+      "evidence": "read in full; two RED baseline scenarios run against control agents (TypeBaseline, TypeBaselineTwo). Six of eight patterns demonstrated; schema derivation untestable by construction; cast discipline not demonstrated, verified by re-reading the emitted code rather than the agents' summaries."
     },
     "pstack/skills/recall": {
       "disposition": "reject",
@@ -490,10 +501,11 @@
       "status": "no-action"
     },
     "pstack/skills/show-me-your-work": {
-      "disposition": "adopt-rule",
-      "note": "Append-only TSV decision log with pointer-only evidence, audited against the transcript before handoff.",
+      "disposition": "reject",
+      "note": "reject: an append-only TSV log audited against ~/.cursor/projects transcripts. Transcript-bound, and handing-off-work already owns the handoff record with an explicit rule that it never lives in the workspace.",
       "audit": "AuditPstackWorkflows",
-      "status": "pending"
+      "status": "no-action",
+      "evidence": "corpus destination read and quoted at the cited lines"
     },
     "pstack/skills/swarm": {
       "disposition": "duplicate",
@@ -508,34 +520,40 @@
       "status": "no-action"
     },
     "pstack/skills/teach": {
-      "disposition": "adopt-rule",
-      "note": "Human-facing explanation mode; carries a cumulative-diagram-series rule for 3+ moving parts.",
+      "disposition": "reject",
+      "note": "reject: its portable rule (for 3+ moving parts draw a cumulative diagram series rather than one all-at-once diagram) is scoped to teaching by the source itself, and the corpus has no human-explanation mode. diagramming-with-mermaid:27 already gives the documentation answer — split a dense map into an overview plus focused companions — and landing a teaching rule there would give docs the wrong rule.",
       "audit": "AuditPstackWorkflows",
-      "status": "pending"
+      "status": "no-action",
+      "evidence": "read in full by UnreadFive; candidate host read and quoted"
     },
     "pstack/skills/technical-writing": {
-      "disposition": "adopt-skill",
-      "note": "Four-layer doc standard: Diataxis mode selection, Google style, STE, Global English. No corpus owner.",
+      "disposition": "reject",
+      "note": "reject: the residue is rule-sized and unhoused, not skill-sized. A control agent with no skill loaded, asked for a README usage section, a commit message, and a PR description, produced condition-before-instruction, one thought per sentence, named actors, a derivation for every number it claimed, an explicit behaviour-change callout with the opt-out, alternatives-considered with a reason for deferring, per-consumer impact analysis naming three callers and their deadline budgets, and a closing note that the value was a judgement call rather than derived. It was NOT clean on the source's Global English layer: \"only\" placed away from the word it modifies, a \"which\" pointing at a whole clause, and \"a already-degraded\". Diataxis mode selection was untested because no document-set task was posed. What survives is two ambiguity rules with no corpus host, which is a rule-sized gap.",
       "audit": "AuditPstackWorkflows",
-      "status": "pending"
+      "status": "no-action",
+      "evidence": "read in full; RED baseline run against a control agent (ProseBaseline) across three artifacts, transcript re-read for violations rather than only for compliance"
     },
     "pstack/skills/typescript-best-practices": {
-      "disposition": "adopt-skill",
-      "note": "Dense TS rule table (discriminated unions, branded types, narrowing hierarchy, exhaustiveness). Same shape as corpus writing-idiomatic-rust.",
+      "disposition": "reject",
+      "note": "reject: it was a candidate only as the language-specific companion to principle-type-system-discipline, which the RED baselines refuted. ~13 of 16 rows re-express those same patterns in TypeScript syntax, so it inherits the refutation. The corpus keeps its Rust cluster because those skills carry non-obvious rules (aliasing, unsafe invariants, build graph); mainstream TypeScript typing is not that.",
       "audit": "AuditPstackWorkflows",
-      "status": "pending"
+      "status": "no-action",
+      "evidence": "read in full; inherits the TypeBaseline/TypeBaselineTwo result"
     },
     "pstack/skills/unslop": {
-      "disposition": "adopt-skill",
-      "note": "Numbered catalog of ~30 AI prose tells. Prose-scoped, not code-scoped; corpus cleaning-ai-slop does not reach it.",
+      "disposition": "reject",
+      "note": "reject: it was a candidate only as the portable subset inside technical-writing, whose residue proved rule-sized. Standalone it also fights the corpus: rule 13 forbids em dashes, which corpus descriptions and bodies use throughout, and several of its rules duplicate the technical-writing source or contradict house vocabulary.",
       "audit": "AuditPstackWorkflows",
-      "status": "pending"
+      "status": "no-action",
+      "evidence": "read in full; inherits the ProseBaseline result"
     },
     "pstack/skills/why": {
       "disposition": "adopt-rule",
-      "note": "Design-rationale investigation: git/PR anchor, one investigator per evidence source, explicit nulls, confidence tiers.",
+      "note": "adopt-rule: destination receiving-code-review, whose check 3 asks for the reason behind the current implementation and gave no way to establish it. Landed as one paragraph: take the reason from blame, the merging PR, or the ticket; code is not evidence of its own intent; label inference as inference and say where a null search looked. The MCP investigator roster and model slugs are Cursor-bound and rejected.",
       "audit": "AuditPstackWorkflows",
-      "status": "pending"
+      "status": "landed",
+      "landedIn": "pending — receiving-code-review, rationale from the record",
+      "evidence": "read in full by UnreadFive; destination check 3 read and quoted"
     },
     "ralph-loop/skills/cancel-ralph": {
       "disposition": "product-specific",
@@ -594,17 +612,16 @@
     }
   },
   "counts": {
-    "adopt-skill": 8,
-    "reject": 29,
+    "reject": 38,
+    "adopt-skill": 2,
     "product-specific": 13,
-    "duplicate": 16,
-    "adopt-rule": 25
+    "duplicate": 21,
+    "adopt-rule": 17
   },
-  "method": "All 91 SKILL.md files enumerated from the tree at the pinned sha; every file carries exactly one disposition, asserted to sum to 91. 74 were assessed by three scout audits. The remaining 17 were initially dispositioned from descriptions alone, then read in full (plus 11 companion files), which overturned that verdict on 8 and produced 3 further adoptions. Two Benny rows outside those 17 were verified by targeted grep rather than a full read; their evidence fields say so.",
+  "method": "All 91 SKILL.md files enumerated from the tree at the pinned sha; every file carries exactly one disposition, asserted to sum to 91. 74 were assessed by three scout audits. The remaining 17 were initially dispositioned from descriptions alone, then read in full (plus 11 companion files), which overturned that verdict on 8 and produced 3 further adoptions. Two Benny rows outside those 17 were verified by targeted grep rather than a full read; their evidence fields say so. Two adopt-skill candidates were refused on RED-baseline evidence rather than on judgement: control agents satisfied the proposed rules unaided.",
   "statusCounts": {
-    "pending": 19,
-    "no-action": 58,
-    "landed": 14
+    "no-action": 72,
+    "landed": 19
   },
   "caveat": "Verdicts come from three scout audits of differing strictness. AuditPstackWorkflows applied a visibly laxer bar than AuditTeamKitThermos: it returned adopt-rule for workflow recipes with hardcoded model slugs (arena, architect, why, teach, figure-it-out) of the same class AuditTeamKitThermos rejected (review-and-ship, new-branch-and-pr). An independent oracle pass read 14 of the 19 unlanded adopt-rule rows and found roughly 20% survive as stated, 30-40% yield any edit at all, none yields a section. Treat adopt-* as a lead list, not a work queue.",
   "statusMeaning": {

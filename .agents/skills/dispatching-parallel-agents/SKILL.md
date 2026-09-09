@@ -26,7 +26,7 @@ flowchart TD
     N2 -->|"no - related"| N3["Single agent investigates all"]
     N2 -->|"yes"| N4{"Can they work in parallel?"}
     N4 -->|"yes"| N5["Parallel dispatch"]
-    N4 -->|"no - shared state"| N6["Sequential agents"]
+    N4 -->|"no - shared state"| N6["Partition ownership,<br/>else sequential"]
     N7["One agent per problem domain"]
 ```
 
@@ -150,7 +150,7 @@ thought you were finished is information, not noise.
 **Related failures:** Fixing one might fix others - investigate together first
 **Need full context:** Understanding requires seeing entire system
 **Exploratory debugging:** You don't know what's broken yet
-**Shared state:** Agents would interfere (editing same files, using same resources)
+**Shared state:** Agents would interfere (editing same files, using same resources). Before falling back to sequential, try removing the sharing: give each agent its own file, key, or branch and merge at the read boundary. Two agents writing separate fields into one state file is still shared mutation; two files is not. Serialize only where a single writer is a real invariant, and do it structurally — a lock, a sequential phase, one owning agent. "Do not touch X" in a prompt is not concurrency control; it is a request.
 **A deterministic lever exists:** A codemod, query, or script answers it exactly. Fan-out costs more and returns judgement where a tool returns a fact.
 
 ## Real Example from Session

@@ -85,6 +85,13 @@ IF conflicts with your human partner's prior decisions:
 
 **Your human partner's rule:** "External feedback - be skeptical, but check carefully"
 
+Check 3 is answered from the record, not from the code. `git blame` the lines,
+read the PR that merged them, follow the ticket. Code is not evidence of its own
+intent — what it appears designed for is what you would design it for now, which
+is the belief under test. A reason you inferred is labelled as inference, and a
+search that turned up nothing says where it looked, so the next reader does not
+repeat it.
+
 ## YAGNI Check for "Professional" Features
 
 ```

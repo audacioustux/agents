@@ -287,7 +287,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "8b6ee0bdaf3aafc406a5f77c85f47dacbec7c98cd41a99277a89b5b068751e64",
+          "sha256": "2f44c121e7d09fca06209dedbdcec6a94631b4e4e444ee14f7459a112ba719f9",
           "upstream": {
             "status": "diverged",
             "sha256": "1968923066f3b707eb01d1992cdf4c42284c3855f70253b9cd5000ff45fca13c"
@@ -349,7 +349,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "3d800ae66ab49cf06b68db231a32fe4620578cef4c9bd0eb020d1d79738157fe",
+          "sha256": "1c638920d9456623cbd3d4cecf54e1df5dec3240db770e6f7869bd7fc063656e",
           "upstream": {
             "status": "diverged",
             "sha256": "8db5a922b242dd4e1bf824cb91c13b3e8d8e8a86d6ceaf7f0774eb9cce909d65"
@@ -463,7 +463,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "e5803facf809de9f5605143766c6a8e5d7dc34546073e3c0422cf80baa7d1857",
+          "sha256": "7b086aad65373a8cff2cf9903af06695e9492ebc735e7f3ca904ffe01dd17fda",
           "upstream": {
             "status": "diverged",
             "sha256": "091df1629510af1b92fc4abd6f96732ebedb4cb2c0f3457e8f2740b0504a2438"
@@ -572,7 +572,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "838d27a668e31e75ca150046239ab012431062a3b9e4e0452c03fe361bcf27a0",
+          "sha256": "e0ce064bd1b81f10efabf94b597a46c0b91588bc2a10f12f2bad52ddbbb01e17",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
@@ -874,7 +874,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "265b861afbfca18486e21303a5bc745369baf373788f1c82e23ddbe740c7ceae",
+          "sha256": "83ec56e5f5e937154dc4f61b80660e124891138b08e7e261dce7029ae429062f",
           "upstream": {
             "status": "diverged",
             "sha256": "2befe7fc55bcadaa3d97dd9e8efeb633d2561c0ebe74c5a8b17c4d9e7e4520b3"

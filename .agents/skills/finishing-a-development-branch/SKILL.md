@@ -227,3 +227,35 @@ Merging without tests, wrong base branch, leaked worktrees. See `references/comm
 - Get typed confirmation for Option 4
 - Clean up worktree for Options 1 & 4 only
 - Run `git worktree prune` after removal
+
+## History rewrites preserve content
+
+Reordering, squashing, splitting, or rewording commits changes how the work is
+told, never what it is. When the base stays put, the tree hash is invariant:
+capture `git rev-parse <branch>^{tree}` before and compare after, and a
+difference means a hunk was dropped or duplicated during the rewrite. No test
+catches that, because the tests run on whatever survived.
+
+That invariant holds only while the base is unchanged. Rebasing onto a moved
+base changes the tree legitimately — the branch now carries upstream's work as
+well — so the hashes differ and prove nothing. Do not reach for a diff
+comparison instead: literal `git diff` output differs across bases whenever
+upstream touched the same file at all (the `index` lines move), and
+`git patch-id` survives a distant edit but differs once upstream changes a line
+inside the few lines of context around your hunk. Both report a clean carry as
+a failure.
+
+For a moved base, read
+`git range-diff --creation-factor=99 <old-base>..<old-tip> <new-base>..<new-tip>`.
+It pairs commits by similarity and marks each `=` unchanged, `!` changed, or `<`
+unpaired. Raise the creation factor: at the default a commit whose context
+upstream shifted can score as unpaired and print `<` even though it carried
+perfectly, sending you after a commit that never went missing.
+
+Every marker other than `=` is a prompt to look, never a verdict. A conflict
+resolved correctly shows as changed for the same reason a botched one does, and
+nothing mechanical separates them. Open the marked commit and read it.
+
+Anchor any of these on your own pre-rewrite tip, not the remote's. With unpushed
+commits those differ for ordinary reasons, and a check that fires on every
+branch is one you stop reading.

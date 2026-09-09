@@ -45,6 +45,19 @@ that looks like a result and is not one. Report that as inconclusive and say wha
 would settle it. A green that the check could not have turned red is the most
 expensive outcome here, because it ends the investigation while the defect survives.
 
+A claim about code the change does not touch rests on one or two load-bearing
+facts — "this only drops cache entries that were already dead". Name them, then
+say how far each one got: asserted, cited to a real file and line, argued step
+by step, run in a script against the real code, or reproduced in the running
+system. Anything short of run is unproven, and the word to write is "unproven",
+not a paragraph that reads as settled.
+
+Symbol search finds callers; it does not find consumers. It stops at the edge of
+a pinned dependency's own source, at a wire format or database column some other
+process parses, at a feature flag that selects the path at runtime, and at code
+three hops downstream that never names your symbol. A clean grep bounds where
+you looked, not what breaks.
+
 ## Common Failures
 
 | Claim | Requires | Not Sufficient |
@@ -56,6 +69,7 @@ expensive outcome here, because it ends the investigation while the defect survi
 | Regression test works | Red-green cycle verified | Test passes once |
 | Agent completed | VCS diff shows changes | Agent reports "success" |
 | Requirements met | Line-by-line checklist | Tests passing |
+| Safe for code outside the diff | The one fact its safety rests on, checked by running the real code | A grep of callers; reasoning that reads convincingly |
 
 ## Red Flags - STOP
 

@@ -109,6 +109,12 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 
 **DONE_WITH_CONCERNS:** The implementer completed the work but flagged doubts. Read the concerns before proceeding. If the concerns are about correctness or scope, address them before review. If they're observations (e.g., "this file is getting large"), note them and proceed to review.
 
+Two concerns of the same shape from unrelated tasks — a parameter the plan did
+not anticipate, a special-case branch, an escape hatch around a type — are the
+plan's shape failing, not the tasks. Stop dispatching and treat it as BLOCKED
+item 4 below. This is the same signal `systematic-debugging` reads after three
+failed fixes on one bug, arriving through implementers instead of through fixes.
+
 **NEEDS_CONTEXT:** The implementer needs information that wasn't provided. Provide the missing context and re-dispatch.
 
 **BLOCKED:** The implementer cannot complete the task. Assess the blocker:

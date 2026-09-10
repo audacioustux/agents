@@ -656,6 +656,23 @@
       "rationale": "audacioustux-owned, pristine",
       "owned": true
     },
+    "prisma-8": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "prisma/prisma",
+          "path": "skills/prisma-8"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "owned": false,
+      "presentInTree": false,
+      "rationale": "vendor data-layer surface; prisma owns it. Successor to the retired prisma-next family",
+      "decisions": [
+        "2026-09-10: added to Tickify after retiring the eleven prisma-next skills left the repo's data layer uncovered. prisma/prisma-next's \"this repository has moved\" pointed at prisma/prisma, which ships this skill: the same eleven topics consolidated into one SKILL.md plus fifteen reference files. Verified before adding that it teaches @prisma/orm-postgres and prisma.config.ts rather than the deprecated @prisma-next/* packages, and that its trigger signals (prisma.config.ts, contract.prisma, contract.json) match apps/tickify-api exactly. Not added to TheGrid, which has no Prisma. No router risk: its references ship inside the skill directory."
+      ]
+    },
     "prisma-next": {
       "disposition": "retired",
       "upstream": [
@@ -685,7 +702,8 @@
         "note": "One vendor family, retired together. prisma-next-debug has its own entry because it yielded a harvested rule before retirement."
       },
       "decisions": [
-        "2026-09-10: reviewed all eleven by reading, retired as a family on two independently verified facts. prisma/prisma-next's README states \"This repository has moved\"; and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 against prisma.config.ts. Every skill in the family teaches a package name, CLI surface, and config filename the repo no longer uses. Checked specifically for portable content in the four most likely candidates (migration-review, migrations, contract, debug): migration-review is a navigation model over prisma's own marker/ref artefacts with nothing general about irreversibility or destructive diffs; migrations has no expand/contract, backfill ordering, or lock-duration content. Only debug yielded a rule."
+        "2026-09-10: reviewed all eleven by reading, retired as a family on two independently verified facts. prisma/prisma-next's README states \"This repository has moved\"; and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 against prisma.config.ts. Every skill in the family teaches a package name, CLI surface, and config filename the repo no longer uses. Checked specifically for portable content in the four most likely candidates (migration-review, migrations, contract, debug): migration-review is a navigation model over prisma's own marker/ref artefacts with nothing general about irreversibility or destructive diffs; migrations has no expand/contract, backfill ordering, or lock-duration content. Only debug yielded a rule.",
+        "2026-09-10: superseded by prisma-8 from prisma/prisma, added to Tickify's lock the same day."
       ]
     },
     "prisma-next-debug": {

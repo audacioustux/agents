@@ -70,6 +70,18 @@ you looked, not what breaks.
 | Agent completed | VCS diff shows changes | Agent reports "success" |
 | Requirements met | Line-by-line checklist | Tests passing |
 | Safe for code outside the diff | The one fact its safety rests on, checked by running the real code | A grep of callers; reasoning that reads convincingly |
+| Fetched content is what you asked for | The body actually contains the thing sought | HTTP 200; a file exists at the output path |
+| A command found nothing | The search ran and the corpus was covered | An empty result, which also means "never indexed" |
+
+**An artifact that exists is not an artifact this run wrote.** A tool that emits
+nothing on failure leaves the previous run's file in place, so a check for
+existence silently reads an answer to a different question. Check the content,
+or delete the target first so absence is unambiguous.
+
+**An empty result has two causes and only one is fixable by rephrasing.** Either
+the query missed, or the thing was never in the corpus. Rerunning a reworded
+query against a corpus that never contained the answer produces confident
+nothing, indefinitely. Establish which case you are in before iterating.
 
 ## Red Flags - STOP
 

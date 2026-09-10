@@ -60,6 +60,17 @@
     }
   },
   "skills": {
+    "animating-interface-motion": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "Split out of building-accessible-interfaces on 2026-09-07. Holds the motion-craft rules that carry no accessibility failure mode; the constraints they must satisfy stayed behind. Stated as a boundary rather than a count, since the rule set grows.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "15f7fb4b8d42245259840fed6628d0980621094f12e558aa0b2b6064ff3865b5"
+        }
+      }
+    },
     "brainstorming": {
       "disposition": "merge",
       "upstream": [
@@ -157,6 +168,46 @@
       "rationale": "audacioustux-owned; local rules added beyond the upstream snapshot",
       "owned": true
     },
+    "building-color-systems": {
+      "disposition": "merge",
+      "upstream": [
+        {
+          "repo": "jakubkrehel/skills",
+          "sha": "267330e1adfc66a718fb65fa6918c1f06d0a689e",
+          "path": "skills/better-colors"
+        }
+      ],
+      "state": "owned-normalized",
+      "files": {
+        "SKILL.md": {
+          "sha256": "7ff76a965e48492ad59fc196fa4fba12b2f04cd799ce00fadc9d0a7c040a9c0f",
+          "upstream": {
+            "status": "rewritten"
+          }
+        },
+        "references/ramp-roles.md": {
+          "sha256": "1735db38ebe732e97402a4bb7956f49bfe1770513857b58c82ea77da6d1e2498",
+          "upstream": {
+            "status": "rewritten"
+          }
+        },
+        "references/notation-and-gamut.md": {
+          "sha256": "3322b7efb63e254580c4c4d7581b281612264bacd5bfc1a961a353eb6b3689a9",
+          "upstream": {
+            "status": "rewritten"
+          }
+        },
+        "references/measuring-contrast.md": {
+          "sha256": "4e8249c7e84c7c5ccba47d3a714c5e3928cdfb99b990572e564045a9374bb8ba",
+          "upstream": {
+            "status": "rewritten"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
+      "owned": true
+    },
     "building-responsive-layouts": {
       "disposition": "keep-as-is",
       "upstream": [
@@ -220,6 +271,31 @@
       "rationale": "vendor CLI surface; upstash owns tool truth",
       "owned": false,
       "presentInTree": false
+    },
+    "designing-agent-friendly-clis": {
+      "disposition": "keep-as-is",
+      "upstream": [
+        {
+          "repo": "cursor/plugins",
+          "path": "cli-for-agent/skills/cli-for-agents",
+          "license": "MIT",
+          "author": "Eric Zakariasson",
+          "sha": "df3fb154fb982fb83f649de8646d4af6a0cb16b3"
+        }
+      ],
+      "state": "rewritten",
+      "files": {
+        "SKILL.md": {
+          "sha256": "79ba835bc4b86966aef9fd2e50cdfb60f3816f937126ef574b523a0dde3d0606",
+          "upstream": {
+            "status": "rewritten",
+            "sha256": "1cddd028d24ece48cd538fc1d84e49f5922dc8d04ee88caf12666b0557575e09"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "Adopted from cursor/plugins (MIT) after a full-repo audit. Rewritten to corpus form rather than copied: each rule states its failure mode, product-coupled framing dropped, and exit-code semantics added, which the upstream skill omits despite being the one signal every non-interactive caller reads.",
+      "owned": true
     },
     "designing-component-systems": {
       "disposition": "keep-as-is",
@@ -390,6 +466,193 @@
       "owned": false,
       "presentInTree": false
     },
+    "firecrawl-agent": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "firecrawl/cli",
+          "path": "skills/firecrawl-agent"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
+      ],
+      "rationale": "vendor CLI command surface; firecrawl owns it",
+      "owned": false,
+      "presentInTree": false
+    },
+    "firecrawl-crawl": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "firecrawl/cli",
+          "path": "skills/firecrawl-crawl"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
+      ],
+      "rationale": "vendor CLI command surface; firecrawl owns it",
+      "owned": false,
+      "presentInTree": false
+    },
+    "firecrawl-developer-index": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "firecrawl/cli",
+          "path": "skills/firecrawl-developer-index"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Harvested the empty-result disambiguator (indexed:true|false distinguishes 'not in the index' from 'found nothing') into verifying-before-completion. Also states \"A merge supersedes a report\", \"Never answer from an opening report alone\", and \"Scope last, not first\" — all verified verbatim, all portable, left in place as vendor-owned since the corpus has no web-research skill to host them."
+      ],
+      "rationale": "vendor CLI surface, but carries portable primary-source methodology",
+      "owned": false,
+      "presentInTree": false
+    },
+    "firecrawl-download": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "firecrawl/cli",
+          "path": "skills/firecrawl-download"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
+      ],
+      "rationale": "vendor CLI command surface; firecrawl owns it",
+      "owned": false,
+      "presentInTree": false
+    },
+    "firecrawl-interact": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "firecrawl/cli",
+          "path": "skills/firecrawl-interact"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
+      ],
+      "rationale": "vendor CLI command surface; firecrawl owns it",
+      "owned": false,
+      "presentInTree": false
+    },
+    "firecrawl-map": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "firecrawl/cli",
+          "path": "skills/firecrawl-map"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
+      ],
+      "rationale": "vendor CLI command surface; firecrawl owns it",
+      "owned": false,
+      "presentInTree": false
+    },
+    "firecrawl-monitor": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "firecrawl/cli",
+          "path": "skills/firecrawl-monitor"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
+      ],
+      "rationale": "vendor CLI command surface; firecrawl owns it",
+      "owned": false,
+      "presentInTree": false
+    },
+    "firecrawl-parse": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "firecrawl/cli",
+          "path": "skills/firecrawl-parse"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
+      ],
+      "rationale": "vendor CLI command surface; firecrawl owns it",
+      "owned": false,
+      "presentInTree": false
+    },
+    "firecrawl-research-index": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "firecrawl/cli",
+          "path": "skills/firecrawl-research-index"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Vendor-owned, yet not a command wrapper: it encodes a retrieval methodology keyed to query shape. Harvested into verifying-before-completion: \"Verify to exclude, not to gatekeep\" and \"Stopping at one good result is the most common way to leave the reader with half an answer\" generalise to any indexed corpus; the near-namesake filter warning became the empty-result rule."
+      ],
+      "rationale": "vendor CLI surface, but carries portable source-evaluation methodology",
+      "owned": false,
+      "presentInTree": false
+    },
+    "firecrawl-scrape": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "firecrawl/cli",
+          "path": "skills/firecrawl-scrape"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
+      ],
+      "rationale": "vendor CLI command surface; firecrawl owns it",
+      "owned": false,
+      "presentInTree": false
+    },
+    "firecrawl-search": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "firecrawl/cli",
+          "path": "skills/firecrawl-search"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Body is a vendor credit-refund protocol. Harvested one rule into verifying-before-completion: \"Zero-result searches write no output file\", generalised to — a tool that writes nothing on failure leaves the prior run's artifact in place, so an existence check silently consumes stale data."
+      ],
+      "rationale": "vendor CLI surface; one portable rule harvested",
+      "owned": false,
+      "presentInTree": false
+    },
     "following-repo-ui-conventions": {
       "disposition": "keep-as-is",
       "upstream": [
@@ -412,6 +675,23 @@
       "decisions": [],
       "rationale": "audacioustux-owned, pristine",
       "owned": true
+    },
+    "guide": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "toss/es-toolkit",
+          "path": "es-toolkit-plugin/skills/guide"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Install and import paths for a specific library version — exactly the content that goes stale when the vendor ships."
+      ],
+      "rationale": "es-toolkit install/import surface; vendor owns it",
+      "owned": false,
+      "presentInTree": false
     },
     "handing-off-work": {
       "disposition": "merge",
@@ -436,6 +716,45 @@
       "rationale": "847B; too small to justify external tracking",
       "owned": true
     },
+    "handoff": {
+      "disposition": "overlaps:handing-off-work",
+      "upstream": [
+        {
+          "repo": "mattpocock/skills",
+          "path": "skills/productivity/handoff"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading both. All five of its rules appear in handing-off-work, which additionally carries the rationale for each and the clause that rejected paths matter most because nothing else records them. Zero inbound references. Its one distinct mechanism is frontmatter, not content: disable-model-invocation plus an openai.yaml denying implicit invocation, which no corpus skill uses — noted, not adopted, since the corpus has no convention for it."
+      ],
+      "rationale": "strict body-subset of the corpus skill; same upstream as tdd",
+      "owned": false,
+      "presentInTree": false
+    },
+    "hardening-rust-supply-chain": {
+      "disposition": "keep-as-is",
+      "rationale": "authored in this repo; mechanisms independently restated from the MIT-licensed references below, with no text copied",
+      "owned": true,
+      "upstream": [],
+      "references": [
+        {
+          "repo": "mohitmishra786/low-level-dev-skills",
+          "sha": "bdc58472fa9f309ed1b3f7d985a0d8e9bd8f4608",
+          "license": "MIT"
+        }
+      ],
+      "state": "native",
+      "files": {
+        "SKILL.md": {
+          "sha256": "918fae25c04846d72ef16019f0840a1f00e1c93b3523fef4d1d00522cbd06228",
+          "upstream": {
+            "status": "native"
+          }
+        }
+      }
+    },
     "improving-web-performance": {
       "disposition": "keep-as-is",
       "upstream": [
@@ -459,6 +778,194 @@
       "rationale": "audacioustux-owned, pristine",
       "owned": true
     },
+    "prisma-next": {
+      "disposition": "retired",
+      "upstream": [
+        {
+          "repo": "prisma/prisma-next",
+          "path": "skills/prisma-next"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
+      ],
+      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
+      "owned": false,
+      "presentInTree": false
+    },
+    "prisma-next-build": {
+      "disposition": "retired",
+      "upstream": [
+        {
+          "repo": "prisma/prisma-next",
+          "path": "skills/prisma-next-build"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
+      ],
+      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
+      "owned": false,
+      "presentInTree": false
+    },
+    "prisma-next-contract": {
+      "disposition": "retired",
+      "upstream": [
+        {
+          "repo": "prisma/prisma-next",
+          "path": "skills/prisma-next-contract"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
+      ],
+      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
+      "owned": false,
+      "presentInTree": false
+    },
+    "prisma-next-debug": {
+      "disposition": "retired",
+      "upstream": [
+        {
+          "repo": "prisma/prisma-next",
+          "path": "skills/prisma-next-debug"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses.",
+        "2026-09-10: harvested one rule before retiring. Its wrapper-envelope guidance (\"That envelope is a wrapper — the real code lives on meta.code\") generalises, and systematic-debugging had nothing on reading through a wrapped cause. Added there as \"Read the cause, not the wrapper\"."
+      ],
+      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
+      "owned": false,
+      "presentInTree": false
+    },
+    "prisma-next-feedback": {
+      "disposition": "retired",
+      "upstream": [
+        {
+          "repo": "prisma/prisma-next",
+          "path": "skills/prisma-next-feedback"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
+      ],
+      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
+      "owned": false,
+      "presentInTree": false
+    },
+    "prisma-next-migration-review": {
+      "disposition": "retired",
+      "upstream": [
+        {
+          "repo": "prisma/prisma-next",
+          "path": "skills/prisma-next-migration-review"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
+      ],
+      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
+      "owned": false,
+      "presentInTree": false
+    },
+    "prisma-next-migrations": {
+      "disposition": "retired",
+      "upstream": [
+        {
+          "repo": "prisma/prisma-next",
+          "path": "skills/prisma-next-migrations"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
+      ],
+      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
+      "owned": false,
+      "presentInTree": false
+    },
+    "prisma-next-queries": {
+      "disposition": "retired",
+      "upstream": [
+        {
+          "repo": "prisma/prisma-next",
+          "path": "skills/prisma-next-queries"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
+      ],
+      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
+      "owned": false,
+      "presentInTree": false
+    },
+    "prisma-next-quickstart": {
+      "disposition": "retired",
+      "upstream": [
+        {
+          "repo": "prisma/prisma-next",
+          "path": "skills/prisma-next-quickstart"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
+      ],
+      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
+      "owned": false,
+      "presentInTree": false
+    },
+    "prisma-next-runtime": {
+      "disposition": "retired",
+      "upstream": [
+        {
+          "repo": "prisma/prisma-next",
+          "path": "skills/prisma-next-runtime"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
+      ],
+      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
+      "owned": false,
+      "presentInTree": false
+    },
+    "prisma-next-supabase": {
+      "disposition": "retired",
+      "upstream": [
+        {
+          "repo": "prisma/prisma-next",
+          "path": "skills/prisma-next-supabase"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
+      ],
+      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
+      "owned": false,
+      "presentInTree": false
+    },
     "receiving-code-review": {
       "disposition": "merge",
       "upstream": [
@@ -480,6 +987,80 @@
       },
       "decisions": [],
       "rationale": "core workflow skill",
+      "owned": true
+    },
+    "recommend": {
+      "disposition": "external",
+      "upstream": [
+        {
+          "repo": "toss/es-toolkit",
+          "path": "es-toolkit-plugin/skills/recommend"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading. Checked specifically for dependency-selection methodology and found none: it presupposes es-toolkit, embeds a vendor-specific script and doc-URL templates, and prescribes only an output shape. Also references an /es-toolkit:migrate skill that is not installed."
+      ],
+      "rationale": "es-toolkit function recommender; vendor owns it",
+      "owned": false,
+      "presentInTree": false
+    },
+    "refactor": {
+      "disposition": "overlaps:reviewing-for-bloat",
+      "upstream": [
+        {
+          "repo": "github/awesome-copilot",
+          "path": "skills/refactor"
+        }
+      ],
+      "state": "vendored",
+      "files": {},
+      "decisions": [
+        "2026-09-10: reviewed by reading, and checked against reviewing-for-bloat/references/pattern-catalog.md directly. All ten of its smells are in the catalog, which is a strict superset — it additionally names divergent change, shotgun surgery, temporal coupling, policy-mechanism entanglement, and boundary bypass. Its \"Safe Refactoring Process\" is weaker than cleaning-ai-slop's Hard Gates. Nothing harvested."
+      ],
+      "rationale": "Fowler smell catalogue already owned, with no methodology the corpus lacks",
+      "owned": false,
+      "presentInTree": false
+    },
+    "refining-typography": {
+      "disposition": "merge",
+      "upstream": [
+        {
+          "repo": "jakubkrehel/skills",
+          "sha": "267330e1adfc66a718fb65fa6918c1f06d0a689e",
+          "path": "skills/better-typography"
+        }
+      ],
+      "state": "owned-normalized",
+      "files": {
+        "SKILL.md": {
+          "sha256": "0fe977c5d41038667c56cf9d300c21174974c162c78e2cfc76243f91e6d50b5b",
+          "upstream": {
+            "status": "rewritten"
+          }
+        },
+        "references/opentype-and-variable-fonts.md": {
+          "sha256": "fa27c17c53d9be1038951d54b959dc3d548999db5f7bb427a5b3b011e8672828",
+          "upstream": {
+            "status": "rewritten"
+          }
+        },
+        "references/measure-and-line-length.md": {
+          "sha256": "28d72c8308253904c16b0f152e1dc1e1ac64a423ab8c2855211209cfdb6440d4",
+          "upstream": {
+            "status": "rewritten"
+          }
+        },
+        "references/ios-input-zoom-recipes.md": {
+          "sha256": "82975789276f90a5c2eb5ba2c8c65cd933f274c18fad8cab1512b0e5c76f3d5d",
+          "upstream": {
+            "status": "rewritten"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
       "owned": true
     },
     "requesting-code-review": {
@@ -548,6 +1129,33 @@
       "rationale": "audacioustux-owned, pristine",
       "owned": true
     },
+    "reviewing-unsafe-rust": {
+      "disposition": "keep-as-is",
+      "rationale": "authored in this repo; mechanisms independently restated from the MIT-licensed references below, with no text copied",
+      "owned": true,
+      "upstream": [],
+      "references": [
+        {
+          "repo": "mohitmishra786/low-level-dev-skills",
+          "sha": "bdc58472fa9f309ed1b3f7d985a0d8e9bd8f4608",
+          "license": "MIT"
+        },
+        {
+          "repo": "Rust-Coding-Guidelines/rust-coding-guidelines-zh",
+          "sha": "6b3fc48b285b4f87696634a3e18572d010b30fd4",
+          "license": "MIT"
+        }
+      ],
+      "state": "native",
+      "files": {
+        "SKILL.md": {
+          "sha256": "85b2930b792f317756abc037f162ba55a4417963970f6a8ee9c0863500c18824",
+          "upstream": {
+            "status": "native"
+          }
+        }
+      }
+    },
     "reviewing-ux-in-browser": {
       "disposition": "keep-as-is",
       "upstream": [
@@ -570,6 +1178,28 @@
       "decisions": [],
       "rationale": "audacioustux-owned, pristine",
       "owned": true
+    },
+    "speeding-up-rust-builds": {
+      "disposition": "keep-as-is",
+      "rationale": "authored in this repo; mechanisms independently restated from the MIT-licensed references below, with no text copied",
+      "owned": true,
+      "upstream": [],
+      "references": [
+        {
+          "repo": "mohitmishra786/low-level-dev-skills",
+          "sha": "bdc58472fa9f309ed1b3f7d985a0d8e9bd8f4608",
+          "license": "MIT"
+        }
+      ],
+      "state": "native",
+      "files": {
+        "SKILL.md": {
+          "sha256": "2d0795a5a76e1b8e94737b42a3f012167c28e4b604b870ea30c619ac55e9f2f0",
+          "upstream": {
+            "status": "native"
+          }
+        }
+      }
     },
     "subagent-driven-development": {
       "disposition": "merge",
@@ -638,7 +1268,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "57934d2369e020cae57236bff446d828c7216658e7e1f2a15a0faac093015a9a",
+          "sha256": "bc2e9b1128b069fea854baca9283ffeb23d10cc6dac109835c7ceba092c25a3a",
           "upstream": {
             "status": "diverged",
             "sha256": "808fc5717aa88ad65efff312b11c186294d3e6ee301afb584e2f86599b137787"
@@ -723,7 +1353,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "a4bf65fc5cdaf753ade6c848aed784ad2b9aa782ba80f8e46da3ba2579f84309",
+          "sha256": "a9084597109105f577c1843dd9346403d54d66e0121c9d185154fe28da4c0649",
           "upstream": {
             "status": "diverged",
             "sha256": "bf1b8216e523851a411e91d429a7c1c2a173e79d88957bc78e348218d50edd54"
@@ -887,7 +1517,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "83ec56e5f5e937154dc4f61b80660e124891138b08e7e261dce7029ae429062f",
+          "sha256": "8f0cc7594211ad04fec3818f7754b8140fd4f4a5e91913314fe36f6828519a1b",
           "upstream": {
             "status": "diverged",
             "sha256": "2befe7fc55bcadaa3d97dd9e8efeb633d2561c0ebe74c5a8b17c4d9e7e4520b3"
@@ -899,6 +1529,31 @@
       ],
       "rationale": "core workflow skill",
       "owned": true
+    },
+    "verifying-terminal-interfaces": {
+      "disposition": "keep-as-is",
+      "owned": true,
+      "decisions": [],
+      "upstream": [
+        {
+          "repo": "cursor/plugins",
+          "path": "cursor-team-kit/skills/control-cli",
+          "license": "MIT",
+          "author": "Cursor",
+          "sha": "df3fb154fb982fb83f649de8646d4af6a0cb16b3"
+        }
+      ],
+      "state": "rewritten",
+      "files": {
+        "SKILL.md": {
+          "sha256": "af2d17b495b1bc6d8a7b71c237c3e17f6e3b15a89b9f1809e30476cdcc5c2c75",
+          "upstream": {
+            "status": "rewritten",
+            "sha256": "13ac93e595bbda2000849bdb815d5f2ca03f7c2ca63788c8335f9212b9b422a2"
+          }
+        }
+      },
+      "rationale": "Adopted from cursor/plugins (MIT) after the full-repo audit; the oracle scope gate independently confirmed no corpus host — reviewing-ux-in-browser self-scopes to browser surfaces in its own description, and designing-agent-friendly-clis is design-side, not verification-side. Verified zero corpus hits for tmux, PTY, capture-pane, or TUI. Rewritten to corpus form: each rule carries its failure mode, the wait-for-screen rule is tied to the existing condition-based-waiting owner rather than restated, and the Node-inspector profiling third of the source is dropped as runtime-specific."
     },
     "web-search": {
       "disposition": "external",
@@ -915,6 +1570,70 @@
       "rationale": "Brave API surface; vendor owns it",
       "owned": false,
       "presentInTree": false
+    },
+    "writing-async-rust": {
+      "disposition": "keep-as-is",
+      "rationale": "authored in this repo; no surveyed source covered async cancellation semantics, so this is original text with no upstream",
+      "owned": true,
+      "upstream": [],
+      "state": "native",
+      "files": {
+        "SKILL.md": {
+          "sha256": "524f3ed8e6e64adfc3b9edbdcbb23e9895d812efc598aa6101df43df04ef2e4b",
+          "upstream": {
+            "status": "native"
+          }
+        }
+      }
+    },
+    "writing-idiomatic-rust": {
+      "disposition": "keep-as-is",
+      "rationale": "authored in this repo; mechanisms independently restated from the MIT-licensed references below, with no text copied",
+      "owned": true,
+      "upstream": [],
+      "references": [
+        {
+          "repo": "apollographql/skills",
+          "sha": "c288eb80629dd2309eed81f23d693f66a452d043",
+          "license": "MIT"
+        },
+        {
+          "repo": "Rust-Coding-Guidelines/rust-coding-guidelines-zh",
+          "sha": "6b3fc48b285b4f87696634a3e18572d010b30fd4",
+          "license": "MIT"
+        }
+      ],
+      "state": "native",
+      "files": {
+        "SKILL.md": {
+          "sha256": "6250e132549cda68289213c82d1cdc5a76b1d17f2ee3199b5e2528d185b20f06",
+          "upstream": {
+            "status": "native"
+          }
+        }
+      }
+    },
+    "writing-interface-copy": {
+      "disposition": "merge",
+      "upstream": [
+        {
+          "repo": "jakubkrehel/skills",
+          "sha": "267330e1adfc66a718fb65fa6918c1f06d0a689e",
+          "path": "skills/better-writing"
+        }
+      ],
+      "state": "owned-normalized",
+      "files": {
+        "SKILL.md": {
+          "sha256": "32edd29ba6b55e85e526b983ac8ec4e558e5ae5594ce9b2d5ed6602ec23fcdc3",
+          "upstream": {
+            "status": "rewritten"
+          }
+        }
+      },
+      "decisions": [],
+      "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
+      "owned": true
     },
     "writing-plans": {
       "disposition": "merge",
@@ -981,282 +1700,6 @@
       "decisions": [],
       "rationale": "becomes the authoring standard for the agents repo",
       "owned": true
-    },
-    "refining-typography": {
-      "disposition": "merge",
-      "upstream": [
-        {
-          "repo": "jakubkrehel/skills",
-          "sha": "267330e1adfc66a718fb65fa6918c1f06d0a689e",
-          "path": "skills/better-typography"
-        }
-      ],
-      "state": "owned-normalized",
-      "files": {
-        "SKILL.md": {
-          "sha256": "0fe977c5d41038667c56cf9d300c21174974c162c78e2cfc76243f91e6d50b5b",
-          "upstream": {
-            "status": "rewritten"
-          }
-        },
-        "references/opentype-and-variable-fonts.md": {
-          "sha256": "fa27c17c53d9be1038951d54b959dc3d548999db5f7bb427a5b3b011e8672828",
-          "upstream": {
-            "status": "rewritten"
-          }
-        },
-        "references/measure-and-line-length.md": {
-          "sha256": "28d72c8308253904c16b0f152e1dc1e1ac64a423ab8c2855211209cfdb6440d4",
-          "upstream": {
-            "status": "rewritten"
-          }
-        },
-        "references/ios-input-zoom-recipes.md": {
-          "sha256": "82975789276f90a5c2eb5ba2c8c65cd933f274c18fad8cab1512b0e5c76f3d5d",
-          "upstream": {
-            "status": "rewritten"
-          }
-        }
-      },
-      "decisions": [],
-      "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
-      "owned": true
-    },
-    "building-color-systems": {
-      "disposition": "merge",
-      "upstream": [
-        {
-          "repo": "jakubkrehel/skills",
-          "sha": "267330e1adfc66a718fb65fa6918c1f06d0a689e",
-          "path": "skills/better-colors"
-        }
-      ],
-      "state": "owned-normalized",
-      "files": {
-        "SKILL.md": {
-          "sha256": "7ff76a965e48492ad59fc196fa4fba12b2f04cd799ce00fadc9d0a7c040a9c0f",
-          "upstream": {
-            "status": "rewritten"
-          }
-        },
-        "references/ramp-roles.md": {
-          "sha256": "1735db38ebe732e97402a4bb7956f49bfe1770513857b58c82ea77da6d1e2498",
-          "upstream": {
-            "status": "rewritten"
-          }
-        },
-        "references/notation-and-gamut.md": {
-          "sha256": "3322b7efb63e254580c4c4d7581b281612264bacd5bfc1a961a353eb6b3689a9",
-          "upstream": {
-            "status": "rewritten"
-          }
-        },
-        "references/measuring-contrast.md": {
-          "sha256": "4e8249c7e84c7c5ccba47d3a714c5e3928cdfb99b990572e564045a9374bb8ba",
-          "upstream": {
-            "status": "rewritten"
-          }
-        }
-      },
-      "decisions": [],
-      "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
-      "owned": true
-    },
-    "writing-interface-copy": {
-      "disposition": "merge",
-      "upstream": [
-        {
-          "repo": "jakubkrehel/skills",
-          "sha": "267330e1adfc66a718fb65fa6918c1f06d0a689e",
-          "path": "skills/better-writing"
-        }
-      ],
-      "state": "owned-normalized",
-      "files": {
-        "SKILL.md": {
-          "sha256": "32edd29ba6b55e85e526b983ac8ec4e558e5ae5594ce9b2d5ed6602ec23fcdc3",
-          "upstream": {
-            "status": "rewritten"
-          }
-        }
-      },
-      "decisions": [],
-      "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
-      "owned": true
-    },
-    "animating-interface-motion": {
-      "owned": true,
-      "presentInTree": true,
-      "origin": "native",
-      "note": "Split out of building-accessible-interfaces on 2026-09-07. Holds the motion-craft rules that carry no accessibility failure mode; the constraints they must satisfy stayed behind. Stated as a boundary rather than a count, since the rule set grows.",
-      "files": {
-        "SKILL.md": {
-          "sha256": "15f7fb4b8d42245259840fed6628d0980621094f12e558aa0b2b6064ff3865b5"
-        }
-      }
-    },
-    "writing-idiomatic-rust": {
-      "disposition": "keep-as-is",
-      "rationale": "authored in this repo; mechanisms independently restated from the MIT-licensed references below, with no text copied",
-      "owned": true,
-      "upstream": [],
-      "references": [
-        {
-          "repo": "apollographql/skills",
-          "sha": "c288eb80629dd2309eed81f23d693f66a452d043",
-          "license": "MIT"
-        },
-        {
-          "repo": "Rust-Coding-Guidelines/rust-coding-guidelines-zh",
-          "sha": "6b3fc48b285b4f87696634a3e18572d010b30fd4",
-          "license": "MIT"
-        }
-      ],
-      "state": "native",
-      "files": {
-        "SKILL.md": {
-          "sha256": "6250e132549cda68289213c82d1cdc5a76b1d17f2ee3199b5e2528d185b20f06",
-          "upstream": {
-            "status": "native"
-          }
-        }
-      }
-    },
-    "reviewing-unsafe-rust": {
-      "disposition": "keep-as-is",
-      "rationale": "authored in this repo; mechanisms independently restated from the MIT-licensed references below, with no text copied",
-      "owned": true,
-      "upstream": [],
-      "references": [
-        {
-          "repo": "mohitmishra786/low-level-dev-skills",
-          "sha": "bdc58472fa9f309ed1b3f7d985a0d8e9bd8f4608",
-          "license": "MIT"
-        },
-        {
-          "repo": "Rust-Coding-Guidelines/rust-coding-guidelines-zh",
-          "sha": "6b3fc48b285b4f87696634a3e18572d010b30fd4",
-          "license": "MIT"
-        }
-      ],
-      "state": "native",
-      "files": {
-        "SKILL.md": {
-          "sha256": "85b2930b792f317756abc037f162ba55a4417963970f6a8ee9c0863500c18824",
-          "upstream": {
-            "status": "native"
-          }
-        }
-      }
-    },
-    "hardening-rust-supply-chain": {
-      "disposition": "keep-as-is",
-      "rationale": "authored in this repo; mechanisms independently restated from the MIT-licensed references below, with no text copied",
-      "owned": true,
-      "upstream": [],
-      "references": [
-        {
-          "repo": "mohitmishra786/low-level-dev-skills",
-          "sha": "bdc58472fa9f309ed1b3f7d985a0d8e9bd8f4608",
-          "license": "MIT"
-        }
-      ],
-      "state": "native",
-      "files": {
-        "SKILL.md": {
-          "sha256": "918fae25c04846d72ef16019f0840a1f00e1c93b3523fef4d1d00522cbd06228",
-          "upstream": {
-            "status": "native"
-          }
-        }
-      }
-    },
-    "speeding-up-rust-builds": {
-      "disposition": "keep-as-is",
-      "rationale": "authored in this repo; mechanisms independently restated from the MIT-licensed references below, with no text copied",
-      "owned": true,
-      "upstream": [],
-      "references": [
-        {
-          "repo": "mohitmishra786/low-level-dev-skills",
-          "sha": "bdc58472fa9f309ed1b3f7d985a0d8e9bd8f4608",
-          "license": "MIT"
-        }
-      ],
-      "state": "native",
-      "files": {
-        "SKILL.md": {
-          "sha256": "2d0795a5a76e1b8e94737b42a3f012167c28e4b604b870ea30c619ac55e9f2f0",
-          "upstream": {
-            "status": "native"
-          }
-        }
-      }
-    },
-    "writing-async-rust": {
-      "disposition": "keep-as-is",
-      "rationale": "authored in this repo; no surveyed source covered async cancellation semantics, so this is original text with no upstream",
-      "owned": true,
-      "upstream": [],
-      "state": "native",
-      "files": {
-        "SKILL.md": {
-          "sha256": "524f3ed8e6e64adfc3b9edbdcbb23e9895d812efc598aa6101df43df04ef2e4b",
-          "upstream": {
-            "status": "native"
-          }
-        }
-      }
-    },
-    "designing-agent-friendly-clis": {
-      "disposition": "keep-as-is",
-      "upstream": [
-        {
-          "repo": "cursor/plugins",
-          "path": "cli-for-agent/skills/cli-for-agents",
-          "license": "MIT",
-          "author": "Eric Zakariasson",
-          "sha": "df3fb154fb982fb83f649de8646d4af6a0cb16b3"
-        }
-      ],
-      "state": "rewritten",
-      "files": {
-        "SKILL.md": {
-          "sha256": "79ba835bc4b86966aef9fd2e50cdfb60f3816f937126ef574b523a0dde3d0606",
-          "upstream": {
-            "status": "rewritten",
-            "sha256": "1cddd028d24ece48cd538fc1d84e49f5922dc8d04ee88caf12666b0557575e09"
-          }
-        }
-      },
-      "decisions": [],
-      "rationale": "Adopted from cursor/plugins (MIT) after a full-repo audit. Rewritten to corpus form rather than copied: each rule states its failure mode, product-coupled framing dropped, and exit-code semantics added, which the upstream skill omits despite being the one signal every non-interactive caller reads.",
-      "owned": true
-    },
-    "verifying-terminal-interfaces": {
-      "disposition": "keep-as-is",
-      "owned": true,
-      "decisions": [],
-      "upstream": [
-        {
-          "repo": "cursor/plugins",
-          "path": "cursor-team-kit/skills/control-cli",
-          "license": "MIT",
-          "author": "Cursor",
-          "sha": "df3fb154fb982fb83f649de8646d4af6a0cb16b3"
-        }
-      ],
-      "state": "rewritten",
-      "files": {
-        "SKILL.md": {
-          "sha256": "af2d17b495b1bc6d8a7b71c237c3e17f6e3b15a89b9f1809e30476cdcc5c2c75",
-          "upstream": {
-            "status": "rewritten",
-            "sha256": "13ac93e595bbda2000849bdb815d5f2ca03f7c2ca63788c8335f9212b9b422a2"
-          }
-        }
-      },
-      "rationale": "Adopted from cursor/plugins (MIT) after the full-repo audit; the oracle scope gate independently confirmed no corpus host — reviewing-ux-in-browser self-scopes to browser surfaces in its own description, and designing-agent-friendly-clis is design-side, not verification-side. Verified zero corpus hits for tmux, PTY, capture-pane, or TUI. Rewritten to corpus form: each rule carries its failure mode, the wait-for-screen rule is tied to the existing condition-based-waiting owner rather than restated, and the Node-inspector profiling third of the source is dropped as runtime-specific."
     }
   },
   "dispositionsRecorded": "2026-09-04",

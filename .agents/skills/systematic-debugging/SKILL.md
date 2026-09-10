@@ -124,6 +124,18 @@ If systematic investigation reveals issue is truly environmental, timing-depende
 
 **But:** 95% of "no root cause" cases are incomplete investigation.
 
+## Read the cause, not the wrapper
+
+A framework that wraps errors reports its own outer code on every failure it
+handles. That code identifies the layer that caught the problem, not the problem.
+Routing on it groups unrelated failures under one banner and sends you to the
+wrapper's own machinery, which is working correctly.
+
+Unwrap to the innermost cause before forming any hypothesis. When an error
+carries a nested cause, a `meta` field, or a chained exception, that is where
+the actionable identity lives — the outer envelope only tells you who was
+holding it when it surfaced.
+
 ## Supporting Techniques
 
 These techniques are part of systematic debugging and available in this directory:

@@ -205,6 +205,18 @@ Next failing test for next feature.
 | **Clear** | Name describes behavior | `test('test1')` |
 | **Shows intent** | Demonstrates desired API | Obscures what code should do |
 
+### Agree the seams before writing tests
+
+A seam is the public boundary you observe behavior through, without reaching
+inside. Tests attach at seams; a test that reaches past one is pinned to an
+implementation and will break on a refactor that changed nothing observable.
+
+Name the seams under test and confirm them before the first test, not after.
+You cannot test everything, and the choice of where to attach is what decides
+whether the effort lands on critical paths or spreads evenly across edge cases
+that no one will regress. Making that choice explicit also surfaces the case
+where no good seam exists yet — which is a design signal, not a testing one.
+
 ### Deeper references
 
 The loop above is the law; these cover the judgement it does not encode.

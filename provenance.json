@@ -670,7 +670,8 @@
       "presentInTree": false,
       "rationale": "vendor data-layer surface; prisma owns it. Successor to the retired prisma-next family",
       "decisions": [
-        "2026-09-10: added to Tickify after retiring the eleven prisma-next skills left the repo's data layer uncovered. prisma/prisma-next's \"this repository has moved\" pointed at prisma/prisma, which ships this skill: the same eleven topics consolidated into one SKILL.md plus fifteen reference files. Verified before adding that it teaches @prisma/orm-postgres and prisma.config.ts rather than the deprecated @prisma-next/* packages, and that its trigger signals (prisma.config.ts, contract.prisma, contract.json) match apps/tickify-api exactly. Not added to TheGrid, which has no Prisma. No router risk: its references ship inside the skill directory."
+        "2026-09-10: added to Tickify after retiring the eleven prisma-next skills left the repo's data layer uncovered. prisma/prisma-next's \"this repository has moved\" pointed at prisma/prisma, which ships this skill: the same eleven topics consolidated into one SKILL.md plus fifteen reference files. Verified before adding that it teaches @prisma/orm-postgres and prisma.config.ts rather than the deprecated @prisma-next/* packages, and that its trigger signals (prisma.config.ts, contract.prisma, contract.json) match apps/tickify-api exactly. Not added to TheGrid, which has no Prisma. No router risk: its references ship inside the skill directory.",
+        "2026-09-10: audited every link in the installed tree after adding it, because the retired prisma-next-migration-review carried dead monorepo links and migration-review.md is one of the fifteen references here. It does: 12 of 75 relative links are dead, pointing at ../../docs/architecture docs/, ADR 218/240, packages/2-sql/, and examples/ inside the prisma monorepo, which no consumer install contains. Kept anyway, on measurement rather than tolerance: the dead links are on 6 of 3960 lines (0.15%), every one is a supplementary 'canonical detail' or 'see also' pointer placed after a complete statement, and none gates a procedural step. Each workflow in migration-review.md and migrations.md is stated inline. This is the opposite of the firecrawl router, where every procedure lived behind a sibling link and the skill was inert without them. Recorded so the limitation is known rather than rediscovered."
       ]
     },
     "prisma-next": {
@@ -1441,7 +1442,7 @@
           }
         },
         "references/anthropic-best-practices.md": {
-          "sha256": "20914c2fda31670c75fe91710e18a53d413ce0d00b5102acfa251d75c9226e3f",
+          "sha256": "d5b88816eee7133926ad4fb4060dc59ca0b384a40fd9ca8c5c583b7987ca85ba",
           "upstream": {
             "status": "diverged",
             "sha256": "217629b356c09c9bd11017c9788e8fc654ca1b32c92d4a51cd490e16dd65e59a",

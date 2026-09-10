@@ -24,9 +24,17 @@ Dispatch a code reviewer subagent to catch issues before they cascade. The revie
 ## How to Request
 
 **1. Get git SHAs:**
+
+Before dispatching the implementer:
+
 ```bash
-BASE_SHA=$(git rev-parse HEAD)   # capture BEFORE the work starts
-HEAD_SHA=$(git rev-parse HEAD)   # after it finishes
+BASE_SHA=$(git rev-parse HEAD)
+```
+
+After the work has landed, and not before:
+
+```bash
+HEAD_SHA=$(git rev-parse HEAD)
 ```
 
 Record the base before dispatching, not after. `HEAD~1` is wrong for anything

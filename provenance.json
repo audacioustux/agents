@@ -107,28 +107,30 @@
           }
         },
         "scripts/server.cjs": {
-          "sha256": "ea81185f581897c67d4b417eeb9bc7a158c50e0932c73047054fe53efc2683ef",
+          "sha256": "6785a3f3c38fa0fe243167d69a6b82aa3f7e4351c75d682424e562745fe0ec63",
           "upstream": {
             "status": "diverged",
             "sha256": "2d2961ea8d11f56c5f4c3a1a68d22709efa5d7601a2246d8c880774e7e9e8412"
           }
         },
         "scripts/start-server.sh": {
-          "sha256": "20b6f36cf7653e3824cf3d6f5fa0a347d2f07c9822e7e3d73e080565c9d02bf0",
+          "sha256": "6105326081019ad70c9d67b527629e9d67f65af3ebe36d4a6b3be05f0a526f32",
           "upstream": {
             "status": "diverged",
             "sha256": "a4e5ae84275bcaacd2f84345afeabe59cf7b00ba080e123da7cc1fb226f12847"
           }
         },
         "scripts/stop-server.sh": {
-          "sha256": "0e8716b4c35d348b464b0b409d888531156f70465408e19021598fa0e839be43",
+          "sha256": "d7839b348576ab7a2293915a94a3760e81ecaf62dc029240716e1c1147ab14b3",
           "upstream": {
             "status": "diverged",
             "sha256": "0b5ccbbd57f62d3ed88993f7940b5ee0e5c0fc9b21c550c623da4f6292e47daf"
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-09-10: recovered three safety mechanisms the corpus fork never adopted from obra/superpowers — per-session token auth (?key= plus HttpOnly SameSite=Strict cookie, timing-safe compare, 403 + forbidden page, 0o600 token file, refusal to rebind when BRAINSTORM_TOKEN is explicit), a 10 MiB WebSocket frame cap, and PID instance-identity in stop-server.sh. The corpus server honours BRAINSTORM_HOST, so a non-loopback bind was previously unauthenticated. Branding, telemetry and version pinning stay removed. Verified live: correct key 200, no key 403, wrong key 403, cookie-only 200; stale PID left alive with status stale_pid; real server stopped cleanly."
+      ],
       "rationale": "diverged both ways; 5 hardcoded .superpowers/brainstorm paths to fix",
       "owned": true
     },
@@ -167,7 +169,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "87175be27c9c6a3938b8317819023cd60e2482cba9a101a7d04bcb14b38a44f0",
+          "sha256": "dc3e29a20ec73ff3582215613db182c49cf8efb022e88663d4d2256b43c128f4",
           "upstream": {
             "status": "diverged",
             "sha256": "51b8d0b6730e70aa973f8e49b4a1389c0f73542f60669fa6a2c4334af9a4c043"
@@ -486,7 +488,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "9f9058e740981ca09f164e8f30ff6a4aaa6d827d8c528da999b2a8e9bd24ed5a",
+          "sha256": "537da8540f3aec2b16ce8645bf57f1f90eb9fcff99da3560f09d3dd78739955d",
           "upstream": {
             "status": "diverged",
             "sha256": "d71cc01ba56d2325cf8af5f7c11837819b63ecd57de0bfdb812f7f3ff7751df8"
@@ -502,7 +504,8 @@
         }
       },
       "decisions": [
-        "2026-09-09: adopted the reviewer anchoring guard from cursor/plugins thermos/skills/thermo-nuclear-review/SKILL.md (MIT, author Cursor) at df3fb154fb98. Rewritten, not copied; extended to cover re-review after fixes, which the upstream does not address."
+        "2026-09-09: adopted the reviewer anchoring guard from cursor/plugins thermos/skills/thermo-nuclear-review/SKILL.md (MIT, author Cursor) at df3fb154fb98. Rewritten, not copied; extended to cover re-review after fixes, which the upstream does not address.",
+        "2026-09-10: fixed base-SHA selection. Both sites were wrong — `git rev-parse HEAD~1` truncates any task that landed as more than one commit, and the worked example derived the base by grepping log messages, which breaks on a reword or squash. Both now record the base before the work starts. Sourced from obra/superpowers subagent-driven-development, which states the rule the corpus had lost."
       ],
       "rationale": "hardcodes docs/superpowers/plans",
       "owned": true
@@ -572,7 +575,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "2d99be87b6c5c0457804768e71791a4cdec59177b65242811fdcf2cfb0f7417c",
+          "sha256": "aac4aec7aca95072943312c6ace754f824a4dec63661c84ff14c58c18bee69a2",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"

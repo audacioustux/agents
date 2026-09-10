@@ -25,9 +25,15 @@ Dispatch a code reviewer subagent to catch issues before they cascade. The revie
 
 **1. Get git SHAs:**
 ```bash
-BASE_SHA=$(git rev-parse HEAD~1)  # or origin/main
-HEAD_SHA=$(git rev-parse HEAD)
+BASE_SHA=$(git rev-parse HEAD)   # capture BEFORE the work starts
+HEAD_SHA=$(git rev-parse HEAD)   # after it finishes
 ```
+
+Record the base before dispatching, not after. `HEAD~1` is wrong for anything
+that landed as more than one commit: it reviews the last commit and silently
+hides the rest of the task. Deriving it by grepping log messages is worse — it
+breaks the moment a commit is reworded or squashed, and it fails open, handing
+the reviewer a narrower diff with no indication anything is missing.
 
 **2. Dispatch code reviewer subagent:**
 
@@ -61,12 +67,15 @@ a second description of itself.
 ## Example
 
 ```
-[Just completed Task 2: Add verification function]
+[Before starting Task 2]
+
+BASE_SHA=$(git rev-parse HEAD)        # a7981ec — recorded up front
+
+[Task 2 lands as three commits: Add verification function]
 
 You: Let me request code review before proceeding.
 
-BASE_SHA=$(git log --oneline | grep "Task 1" | head -1 | awk '{print $1}')
-HEAD_SHA=$(git rev-parse HEAD)
+HEAD_SHA=$(git rev-parse HEAD)        # 3df7661
 
 [Dispatch code reviewer subagent]
   DESCRIPTION: Added verifyIndex() and repairIndex() with 4 issue types

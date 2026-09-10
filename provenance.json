@@ -169,14 +169,16 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "dc3e29a20ec73ff3582215613db182c49cf8efb022e88663d4d2256b43c128f4",
+          "sha256": "c6d6667a55ac5472951c68839409400b991e9fe9f5280ec503e1b5a398ca3c37",
           "upstream": {
             "status": "diverged",
             "sha256": "51b8d0b6730e70aa973f8e49b4a1389c0f73542f60669fa6a2c4334af9a4c043"
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-09-10: reviewed a proposed viewport-height paragraph and rejected it as a duplicate — the dynamic-viewport rule was already owned in Stable dynamic surfaces, and the new wording additionally misattributed the failure (vh is pinned to the large viewport, so it is too tall on load rather than jumping during scroll; dvh is the unit that resizes). Only the genuinely new clause was folded into the existing bullet: set it as a minimum so the section can still grow. Separately added side-by-side alignment, harvested from Leonxlnx/taste-skill during an audit that rejected all 13 of its skills."
+      ],
       "rationale": "audacioustux-owned, pristine",
       "owned": true
     },
@@ -488,7 +490,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "537da8540f3aec2b16ce8645bf57f1f90eb9fcff99da3560f09d3dd78739955d",
+          "sha256": "ba7457caae05aad2b39647d3d987e52ea933c2b040d712365e37db97e5c2118c",
           "upstream": {
             "status": "diverged",
             "sha256": "d71cc01ba56d2325cf8af5f7c11837819b63ecd57de0bfdb812f7f3ff7751df8"
@@ -505,7 +507,8 @@
       },
       "decisions": [
         "2026-09-09: adopted the reviewer anchoring guard from cursor/plugins thermos/skills/thermo-nuclear-review/SKILL.md (MIT, author Cursor) at df3fb154fb98. Rewritten, not copied; extended to cover re-review after fixes, which the upstream does not address.",
-        "2026-09-10: fixed base-SHA selection. Both sites were wrong — `git rev-parse HEAD~1` truncates any task that landed as more than one commit, and the worked example derived the base by grepping log messages, which breaks on a reword or squash. Both now record the base before the work starts. Sourced from obra/superpowers subagent-driven-development, which states the rule the corpus had lost."
+        "2026-09-10: fixed base-SHA selection. Both sites were wrong — `git rev-parse HEAD~1` truncates any task that landed as more than one commit, and the worked example derived the base by grepping log messages, which breaks on a reword or squash. Both now record the base before the work starts. Sourced from obra/superpowers subagent-driven-development, which states the rule the corpus had lost.",
+        "2026-09-10: took three reviewer-dispatch rules from the same upstream — never pre-judge a finding in the prompt, treat a plan-mandated finding as a decision rather than a dismissal, and resolve \"cannot verify from diff\" items yourself. Placed here rather than in subagent-driven-development because this skill owns reviewer dispatch. Also reconciled a contradiction the port exposed: the anchoring rule said never point a re-review at an earlier verdict, while a fix-round re-review must verdict the open findings list. The fix-round case is now stated as the one bounded exception."
       ],
       "rationale": "hardcodes docs/superpowers/plans",
       "owned": true
@@ -575,7 +578,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "aac4aec7aca95072943312c6ace754f824a4dec63661c84ff14c58c18bee69a2",
+          "sha256": "d95a2ea217f545b6ba8ba29a42c9562c1caaa8a0fdf6b64c6ebe0f88de40f8a1",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
@@ -612,7 +615,9 @@
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-09-10: reconciled against the newer obra/superpowers generation (27KB; corpus copy was the 8KB older one, recorded here since as \"reconcile deliberately\" and never done). Source bytes sha256 f32739563160d3612fe2febd0dad4a9cc8a6d1ea7dfcda59f245b3a4b968f7cf. Ported: a durable ledger with an explicit line format, because conversation memory does not survive compaction and a controller that loses its place re-dispatches finished work; recording BASE before each dispatch; a five-round cap on the fix loop, replacing \"repeat until approved\", which is not a terminating condition; a scoped re-review bounded to the fix diff; and naming the model on every dispatch, without which the tiering silently inherits the session model. Deliberately not ported: upstream's .superpowers/sdd/ workspace paths and its scripts/task-brief, scripts/review-package, scripts/sdd-workspace helpers, which the corpus does not ship."
+      ],
       "rationale": "hard one: upstream 12.5KB->32KB; reconcile deliberately",
       "owned": true
     },

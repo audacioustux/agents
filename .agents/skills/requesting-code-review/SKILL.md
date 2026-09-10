@@ -109,13 +109,39 @@ You: [Fix progress indicators]
 - Review before merge
 - Review when stuck
 
+**Never pre-judge a finding in the prompt.** If your brief tells the reviewer not
+to flag something, treat X as acceptable, or cap a class of issue at Minor, you
+have decided the outcome and are paying for a review that can only agree with
+you. Let it raise the finding and adjudicate afterwards. The phrasings to catch
+in your own drafts are "do not flag", "don't treat X as a defect", "at most
+Minor", and "the plan chose this" — each usually written to avoid a fix round.
+
+**A finding the plan mandates is a decision, not a dismissal.** When the reviewer
+flags something the plan explicitly required, the plan does not get to grade its
+own work. Put the finding and the plan text side by side and decide which
+governs — escalating if the choice is the user's. Dispatching a fix that
+contradicts the plan, or waving the finding away because the plan asked for it,
+both skip the decision.
+
+**Resolve "cannot verify from diff" items yourself.** A reviewer sees the diff; a
+requirement satisfied in unchanged code or spanning several tasks is outside what
+it can check. Those items are not failures and do not block the rest of the
+review, but each one is yours to close before the work counts as reviewed — you
+hold the context the reviewer lacks. Confirm a real gap and it enters the fix
+loop like any other finding.
+
 **When earlier findings already exist:**
 
 A reviewer that reads prior comments first anchors on them and returns a verdict on
 someone else's list. Have it complete its own pass, then read what came before, then
-fold in what it missed and attribute it. The same applies to a re-review after fixes:
-point it at the current state, not at the earlier verdict, or it grades the diff
-against a list rather than the code.
+fold in what it missed and attribute it.
+
+A fix-round re-review inside a task loop is the one deliberate exception, and it
+is narrow: its job is to verdict each open finding addressed or not, plus catch
+new breakage inside the fix diff itself. Give it the list, and bound it to that
+diff. Anywhere else — a re-review of the whole change after fixes, a second
+opinion, a final pass before merge — point it at the current state rather than
+the earlier verdict, or it grades the diff against a list instead of the code.
 
 That independence is also what makes agreement informative: a finding two reviewers
 reach separately is worth more than one raised twice, and worth far more than one

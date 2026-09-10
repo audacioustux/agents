@@ -48,6 +48,32 @@ flowchart TD
 
 ## The Process
 
+### Track progress in a file, not only in memory
+
+Conversation memory does not survive compaction. A controller that loses its
+place re-dispatches work that already finished — the most expensive failure this
+process has, because every re-run looks like normal progress.
+
+Keep a ledger beside the plan and append to it as you go, one line per event:
+
+```
+Task 3: base a7981ec
+Task 3: fix round 2
+Task 3: minor (deferred): error message says "id" where the field is "key"
+Task 3: complete
+```
+
+On resume, read it before dispatching anything. A task with a `complete` line is
+done — start at the first task without one. A task whose last line is a fix round
+tells you both that it is mid-loop and which round it reached, so you resume the
+loop at the next round rather than restarting the task or exceeding the cap.
+
+Record the base commit (`git rev-parse HEAD`) before dispatching each task, and
+put it in the ledger. The review package and every fix-round diff need it, and
+it cannot be recovered afterwards: `HEAD~1` is wrong for any task that landed as
+more than one commit, and reconstructing it from log messages breaks on a
+reword. See `requesting-code-review` for what the reviewer does with it.
+
 ```mermaid
 flowchart TD
     subgraph per_task["Per Task"]
@@ -103,6 +129,10 @@ Use the least powerful model that can handle each role to conserve cost and incr
 - Touches multiple files with integration concerns → standard model
 - Requires design judgment or broad codebase understanding → most capable model
 
+Name the model on every dispatch. An omitted model inherits your own session's,
+which is usually the most capable and most expensive one available — so the
+tiering above silently becomes a no-op while still reading as though it applied.
+
 ## Handling Implementer Status
 
 Implementer subagents report one of four statuses. Handle each appropriately:
@@ -155,7 +185,7 @@ Fresh context per task, curated inputs, automatic review checkpoints. See `refer
 - Skip review loops (reviewer found issues = implementer fixes = review again)
 - Let implementer self-review replace actual review (both are needed)
 - **Start code quality review before spec compliance is ✅** (wrong order)
-- Move to next task while either review has open issues
+- Move to next task while either review has open issues — unless you have hit the five-round cap and adjudicated each remaining finding yourself, which is a decision you record, not a silent carry-over
 
 **If subagent asks questions:**
 - Answer clearly and completely
@@ -163,10 +193,25 @@ Fresh context per task, curated inputs, automatic review checkpoints. See `refer
 - Don't rush them into implementation
 
 **If reviewer finds issues:**
-- Implementer (same subagent) fixes them
-- Reviewer reviews again
-- Repeat until approved
-- Don't skip the re-review
+
+A fix round is one fix dispatch plus one scoped re-review. Cap it at five rounds
+per task. "Repeat until approved" is not a terminating condition — a loop with no
+exit keeps dispatching against a task that has stopped converging, and the cost
+is invisible because each round looks like progress.
+
+Scope the re-review to the fix. Give it the open findings list and the fix diff
+only; it verdicts each finding addressed or not addressed and flags new breakage
+within that diff. Re-running the full reviewer each round lets it wander into
+untouched code and reopen the loop with findings the round never caused.
+
+If round five still leaves findings open, stop dispatching and adjudicate each
+one yourself. Rounds four and five are worth a fresh implementer on a more
+capable model — the same one failing twice more rarely converges.
+
+Record Minor findings in the ledger as you go and hand that list to the final
+whole-branch review, rather than carrying them in the loop. A deferral with no
+record is a silent discard; the corpus rule elsewhere is that deferring without
+writing it down is the same as dropping it.
 
 **If subagent fails task:**
 - Dispatch fix subagent with specific instructions

@@ -74,7 +74,7 @@ Never collapse labels, summaries, or controls that are required to understand th
 - Keep headers, filters, summaries, and action bars pinned only when it helps orientation and does not obscure focus.
 - An overlay that renders behind its neighbours is usually a stacking-context problem, not a z-index problem: z-index only ranks siblings within one context, and it is ignored entirely on a statically positioned element. Escalating the number is a symptom. Find the ancestor that created the context, and contain a component's internal layers with an explicit isolation boundary instead.
 - Full-bleed layouts must inset against the device's safe-area insets, or notches and home indicators clip real content.
-- Size full-height regions against the dynamic viewport, not the static one. On mobile the browser chrome collapses on scroll, so a static viewport height either overflows or leaves a gap for the whole scroll.
+- Size full-height regions against the dynamic viewport, not the static one. On mobile the browser chrome collapses on scroll, so a static viewport height either overflows or leaves a gap for the whole scroll. Set it as a minimum rather than a fixed height, so the section can still grow when its content needs more room than the viewport has.
 - A flex or grid child will not truncate until its minimum content size is released; text that should ellipsize but instead stretches its container is almost always this, not a truncation-rule problem.
 - Prefer flex and grid over measuring geometry in script. Layout computed in JavaScript re-runs on every resize and is a common source of jank and shift.
 
@@ -86,6 +86,22 @@ late-arriving content out of a flow the user has already started belong to
 
 What stays here is the layout half: a shell whose own geometry moves when its
 contents change is a layout defect, not a loading one, and no reserved space fixes it.
+
+### Align what sits side by side
+
+Cards, columns, and panels in one row share invisible rails. When a title wraps
+to two lines in one card and one in the next, every element below it shifts, and
+the row reads as broken even though each card is internally correct.
+
+- Pin repeated actions to a common edge. Buttons at the bottom of each card form
+  one horizontal line regardless of the content above them; unpinned, they land
+  at whatever height their own card ended.
+- Start repeated content at the same offset. In pricing or comparison columns the
+  feature list should begin at one Y position across all of them, which means the
+  block above it needs a shared height rather than each column sizing to its own.
+- This is alignment, not equal height. Forcing every card to the tallest one's
+  height to fake it leaves dead space under the short ones; align the shared
+  elements and let the cards differ.
 
 ## Implementation checklist
 

@@ -464,41 +464,20 @@
       ],
       "rationale": "vendor CLI doc; upstream owns it",
       "owned": false,
-      "presentInTree": false
-    },
-    "firecrawl-agent": {
-      "disposition": "external",
-      "upstream": [
-        {
-          "repo": "firecrawl/cli",
-          "path": "skills/firecrawl-agent"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
-      ],
-      "rationale": "vendor CLI command surface; firecrawl owns it",
-      "owned": false,
-      "presentInTree": false
-    },
-    "firecrawl-crawl": {
-      "disposition": "external",
-      "upstream": [
-        {
-          "repo": "firecrawl/cli",
-          "path": "skills/firecrawl-crawl"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
-      ],
-      "rationale": "vendor CLI command surface; firecrawl owns it",
-      "owned": false,
-      "presentInTree": false
+      "presentInTree": false,
+      "siblings": {
+        "members": [
+          "firecrawl-agent",
+          "firecrawl-crawl",
+          "firecrawl-download",
+          "firecrawl-interact",
+          "firecrawl-map",
+          "firecrawl-monitor",
+          "firecrawl-parse",
+          "firecrawl-scrape"
+        ],
+        "note": "Command wrappers for the Firecrawl CLI, dispositioned external with this parent. Reviewed individually by reading; all eight are thin wrappers with no portable content. They stay in consumer locks because this router links to each by relative path, so removing one leaves a dangling procedure link. The three siblings that are NOT covered here — firecrawl-research-index, firecrawl-developer-index, firecrawl-search — have their own entries because each yielded a harvested rule."
+      }
     },
     "firecrawl-developer-index": {
       "disposition": "external",
@@ -517,91 +496,6 @@
       "owned": false,
       "presentInTree": false
     },
-    "firecrawl-download": {
-      "disposition": "external",
-      "upstream": [
-        {
-          "repo": "firecrawl/cli",
-          "path": "skills/firecrawl-download"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
-      ],
-      "rationale": "vendor CLI command surface; firecrawl owns it",
-      "owned": false,
-      "presentInTree": false
-    },
-    "firecrawl-interact": {
-      "disposition": "external",
-      "upstream": [
-        {
-          "repo": "firecrawl/cli",
-          "path": "skills/firecrawl-interact"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
-      ],
-      "rationale": "vendor CLI command surface; firecrawl owns it",
-      "owned": false,
-      "presentInTree": false
-    },
-    "firecrawl-map": {
-      "disposition": "external",
-      "upstream": [
-        {
-          "repo": "firecrawl/cli",
-          "path": "skills/firecrawl-map"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
-      ],
-      "rationale": "vendor CLI command surface; firecrawl owns it",
-      "owned": false,
-      "presentInTree": false
-    },
-    "firecrawl-monitor": {
-      "disposition": "external",
-      "upstream": [
-        {
-          "repo": "firecrawl/cli",
-          "path": "skills/firecrawl-monitor"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
-      ],
-      "rationale": "vendor CLI command surface; firecrawl owns it",
-      "owned": false,
-      "presentInTree": false
-    },
-    "firecrawl-parse": {
-      "disposition": "external",
-      "upstream": [
-        {
-          "repo": "firecrawl/cli",
-          "path": "skills/firecrawl-parse"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
-      ],
-      "rationale": "vendor CLI command surface; firecrawl owns it",
-      "owned": false,
-      "presentInTree": false
-    },
     "firecrawl-research-index": {
       "disposition": "external",
       "upstream": [
@@ -616,23 +510,6 @@
         "2026-09-10: reviewed by reading. Vendor-owned, yet not a command wrapper: it encodes a retrieval methodology keyed to query shape. Harvested into verifying-before-completion: \"Verify to exclude, not to gatekeep\" and \"Stopping at one good result is the most common way to leave the reader with half an answer\" generalise to any indexed corpus; the near-namesake filter warning became the empty-result rule."
       ],
       "rationale": "vendor CLI surface, but carries portable source-evaluation methodology",
-      "owned": false,
-      "presentInTree": false
-    },
-    "firecrawl-scrape": {
-      "disposition": "external",
-      "upstream": [
-        {
-          "repo": "firecrawl/cli",
-          "path": "skills/firecrawl-scrape"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Command wrapper for the Firecrawl CLI. Kept in the lock because the already-external parent router links to every sibling by relative path, so removing any one leaves a dangling procedure link."
-      ],
-      "rationale": "vendor CLI command surface; firecrawl owns it",
       "owned": false,
       "presentInTree": false
     },
@@ -783,51 +660,32 @@
       "upstream": [
         {
           "repo": "prisma/prisma-next",
-          "path": "skills/prisma-next"
+          "path": "skills/*"
         }
       ],
       "state": "vendored",
       "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
-      ],
-      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
       "owned": false,
-      "presentInTree": false
-    },
-    "prisma-next-build": {
-      "disposition": "retired",
-      "upstream": [
-        {
-          "repo": "prisma/prisma-next",
-          "path": "skills/prisma-next-build"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
-      ],
+      "presentInTree": false,
       "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
-      "owned": false,
-      "presentInTree": false
-    },
-    "prisma-next-contract": {
-      "disposition": "retired",
-      "upstream": [
-        {
-          "repo": "prisma/prisma-next",
-          "path": "skills/prisma-next-contract"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
+      "siblings": {
+        "members": [
+          "prisma-next",
+          "prisma-next-build",
+          "prisma-next-contract",
+          "prisma-next-feedback",
+          "prisma-next-migration-review",
+          "prisma-next-migrations",
+          "prisma-next-queries",
+          "prisma-next-quickstart",
+          "prisma-next-runtime",
+          "prisma-next-supabase"
+        ],
+        "note": "One vendor family, retired together. prisma-next-debug has its own entry because it yielded a harvested rule before retirement."
+      },
       "decisions": [
-        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
-      ],
-      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
-      "owned": false,
-      "presentInTree": false
+        "2026-09-10: reviewed all eleven by reading, retired as a family on two independently verified facts. prisma/prisma-next's README states \"This repository has moved\"; and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 against prisma.config.ts. Every skill in the family teaches a package name, CLI surface, and config filename the repo no longer uses. Checked specifically for portable content in the four most likely candidates (migration-review, migrations, contract, debug): migration-review is a navigation model over prisma's own marker/ref artefacts with nothing general about irreversibility or destructive diffs; migrations has no expand/contract, backfill ordering, or lock-duration content. Only debug yielded a rule."
+      ]
     },
     "prisma-next-debug": {
       "disposition": "retired",
@@ -842,125 +700,6 @@
       "decisions": [
         "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses.",
         "2026-09-10: harvested one rule before retiring. Its wrapper-envelope guidance (\"That envelope is a wrapper — the real code lives on meta.code\") generalises, and systematic-debugging had nothing on reading through a wrapped cause. Added there as \"Read the cause, not the wrapper\"."
-      ],
-      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
-      "owned": false,
-      "presentInTree": false
-    },
-    "prisma-next-feedback": {
-      "disposition": "retired",
-      "upstream": [
-        {
-          "repo": "prisma/prisma-next",
-          "path": "skills/prisma-next-feedback"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
-      ],
-      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
-      "owned": false,
-      "presentInTree": false
-    },
-    "prisma-next-migration-review": {
-      "disposition": "retired",
-      "upstream": [
-        {
-          "repo": "prisma/prisma-next",
-          "path": "skills/prisma-next-migration-review"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
-      ],
-      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
-      "owned": false,
-      "presentInTree": false
-    },
-    "prisma-next-migrations": {
-      "disposition": "retired",
-      "upstream": [
-        {
-          "repo": "prisma/prisma-next",
-          "path": "skills/prisma-next-migrations"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
-      ],
-      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
-      "owned": false,
-      "presentInTree": false
-    },
-    "prisma-next-queries": {
-      "disposition": "retired",
-      "upstream": [
-        {
-          "repo": "prisma/prisma-next",
-          "path": "skills/prisma-next-queries"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
-      ],
-      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
-      "owned": false,
-      "presentInTree": false
-    },
-    "prisma-next-quickstart": {
-      "disposition": "retired",
-      "upstream": [
-        {
-          "repo": "prisma/prisma-next",
-          "path": "skills/prisma-next-quickstart"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
-      ],
-      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
-      "owned": false,
-      "presentInTree": false
-    },
-    "prisma-next-runtime": {
-      "disposition": "retired",
-      "upstream": [
-        {
-          "repo": "prisma/prisma-next",
-          "path": "skills/prisma-next-runtime"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
-      ],
-      "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
-      "owned": false,
-      "presentInTree": false
-    },
-    "prisma-next-supabase": {
-      "disposition": "retired",
-      "upstream": [
-        {
-          "repo": "prisma/prisma-next",
-          "path": "skills/prisma-next-supabase"
-        }
-      ],
-      "state": "vendored",
-      "files": {},
-      "decisions": [
-        "2026-09-10: reviewed by reading. Two independently verified facts retire the whole cluster: prisma/prisma-next README states \"This repository has moved\", and Tickify has zero prisma-next references across 16 package.json files while running prisma 8 with prisma.config.ts. Every skill teaches a package name, CLI surface, and config filename the repo no longer uses."
       ],
       "rationale": "upstream moved; Tickify migrated off prisma-next entirely",
       "owned": false,

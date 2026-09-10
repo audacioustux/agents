@@ -1442,7 +1442,7 @@
           }
         },
         "references/anthropic-best-practices.md": {
-          "sha256": "58145c6004787a2b7061d83c4a9fb14367d1da9a31565d579ec98f98df784522",
+          "sha256": "03e0b790dae51b0a5b835f1f05e0b28a885f9fe949e10f271b539ffea7776871",
           "upstream": {
             "status": "diverged",
             "sha256": "217629b356c09c9bd11017c9788e8fc654ca1b32c92d4a51cd490e16dd65e59a",
@@ -1456,7 +1456,9 @@
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-09-10: replaced three <img> tags in anthropic-best-practices.md with their alt text. They came in with the vendored Anthropic docs and were 4709 bytes — 10.3% of the file — almost entirely srcset and cache-busting query parameters. Nothing renders an image in a file an agent reads, so that was pure token cost carrying no information. Alt text rather than deletion, because prose downstream refers to 'the diagram above' and deleting would leave that dangling. The CDN URLs did resolve; liveness was not the problem."
+      ],
       "rationale": "becomes the authoring standard for the agents repo",
       "owned": true
     }

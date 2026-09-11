@@ -7,7 +7,7 @@ combos:
       - cc/claude-fable-5-1
       - cc/claude-opus-5
       # - cx/gpt-5.6-sol-xhigh
-      # - antigravity/gemini-3.7-flash-tiered
+      # - antigravity/gemini-3.8-flash-tiered
       # - antigravity/gemini-pro-agent
       # - minimax/MiniMax-M3
       # - antigravity/gemini-pro-agent
@@ -19,14 +19,14 @@ combos:
   coding:
     models:
       - minimax/MiniMax-M3
-      - antigravity/gemini-3.7-flash-tiered
+      - antigravity/gemini-3.8-flash-tiered
   ###
   best-coding-fast:
     models:
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
       - minimax/MiniMax-M3
-      - antigravity/gemini-3.7-flash-tiered
+      - antigravity/gemini-3.8-flash-tiered
   ###
   pro-reasoning:
     # strategy: pipeline
@@ -41,7 +41,7 @@ combos:
   best-reasoning:
     # strategy: pipeline
     models:
-      - antigravity/gemini-3.7-flash-tiered
+      - antigravity/gemini-3.8-flash-tiered
       - antigravity/claude-opus-4-6-thinking
       - cx/gpt-5.6-luna
       - cc/claude-opus-5
@@ -57,7 +57,7 @@ combos:
       - cc/claude-fable-5-1
       - cc/claude-opus-5
       # - cx/gpt-5.6-sol-xhigh
-      # - antigravity/gemini-3.7-flash-tiered
+      # - antigravity/gemini-3.8-flash-tiered
       # - minimax/MiniMax-M3
       # - antigravity/gemini-pro-agent
       # - gh/claude-sonnet-5
@@ -68,7 +68,7 @@ combos:
     models:
       - cc/claude-opus-5
       - minimax/MiniMax-M3
-      - antigravity/gemini-3.7-flash-tiered
+      - antigravity/gemini-3.8-flash-tiered
   ###
   pro-vision:
     models:
@@ -84,12 +84,12 @@ combos:
       - gh/claude-sonnet-5
   best-fast:
     models:
-      - antigravity/gemini-3.7-flash-tiered
+      - antigravity/gemini-3.8-flash-tiered
       - minimax/MiniMax-M3
       - oc/big-pickle
   fast:
     models:
-      - antigravity/gemini-3.7-flash-tiered
+      - antigravity/gemini-3.8-flash-tiered
       - antigravity/gpt-oss-120b-medium
       - cf/@cf/openai/gpt-oss-120b
   ###
@@ -100,7 +100,7 @@ combos:
       - antigravity/gemini-3.1-flash-lite
       - nvidia/deepseek-ai/deepseek-v4-pro
       - fmd/gpt-5.5
-      - antigravity/gemini-3.7-flash-tiered
+      - antigravity/gemini-3.8-flash-tiered
       - antigravity/gemini-pro-agent
       - nvidia/mistralai/mistral-large-3-675b-instruct-2512
       - cerebras/gpt-oss-120b

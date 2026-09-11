@@ -60,6 +60,17 @@
     }
   },
   "skills": {
+    "allocating-finite-inventory": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "2026-09-11: extracted from the tickify-v4 design corpus (30 files, 1.9MB, four review rounds) by four parallel readers against a four-part portability test — vendor-free, falsifiable, non-obvious, not already owned. 74 candidates, 30 survived. Every rule verified verbatim against its source before adoption.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "f13e673fd3c904c856a47c7e2365a27302e59d31294be7a6df01472dcf72279b"
+        }
+      }
+    },
     "animating-interface-motion": {
       "owned": true,
       "presentInTree": true,
@@ -320,6 +331,17 @@
       "rationale": "audacioustux-owned, pristine",
       "owned": true
     },
+    "designing-idempotent-boundaries": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "2026-09-11: extracted from the tickify-v4 design corpus (30 files, 1.9MB, four review rounds) by four parallel readers against a four-part portability test — vendor-free, falsifiable, non-obvious, not already owned. 74 candidates, 30 survived. Every rule verified verbatim against its source before adoption.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "286b48152f22491aa91cb3323f86539e2360983781adf8728f2fc45432a4db13"
+        }
+      }
+    },
     "diagramming-with-mermaid": {
       "disposition": "merge",
       "upstream": [
@@ -378,6 +400,17 @@
       "decisions": [],
       "rationale": "core workflow skill, locally modified",
       "owned": true
+    },
+    "evolving-shared-contracts": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "2026-09-11: written after surveying affaan-m/ecc (291 distinct skills). Its contract-first skill was the only one of the 291 covering a gap in this corpus — all five of its core rules probed as unowned here. Not adopted directly: it carries five references to sibling skills this corpus does not have, the same dangling-router defect fixed earlier in firecrawl. Rules rewritten in this corpus's voice.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "0fa51898ae04c00fb6270fbccc85845c75e615a600b2493e7f313f54dea34bd3"
+        }
+      }
     },
     "executing-plans": {
       "disposition": "merge",
@@ -594,6 +627,17 @@
       "rationale": "847B; too small to justify external tracking",
       "owned": true
     },
+    "handling-money-arithmetic": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "2026-09-11: extracted from the tickify-v4 design corpus (30 files, 1.9MB, four review rounds) by four parallel readers against a four-part portability test — vendor-free, falsifiable, non-obvious, not already owned. 74 candidates, 30 survived. Every rule verified verbatim against its source before adoption.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "c1377e71e23ed1925948df1870e48fbe51315974b83924e61a5ae3d76d8070a0"
+        }
+      }
+    },
     "handoff": {
       "disposition": "overlaps:handing-off-work",
       "upstream": [
@@ -655,6 +699,28 @@
       "decisions": [],
       "rationale": "audacioustux-owned, pristine",
       "owned": true
+    },
+    "migrating-live-data": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "2026-09-11: extracted from the tickify-v4 design corpus (30 files, 1.9MB, four review rounds) by four parallel readers against a four-part portability test — vendor-free, falsifiable, non-obvious, not already owned. 74 candidates, 30 survived. Every rule verified verbatim against its source before adoption.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "32a71e40eea1bc9b36e2a9c7d155f0285ae68f61a578b45ea5a0bb7ed5b76662"
+        }
+      }
+    },
+    "modelling-domain-invariants": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "2026-09-11: extracted from the tickify-v4 design corpus (30 files, 1.9MB, four review rounds) by four parallel readers against a four-part portability test — vendor-free, falsifiable, non-obvious, not already owned. 74 candidates, 30 survived. Every rule verified verbatim against its source before adoption.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "caef8aec14a4c7bc7e9eaead91f96965959a7d147f6ac2430118de672b8a6d8f"
+        }
+      }
     },
     "prisma-8": {
       "disposition": "external",
@@ -857,6 +923,17 @@
       ],
       "rationale": "hardcodes docs/superpowers/plans",
       "owned": true
+    },
+    "reviewing-a-design-corpus": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "2026-09-11: extracted from the tickify-v4 design corpus (30 files, 1.9MB, four review rounds) by four parallel readers against a four-part portability test — vendor-free, falsifiable, non-obvious, not already owned. 74 candidates, 30 survived. Every rule verified verbatim against its source before adoption.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "eb1c43a5729554429d4bed6bd5d4c226146f6f8f1ee94f8b727ac91c3be9a955"
+        }
+      }
     },
     "reviewing-for-bloat": {
       "disposition": "keep-as-is",
@@ -1406,7 +1483,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "eb5c61ce02b39fc0d2843e06611709d29e301142b5d4784d649f2f6b82e6e799",
+          "sha256": "98b1cbadf95d9cf9847c422388ee33666e2cc4f6ab2660ea151053064e78645c",
           "upstream": {
             "status": "diverged",
             "sha256": "48508f44bbfd7d24b029fbf3a314f3cd14c9615599059366e922f47b8dc08cf2"

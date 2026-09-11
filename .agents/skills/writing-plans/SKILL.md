@@ -124,6 +124,29 @@ Every step must contain the actual content an engineer needs. These are **plan f
 - Steps that describe what to do without showing how (code blocks required for code steps)
 - References to types, functions, or methods not defined in any task
 
+## Name the Missing Measurement
+
+A plan resting on a quantity nobody has measured has two honest options: measure
+it, or name it as missing. Guessing a value and writing it down as if it were
+derived is the failure, because the guess loses its provenance the moment it is
+written and every later step inherits it as fact.
+
+Write "mean service time under this workload is unmeasured; measure before
+sizing" rather than a plausible number. That sentence is actionable. A fabricated
+constant is not, and it cannot be distinguished later from one that was measured.
+
+Watch for a specific error when sizing anything: **a resource budget gives a
+ceiling, not a floor.** A connection limit, a memory cap, or a quota tells you how
+many workers the system can admit — never how many the workload needs. The floor
+is a demand-side question, and answering it requires arrival rate and service
+time. Deriving a floor from a ceiling produces a number with the right units and
+no meaning.
+
+The same applies to a per-process resource multiplied by replica count. The
+product is what the shared resource must supply, and it is easy to write a
+per-process limit that is correct in isolation and exceeds the shared ceiling at
+peak replicas. Check the product, not the factor.
+
 ## Remember
 - Exact file paths always
 - Complete code in every step — if a step changes code, show the code

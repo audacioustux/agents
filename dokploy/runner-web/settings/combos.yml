@@ -47,8 +47,10 @@ combos:
       - openrouter/openrouter/free
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
+      - minimax/MiniMax-M3
   reasoning:
     models:
+      - openrouter/openrouter/free
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
       - minimax/MiniMax-M3

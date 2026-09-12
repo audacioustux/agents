@@ -1512,7 +1512,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "debfe51afffb784370eb369b3363695daf234e8f80def0b7ac0432bb049c7e68",
+          "sha256": "252b74b130dbd1f7dc6f10ceeb826a80c16ca353515fa92470b93a633450e8b5",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"
@@ -1538,7 +1538,7 @@
       ],
       "rationale": "becomes the authoring standard for the agents repo",
       "owned": true,
-      "note": "2026-09-12: two rules added after surveying wshobson/agents (94 plugins / 202 agents / 183 skills, HEAD 2026-09-01). The repo is predominantly persona prompts; its adoptable content was in its own CI-enforced authoring guide, docs/authoring.md. The flat-namespace failure mode restates docs/authoring.md:81-85 vendor-neutrally; the diagnostic blast-radius/false-positive rule generalises the authoring habit in plugins/dgx-spark-ops/skills/spark-training-gotchas/references/gotcha-checks.md, which is hardware-locked and was not adopted as content. Its $ARGUMENTS injection rule was rejected: zero surface in this corpus. Its PostgreSQL NULL-vacuity gotcha was rejected as already owned by the managed skill schema-constraint-vacuity-audit. The $ARGUMENTS rule (docs/authoring.md:89-115) was initially rejected on zero surface; a wider scan of all 241 installed markdown files found three unframed interpolations in vendored skills (guide, recommend), so it was adopted stated as a consumption rule as well as an authoring one."
+      "note": "2026-09-12: three rules added after surveying wshobson/agents (94 plugins / 202 agents / 183 skills, HEAD 2026-09-01). The repo is predominantly persona prompts; its adoptable content was in its own CI-enforced authoring guide, docs/authoring.md. (1) The flat-namespace failure mode restates docs/authoring.md:81-85 vendor-neutrally. (2) The diagnostic blast-radius/false-positive rule generalises the authoring habit in plugins/dgx-spark-ops/skills/spark-training-gotchas/references/gotcha-checks.md, which is hardware-locked and was not adopted as content. (3) The caller-supplied-input rule derives from docs/authoring.md:89-115. It was rejected in the first pass on a zero-surface measurement that scanned only top-level SKILL.md files; a wider scan of all 241 installed markdown files found three unframed interpolations in the vendored guide and recommend skills, so it was adopted and stated as a consumption rule as well as an authoring one. It does not carry upstream's claim that values inside fenced code 'are not prompt text' (docs/authoring.md:110) - that is false; fenced text still reaches the model, and upstream's own clause is about what its gardener checks. The PostgreSQL NULL-vacuity gotcha was rejected as already owned by the managed skill schema-constraint-vacuity-audit."
     }
   },
   "dispositionsRecorded": "2026-09-04",

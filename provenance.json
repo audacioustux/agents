@@ -67,7 +67,7 @@
       "note": "2026-09-11: extracted from the tickify-v4 design corpus (30 files, 1.9MB, four review rounds) by four parallel readers against a four-part portability test — vendor-free, falsifiable, non-obvious, not already owned. 74 candidates, 30 survived. Every rule verified verbatim against its source before adoption.",
       "files": {
         "SKILL.md": {
-          "sha256": "f13e673fd3c904c856a47c7e2365a27302e59d31294be7a6df01472dcf72279b"
+          "sha256": "5a85ddb7119b06189b3ea499398e806c375fa8706da3a45907125d56c72d584f"
         }
       }
     },
@@ -707,7 +707,7 @@
       "note": "2026-09-11: extracted from the tickify-v4 design corpus (30 files, 1.9MB, four review rounds) by four parallel readers against a four-part portability test — vendor-free, falsifiable, non-obvious, not already owned. 74 candidates, 30 survived. Every rule verified verbatim against its source before adoption.",
       "files": {
         "SKILL.md": {
-          "sha256": "32a71e40eea1bc9b36e2a9c7d155f0285ae68f61a578b45ea5a0bb7ed5b76662"
+          "sha256": "7f67e2e4ec8b3f5a91eedaa983d84898e960629b952f6dfdd55e6fe9af264edd"
         }
       }
     },

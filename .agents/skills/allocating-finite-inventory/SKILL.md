@@ -151,5 +151,7 @@ will never review.
 - Can a claim outlive the process that made it, and does every reader filter on
   expiry rather than trusting a sweeper?
 - Does a constraint enforce the invariant, or only the application code?
-- What happens on retry after a lost claim — is the retry itself safe? See
-  `designing-idempotent-boundaries`.
+- What happens on retry after a lost claim? A loser that retries must not end up
+  holding two units, which means the retry needs a key the caller supplies rather
+  than one minted per attempt. `designing-idempotent-boundaries` covers that in
+  full.

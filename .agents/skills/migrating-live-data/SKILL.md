@@ -132,7 +132,10 @@ A migration that ran without error is not a migration that worked.
 - Confirm the rejected set is empty, or that every rejection has its decided
   reason.
 
-Absence of errors is not evidence. See `verifying-before-completion`.
+Absence of errors is not evidence: a migration reports success for the work it
+attempted, not the work you intended. Name the query that would fail if the
+migration were wrong, and run it. `verifying-before-completion` covers the
+general discipline.
 
 ## Correctness checks cannot see a cold optimiser
 

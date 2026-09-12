@@ -44,9 +44,7 @@ combos:
       - antigravity/gemini-3.8-flash-tiered
       - antigravity/claude-sonnet-4-6
       - cx/gpt-5.6-luna
-      - openrouter/openrouter/free
-      - cc/claude-sonnet-5
-      - gh/claude-sonnet-5
+      - cc/claude-opus-5
       - minimax/MiniMax-M3
   reasoning:
     models:

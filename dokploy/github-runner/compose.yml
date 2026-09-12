@@ -37,7 +37,7 @@ services:
   runner-tickify:
     <<: *runner
     deploy:
-      replicas: 3
+      replicas: 1
     environment:
       RUNNER_SCOPE: repo
       REPO_URL: ${REPO_URL:?}

@@ -1512,7 +1512,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "f0899007fabc12a1e14bdd3b17a16801212cc5e5477ad2642e0009f6ebd31964",
+          "sha256": "077380a7d4de74715a12ab51c1881a4b3c0f0ae8348368176b7119109761649d",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"
@@ -1537,7 +1537,8 @@
         "2026-09-10: replaced three <img> tags in anthropic-best-practices.md with their alt text. They came in with the vendored Anthropic docs and were 4709 bytes — 10.3% of the file — almost entirely srcset and cache-busting query parameters. Nothing renders an image in a file an agent reads, so that was pure token cost carrying no information. Alt text rather than deletion, because prose downstream refers to 'the diagram above' and deleting would leave that dangling. The CDN URLs did resolve; liveness was not the problem."
       ],
       "rationale": "becomes the authoring standard for the agents repo",
-      "owned": true
+      "owned": true,
+      "note": "2026-09-12: two rules added after surveying wshobson/agents (94 plugins / 202 agents / 183 skills, HEAD 2026-09-01). The repo is predominantly persona prompts; its adoptable content was in its own CI-enforced authoring guide, docs/authoring.md. The flat-namespace failure mode restates docs/authoring.md:81-85 vendor-neutrally; the diagnostic blast-radius/false-positive rule generalises the authoring habit in plugins/dgx-spark-ops/skills/spark-training-gotchas/references/gotcha-checks.md, which is hardware-locked and was not adopted as content. Its $ARGUMENTS injection rule was rejected: zero surface in this corpus. Its PostgreSQL NULL-vacuity gotcha was rejected as already owned by the managed skill schema-constraint-vacuity-audit."
     }
   },
   "dispositionsRecorded": "2026-09-04",

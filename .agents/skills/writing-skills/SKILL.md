@@ -89,7 +89,15 @@ skills/
     supporting-file.*     # Only if needed
 ```
 
-**Flat namespace** - all skills in one searchable namespace
+**Flat namespace** - all skills in one searchable namespace, and the name is the
+key. The directory is scoped; the key is not. A tree with no duplicates can still
+install over another source's skill of the same name, because a consumer usually
+installs several corpora into one directory. Nothing reports the loss: the
+overwritten skill simply stops existing, and its triggers stop firing.
+
+Check the installed set, not your own tree. A name common enough to be useful -
+`writing-plans`, `code-review` - is exactly the one another corpus also ships.
+Prefer a name that says whose rule it is when the obvious one is generic.
 
 **Separate files for:**
 1. **Heavy reference** (100+ lines) - API docs, comprehensive syntax
@@ -161,6 +169,25 @@ Match the degree of prescription to the decision. A requirement can be unconditi
 Where a skill has recurring mistakes, a two-column table beats a prose list. The left column is the observable symptom, which is exactly what a principle statement does not give you: "orphan word alone on a paragraph's last line" is detectable, "use good typography" is not. The right column is the fix.
 
 A row that only restates the principle above it earns nothing. Cut it.
+
+## A diagnostic step states what it perturbs and what would fool it
+
+A skill that tells the reader to run something owes two facts the command itself
+does not carry.
+
+**What it disturbs.** "Needs root and flushes the page cache system-wide - every
+process on the box loses cached reads, not just yours" is a different instruction
+from the same command with no note. Without it a reader cannot tell a safe probe
+from one that must not touch a live system, and finds out by running it.
+
+**What a wrong reading looks like.** Name the false positive: a gauge that reads
+low, a value still climbing that has not yet crossed, a metric that returns a
+non-numeric sentinel rather than a number. The last is its own failure class - a
+check that greps for a number gets nothing, and a script built on it fails open
+while reporting healthy.
+
+Both belong next to the step, not in a caveats section at the end. A reader who
+has already run the command has passed the point the warning was for.
 
 ## One home per rule
 

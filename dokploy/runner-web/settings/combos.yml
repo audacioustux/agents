@@ -68,6 +68,7 @@ combos:
   best-chat:
     models:
       - cc/claude-opus-5
+      - cx/gpt-6-astra
   chat:
     models:
       - cc/claude-opus-5

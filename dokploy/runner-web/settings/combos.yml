@@ -16,9 +16,10 @@ combos:
     models:
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
+      - minimax/MiniMax-M3
   coding:
     models:
-      - minimax/MiniMax-M3
+      - openrouter/openrouter/free
       - antigravity/gemini-3.8-flash-tiered
   ###
   best-coding-fast:

@@ -48,7 +48,6 @@ combos:
       - minimax/MiniMax-M3
   reasoning:
     models:
-      - openrouter/openrouter/free
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
       - minimax/MiniMax-M3
@@ -93,6 +92,7 @@ combos:
       - oc/big-pickle
   fast:
     models:
+      - openrouter/openrouter/free
       - antigravity/gemini-3.8-flash-tiered
       - antigravity/gpt-oss-120b-medium
       - cf/@cf/openai/gpt-oss-120b

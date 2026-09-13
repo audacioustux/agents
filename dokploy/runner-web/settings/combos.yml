@@ -70,9 +70,9 @@ combos:
       - cx/gpt-6-astra
   chat:
     models:
-      - cc/claude-opus-5
+      - cc/claude-sonnet-5
+      - gh/claude-sonnet-5
       - minimax/MiniMax-M3
-      - antigravity/gemini-3.8-flash-tiered
   ###
   pro-vision:
     models:

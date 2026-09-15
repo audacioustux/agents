@@ -13,59 +13,135 @@ providers:
     # Mirrors enabledModels in config.yml.
     models:
       - id: auto/smart
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: pro-chat
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: best-chat
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: chat
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: claude-opus
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 204800
       - id: claude-sonnet
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 204800
       - id: pro-coding
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: best-coding
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: coding
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: best-coding-fast
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: pro-fast
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: best-fast
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: fast
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: best-free
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 131072
       - id: pro-reasoning
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: best-reasoning
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: reasoning
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: pro-vision
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000
       - id: best-vision
+        reasoning: true
+        thinking:
+          mode: effort
+          efforts: [minimal, low, medium, high, xhigh, max]
         input: [text, image]
         contextWindow: 512000

@@ -75,10 +75,12 @@ combos:
   ###
   pro-vision:
     models:
+      - cx/gpt-6-astra
       - cc/claude-fable-5-1
       - cc/claude-opus-5
   best-vision:
     models:
+      - cx/gpt-6-astra
       - cc/claude-opus-5
   ###
   pro-fast:

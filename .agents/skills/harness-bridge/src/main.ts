@@ -21,6 +21,7 @@ type Mode = typeof MODES[number];
 
 const SUBJECT_LIMIT = 20_000;
 const DIFF_LIMIT = 1_000_000;
+const PROMPT_ARGV_LIMIT = 128 * 1024;
 const EMPTY_SUBJECT = { text: "", path: "", truncated: false };
 
 export function parseCliArgs(argv: readonly string[]) {
@@ -154,6 +155,42 @@ export function buildCommand(p: {
   return { bin: a.bin, args, cwd: p.cwd };
 }
 
+// For prompts that would overflow argv, switch to stream-json over stdin.
+// Both `claude` and `puku-cli` accept `--input-format stream-json` with a
+// single user-message envelope and replay it as the prompt body.
+export function buildCommandStdin(p: {
+  agent: AgentId;
+  mode: Mode;
+  prompt: string;
+  resume?: string;
+  newSessionId: string;
+  model?: string;
+  stamp: string;
+  cwd: string;
+}): { bin: string; args: string[]; cwd: string; envelope: string } {
+  const a = AGENTS[p.agent];
+  const args = [
+    "-p",
+    "--permission-mode",
+    "plan",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--replay-user-messages",
+  ];
+  if (p.model) args.push("--model", p.model);
+  args.push("--name", a.name(p.mode, p.stamp));
+  if (p.resume) args.push("--resume", p.resume, "--fork-session");
+  else args.push("--session-id", p.newSessionId);
+  const envelope = JSON.stringify({
+    type: "user",
+    message: { role: "user", content: p.prompt },
+  }) + "\n";
+  return { bin: a.bin, args, cwd: p.cwd, envelope };
+}
+
 async function gitDiff(
   args: string[],
   cwd: string,
@@ -225,7 +262,8 @@ export async function run(args: ParsedArgs, now: () => Date = () => new Date()):
 
   const newSessionId = args.resume ? undefined : crypto.randomUUID();
   const stamp = now().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const cmd = buildCommand({
+  const useStdin = prompt.length > PROMPT_ARGV_LIMIT;
+  const shared = {
     agent: args.agent,
     mode: args.mode,
     prompt,
@@ -234,7 +272,12 @@ export async function run(args: ParsedArgs, now: () => Date = () => new Date()):
     model: args.model,
     stamp,
     cwd,
-  });
+  } as const;
+  const stdinBuilt = useStdin ? buildCommandStdin(shared) : null;
+  const cmd = stdinBuilt
+    ? { bin: stdinBuilt.bin, args: stdinBuilt.args, cwd: stdinBuilt.cwd }
+    : buildCommand(shared);
+  const envelope = stdinBuilt?.envelope;
 
   if (args.dryRun) {
     const redacted = cmd.args.map((a) =>
@@ -247,7 +290,12 @@ export async function run(args: ParsedArgs, now: () => Date = () => new Date()):
         resume: args.resume,
         fresh: args.fresh,
         newSessionId: args.resume ? null : newSessionId,
-        prompt: { redacted: true, chars: prompt.length, ...meta },
+        prompt: {
+          redacted: true,
+          chars: prompt.length,
+          delivery: useStdin ? "stdin-stream-json" : "argv",
+          ...meta,
+        },
         command: [cmd.bin, ...redacted],
       },
       null,
@@ -260,10 +308,15 @@ export async function run(args: ParsedArgs, now: () => Date = () => new Date()):
   const child = new Deno.Command(cmd.bin, {
     args: cmd.args,
     cwd: cmd.cwd,
-    stdin: "inherit",
+    stdin: envelope ? "piped" : "inherit",
     stdout: "inherit",
     stderr: "inherit",
   }).spawn();
+  if (envelope && child.stdin) {
+    const w = child.stdin.getWriter();
+    await w.write(new TextEncoder().encode(envelope));
+    await w.close();
+  }
   return (await child.status).code;
 }
 

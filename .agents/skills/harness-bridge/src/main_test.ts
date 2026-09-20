@@ -2,7 +2,7 @@
 // SKILL.md and src/main.ts together.
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "jsr:@std/assert@1";
-import { buildCommand, buildPrompt, parseCliArgs, readSubject } from "./main.ts";
+import { buildCommand, buildCommandStdin, buildPrompt, parseCliArgs, readSubject } from "./main.ts";
 
 const SUBJECT_FILE_BYTE_LIMIT = 20_000;
 
@@ -173,4 +173,61 @@ Deno.test("buildPrompt strips stray ``` so a markdown fence in the subject canno
   assert(prompt.includes("`\u200b``"));
   assertStringIncludes(prompt, "before");
   assertStringIncludes(prompt, "after");
+});
+
+Deno.test("buildCommandStdin keeps the safety contract and never puts the prompt in argv", () => {
+  const prompt = "x".repeat(200 * 1024); // 200 KB — above PROMPT_ARGV_LIMIT
+  const cmd = buildCommandStdin({
+    agent: "puku-cli",
+    mode: "ask",
+    prompt,
+    newSessionId: "new-uuid",
+    stamp,
+    cwd: "/tmp",
+  });
+  assertEquals(cmd.bin, "puku-cli");
+  assertEquals(cmd.args.slice(0, 3), ["-p", "--permission-mode", "plan"]);
+  assertEquals(cmd.args.includes("--input-format"), true);
+  assertEquals(cmd.args.includes("--output-format"), true);
+  assertEquals(cmd.args.includes("--verbose"), true);
+  assertEquals(cmd.args.includes("--replay-user-messages"), true);
+  assertEquals(cmd.args.includes("--fork-session"), false);
+  assertEquals(cmd.args.includes("--session-id"), true);
+  // The 200 KB prompt must NOT appear in argv — only the envelope carries it.
+  assertEquals(cmd.args.some((a) => a.length > 1024), false);
+  assertStringIncludes(cmd.envelope, `"content":"${prompt.slice(0, 32)}`);
+  // Envelope is valid JSON ending with a newline.
+  const parsed = JSON.parse(cmd.envelope.trimEnd());
+  assertEquals(parsed.type, "user");
+  assertEquals(parsed.message.role, "user");
+  assertEquals(parsed.message.content, prompt);
+});
+
+Deno.test("buildCommandStdin escapes JSON special characters in the prompt", () => {
+  const tricky = `quote " backslash \\ newline\ndone`;
+  const cmd = buildCommandStdin({
+    agent: "claude",
+    mode: "ask",
+    prompt: tricky,
+    newSessionId: "x",
+    stamp,
+    cwd: "/tmp",
+  });
+  const parsed = JSON.parse(cmd.envelope.trimEnd());
+  assertEquals(parsed.message.content, tricky);
+});
+
+Deno.test("buildCommandStdin preserves --fork-session on resume", () => {
+  const cmd = buildCommandStdin({
+    agent: "claude",
+    mode: "review",
+    prompt: "x".repeat(200 * 1024),
+    resume: "abc",
+    newSessionId: "ignored",
+    stamp,
+    cwd: "/tmp",
+  });
+  assertEquals(cmd.args.includes("--resume"), true);
+  assertEquals(cmd.args.includes("--fork-session"), true);
+  assertEquals(cmd.args.includes("--session-id"), false);
 });

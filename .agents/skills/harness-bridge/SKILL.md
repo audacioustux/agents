@@ -65,6 +65,17 @@ The wrapper rejects or forces the following at parse time:
 These are checked before the child CLI runs. A calling agent that obeys this
 file cannot accidentally bypass them.
 
+### Large prompts (stdin-pipe path)
+
+Prompts whose byte length exceeds `PROMPT_ARGV_LIMIT` (128 KB) are delivered
+via `--input-format stream-json --output-format stream-json --verbose
+--replay-user-messages`, with a single `{"type":"user","message":{"role":"user","content":…}}`
+envelope written to the child's stdin. The argv slot that normally holds the
+prompt is empty; the prompt body never enters argv, so the kernel's `ARG_MAX`
+cannot trigger `E2BIG`. The safety contract (`--permission-mode plan`,
+`--fork-session`, `--session-id`) is preserved on this path. Use this path
+for `review` mode against large diffs; it kicks in automatically.
+
 ## Supported CLIs
 
 | CLI | Notes |
@@ -74,8 +85,11 @@ file cannot accidentally bypass them.
 
 Adding a new CLI is a one-line entry in `src/main.ts`'s `AGENTS` map — both
 CLIs share the same argv shape (`-p --permission-mode plan [--model M]
-[--name N] [--resume ID --fork-session | --session-id UUID] <prompt>`).
-The CLI is considered supported if it accepts those flags.
+[--name N] [--resume ID --fork-session | --session-id UUID] <prompt>`)
+and accept the same `--input-format stream-json --replay-user-messages`
+stdin envelope (see [Large prompts](#large-prompts-stdin-pipe-path)). The CLI
+is considered supported if it accepts both shapes; missing the stdin shape
+means large reviews will silently fall back to argv and may hit `E2BIG`.
 
 ## Privacy
 

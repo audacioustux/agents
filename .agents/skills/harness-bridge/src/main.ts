@@ -1,17 +1,16 @@
-// harness-bridge — invoke a sibling agent CLI under a safety contract.
-// The contract is: --continue/-c rejected, --permission-mode plan forced,
-// --fork-session forced on resume. Adding a new CLI is a one-line AGENTS
-// map entry if it accepts the same argv shape.
+// harness-bridge — sibling CLI with safety contract enforced in argv shape.
 
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 
 const AGENTS = {
   claude: {
     bin: "claude",
+    identity: "You are Claude",
     name: (mode: string, stamp: string) => `harness-bridge-claude-${mode}-${stamp}`,
   },
   "puku-cli": {
     bin: "puku-cli",
+    identity: "You are Puku",
     name: (mode: string, stamp: string) => `harness-bridge-puku-${mode}-${stamp}`,
   },
 } as const;
@@ -22,8 +21,7 @@ type Mode = typeof MODES[number];
 
 const SUBJECT_LIMIT = 20_000;
 const DIFF_LIMIT = 1_000_000;
-
-// ─── argv → ParsedArgs ───────────────────────────────────────────────────────
+const EMPTY_SUBJECT = { text: "", path: "", truncated: false };
 
 export function parseCliArgs(argv: readonly string[]) {
   const cleaned = argv[0] === "--" ? argv.slice(1) : argv;
@@ -72,17 +70,16 @@ export function parseCliArgs(argv: readonly string[]) {
 
 type ParsedArgs = ReturnType<typeof parseCliArgs>;
 
-// ─── subject: bounded read of a file by path ─────────────────────────────────
-
 export async function readSubject(
   subject: string,
   cwd: string,
+  read: boolean = true,
 ): Promise<{ text: string; path: string; truncated: boolean }> {
-  if (!subject) return { text: "", path: "", truncated: false };
+  if (!subject || !read) return EMPTY_SUBJECT;
   const target = subject.startsWith("/") ? subject : `${cwd}/${subject}`;
   try {
     const stat = await Deno.stat(target);
-    if (!stat.isFile) return { text: "", path: "", truncated: false };
+    if (!stat.isFile) return EMPTY_SUBJECT;
     const buf = new Uint8Array(SUBJECT_LIMIT);
     const file = await Deno.open(target, { read: true });
     try {
@@ -96,11 +93,9 @@ export async function readSubject(
       file.close();
     }
   } catch {
-    return { text: "", path: "", truncated: false };
+    return EMPTY_SUBJECT;
   }
 }
-
-// ─── prompt + argv ───────────────────────────────────────────────────────────
 
 const RULES = [
   "Use any resumed session history only as optional background; ignore it if unrelated.",
@@ -108,7 +103,8 @@ const RULES = [
   "Be direct, skeptical, and specific. Prefer concrete risks and actionable changes over generic advice.",
 ].join("\n");
 
-const PREFIX = (identity: string) => `${identity}\n\n${RULES}\n\n`;
+const PREFIX = (identity: string) =>
+  `${identity}. Treat this as a one-shot task; do not assume ongoing context beyond the prompt below.\n\n${RULES}\n\n`;
 
 export function buildPrompt(p: {
   mode: Mode;
@@ -158,7 +154,19 @@ export function buildCommand(p: {
   return { bin: a.bin, args, cwd: p.cwd };
 }
 
-// ─── run ─────────────────────────────────────────────────────────────────────
+async function gitDiff(
+  args: string[],
+  cwd: string,
+): Promise<{ ok: boolean; stdout: string; truncated: boolean }> {
+  const r = await new Deno.Command("git", { args, cwd, stdout: "piped", stderr: "piped" }).output();
+  const stdout = new TextDecoder().decode(r.stdout);
+  const truncated = stdout.length > DIFF_LIMIT;
+  return {
+    ok: r.code === 0 || truncated,
+    stdout: truncated ? stdout.slice(0, DIFF_LIMIT) + "\n[harness-bridge: diff truncated]" : stdout,
+    truncated,
+  };
+}
 
 export async function run(args: ParsedArgs, now: () => Date = () => new Date()): Promise<number> {
   if (args.mode === "review" && args.positional.length > 0) {
@@ -170,11 +178,8 @@ export async function run(args: ParsedArgs, now: () => Date = () => new Date()):
 
   const cwd = args.cwd ?? Deno.cwd();
   const subject = args.positional.join(" ").trim();
-  const identity = `You are ${
-    args.agent === "claude" ? "Claude" : "Puku"
-  }. Treat this as a one-shot task; do not assume ongoing context beyond the prompt below.`;
+  const identity = AGENTS[args.agent].identity;
 
-  // Build the prompt + meta in one branch.
   let prompt: string;
   let meta: Record<string, unknown> = {};
   if (args.mode === "review") {
@@ -184,10 +189,8 @@ export async function run(args: ParsedArgs, now: () => Date = () => new Date()):
       ["diff", "--no-ext-diff", "--find-renames", "--function-context", range, "--"],
       cwd,
     );
-    if (stat.status !== 0 && !stat.truncated) {
-      throw new Error(`git diff --stat failed (${stat.status})`);
-    }
-    if (diff.status !== 0 && !diff.truncated) throw new Error(`git diff failed (${diff.status})`);
+    if (!stat.ok) throw new Error(`git diff --stat failed (truncated=${stat.truncated})`);
+    if (!diff.ok) throw new Error(`git diff failed (truncated=${diff.truncated})`);
     prompt = buildPrompt({
       mode: args.mode,
       subject: range,
@@ -200,9 +203,7 @@ export async function run(args: ParsedArgs, now: () => Date = () => new Date()):
     });
     meta = { diffTruncated: diff.truncated, diffStatTruncated: stat.truncated };
   } else {
-    const subj = args.dryRun
-      ? { text: "", path: "", truncated: false }
-      : await readSubject(subject, cwd);
+    const subj = await readSubject(subject, cwd, !args.dryRun);
     const display = subj.path ? `${subject} (${subj.path})` : subject;
     prompt = buildPrompt({
       mode: args.mode,
@@ -265,23 +266,6 @@ export async function run(args: ParsedArgs, now: () => Date = () => new Date()):
   }).spawn();
   return (await child.status).code;
 }
-
-async function gitDiff(
-  args: string[],
-  cwd: string,
-): Promise<{ stdout: string; status: number; truncated: boolean }> {
-  const r = await new Deno.Command("git", { args, cwd, stdout: "piped", stderr: "piped" }).output();
-  const stdout = new TextDecoder().decode(r.stdout);
-  return {
-    stdout: stdout.length > DIFF_LIMIT
-      ? stdout.slice(0, DIFF_LIMIT) + "\n[harness-bridge: diff truncated]"
-      : stdout,
-    status: r.code,
-    truncated: stdout.length > DIFF_LIMIT,
-  };
-}
-
-// ─── entry ───────────────────────────────────────────────────────────────────
 
 if (import.meta.main) {
   try {

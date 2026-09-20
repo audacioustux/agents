@@ -33,7 +33,7 @@ combos:
   pro-reasoning:
     # strategy: pipeline
     models:
-      # - cx/gpt-6-astra
+      - cx/gpt-6-astra
       # - cc/claude-fable-5-1
       - cc/claude-opus-5
       # - antigravity/gemini-pro-agent

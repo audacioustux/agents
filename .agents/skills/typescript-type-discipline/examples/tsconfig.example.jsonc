@@ -1,0 +1,70 @@
+{
+  // tsconfig.example.jsonc — flags split into three groups (strictness /
+  // build / emit) for the reader. Comments name the failure each catches.
+  // Replace, prune, or add as the codebase earns its posture.
+  "compilerOptions": {
+    // ---------- strictness ----------
+    // These decide which classes of bug the compiler rejects. Each earns its
+    // place by catching a real class of bug in this codebase, not because a
+    // blog post said so. See `modelling-domain-invariants`.
+    "strict": true,
+    // strict enables: noImplicitAny, strictNullChecks, strictFunctionTypes,
+    // strictBindCallApply, strictPropertyInitialization, alwaysStrict,
+    // useUnknownInCatchVariables, noImplicitThis, noImplicitReturns.
+
+    "noUncheckedIndexedAccess": true,
+    // arr[i] becomes T | undefined; record[k] becomes T | undefined.
+    // Forces every reader to handle the missing case.
+
+    "exactOptionalPropertyTypes": true,
+    // { x?: number } no longer accepts { x: undefined }. Distinguishes
+    // "the property is missing" from "the property is present and undefined".
+
+    "noImplicitOverride": true,
+    // class B extends A { override foo() {} } — without the keyword the
+    // override silently disappears when A's method is renamed.
+
+    "noFallthroughCasesInSwitch": true,
+    // Catches fallthrough between non-empty `case` arms. Distinct from
+    // `assertNever`, which catches missing variants.
+
+    "noPropertyAccessFromIndexSignature": true,
+    // Forces explicit `obj["key"]` for index-signature access. Catches
+    // typos on record keys at compile time.
+
+    "forceConsistentCasingInFileNames": true,
+    // Cross-platform safety; rejects `import './Foo'` against `foo.ts`.
+
+    // TypeScript recommends but does not require:
+    // "noUnusedLocals": true,
+    // "noUnusedParameters": true,
+    // These catch dead code but can fight generated code and tests.
+
+    // ---------- build / type-check performance ----------
+    // These decide how long the type-check takes. See the skill body for
+    // when each flag earns its place.
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/.cache/tsbuildinfo",
+    // `incremental` makes tsc emit a build info file and skip checking
+    // files whose inputs have not changed. `tsBuildInfoFile` keeps the
+    // cache out of the source tree.
+
+    "skipLibCheck": true,
+    // Stops the compiler from re-checking `.d.ts` in `node_modules` and
+    // bundled libs. The cost of leaving it off is real compile time for
+    // a class of bug (a wrong third-party type) that almost never bites.
+
+    "isolatedModules": true,
+    // Required for any code that goes through a transpiler (swc, esbuild,
+    // Bun, ts-jest). Forces every file to be parseable without cross-file
+    // type information.
+
+    // ---------- emit ----------
+    // For codebases where a transpiler (esbuild / swc / Bun) emits
+    // JavaScript and tsc only type-checks.
+    "noEmit": true
+    // Skip JavaScript output. `noEmit` (config flag) and `--noEmit` (CLI
+    // flag) are two different surfaces — set this in tsconfig so the IDE
+    // and CLI agree, and run `tsc --noEmit` in CI scripts.
+  }
+}

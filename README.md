@@ -13,9 +13,9 @@ their `skills-lock.json` against `provenance.json`.
 | `.agents/skills/` | The skill corpus. Each skill is a directory with a `SKILL.md` frontmatter entry point and optional `references/`, `prompts/`, `scripts/`, `examples/`. | [`.agents/skills/README.md`](.agents/skills/README.md) |
 | `.omp/` | Runtime agent config: provider, enabled models, model roles, retry chains, the `oracle` read-only consultant, and the reviewer-gate hook rule. | [`.omp/agent/config.yml`](.omp/agent/config.yml), [`.omp/agent/agents/oracle.md`](.omp/agent/agents/oracle.md) |
 | `.github/workflows/omniroute-combos.yml` | CI that applies `dokploy/runner-web/settings/combos.yml` to the live router on every push to `main`. | the workflow file; tests at [`.github/scripts/sync-omniroute-combos.test.ts`](.github/scripts/sync-omniroute-combos.test.ts) |
-| `dokploy/runner-web/` | The OmniRoute stack (web + Redis). | [`dokploy/runner-web/README.md`](dokploy/runner-web/README.md) |
-| `dokploy/github-runner/` | Self-hosted GitHub Actions runner pool. One pool today (`runner-tickify`); the README records why a TheGrid pool was retired. | [`dokploy/github-runner/README.md`](dokploy/github-runner/README.md) |
-| `dokploy/hindsight/` | The memory backend (`vectorize-io/hindsight`). Single container, embedded `pg0`. | [`dokploy/hindsight/compose.yml`](dokploy/hindsight/compose.yml) |
+| `dokploy/runner-web/` | The OmniRoute stack. | [`dokploy/runner-web/README.md`](dokploy/runner-web/README.md) |
+| `dokploy/github-runner/` | Self-hosted GitHub Actions runner pool. | [`dokploy/github-runner/README.md`](dokploy/github-runner/README.md) |
+| `dokploy/hindsight/` | The memory backend (`vectorize-io/hindsight`). | [`dokploy/hindsight/compose.yml`](dokploy/hindsight/compose.yml) |
 | `docs/audits/` | Worked-example audits of upstream skill registries. The cursor/plugins audit is the model every new audit follows. | [`docs/audits/cursor-plugins/README.md`](docs/audits/cursor-plugins/README.md) |
 | `provenance.json` | Maintenance ledger. Per-skill source repos and pinned SHAs, per-file SHA-256s, disposition notes, upstream status. **Maintenance metadata only — never loaded by agents.** | the file's own `note`, `upstreamRetrieval`, and `lockfileNotes` fields |
 

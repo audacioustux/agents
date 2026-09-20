@@ -1300,10 +1300,18 @@
       "owned": true,
       "presentInTree": true,
       "origin": "native",
-      "note": "2026-09-20: First language-specific skill admitted to the corpus. The corpus's prior rule refused framework/library material because the rule belongs at the publisher (see .agents/skills/README.md). This skill carves a narrower category: language-specific skills are admitted when every pattern in them is the TS expression of a cross-stack rule this corpus already owns, and the skill enforces that mapping in its own scope-guard. Four TS forms admitted (satisfies, assertNever, branded types, template literal types) each cite their cross-stack owner in the table at the head of the skill. Pattern rejected: a fifth candidate (Zod schema inference) was considered and refused — runtime validation is out of scope because the type system is erased at compile time, and the consumer repo owns Zod/Valibot/hand-rolled guards. 2026-09-20 extension: added two genuinely TS-specific gaps surfaced by auditing top skills.sh TypeScript skills against the corpus's prior decisions — (1) tsconfig strictness posture as the type-level expression of `modelling-domain-invariants`, (2) build and type-check performance as the TS expression of `speeding-up-rust-builds`. The four other top skills (typescript-pro variants, vue-best-practices, nodejs-backend-patterns) were rejected on portability grounds: their content is either already owned, or vendor-bound to a specific framework. Cross-stack owner citations added to the mapping table, detection patterns, and review checklist for both new sections. 2026-09-20 review pass: consolidated the two prior tsconfig.json examples into one comment-grouped file with strictness / build / emit sections, clarified `noEmit` (config flag) vs `--noEmit` (CLI flag) with each surface named in its own context, added three detection patterns (strict flag turned off with a TODO, project references added before measurement, base tsconfig whose overrides make it a fiction), and brought `hardening-rust-supply-chain` into the frontmatter `uses:` block (it was already cited in the body for the supply-chain half of compile-time discipline; the frontmatter now lists all six body citations). Mapping table has thirteen rows; detection patterns have fourteen. Review checklist gained an explicit prompt: did the cross-stack owner get cited, or did a TS-only rule sneak in? Also: trimmed the description to keep total frontmatter under the 1024-char spec limit.",
+      "note": "2026-09-20: First language-specific skill in the corpus, admitted on the bridge discipline — each pattern is the TS expression of a corpus-owned rule; the rule itself lives at the owner. Audited skills.sh top-10 TypeScript entries: this skill was admitted; four others (typescript-pro variants, vue-best-practices, nodejs-backend-patterns) were rejected as either already-owned or vendor-bound. Two patterns considered and refused: `satisfies` (no corpus owner), brand constructor at trust boundary (TS-only).",
+      "decisions": [
+        "2026-09-20: refused `satisfies` pattern — `designing-component-systems` covers UI component APIs, not TS-type-narrowing; no corpus skill owns the principle behind literal-typed maps.",
+        "2026-09-20: refused brand constructor at trust boundary — `designing-idempotent-boundaries` covers duplicate delivery, not input validation; the cast-at-boundary principle is TS-only and has no corpus owner.",
+        "2026-09-20: dropped `hardening-rust-supply-chain` from body — it owns dependency hygiene (lockfile, advisories), not compile-time discipline; the cross-stack mapping would be incorrect."
+      ],
       "files": {
         "SKILL.md": {
-          "sha256": "78f93f80a767d578063068b1d1989087945ef3b1f747de431b492b0adca51579"
+          "sha256": "c86919dc5f44fe2c0d8601a16e546c9fc6f3086890bce4a5829abbac106f1f62"
+        },
+        "examples/tsconfig.example.jsonc": {
+          "sha256": "4cacfa78037865968ac623738950cdf378c7bfee35f1c642630955a9a11d78c5"
         }
       }
     },

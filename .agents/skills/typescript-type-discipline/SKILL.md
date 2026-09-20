@@ -1,6 +1,6 @@
 ---
 name: typescript-type-discipline
-description: Use when designing or reviewing TypeScript types — handler maps, discriminated unions, branded primitives, route or event string templates, or a tsconfig posture — and the choice between `assertNever`, exhaustive `switch`, branded types, template literal types, or strict tsconfig flags will change what the compiler accepts. Maps TS expressions to corpus-owned rules; the rule itself lives at the owner. Not for vendor framework APIs, not for runtime validation (types are erased), not for syntax reference.
+description: Use when designing or reviewing TypeScript types — handler maps, discriminated unions, branded primitives, route or event string templates, or a tsconfig posture — and the choice between `satisfies`, `assertNever`, exhaustive `switch`, branded types, template literal types, or strict tsconfig flags will change what the compiler accepts. Maps TS expressions to corpus-owned rules; the rule itself lives at the owner. Not for vendor framework APIs, not for runtime validation (types are erased), not for syntax reference.
 ---
 
 # TypeScript Type Discipline
@@ -15,8 +15,9 @@ owns Zod, Valibot, or hand-rolled guards.
 
 | TS form | Owned by |
 | --- | --- |
+| A trailing `satisfies` clause (no type annotation) over a literal-keyed map, enum-like record, or value with literal properties | `modelling-domain-invariants` § "Model what is true, not what is convenient" |
 | `assertNever(x: never): never` in a `switch` default, paired with an exhaustive `switch` over a discriminated union with no fallthrough | `modelling-domain-invariants` § "Every state needs a named writer" |
-| `type Brand<T, B extends string> = T & { readonly __brand: B }` for two primitives that share a runtime representation but represent different facts | `modelling-domain-invariants` § "One fact, one home" |
+| `type Brand<T, B extends string> = T & { readonly __brand: B }` for two primitives that share a runtime representation but represent different facts, with the `as Brand` cast living in one validator function | `modelling-domain-invariants` § "One fact, one home"; § "Put the invariant where it cannot be bypassed" |
 | Discriminated union with a `kind` / `type` literal field | `evolving-shared-contracts` § "Change the contract first, then the implementations" |
 | `type Route<T extends string> = \`/api/${T}\`` for pattern strings the codebase produces | `evolving-shared-contracts` § "Change the contract first, then the implementations" |
 | `Parameters<typeof fn>` / `ReturnType<typeof fn>` to derive a consumer shape from a single source of truth | `evolving-shared-contracts` § "Change the contract first, then the implementations" |
@@ -32,6 +33,33 @@ choose the right one for a case at hand.
 
 The forms below illustrate each row. The principle behind each one is at the
 owner named in the table; this section only shows the shape.
+
+### `satisfies` for shape-checked, narrowly-typed values
+
+```ts
+// WIDENED — keys become string, literal types erased
+const handlers: Record<string, Handler> = {
+  login: handleLogin,
+  logout: handleLogout,
+};
+
+// PRESERVED — keys remain the literals "login" | "logout",
+// the declared shape is still checked
+const handlers = {
+  login: handleLogin,
+  logout: handleLogout,
+} satisfies Record<string, Handler>;
+```
+
+A type annotation forces the variable to the declared shape and erases the
+narrower literal type. A trailing `satisfies` checks the declared shape while
+keeping the inferred type, so the compiler still narrows on the literal keys
+or the literal property values. The TS expression of "the model should reflect
+what is true": when the literal matters, the type should carry it.
+
+**Do not combine a type annotation with `satisfies` on the same declaration.**
+The annotation wins; the value still gets widened. Use the trailing `satisfies`
+alone.
 
 ### `assertNever` and exhaustive switches
 
@@ -72,12 +100,22 @@ type Brand<T, B extends string> = T & { readonly __brand: B };
 type UserId  = Brand<string, "UserId">;
 type OrderId = Brand<string, "OrderId">;
 
+// The cast lives in one place: the validator. Nowhere else.
+function toUserId(raw: string): UserId {
+  if (!/^u_[a-z0-9]{16}$/.test(raw)) {
+    throw new Error(`invalid UserId: ${raw}`);
+  }
+  return raw as UserId;
+}
+
 // sendOrder(orderId: OrderId, userId: UserId)
 // sendOrder(userId, orderId) — compile error.
 ```
 
 The TS expression of "one fact, one home" for primitive types. Two strings that
-should not be confused become types the compiler distinguishes.
+should not be confused become types the compiler distinguishes, and the cast
+that crosses the trust boundary lives in one validator function. Code downstream
+of the validator cannot mint a `UserId` from arbitrary strings.
 
 ### Template literal types and discriminated unions
 
@@ -137,6 +175,7 @@ intent explicit.
 
 | Symptom | Fix |
 | --- | --- |
+| `const handlers: Record<string, Handler> = { login: ..., logout: ... }` — autocomplete shows every string, typos in keys compile | Drop the type annotation; keep a trailing `satisfies Record<string, Handler>` so the literal keys are preserved |
 | A `switch` whose `default` returns a fallback string | Replace with `assertNever`; the next variant becomes a compile error |
 | Two primitives aliased to the same `string` / `number` and passed interchangeably | Brand each one; the next swap fails to compile |
 | Route string `"/api/plans/" + id` typed as `string` | Template-literal-type the route; the concatenation now produces a typed value |

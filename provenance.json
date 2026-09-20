@@ -1300,15 +1300,15 @@
       "owned": true,
       "presentInTree": true,
       "origin": "native",
-      "note": "2026-09-20: First language-specific skill in the corpus, admitted on the bridge discipline — each pattern is the TS expression of a corpus-owned rule; the rule itself lives at the owner. Audited skills.sh top-10 TypeScript entries: this skill was admitted; four others (typescript-pro variants, vue-best-practices, nodejs-backend-patterns) were rejected as either already-owned or vendor-bound. Two patterns considered and refused: `satisfies` (no corpus owner), brand constructor at trust boundary (TS-only).",
+      "note": "2026-09-20: First language-specific skill in the corpus, admitted on the bridge discipline — each pattern is the TS expression of a corpus-owned rule; the rule itself lives at the owner. Audited skills.sh top-10 TypeScript entries: this skill was admitted; four others (typescript-pro variants, vue-best-practices, nodejs-backend-patterns) were rejected as either already-owned or vendor-bound. One pattern was initially refused and reconsidered: `satisfies` is owned by `modelling-domain-invariants` § \"Model what is true, not what is convenient\" — the principle that the type system should preserve what is true rather than widen it.",
       "decisions": [
-        "2026-09-20: refused `satisfies` pattern — `designing-component-systems` covers UI component APIs, not TS-type-narrowing; no corpus skill owns the principle behind literal-typed maps.",
-        "2026-09-20: refused brand constructor at trust boundary — `designing-idempotent-boundaries` covers duplicate delivery, not input validation; the cast-at-boundary principle is TS-only and has no corpus owner.",
+        "2026-09-20: admitted `satisfies` after re-audit — the principle (\"preserve the type that reflects what is true\") is owned by `modelling-domain-invariants` § \"Model what is true, not what is convenient\" (the nullable-column and conflation argument is the same shape).",
+        "2026-09-20: admitted brand constructor with `as Brand` cast in one validator function — `modelling-domain-invariants` § \"Put the invariant where it cannot be bypassed\" covers the input-side mirror of the schema-side principle.",
         "2026-09-20: dropped `hardening-rust-supply-chain` from body — it owns dependency hygiene (lockfile, advisories), not compile-time discipline; the cross-stack mapping would be incorrect."
       ],
       "files": {
         "SKILL.md": {
-          "sha256": "c86919dc5f44fe2c0d8601a16e546c9fc6f3086890bce4a5829abbac106f1f62"
+          "sha256": "748697b4ed0a306c6d3a19f77462215652221cae4513567b251fb7d1ad0f8849"
         },
         "examples/tsconfig.example.jsonc": {
           "sha256": "4cacfa78037865968ac623738950cdf378c7bfee35f1c642630955a9a11d78c5"

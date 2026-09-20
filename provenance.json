@@ -659,19 +659,19 @@
       "owned": true,
       "presentInTree": true,
       "origin": "native",
-      "note": "2026-09-20: Admitted as a re-written successor to ask-cli (caaf3a584f5edb81de687b91e2c45bdb054bfd1e). Same safety contract, fewer lines, no shell wrapper. The name changes from ask-cli to harness-bridge because the bridge is general-purpose — it invokes any sibling agent CLI under the contract, not just for \"second opinions.\" Three changes that drove the rewrite: (1) drop the bash wrapper in favour of `deno task run` so the entire skill is a single entry point plus one source file; (2) drop the per-CLI adapter files — claude and puku-cli accept the same argv shape, so a single buildCommand serves both and adding a new CLI is a one-line AGENTS map entry; (3) drop the dependency-injection orchestrator layer — the original carried 11 injected deps to test 14 small files; the rewrite is one source file (~400 lines) plus a test file. Safety contract preserved: --continue/-c rejected, --permission-mode plan always added, --fork-session forced on resume, repo-root enforcement on subject paths. agy and pi dropped because neither accepts the shared argv shape; re-admitting one would re-introduce the per-CLI branching the rewrite removed.",
+      "note": "2026-09-20: Admitted as a re-written successor to ask-cli (caaf3a584f5edb81de687b91e2c45bdb054bfd1e). Same safety contract, fewer lines, no shell wrapper. The name changes from ask-cli to harness-bridge because the bridge is general-purpose — it invokes any sibling agent CLI under the contract, not just for \"second opinions.\" Three changes that drove the rewrite: (1) drop the bash wrapper in favour of `deno task run` so the entire skill is a single entry point plus one source file; (2) drop the per-CLI adapter files — claude and puku-cli accept the same argv shape, so a single buildCommand serves both and adding a new CLI is a one-line AGENTS map entry; (3) drop the dependency-injection orchestrator layer — the original carried 11 injected deps to test 14 small files; the rewrite is one source file plus a test file. Safety contract preserved: --continue/-c rejected, --permission-mode plan always added, --fork-session forced on resume, repo-root enforcement on subject paths. agy and pi dropped because neither accepts the shared argv shape; re-admitting one would re-introduce the per-CLI branching. Updated 2026-09-20 (same day): collapsed `findRepoRoot` (git resolves refs from cwd, the walk-up was dead weight) and replaced the hand-rolled 52-line stream-reader in `gitDiff` with `Deno.Command.output()` plus JS string truncation (~15 lines). Main source file went from 480 → 364 lines. Added a SKILL.md pointer to using-git-worktrees for multi-turn / plan-then-implement flows; the worktree rule lives at the owner, not here.",
       "files": {
         "SKILL.md": {
-          "sha256": "b3b99358fb6775b5af86a35a4d45d81ad44f9c844caf375ee9c94a75358d3884"
+          "sha256": "fcceb433d8ed1396840b43c0e896ff87130297ba68f6b970ebdfce534cc859e1"
         },
         "deno.json": {
           "sha256": "84c5e729a02ba0237886ee3d3508592b16ff18315af5b6907c14b0444dafb3ca"
         },
         "src/main.ts": {
-          "sha256": "59b8d9e8a5d163b1c74395dff1415fd3468be8a3654c3d1ac073f2b884a78a03"
+          "sha256": "293141407231cbc04e83403aa689a4081513a299ad8ea87a8fa9ce1b1c7d0db4"
         },
         "src/main_test.ts": {
-          "sha256": "c3e04a4c2eed08d7080dcf7797fe9476be6a0fa6cd72c8c4e989ca7ee8766304"
+          "sha256": "9254e17572b6d0821c04e67a56e2ebf1d17fd16bf9df0b05c385be9fb1865d9d"
         }
       }
     },

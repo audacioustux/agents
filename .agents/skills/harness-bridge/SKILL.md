@@ -82,10 +82,21 @@ The CLI is considered supported if it accepts those flags.
 - `--dry-run` shows the argv shape with the prompt redacted by length only —
   the payload is never written.
 - Subject file reads are bounded to 20 KB.
-- `git diff` output is bounded to 1 MB; oversize output is SIGTERM-killed
-  and the truncation is marked in the prompt.
+- `git diff` output is bounded to 1 MB; oversize output is truncated in
+  place and the truncation is marked in the prompt.
 - The wrapper does not read session JSONL or rank prior sessions.
 - Treat child model output as a hint, not truth. Verify before changing code.
+
+## When to use a worktree
+
+`harness-bridge` is read-only by contract (`--permission-mode plan` is forced
+on every invocation), so it cannot damage the caller's working tree. For a
+single review, that is enough.
+
+For a **multi-turn session** (`--resume <id>` across commits), or a
+**plan-then-implement** flow where the sibling CLI is asked to draft a patch,
+isolate the work in a [`git worktree`](../using-git-worktrees/SKILL.md).
+The worktree rule lives there; this skill only flags the case.
 
 ## What this skill does NOT do
 

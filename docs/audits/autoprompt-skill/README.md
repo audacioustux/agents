@@ -10,16 +10,17 @@ Every contract in `agents/contracts/` — 7 hand-authored files plus the provide
 | Verdict | Count |
 |---|---|
 | reject | 5 |
-| adopt-rule | 3 |
+| adopt-rule (no-action) | 2 |
+| adopt-rule (landed) | 1 |
 | duplicate | 0 |
 | product-specific | 0 |
 | adopt-skill | 0 |
 
-All entries are `no-action` pending further investigation; the audit is **incomplete** because the three candidate `adopt-rule` rows require full reads of `routes.json`, `gates.json` + `state-machine.json`, and the conformance-evidence JSONs before they can land.
+One adopt-rule row has landed in `writing-plans/SKILL.md` (the nonSelectors discipline). The other two candidate `adopt-rule` rows are `no-action` pending full reads.
 
 | From | Into | Status |
 |---|---|---|
-| `contracts/routes.json` (no-fallback-route) | unresolved (verifying-before-completion vs new route-classification skill) | needs full read |
+| `contracts/routes.json` (nonSelectors — what does NOT trigger a plan) | writing-plans | landed |
 | `contracts/gates.json` + `state-machine.json` (freeze-before-check + non-resetting retry) | verifying-before-completion | needs full read |
 | `contracts/codex-live-conformance-evidence.json` + sibling (conformance-evidence refusal) | harness-bridge | needs full read |
 | `contracts/personas/` | — | reject (overlaps with existing skills) |
@@ -64,7 +65,10 @@ The cursor-plugins schema places the auditor on each row as an `audit` field. Th
 
 ## Next steps
 
-1. Read `routes.json` in full to resolve the destination for the no-fallback-route rule.
-2. Read `gates.json` AND `state-machine.json` in full to specify what "failure" means under non-resetting retry limits.
-3. Read `codex-live-conformance-evidence.json` to confirm the conformance-evidence rule generalises beyond stream-json and meets the harness-bridge bar.
-4. If all three resolve to clear adopt-rule destinations, file 3 PRs and update this ledger with `landedIn` SHAs.
+1. Read `gates.json` AND `state-machine.json` in full to specify what "failure" means under non-resetting retry limits.
+2. Read `codex-live-conformance-evidence.json` to confirm the conformance-evidence rule generalises beyond stream-json and meets the harness-bridge bar.
+3. If both resolve to clear adopt-rule destinations, file 2 PRs and update this ledger with `landedIn` SHAs.
+
+## What was adopted from routes.json
+
+The nonSelectors discipline (9 inputs that MUST NOT escalate the route on their own: file-count, repository-size, max-subs, available-agent-count, security-word-alone, refactor-word-alone, research-word-alone, one-failed-implementation, benchmark-label) was adopted into `writing-plans/SKILL.md` as a new "Not by themselves reasons to plan" section. The full routing system (23-input `routeFactsSchema`, 9-rule `precedenceTable`, `routeAnalyst` role with 120s time-limit, `runOwnerDecision` role with 240s time-limit, `capabilityRequirements` matrix) was rejected as inseparable from the autoprompt packaging model.

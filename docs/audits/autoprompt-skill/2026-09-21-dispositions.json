@@ -14,11 +14,12 @@
   "dispositions": {
     "agents/contracts/routes.json": {
       "disposition": "adopt-rule",
-      "status": "no-action",
-      "evidence": "directory listing confirmed; contents not yet read in full.",
-      "note": "adopt-rule: 'file count, repository size, failed attempt, or preference for more agents never selects a larger route'. The corpus's escalation rules are scattered (dispatching-parallel-agents for parallelism, brainstorming for option count, writing-plans for plan depth); no single rule refuses upward routing on those four signals. This is the most distinctive autoprompt rule — likely the strongest candidate for adoption.",
-      "destination": "unresolved",
-      "caveat": "destination owed. verifying-before-completion owns completion evidence; this rule is about route CLASSIFICATION, which is upstream. A new lightweight 'route-classification' skill may be the right home. Decide after reading routes.json in full."
+      "status": "landed",
+      "landedIn": "writing-plans/SKILL.md 'Not by themselves reasons to plan' section (SHA recorded in provenance.json decisions.source-rejections-autoprompt-skill)",
+      "evidence": "Full file read at SHA b6516cf52a7891d797621fdd2a8ca0311e1ae0a9. The contract's `nonSelectors` field lists 9 inputs that MUST NOT escalate the route on their own: file-count, repository-size, max-subs, available-agent-count, security-word-alone, refactor-word-alone, research-word-alone, one-failed-implementation, benchmark-label. The round-1 verdict named 4 of these; the other 5 (max-subs, security-word-alone, refactor-word-alone, research-word-alone, benchmark-label) are not corpus duplicates either. The full 9 are the rule, not 4.",
+      "note": "adopt-rule (partial): the corpus adopts the nonSelectors discipline — what does NOT trigger a plan — but NOT the rest of routes.json (23-input routeFactsSchema, 9-rule precedenceTable, routeAnalyst role, runOwnerDecision role, capabilityRequirements matrix). Those are a complete routing system; adopting any of them requires adopting the system. The nonSelectors list is mechanically separable: it is 9 short labels plus a one-line rule naming them, and it has no dependency on the schema or operator language. Destination resolved to writing-plans (NOT a new route-classification skill): the rule is about what does not justify a plan, which is the inverse of writing-plans' existing Scope Check (what DOES justify one). Adding a new skill for one rule introduces an abstraction with no other call sites.",
+      "destination": "writing-plans",
+      "caveat": "Two corollary risks are not yet covered by the autoprompt rule itself but were added to the writing-plans section: (a) the rule must be read alongside, not instead of, writing-plans' existing 'if the spec covers multiple independent subsystems, suggest breaking this into separate plans' — the two are complementary (don't escalate UP just because inputs look big; DO escalate DOWN when the spec actually spans independent subsystems); (b) the rule does NOT apply when one of the listed inputs co-occurs with a real dependency signal (e.g., a large file count plus proven dependency counts as ROADMAP, not DIRECT). The writing-plans prose states both clarifications. If a future audit finds either clarification wrong, the rule should be revisited, not deleted."
     },
     "agents/contracts/gates.json + state-machine.json (freeze-before-check + non-resetting retry)": {
       "disposition": "adopt-rule",
@@ -74,13 +75,13 @@
     "duplicate": 0,
     "reject": 5,
     "product-specific": 0,
-    "unresolved": 1
+    "landed": 1,
+    "unresolved": 0
   },
   "next_steps": [
-    "Read agents/contracts/routes.json in full to resolve the destination for the no-fallback-route rule (verifying-before-completion vs new route-classification skill).",
     "Read agents/contracts/gates.json AND state-machine.json in full to specify what 'failure' means under non-resetting retry limits.",
     "Read agents/contracts/codex-live-conformance-evidence.json to confirm the conformance-evidence rule generalises beyond stream-json and meets the harness-bridge bar.",
-    "If all three resolve to clear adopt-rule destinations, file 3 PRs targeting verifying-before-completion, harness-bridge, and one new skill (route-classification). Update this ledger with landedIn SHAs."
+    "If those two resolve to clear adopt-rule destinations, file 2 PRs targeting verifying-before-completion and harness-bridge. Update this ledger with landedIn SHAs."
   ],
   "reviewer_trail": [
     {

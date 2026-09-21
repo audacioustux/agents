@@ -385,14 +385,16 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "2f44c121e7d09fca06209dedbdcec6a94631b4e4e444ee14f7459a112ba719f9",
+          "sha256": "d4f0f9c1cacc0c7b7664acec163a4e79cef7a0f8d58e4130b945c5373f0c8945",
           "upstream": {
             "status": "diverged",
             "sha256": "1968923066f3b707eb01d1992cdf4c42284c3855f70253b9cd5000ff45fca13c"
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-09-21: trimmed two restated-facts sections in SKILL.md (205 -> 189 LOC, -7.8%). Deleted ## Key Benefits (restated Core principle in four positive-form bullets: Parallelization, Focus, Independence, Speed — all already asserted by 'Dispatch one agent per independent problem domain. Let them work concurrently'). Deleted ## Real-World Impact (same 2025-10-03 6-failure / 3-file / 3-agent scenario as ## Real Example from Session immediately above, with the same integration outcome). An initial broader pass also removed ## Common Mistakes (Bad/Good pairs as concrete contrast examples — not restatement), ## Verification (the 'Spot check' line is load-bearing for parallel-agent bias), and ## Overview (split Core principle from context-isolation hand-off to subagent-driven-development); reviewer correctly flagged those as load-bearing, not duplication. Reverted to main and applied only the two unambiguous cuts."
+      ],
       "rationale": "core workflow skill, locally modified",
       "owned": true
     },

@@ -27,22 +27,14 @@ and every file reference against the actual tree before engaging with any
 argument. Mixing the two is how a reviewer spends an hour on a design debate
 premised on a count that was wrong.
 
-There is a strong pattern in how these claims fail, and it shapes what to look
-for:
-
-**Wrong counts are almost never invented. They are stale, or scoped differently
-than the reader assumes.** Someone measured accurately weeks ago against a tree
-that has since moved, or measured a subdirectory while the sentence implies the
-repository.
-
-Neither failure is carelessness, and neither is fixed by measuring more carefully
-— the number will drift again. The fix is provenance: **every measured number
-carries the date it was taken and the command that produced it.** A stale number
-with its command attached is re-runnable and self-correcting. A bare number is a
-claim the reader must either trust or re-derive from scratch.
-
-The same applies to a count describing the document that contains it. A file that
-states its own length is stale on the next edit, and the reader has no way to know.
+Wrong counts are almost never invented. They are stale, or scoped differently
+than the reader assumes — measured weeks ago against a tree that has since
+moved, or measured a subdirectory while the sentence implies the repository.
+The fix is provenance: **every measured number carries the date it was taken and
+the command that produced it.** A stale number with its command attached is
+re-runnable and self-correcting; a bare number is a claim the reader must either
+trust or re-derive from scratch. A file that states its own length is stale on
+the next edit, and the reader has no way to know.
 
 ## Separate what was measured from what was decided
 
@@ -60,9 +52,8 @@ proposals. Implementers cannot tell which statements they are allowed to
 contradict with evidence.
 
 Keep them visibly distinct, and when a proposal is settled, record where it was
-settled. A proposal quietly rewritten as a ruling has no decision behind it that
-anyone can find, so the next person to disagree reopens it — and neither of them
-can tell whether it was ever actually decided.
+settled — a proposal quietly rewritten as a ruling has no decision behind it
+anyone can find.
 
 ## What a document set drifts into
 
@@ -126,10 +117,8 @@ added later behind a seam that already exists?**
 Both halves matter. Unjustified cost alone does not license removal if adding it
 back later means restructuring. A clean seam alone does not justify keeping
 something nobody has asked for. Together they identify what to cut now and
-reintroduce when demand is real rather than anticipated.
-
-Record what was cut and why. Otherwise the same mechanism is proposed again next
-round, and the argument runs from the start.
+reintroduce when demand is real rather than anticipated. Record what was cut
+and why, or the same mechanism is proposed again next round.
 
 ## Review checklist
 

@@ -952,9 +952,12 @@
       "note": "2026-09-11: extracted from the tickify-v4 design corpus (30 files, 1.9MB, four review rounds) by four parallel readers against a four-part portability test — vendor-free, falsifiable, non-obvious, not already owned. 74 candidates, 30 survived. Every rule verified verbatim against its source before adoption.",
       "files": {
         "SKILL.md": {
-          "sha256": "eb1c43a5729554429d4bed6bd5d4c226146f6f8f1ee94f8b727ac91c3be9a955"
+          "sha256": "e17ad88ef212ee67c0a73271c1a989837530fae369f590815190f1125286639f"
         }
-      }
+      },
+      "decisions": [
+        "2026-09-21: trimmed SKILL.md (145 → 134 LOC, -11, -8%). The 'Verify the numbers' section had a three-paragraph expansion of one rule — the 'wrong counts are stale' lesson was stated at the top, then justified and re-stated across three paragraphs; collapsed to a single paragraph that keeps the load-bearing provenance rule and the 'a file that states its own length is stale' example. The closing paragraph of 'Separate what was measured' restated the visible-distinctness rule in negative form ('next person reopens it — neither can tell'); collapsed. The closing line of 'Simplification' restated 'record what was cut and why'; merged into the preceding sentence. No content loss; the checklist already carries the trimmed prescriptions."
+      ]
     },
     "reviewing-for-bloat": {
       "disposition": "keep-as-is",

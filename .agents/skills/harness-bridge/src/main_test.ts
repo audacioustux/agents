@@ -263,3 +263,69 @@ Deno.test("chooseDelivery keeps a small ASCII prompt on argv", () => {
   assertEquals(chooseDelivery("x".repeat(100_000)), "argv");
   assertEquals(chooseDelivery("x".repeat(200_000)), "stdin");
 });
+
+Deno.test("buildCommand omp uses --approval-mode always-ask and rejects resume", () => {
+  const cmd = buildCommand({
+    agent: "omp",
+    mode: "ask",
+    prompt: "hello",
+    newSessionId: "ignored",
+    stamp,
+    cwd: "/tmp",
+  }, "argv");
+  assertEquals(cmd.bin, "omp");
+  assertEquals(cmd.args.slice(0, 3), ["-p", "--approval-mode", "always-ask"]);
+  assertEquals(cmd.args.includes("--fork-session"), false);
+  assertEquals(cmd.args.includes("--session-id"), false);
+  assertEquals(cmd.args.includes("--permission-mode"), false);
+  assertEquals(cmd.args[cmd.args.length - 1], "hello");
+  assertEquals(cmd.envelope, null);
+});
+
+Deno.test("buildCommand omp refuses resume rather than extending the prior session", () => {
+  assertThrows(
+    () =>
+      buildCommand({
+        agent: "omp",
+        mode: "ask",
+        prompt: "hello",
+        resume: "abc",
+        newSessionId: "ignored",
+        stamp,
+        cwd: "/tmp",
+      }, "argv"),
+    Error,
+    "no --fork-session",
+  );
+});
+
+Deno.test("buildCommand omp refuses stdin delivery", () => {
+  const big = "x".repeat(200 * 1024);
+  assertThrows(
+    () =>
+      buildCommand({
+        agent: "omp",
+        mode: "ask",
+        prompt: big,
+        newSessionId: "ignored",
+        stamp,
+        cwd: "/tmp",
+      }, "stdin"),
+    Error,
+    "stdin support",
+  );
+});
+
+Deno.test("buildCommand omp threads --model through", () => {
+  const cmd = buildCommand({
+    agent: "omp",
+    mode: "ask",
+    prompt: "hello",
+    newSessionId: "ignored",
+    model: "opus",
+    stamp,
+    cwd: "/tmp",
+  }, "argv");
+  assertEquals(cmd.args.includes("--model"), true);
+  assertEquals(cmd.args[cmd.args.indexOf("--model") + 1], "opus");
+});

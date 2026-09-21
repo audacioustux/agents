@@ -6,7 +6,31 @@ import { parseArgs } from "jsr:@std/cli@1/parse-args";
 // `--input-format stream-json --replay-user-messages` with a single
 // user-message envelope. Missing it means large reviews hard-fail
 // rather than silently hanging on stdin.
-const AGENTS = {
+//
+// `build` is an optional per-CLI argv translator. When present it owns
+// the full argv shape and is responsible for honoring the shared contract
+// (read-only mode, fork-on-resume, prompt delivery). Use it when a CLI's
+// argv shape differs from the shared one; omit it to inherit the default
+// builder below.
+type ContractArgv = {
+  prompt: string;
+  model?: string;
+  name: string;
+  resume?: string;
+  sessionId?: string;
+  delivery: "argv" | "stdin";
+  envelope: string | null;
+};
+
+type AgentSpec = {
+  bin: string;
+  identity: string;
+  name: (mode: string, stamp: string) => string;
+  stdin: boolean;
+  build?: (c: ContractArgv) => string[];
+};
+
+const AGENTS: { [k: string]: AgentSpec } = {
   claude: {
     bin: "claude",
     identity: "You are Claude",
@@ -18,6 +42,36 @@ const AGENTS = {
     identity: "You are Puku",
     name: (mode: string, stamp: string) => `harness-bridge-puku-${mode}-${stamp}`,
     stdin: true,
+  },
+  // omp (oh-my-pi) has a different argv surface: no `--name`,
+  // `--fork-session`, `--session-id`, or stream-json input. The hook
+  // translates the shared contract into omp's vocabulary and rejects
+  // resume (omp has no fork primitive, so extending a prior session
+  // is the only option — refuse rather than silently bypass).
+  omp: {
+    bin: "omp",
+    identity: "You are OMP",
+    name: (mode: string, stamp: string) => `harness-bridge-omp-${mode}-${stamp}`,
+    stdin: false,
+    build: (c: ContractArgv) => {
+      const args = ["-p", "--approval-mode", "always-ask"];
+      if (c.delivery === "stdin") {
+        throw new Error(
+          "omp does not declare stdin support; large prompts cannot be delivered. " +
+            'Run with a smaller prompt, or set AGENTS["omp"].stdin = true after ' +
+            "verifying omp accepts --input-format stream-json.",
+        );
+      }
+      if (c.resume) {
+        throw new Error(
+          `omp has no --fork-session; resume would extend the prior session. ` +
+            `Pass --fresh, or call \`omp --resume ${c.resume} --no-session\` directly.`,
+        );
+      }
+      if (c.model) args.push("--model", c.model);
+      args.push(c.prompt);
+      return args;
+    },
   },
 } as const;
 
@@ -165,6 +219,22 @@ export function buildCommand(p: CommandShared, delivery: "argv"): DeliveryArgv;
 export function buildCommand(p: CommandShared, delivery: "stdin"): DeliveryStdin;
 export function buildCommand(p: CommandShared, delivery: "argv" | "stdin"): Built {
   const a = AGENTS[p.agent];
+  // Per-CLI hook (e.g. omp) owns its own argv shape and contract.
+  if (a.build) {
+    const envelope = delivery === "stdin"
+      ? JSON.stringify({ type: "user", message: { role: "user", content: p.prompt } }) + "\n"
+      : null;
+    const args = a.build({
+      prompt: p.prompt,
+      model: p.model,
+      name: a.name(p.mode, p.stamp),
+      resume: p.resume,
+      sessionId: p.resume ? undefined : (p.newSessionId || undefined),
+      delivery,
+      envelope,
+    });
+    return { bin: a.bin, args, cwd: p.cwd, envelope };
+  }
   const args = ["-p", "--permission-mode", "plan"];
   if (delivery === "stdin") {
     args.push(

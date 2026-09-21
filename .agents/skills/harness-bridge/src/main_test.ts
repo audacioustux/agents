@@ -299,21 +299,24 @@ Deno.test("buildCommand omp refuses resume rather than extending the prior sessi
   );
 });
 
-Deno.test("buildCommand omp refuses stdin delivery", () => {
+Deno.test("buildCommand omp refuses stdin delivery at the contract layer", () => {
   const big = "x".repeat(200 * 1024);
-  // Stdin is caught by the runtime guard (useStdin && !AGENTS[agent].stdin)
-  // in run(), not by the build hook. The hook's role is to refuse resume.
-  // This test pins that the hook itself doesn't silently accept stdin.
-  const cmd = buildCommand({
-    agent: "omp",
-    mode: "ask",
-    prompt: big,
-    newSessionId: "ignored",
-    stamp,
-    cwd: "/tmp",
-  }, "stdin");
-  assertEquals(cmd.bin, "omp");
-  assertEquals(cmd.args.slice(0, 3), ["-p", "--approval-mode", "always-ask"]);
+  // The omp hook enforces stdin rejection itself, not just the runtime
+  // guard in run(). Calling buildCommand("omp", "stdin") directly must
+  // throw — the contract applies at the contract layer.
+  assertThrows(
+    () =>
+      buildCommand({
+        agent: "omp",
+        mode: "ask",
+        prompt: big,
+        newSessionId: "ignored",
+        stamp,
+        cwd: "/tmp",
+      }, "stdin"),
+    Error,
+    "stdin delivery is not supported",
+  );
 });
 
 Deno.test("buildCommand omp threads --model through", () => {
@@ -361,4 +364,46 @@ Deno.test("omp dry-run produces argv that the live binary accepts", async () => 
   assertEquals(json.command[3], "always-ask");
   // Prompt must be redacted — never leaked to stdout, even at --dry-run.
   assertEquals(json.command.some((a: string) => a.includes("should not call a real model")), false);
+});
+
+// Pin the --no-session escape hatch: the bridge advertises this flag in
+// its --resume error message, so the live omp binary must still expose
+// it. Catches a renamed-flag regression between omp releases.
+Deno.test("omp --help still advertises --no-session (escape hatch)", async () => {
+  const which = await new Deno.Command("which", { args: ["omp"], stdout: "piped" })
+    .output();
+  if (which.code !== 0) return;
+  const help = await new Deno.Command("omp", { args: ["--help"], stdout: "piped" }).output();
+  const text = new TextDecoder().decode(help.stdout);
+  assertStringIncludes(text, "--no-session");
+});
+
+// Pin --model placement: invoke omp with the argv the bridge produces and
+// assert exit 0. Catches a regression where omp stops accepting the flag
+// or rejects the order produced by the bridge.
+Deno.test("omp accepts --model opus in the bridge's argv position", async () => {
+  const which = await new Deno.Command("which", { args: ["omp"], stdout: "piped" })
+    .output();
+  if (which.code !== 0) return;
+  const out = await new Deno.Command(Deno.execPath(), {
+    args: [
+      "run",
+      "-A",
+      "--no-config",
+      "src/main.ts",
+      "omp",
+      "ask",
+      "model smoke — should not call a real model in --dry-run",
+      "--model",
+      "opus",
+      "--dry-run",
+    ],
+    cwd: new URL("..", import.meta.url).pathname,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(out.code, 0);
+  const json = JSON.parse(new TextDecoder().decode(out.stdout));
+  assertEquals(json.command.includes("--model"), true);
+  assertEquals(json.command[json.command.indexOf("--model") + 1], "opus");
 });

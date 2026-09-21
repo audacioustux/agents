@@ -15,7 +15,7 @@ import { parseArgs } from "jsr:@std/cli@1/parse-args";
 type ContractArgv = {
   prompt: string;
   model?: string;
-  name: string;
+  name?: string;
   resume?: string;
   sessionId?: string;
   delivery: "argv" | "stdin";
@@ -30,26 +30,29 @@ type AgentSpec = {
   build?: (c: ContractArgv) => string[];
 };
 
-const AGENTS: { [k: string]: AgentSpec } = {
+const AGENTS = {
   claude: {
     bin: "claude",
     identity: "You are Claude",
     name: (mode: string, stamp: string) => `harness-bridge-claude-${mode}-${stamp}`,
     stdin: true,
+    build: undefined as undefined | ((c: ContractArgv) => string[]),
   },
   "puku-cli": {
     bin: "puku-cli",
     identity: "You are Puku",
     name: (mode: string, stamp: string) => `harness-bridge-puku-${mode}-${stamp}`,
     stdin: true,
+    build: undefined as undefined | ((c: ContractArgv) => string[]),
   },
   // omp (oh-my-pi) has a different argv surface: no `--name`,
   // `--fork-session`, `--session-id`, or stream-json input. The hook
   // translates the shared contract into omp's vocabulary and refuses
   // resume (omp has no fork primitive, so extending a prior session
-  // would silently bypass the safety contract). stdin delivery is
-  // caught earlier by the runtime guard via `stdin: false`; the hook
-  // does not need to re-check it.
+  // would silently bypass the safety contract) and stdin delivery
+  // (omp has no stream-json analogue; the runtime guard would catch
+  // it, but the hook enforces at the contract layer for defence in
+  // depth).
   //
   // Note: `--approval-mode always-ask` is *approval-gated*, not
   // read-only. omp has no equivalent of claude's `--permission-mode
@@ -61,10 +64,19 @@ const AGENTS: { [k: string]: AgentSpec } = {
     stdin: false,
     build: (c: ContractArgv) => {
       const args = ["-p", "--approval-mode", "always-ask"];
+      if (c.delivery !== "argv") {
+        throw new Error(
+          "omp has no --input-format stream-json; stdin delivery is not supported. " +
+            "Shrink the prompt below PROMPT_ARGV_LIMIT_BYTES (128 KB).",
+        );
+      }
       if (c.resume) {
-        // Escape control chars so a hostile --resume value cannot
-        // forge log lines via \r\n injection.
-        const safe = c.resume.replace(/[\r\n\t]/g, " ");
+        // Strip all ASCII control chars (including ESC, FF, VT, DEL) so
+        // a hostile --resume value cannot forge log lines or terminal
+        // escapes via interpolation. The control-char regex is
+        // intentional; deno-lint disable-next-line no-control-regex.
+        // deno-lint-ignore no-control-regex
+        const safe = c.resume.replace(/[\x00-\x1f\x7f]/g, " ");
         throw new Error(
           `omp has no --fork-session; resume would extend the prior session. ` +
             `Pass --fresh, or call \`omp --resume ${safe} --no-session\` directly ` +
@@ -76,7 +88,7 @@ const AGENTS: { [k: string]: AgentSpec } = {
       return args;
     },
   },
-} as const;
+} satisfies Record<string, AgentSpec>;
 
 type AgentId = keyof typeof AGENTS;
 const MODES = ["ask", "plan", "adversarial", "review"] as const;

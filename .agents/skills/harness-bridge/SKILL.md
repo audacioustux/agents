@@ -107,7 +107,7 @@ gaps](#contract-gaps) for the per-CLI exception list.
 |---|---|---|---|
 | `claude` | `--permission-mode plan` | `--resume <id> --fork-session` | `--input-format stream-json --replay-user-messages` |
 | `puku-cli` | `--permission-mode plan` | `--resume <id> --fork-session` | `--input-format stream-json --replay-user-messages` |
-| `omp` | `--approval-mode always-ask` | **rejected** (no fork primitive; see [Contract gaps](#contract-gaps)) | **rejected** (no stream-json; large prompts must use argv or `--extra` chunks) |
+| `omp` | `--approval-mode always-ask` (approval-gated, not read-only — see [Contract gaps](#contract-gaps)) | **rejected** (no fork primitive) | **rejected** (no stream-json) |
 
 `claude` and `puku-cli` share the same argv shape, so they go through
 the bridge's default builder. `omp` uses a per-CLI argv hook
@@ -144,10 +144,11 @@ rather than approximated:
   `omp has no --fork-session; resume would extend the prior session` and
   points at `omp --resume <id> --no-session` for callers who want the
   unsafe path explicitly (and accept the fork-on-resume gap).
-- **Large prompts are rejected.** omp does not declare stdin support, so
-  the bridge refuses to fall back to argv once the prompt exceeds
-  128 KB. The caller must shrink the prompt (or pipe it via `--extra`
-  chunks in separate bridge calls).
+- **Large prompts are rejected outright.** omp does not declare stdin
+  support, so the bridge refuses to fall back to argv once the prompt
+  exceeds 128 KB. The caller must shrink the prompt (or pipe it via
+  `--extra` chunks in separate bridge calls — `--extra` itself has no
+  helper, callers split manually).
 - **Read-only is approval-gated, not capability-gated.** omp has no
   equivalent of `--permission-mode plan`. The bridge pins
   `--approval-mode always-ask`, which forces the user to approve each

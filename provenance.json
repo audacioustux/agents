@@ -1535,7 +1535,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "fd9cd74934cb91f7c7ffbf4c90aefb8ab9c6933b001bc3a27de8f8484382c933",
+          "sha256": "c534d441f73f5e12c2142e0dda2c3a2c051f3e96119a87b4657840fefcfe3f6a",
           "upstream": {
             "status": "diverged",
             "sha256": "48508f44bbfd7d24b029fbf3a314f3cd14c9615599059366e922f47b8dc08cf2"

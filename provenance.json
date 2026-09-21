@@ -1,7 +1,7 @@
 {
   "version": 1,
   "note": "Provenance for consolidated agent skills. Maintenance metadata only - never loaded by agents. sha256 = plain SHA-256 of file bytes. Skills marked owned:true live in .agents/skills/ of this repo; their `upstream` block records what they were forked from and at which SHA, for periodic re-merge under human judgement.",
-  "captured": "2026-09-06",
+  "captured": "2026-09-20",
   "upstreams": {
     "obra/superpowers": {
       "sha": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
@@ -115,21 +115,14 @@
           }
         },
         "scripts/frame-template.html": {
-          "sha256": "fb22ba9d47f3b83b56e0a95d52a3c2727db03b0d4365078d92c850293a62457b",
+          "sha256": "314ccd688b5647f0cae9cb86e59615145875307eca5480fdb5416e39da4e9b4f",
           "upstream": {
             "status": "diverged",
             "sha256": "6a8a4e58bd6a44b904e2e3c57de774481d909204597e1498de53f1b2fecc4c4e"
           }
         },
-        "scripts/helper.js": {
-          "sha256": "e763d82f32b4ebb320be2f0d08449d3e5a0585778edf5c407c1fdab3f39976a5",
-          "upstream": {
-            "status": "diverged",
-            "sha256": "43c6d69954a46ec34a2a262bcc62a9a7e83e839c739f199cb72646d397c686e3"
-          }
-        },
         "scripts/server.cjs": {
-          "sha256": "6785a3f3c38fa0fe243167d69a6b82aa3f7e4351c75d682424e562745fe0ec63",
+          "sha256": "6cfa4a26cf3814747eb5a9438272c13a8a0c6105a18dace5ce90ee5a3f435e8e",
           "upstream": {
             "status": "diverged",
             "sha256": "2d2961ea8d11f56c5f4c3a1a68d22709efa5d7601a2246d8c880774e7e9e8412"
@@ -151,7 +144,8 @@
         }
       },
       "decisions": [
-        "2026-09-10: recovered three safety mechanisms the corpus fork never adopted from obra/superpowers — per-session token auth (?key= plus HttpOnly SameSite=Strict cookie, timing-safe compare, 403 + forbidden page, 0o600 token file, refusal to rebind when BRAINSTORM_TOKEN is explicit), a 10 MiB WebSocket frame cap, and PID instance-identity in stop-server.sh. The corpus server honours BRAINSTORM_HOST, so a non-loopback bind was previously unauthenticated. Branding, telemetry and version pinning stay removed. Verified live: correct key 200, no key 403, wrong key 403, cookie-only 200; stale PID left alive with status stale_pid; real server stopped cleanly."
+        "2026-09-10: recovered three safety mechanisms the corpus fork never adopted from obra/superpowers — per-session token auth (?key= plus HttpOnly SameSite=Strict cookie, timing-safe compare, 403 + forbidden page, 0o600 token file, refusal to rebind when BRAINSTORM_TOKEN is explicit), a 10 MiB WebSocket frame cap, and PID instance-identity in stop-server.sh. The corpus server honours BRAINSTORM_HOST, so a non-loopback bind was previously unauthenticated. Branding, telemetry and version pinning stay removed. Verified live: correct key 200, no key 403, wrong key 403, cookie-only 200; stale PID left alive with status stale_pid; real server stopped cleanly.",
+        "2026-09-20: replaced the hand-rolled RFC 6455 WebSocket in scripts/server.cjs with HTTP primitives. Two client flows now use platform primitives: form-POST to /event (handled by navigator.sendBeacon in the inline script; survives page reloads that WebSocket.send did not) and Server-Sent Events on /events (text/event-stream; no framing, masking, opcodes, or ping/pong). scripts/helper.js was deleted — its 88 LOC existed entirely to talk to the WebSocket; the 30 LOC of click-capture and selection-tracking logic moved into an inline <script> at the bottom of scripts/frame-template.html. The frame template lost its inline mockup primitives (.mockup, .mock-nav, .split, .pros-cons) — agent-generated content rarely used them, and when needed it inlines the styles. Net: scripts/ from ~811 LOC to ~556 LOC. All existing safety contracts preserved (token auth via ?key= and HttpOnly cookie, DNS-rebinding defense, owner-PID + idle-timeout shutdown, EADDRINUSE fallback, server-info + server-stopped state files). Verified live: GET / 403/200, POST /event 200/413/400, SSE data:reload broadcast on fs.watch fire."
       ],
       "rationale": "diverged both ways; 5 hardcoded .superpowers/brainstorm paths to fix",
       "owned": true

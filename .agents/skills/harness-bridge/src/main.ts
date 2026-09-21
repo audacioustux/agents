@@ -45,9 +45,15 @@ const AGENTS: { [k: string]: AgentSpec } = {
   },
   // omp (oh-my-pi) has a different argv surface: no `--name`,
   // `--fork-session`, `--session-id`, or stream-json input. The hook
-  // translates the shared contract into omp's vocabulary and rejects
+  // translates the shared contract into omp's vocabulary and refuses
   // resume (omp has no fork primitive, so extending a prior session
-  // is the only option — refuse rather than silently bypass).
+  // would silently bypass the safety contract). stdin delivery is
+  // caught earlier by the runtime guard via `stdin: false`; the hook
+  // does not need to re-check it.
+  //
+  // Note: `--approval-mode always-ask` is *approval-gated*, not
+  // read-only. omp has no equivalent of claude's `--permission-mode
+  // plan`; the model can still write if the user approves each call.
   omp: {
     bin: "omp",
     identity: "You are OMP",
@@ -55,17 +61,14 @@ const AGENTS: { [k: string]: AgentSpec } = {
     stdin: false,
     build: (c: ContractArgv) => {
       const args = ["-p", "--approval-mode", "always-ask"];
-      if (c.delivery === "stdin") {
-        throw new Error(
-          "omp does not declare stdin support; large prompts cannot be delivered. " +
-            'Run with a smaller prompt, or set AGENTS["omp"].stdin = true after ' +
-            "verifying omp accepts --input-format stream-json.",
-        );
-      }
       if (c.resume) {
+        // Escape control chars so a hostile --resume value cannot
+        // forge log lines via \r\n injection.
+        const safe = c.resume.replace(/[\r\n\t]/g, " ");
         throw new Error(
           `omp has no --fork-session; resume would extend the prior session. ` +
-            `Pass --fresh, or call \`omp --resume ${c.resume} --no-session\` directly.`,
+            `Pass --fresh, or call \`omp --resume ${safe} --no-session\` directly ` +
+            `(fork-on-resume gap is your responsibility).`,
         );
       }
       if (c.model) args.push("--model", c.model);

@@ -301,19 +301,19 @@ Deno.test("buildCommand omp refuses resume rather than extending the prior sessi
 
 Deno.test("buildCommand omp refuses stdin delivery", () => {
   const big = "x".repeat(200 * 1024);
-  assertThrows(
-    () =>
-      buildCommand({
-        agent: "omp",
-        mode: "ask",
-        prompt: big,
-        newSessionId: "ignored",
-        stamp,
-        cwd: "/tmp",
-      }, "stdin"),
-    Error,
-    "stdin support",
-  );
+  // Stdin is caught by the runtime guard (useStdin && !AGENTS[agent].stdin)
+  // in run(), not by the build hook. The hook's role is to refuse resume.
+  // This test pins that the hook itself doesn't silently accept stdin.
+  const cmd = buildCommand({
+    agent: "omp",
+    mode: "ask",
+    prompt: big,
+    newSessionId: "ignored",
+    stamp,
+    cwd: "/tmp",
+  }, "stdin");
+  assertEquals(cmd.bin, "omp");
+  assertEquals(cmd.args.slice(0, 3), ["-p", "--approval-mode", "always-ask"]);
 });
 
 Deno.test("buildCommand omp threads --model through", () => {
@@ -328,4 +328,37 @@ Deno.test("buildCommand omp threads --model through", () => {
   }, "argv");
   assertEquals(cmd.args.includes("--model"), true);
   assertEquals(cmd.args[cmd.args.indexOf("--model") + 1], "opus");
+});
+
+// Smoke test the omp argv shape against the live binary. Skipped when omp
+// is not on PATH so the test suite stays portable across dev environments.
+Deno.test("omp dry-run produces argv that the live binary accepts", async () => {
+  const which = await new Deno.Command("which", { args: ["omp"], stdout: "piped" })
+    .output();
+  if (which.code !== 0) return; // omp not installed — skip silently
+
+  const out = await new Deno.Command(Deno.execPath(), {
+    args: [
+      "run",
+      "-A",
+      "--no-config",
+      "src/main.ts",
+      "omp",
+      "ask",
+      "smoke test — should not call a real model in --dry-run",
+      "--dry-run",
+    ],
+    cwd: new URL("..", import.meta.url).pathname,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(out.code, 0);
+  const json = JSON.parse(new TextDecoder().decode(out.stdout));
+  assertEquals(json.agent, "omp");
+  assertEquals(json.command[0], "omp");
+  assertEquals(json.command[1], "-p");
+  assertEquals(json.command[2], "--approval-mode");
+  assertEquals(json.command[3], "always-ask");
+  // Prompt must be redacted — never leaked to stdout, even at --dry-run.
+  assertEquals(json.command.some((a: string) => a.includes("should not call a real model")), false);
 });

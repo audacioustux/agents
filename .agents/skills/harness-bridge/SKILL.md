@@ -58,10 +58,13 @@ The wrapper rejects or forces the following at parse time:
 
 - `--continue` and `-c` are **rejected**. They resume the most recent session
   globally, ignoring the current repo. Use `--resume <id>`.
-- `--permission-mode plan` is **always added** for `claude` and `puku-cli`;
-  `omp` is forced into `--approval-mode always-ask` instead. Each CLI's
-  read-only mode is pinned in its `AGENTS` entry — without it the model
-  can write to the repo.
+- `--permission-mode plan` is **always added** for `claude` and `puku-cli`
+  (read-only by capability — the model cannot write). `omp` has no
+  read-only mode; it is forced into `--approval-mode always-ask` instead,
+  which is **approval-gated** (the user must approve every tool call)
+  but the model is still *capable* of writing if the user approves. This
+  is a permanent gap in omp's argv surface — there is no `plan` analogue.
+  See [Contract gaps](#contract-gaps).
 - `--resume <id>` always adds `--fork-session` for the CLIs that support
   it (`claude`, `puku-cli`). `omp` has no fork primitive and is refused
   for resume — see [Contract gaps](#contract-gaps).
@@ -132,18 +135,26 @@ degrading.
 ### Contract gaps
 
 `omp` is a first-class CLI but its argv surface is narrower than the
-shared contract, so two behaviours are refused rather than approximated:
+shared contract, so the following behaviours are refused or downgraded
+rather than approximated:
 
 - **`--resume` is rejected.** omp has no `--fork-session` flag and no
   `--session-id` flag; `--resume <id>` extends the prior session. Forcing
   a fresh session is the only safe path here. The bridge refuses with
   `omp has no --fork-session; resume would extend the prior session` and
   points at `omp --resume <id> --no-session` for callers who want the
-  unsafe path explicitly.
+  unsafe path explicitly (and accept the fork-on-resume gap).
 - **Large prompts are rejected.** omp does not declare stdin support, so
   the bridge refuses to fall back to argv once the prompt exceeds
   128 KB. The caller must shrink the prompt (or pipe it via `--extra`
   chunks in separate bridge calls).
+- **Read-only is approval-gated, not capability-gated.** omp has no
+  equivalent of `--permission-mode plan`. The bridge pins
+  `--approval-mode always-ask`, which forces the user to approve each
+  tool call but does not prevent the model from writing if the user
+  approves. For tasks where the *capability* must be removed (e.g. unat-
+  tended review of an untrusted repo), use `claude` or `puku-cli`; for
+  attended review, `omp` is sufficient.
 
 ## Privacy
 
@@ -157,12 +168,12 @@ shared contract, so two behaviours are refused rather than approximated:
 
 ## When to use a worktree
 
-`harness-bridge` is read-only by contract (each CLI's read-only mode is
-forced on every invocation — `--permission-mode plan` for `claude` and
-`puku-cli`, `--approval-mode always-ask` for `omp`), so it cannot damage
-the caller's working tree. For a single review, that is enough.
-
-For a **multi-turn session** (`--resume <id>` across commits), or a
+`harness-bridge` is read-only by *capability* for `claude` and
+`puku-cli` (the model cannot write to the repo), and approval-gated for
+`omp` (every tool call must be approved by the user — the model is
+*capable* of writing). The wrapper itself does not touch files, so a
+single review against the caller's tree is safe in either mode. For a
+**multi-turn session** (`--resume <id>` across commits), or a
 **plan-then-implement** flow where the sibling CLI is asked to draft a patch,
 isolate the work in a [`git worktree`](../using-git-worktrees/SKILL.md).
 The worktree rule lives there; this skill only flags the case.

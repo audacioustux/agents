@@ -76,6 +76,7 @@
     "reject": 5,
     "product-specific": 0,
     "landed": 1,
+    "pending": 2,
     "unresolved": 0
   },
   "next_steps": [
@@ -96,6 +97,7 @@
         "Generation coupling (adopting a compiler + machine-owned compiled-block markers) is a sharper fork argument than file count or vendor-paths.",
         "AGENTS.md absence is conditional on provenance.json decisions.paths, not a contradiction. The Python CLI fabrication was unfounded."
       ],
+      "fix_commit": "n/a (self-corrections during drafting; no separate fix commit)",
       "note": "The round-1 verdict and its corrections are bundled in commit 64fed6f on lean-autoprompt-audit. There is no separate round-1 artifact in tree; the trail records the corrections as they happened during drafting, not as a separate reviewer pass."
     },
     {
@@ -146,6 +148,19 @@
         "High 2: summary.landed and summary.unresolved schema extension was undocumented in README's Reading-a-row block."
       ],
       "fix_commit": "8c9cf2b"
+    },
+    {
+      "round": 6,
+      "verdict": "REFINE on lean-route-nonselectors @ 8c9cf2b",
+      "reviewer": "puku-cli adversarial (lean-route-nonselectors @ 8c9cf2b)",
+      "outcome": "REFINE",
+      "key_corrections": [
+        "Blocker 1: writing-plans SKILL.md.sha256 was stale again — the round-5 body fix in 8c9cf2b edited one line without rehashing.",
+        "Blocker 2: round 5's fix_commit read 'pending - applied in this round's response' rather than a SHA; the same defect the round-3 reviewer caught in provenance.json.",
+        "High 1: the routes.json caveat still carried vendor vocabulary ('ROADMAP, not DIRECT') after the skill body was cleaned.",
+        "Medium 1: round 1's reviewer field did not start with the model identifier, unlike rounds 2-5."
+      ],
+      "fix_commit": "857fe44"
     }
   ]
 }

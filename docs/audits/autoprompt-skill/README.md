@@ -69,9 +69,10 @@ The top-level `summary` block records aggregate counts for the disposition map p
 
 - `adopt-skill`, `adopt-rule`, `duplicate`, `reject`, `product-specific` — disposition-category counts. Sum equals `total`.
 - `landed` — count of rows whose `status` is `landed` (a `status: landed` row is also counted in its disposition category above; `landed` is a status overlay, not a separate bucket).
+- `pending` — count of `adopt-rule` rows whose `status` is `no-action`. These rows have a named destination and a stated rule, but the evidence behind them is a directory listing rather than a full read, so the adoption is owed work rather than a decision. `pending` and `unresolved` count different failures: `unresolved` means the destination is not yet chosen, `pending` means the destination is chosen and the reading is not done. A row is counted by at most one of `landed` or `pending`.
 - `unresolved` — count of `adopt-rule` rows whose `destination` is the literal string `"unresolved"`. These rows have a destination owed but not yet chosen; their `note` records the discriminator. `unresolved` is independent of `landed`: a row can be `landed` only when its destination is named.
 
-Invariant: `adopt-rule` (the category count) equals `landed` (within adopt-rule) + `no-action` (within adopt-rule). When the audit is fully complete, every `no-action` adopt-rule row has either landed (incrementing `landed`) or changed category (e.g., to `reject` because the rule did not survive scrutiny).
+Invariant: `adopt-rule` (the category count) equals `landed` + `pending` (both within adopt-rule). When the audit is fully complete, `pending` is 0 — every row has either landed (incrementing `landed`) or changed category (e.g., to `reject` because the rule did not survive scrutiny).
 
 ## Next steps
 

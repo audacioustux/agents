@@ -458,7 +458,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "2a150cf17faae584ee41c11147e38206030067538fa65f5dfc26c2bc7877a625",
+          "sha256": "3d983ae6bb1d4f184daff296fc69d3851f05b51c438f33d4b7d50a08be9d6785",
           "upstream": {
             "status": "diverged",
             "sha256": "8db5a922b242dd4e1bf824cb91c13b3e8d8e8a86d6ceaf7f0774eb9cce909d65"
@@ -471,7 +471,13 @@
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        {
+          "date": "2026-09-21",
+          "decision": "anti-bloat lean pass on SKILL.md: removed Overview heading + Core-principle arrow chain that restated Steps 1-6 in summary form; collapsed Red Flags Never/Always lists (which duplicated step prose) into a single Common-Mistakes-tail sentence preserving the four load-bearing warnings not stated elsewhere (force-push without explicit request, `git worktree remove` from inside the worktree, removing a worktree you didn't create, `git worktree prune` after removal). No prescriptive guidance changed.",
+          "rationale": "corpus rule: one home per rule, no restated facts"
+        }
+      ],
       "rationale": "cleanup allowlist must change in lockstep with using-git-worktrees",
       "owned": true
     },

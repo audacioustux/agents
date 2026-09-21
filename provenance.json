@@ -1075,7 +1075,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "d95a2ea217f545b6ba8ba29a42c9562c1caaa8a0fdf6b64c6ebe0f88de40f8a1",
+          "sha256": "4dca312f4abfa4011383499cc01bc24dc9077d36551d4574205fbfc65e95f2e1",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
@@ -1113,7 +1113,8 @@
         }
       },
       "decisions": [
-        "2026-09-10: reconciled against the newer obra/superpowers generation (27KB; corpus copy was the 8KB older one, recorded here since as \"reconcile deliberately\" and never done). Source bytes sha256 f32739563160d3612fe2febd0dad4a9cc8a6d1ea7dfcda59f245b3a4b968f7cf. Ported: a durable ledger with an explicit line format, because conversation memory does not survive compaction and a controller that loses its place re-dispatches finished work; recording BASE before each dispatch; a five-round cap on the fix loop, replacing \"repeat until approved\", which is not a terminating condition; a scoped re-review bounded to the fix diff; and naming the model on every dispatch, without which the tiering silently inherits the session model. Deliberately not ported: upstream's .superpowers/sdd/ workspace paths and its scripts/task-brief, scripts/review-package, scripts/sdd-workspace helpers, which the corpus does not ship."
+        "2026-09-10: reconciled against the newer obra/superpowers generation (27KB; corpus copy was the 8KB older one, recorded here since as \"reconcile deliberately\" and never done). Source bytes sha256 f32739563160d3612fe2febd0dad4a9cc8a6d1ea7dfcda59f245b3a4b968f7cf. Ported: a durable ledger with an explicit line format, because conversation memory does not survive compaction and a controller that loses its place re-dispatches finished work; recording BASE before each dispatch; a five-round cap on the fix loop, replacing \"repeat until approved\", which is not a terminating condition; a scoped re-review bounded to the fix diff; and naming the model on every dispatch, without which the tiering silently inherits the session model. Deliberately not ported: upstream's .superpowers/sdd/ workspace paths and its scripts/task-brief, scripts/review-package, scripts/sdd-workspace helpers, which the corpus does not ship.",
+        "2026-09-21: trimmed SKILL.md (-10 LOC, -4.3%). Removed the Core principle line (restated title and description verbatim - \"fresh subagent per task + two-stage review\"). Collapsed the vs. Executing Plans bullets to one line - four bullets restated the description/uses:/Integration sections. Cut the Advantages section, which restated Why subagents (\"fresh context\") and the title (\"automatic review checkpoints\") and pointed at references/why-subagents.md, the same rationale the opening paragraph already covers. No content loss; load-bearing sections (Process ledger, Model Selection tiers, Handling Implementer Status, Red Flags, Integration) untouched."
       ],
       "rationale": "hard one: upstream 12.5KB->32KB; reconcile deliberately",
       "owned": true

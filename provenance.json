@@ -1354,7 +1354,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "e23b5d0f87aae0434b6f3f0cb962c9dbef29000eda7c7eac0953748bd89bd325",
+          "sha256": "1c4d722b25a5c2487f7602eb91ba7ea0819cb2947bdae844fa3811c74ff26248",
           "upstream": {
             "status": "diverged",
             "sha256": "8cfb86f121269e8f7f12361e6795c4f6738828340e28964c9229d365666c9edd"
@@ -1367,7 +1367,9 @@
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-09-21: trimmed restated-facts sections in SKILL.md (189 -> 162 LOC, -14%). Deleted Quick Reference table (every row restated a Step above). Collapsed Red Flags Never/Always lists into three bullets preserving the load-bearing #1 warning (use a native worktree tool when one exists), the skip-detection skip-priority skip-ignore-check group, and the proceed-with-failing-tests warning. Common Mistakes section kept as one-line delegate to references/common-mistakes.md (which has the actual content)."
+      ],
       "rationale": ".worktrees/ option contradicts AGENTS.md nested-worktree prohibition",
       "owned": true
     },

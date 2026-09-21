@@ -151,39 +151,12 @@ Tests passing (<N> tests, 0 failures)
 Ready to implement <feature-name>
 ```
 
-## Quick Reference
-
-| Situation | Action |
-|-----------|--------|
-| Already in linked worktree | Skip creation (Step 0) |
-| In a submodule | Treat as normal repo (Step 0 guard) |
-| Native worktree tool available | Use it (Step 1a) |
-| No native tool | Git worktree fallback (Step 1b) |
-| `.worktrees/` exists | Use it (verify ignored) |
-| `worktrees/` exists | Use it (verify ignored) |
-| Both exist | Use `.worktrees/` |
-| Neither exists | Check instruction file, then default `.worktrees/` |
-| Instruction file declares one | Use it — a declared preference wins over existing dirs |
-| Global path exists | Use it (backward compat) |
-| Directory not ignored | Add to .gitignore + commit |
-| Permission error on create | Sandbox fallback, work in place |
-| Tests fail during baseline | Report failures + ask |
-| No package.json/Cargo.toml | Skip dependency install |
-
 ## Common Mistakes
 
 Nested worktrees, wrong base, forgetting cleanup. See `references/common-mistakes.md`.
 
 ## Red Flags
 
-**Never:**
-- Create a worktree when Step 0 detects existing isolation
-- Use `git worktree add` when you have a native worktree tool (e.g., `EnterWorktree`). This is the #1 mistake — if you have it, use it.
-- Skip Step 1a by jumping straight to Step 1b's git commands
-- Create worktree without verifying it's ignored (project-local)
-- Proceed with failing tests without asking
-
-**Always:**
-- Follow directory priority: instruction file > existing > global legacy > default
-- Auto-detect and run project setup
-- Verify clean test baseline
+- `#1`: use a native worktree tool (`EnterWorktree`, `/worktree`, `--worktree`) when one exists — `git worktree add` is fallback only.
+- Skip Step 0's isolation detection, skip the directory-priority list, or skip the ignore check before `git worktree add`.
+- Proceed with failing baseline tests instead of reporting.

@@ -63,6 +63,16 @@ The first five fields are the cursor-plugins schema (`docs/audits/cursor-plugins
 
 The cursor-plugins schema places the auditor on each row as an `audit` field. This ledger collapses that to a single top-level `auditor` because the audit was performed by a single reviewer; future schema readers should not grep for `audit`.
 
+## Reading the summary
+
+The top-level `summary` block records aggregate counts for the disposition map plus two status-overlays on `adopt-rule`:
+
+- `adopt-skill`, `adopt-rule`, `duplicate`, `reject`, `product-specific` — disposition-category counts. Sum equals `total`.
+- `landed` — count of rows whose `status` is `landed` (a `status: landed` row is also counted in its disposition category above; `landed` is a status overlay, not a separate bucket).
+- `unresolved` — count of `adopt-rule` rows whose `destination` is the literal string `"unresolved"`. These rows have a destination owed but not yet chosen; their `note` records the discriminator. `unresolved` is independent of `landed`: a row can be `landed` only when its destination is named.
+
+Invariant: `adopt-rule` (the category count) equals `landed` (within adopt-rule) + `no-action` (within adopt-rule). When the audit is fully complete, every `no-action` adopt-rule row has either landed (incrementing `landed`) or changed category (e.g., to `reject` because the rule did not survive scrutiny).
+
 ## Next steps
 
 1. Read `gates.json` AND `state-machine.json` in full to specify what "failure" means under non-resetting retry limits.

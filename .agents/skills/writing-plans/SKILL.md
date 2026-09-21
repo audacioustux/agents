@@ -49,7 +49,7 @@ Some signals look like scope but do not actually justify writing a plan. None of
 
 This rule is the complement of the Scope Check above, not a replacement. Scope Check says **DO split a plan** when a spec covers multiple independent subsystems. This section says **DO NOT escalate to a plan** when the inputs only look big. Use both: the dependency shape and the route facts decide; the labels and counts do not.
 
-A signal from this list combined with a real dependency (for example, a large file count plus a proven integration owner) is no longer a nonSelector and routes as ROADMAP. The rule is about each input **alone**.
+A signal from this list combined with a real dependency (for example, a large file count plus a proven integration owner) is no longer excluded by this rule. The rule is about each input **alone**.
 
 ## File Structure
 

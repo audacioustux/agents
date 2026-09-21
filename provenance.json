@@ -1535,7 +1535,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "98b1cbadf95d9cf9847c422388ee33666e2cc4f6ab2660ea151053064e78645c",
+          "sha256": "fd9cd74934cb91f7c7ffbf4c90aefb8ab9c6933b001bc3a27de8f8484382c933",
           "upstream": {
             "status": "diverged",
             "sha256": "48508f44bbfd7d24b029fbf3a314f3cd14c9615599059366e922f47b8dc08cf2"
@@ -1548,7 +1548,9 @@
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "writing-plans-nonselectors-2026-09-21: Added 'Not by themselves reasons to plan' section (18 lines) between Scope Check and File Structure. Adopted the nonSelectors discipline from Spielewoy/autoprompt-skill routes.json (SHA b6516cf52a7891d797621fdd2a8ca0311e1ae0a9) - 9 inputs that MUST NOT escalate the route on their own (file-count, repository-size, max-subs, available-agent-count, security-word-alone, refactor-word-alone, research-word-alone, one-failed-implementation, benchmark-label). Partial adoption: the rest of routes.json (23-input routeFactsSchema, 9-rule precedenceTable, routeAnalyst role, runOwnerDecision role, capabilityRequirements matrix) is rejected as inseparable from the autoprompt packaging model. Audit ledger at docs/audits/autoprompt-skill/."
+      ],
       "rationale": "local MISSES upstream Task Right-Sizing section; plus path-declaration change",
       "owned": true
     },

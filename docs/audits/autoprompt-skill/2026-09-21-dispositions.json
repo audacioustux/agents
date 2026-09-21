@@ -97,6 +97,55 @@
         "AGENTS.md absence is conditional on provenance.json decisions.paths, not a contradiction. The Python CLI fabrication was unfounded."
       ],
       "note": "The round-1 verdict and its corrections are bundled in commit 64fed6f on lean-autoprompt-audit. There is no separate round-1 artifact in tree; the trail records the corrections as they happened during drafting, not as a separate reviewer pass."
+    },
+    {
+      "round": 2,
+      "verdict": "DO NOT MERGE on lean-autoprompt-audit @ 64fed6f",
+      "reviewer": "puku-cli adversarial (lean-autoprompt-audit @ 64fed6f)",
+      "outcome": "REFINE",
+      "key_corrections": [
+        "Blocker B1: total:11 contradicted the 6-row disposition map; the README acknowledged this in prose, which is not a fix.",
+        "Blocker B2: roles.json and schemas/ directories had no disposition rows, leaving two hand-authored contracts unaccounted for.",
+        "Blocker B3: README line 18 said 'four candidate adopt-rule rows' but the JSON had three.",
+        "High H1: README described omp as 'read-only, approval-gated'; the provenance record explicitly says omp is approval-gated, not read-only.",
+        "High H2: auditor field blended the reviewing model with the invoking harness; harness-bridge does not mediate omp's WebFetch calls."
+      ],
+      "fix_commit": "38cf161 (applied nine corrections)"
+    },
+    {
+      "round": 3,
+      "verdict": "REFINE on lean-autoprompt-audit @ 38cf161",
+      "reviewer": "puku-cli adversarial (lean-autoprompt-audit @ 38cf161)",
+      "outcome": "REFINE",
+      "key_corrections": [
+        "High H1: provenance.json's source-rejections-autoprompt-skill entry left 'applied in commit [pending]' as the only [pending] literal in the file.",
+        "Medium M1: three cursor-plugins/README.md line citations (:47-50 and :47-52) drifted on the next edit; should be section anchors."
+      ],
+      "fix_commit": "d388171 (backfilled H1 + M1)"
+    },
+    {
+      "round": 4,
+      "verdict": "APPROVE on lean-autoprompt-audit @ d388171; merged to main as 50559bb",
+      "reviewer": "puku-cli adversarial (lean-autoprompt-audit @ d388171)",
+      "outcome": "APPROVE",
+      "key_corrections": [
+        "Five L-severity items noted as stylistic/scope-of-future-risk, not blocking: schema extension not documented for `destination`, the `auditor` collapsing rationale, the corpus-flavour reject on README.md, the `reviewer_trail` capturing only round 1, and the README paraphrase of the contract inventory.",
+        "All accepted as out-of-scope for this audit; the merge proceeded."
+      ],
+      "fix_commit": "n/a (merge only)"
+    },
+    {
+      "round": 5,
+      "verdict": "REFINE on lean-route-nonselectors @ 0656118",
+      "reviewer": "puku-cli adversarial (lean-route-nonselectors @ 0656118)",
+      "outcome": "REFINE",
+      "key_corrections": [
+        "Blocker 1: writing-plans SKILL.md.sha256 in provenance.json was stale (98b1cbad... vs actual fd9cd749... after the 56b8894 commit); writing-plans also had no decisions entry.",
+        "Blocker 2: writing-plans/SKILL.md line 52 used autoprompt contract vocabulary (nonSelector, ROADMAP, DIRECT) that is meaningless in the corpus context; stripped.",
+        "High 1: reviewer_trail omitted rounds 2-4 of the audit history; added.",
+        "High 2: summary.landed and summary.unresolved schema extension was undocumented in README's Reading-a-row block."
+      ],
+      "fix_commit": "pending — applied in this round's response"
     }
   ]
 }

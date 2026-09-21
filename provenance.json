@@ -1218,7 +1218,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "a9084597109105f577c1843dd9346403d54d66e0121c9d185154fe28da4c0649",
+          "sha256": "dce259d867a8d81a1acc5b26931602a43345b66f49290e3cb4ee9ead11c90657",
           "upstream": {
             "status": "diverged",
             "sha256": "bf1b8216e523851a411e91d429a7c1c2a173e79d88957bc78e348218d50edd54"
@@ -1267,7 +1267,9 @@
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-09-21: trimmed one restated-fact section in SKILL.md (346 -> 344 LOC, -0.6%). The dedicated 'Why Order Matters' section was a one-sentence pointer to references/why-test-first.md that restated the immediately-preceding 'Implement fresh from tests. Period.'; folded into Iron Law as a follow-on sentence with the reference link preserved. An initial broader pass collapsed the Iron Law / Red Flags / Final Rule triad but the reviewer correctly flagged that the framing lines ('These are observable states, not excuses', the fenced Final Rule contract, the standalone 'No exceptions without your human partner's permission') were load-bearing structural context, not decorative duplication. Reverted to main and applied only the one unambiguous cut."
+      ],
       "rationale": "absorbs tdd; most-referenced skill, keep the name",
       "owned": true
     },

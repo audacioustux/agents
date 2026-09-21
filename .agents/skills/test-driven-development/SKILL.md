@@ -44,6 +44,8 @@ Write code before the test? Delete it. Start over.
 
 Implement fresh from tests. Period.
 
+Tests written after code pass immediately, which proves nothing — full argument: `references/why-test-first.md`.
+
 ## Red-Green-Refactor
 
 ```mermaid
@@ -228,10 +230,6 @@ The loop above is the law; these cover the judgement it does not encode.
 | `references/deep-modules.md` | Deciding what belongs behind an interface before you commit tests to its shape |
 | `references/mocking.md` | Reaching for a mock; read before, not after |
 | `references/refactoring.md` | The REFACTOR step, once green |
-
-## Why Order Matters
-
-Tests written after code pass immediately, which proves nothing. Full argument: `references/why-test-first.md`.
 
 ## Common Rationalizations
 

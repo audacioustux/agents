@@ -14,11 +14,12 @@
   "dispositions": {
     "agents/contracts/routes.json": {
       "disposition": "adopt-rule",
-      "status": "no-action",
-      "evidence": "directory listing confirmed; contents not yet read in full.",
-      "note": "adopt-rule: 'file count, repository size, failed attempt, or preference for more agents never selects a larger route'. The corpus's escalation rules are scattered (dispatching-parallel-agents for parallelism, brainstorming for option count, writing-plans for plan depth); no single rule refuses upward routing on those four signals. This is the most distinctive autoprompt rule — likely the strongest candidate for adoption.",
-      "destination": "unresolved",
-      "caveat": "destination owed. verifying-before-completion owns completion evidence; this rule is about route CLASSIFICATION, which is upstream. A new lightweight 'route-classification' skill may be the right home. Decide after reading routes.json in full."
+      "status": "landed",
+      "landedIn": "writing-plans/SKILL.md 'Not by themselves reasons to plan' section, commit 56b8894",
+      "evidence": "Full file read at SHA b6516cf52a7891d797621fdd2a8ca0311e1ae0a9. The contract's `nonSelectors` field lists 9 inputs that MUST NOT escalate the route on their own: file-count, repository-size, max-subs, available-agent-count, security-word-alone, refactor-word-alone, research-word-alone, one-failed-implementation, benchmark-label. The round-1 verdict named 4 of these; the other 5 (max-subs, security-word-alone, refactor-word-alone, research-word-alone, benchmark-label) are not corpus duplicates either. The full 9 are the rule, not 4.",
+      "note": "adopt-rule (partial): the corpus adopts the nonSelectors discipline — what does NOT trigger a plan — but NOT the rest of routes.json (23-input routeFactsSchema, 9-rule precedenceTable, routeAnalyst role, runOwnerDecision role, capabilityRequirements matrix). Those are a complete routing system; adopting any of them requires adopting the system. The nonSelectors list is mechanically separable: it is 9 short labels plus a one-line rule naming them, and it has no dependency on the schema or operator language. Destination resolved to writing-plans (NOT a new route-classification skill): the rule is about what does not justify a plan, which is the inverse of writing-plans' existing Scope Check (what DOES justify one). Adding a new skill for one rule introduces an abstraction with no other call sites.",
+      "destination": "writing-plans",
+      "caveat": "Two corollary risks are not yet covered by the autoprompt rule itself but were added to the writing-plans section: (a) the rule must be read alongside, not instead of, writing-plans' existing 'if the spec covers multiple independent subsystems, suggest breaking this into separate plans' — the two are complementary (don't escalate UP just because inputs look big; DO escalate DOWN when the spec actually spans independent subsystems); (b) the rule does NOT apply when one of the listed inputs co-occurs with a real dependency signal (e.g., a large file count plus proven dependency is no longer excluded by this rule and warrants a multi-task plan). The writing-plans prose states both clarifications. If a future audit finds either clarification wrong, the rule should be revisited, not deleted."
     },
     "agents/contracts/gates.json + state-machine.json (freeze-before-check + non-resetting retry)": {
       "disposition": "adopt-rule",
@@ -74,19 +75,19 @@
     "duplicate": 0,
     "reject": 5,
     "product-specific": 0,
-    "unresolved": 1
+    "landed": 1,
+    "unresolved": 0
   },
   "next_steps": [
-    "Read agents/contracts/routes.json in full to resolve the destination for the no-fallback-route rule (verifying-before-completion vs new route-classification skill).",
     "Read agents/contracts/gates.json AND state-machine.json in full to specify what 'failure' means under non-resetting retry limits.",
     "Read agents/contracts/codex-live-conformance-evidence.json to confirm the conformance-evidence rule generalises beyond stream-json and meets the harness-bridge bar.",
-    "If all three resolve to clear adopt-rule destinations, file 3 PRs targeting verifying-before-completion, harness-bridge, and one new skill (route-classification). Update this ledger with landedIn SHAs."
+    "If those two resolve to clear adopt-rule destinations, file 2 PRs targeting verifying-before-completion and harness-bridge. Update this ledger with landedIn SHAs."
   ],
   "reviewer_trail": [
     {
       "round": 1,
       "verdict": "NOT a fork candidate (proposed)",
-      "reviewer": "self-corrections during drafting",
+      "reviewer": "puku-cli (self-corrections during drafting; no separate reviewer pass)",
       "outcome": "REFINE",
       "key_corrections": [
         "Decision A (fork) and Decision B (extract) are orthogonal; blending them weakens both halves.",
@@ -96,6 +97,55 @@
         "AGENTS.md absence is conditional on provenance.json decisions.paths, not a contradiction. The Python CLI fabrication was unfounded."
       ],
       "note": "The round-1 verdict and its corrections are bundled in commit 64fed6f on lean-autoprompt-audit. There is no separate round-1 artifact in tree; the trail records the corrections as they happened during drafting, not as a separate reviewer pass."
+    },
+    {
+      "round": 2,
+      "verdict": "DO NOT MERGE on lean-autoprompt-audit @ 64fed6f",
+      "reviewer": "puku-cli adversarial (lean-autoprompt-audit @ 64fed6f)",
+      "outcome": "REFINE",
+      "key_corrections": [
+        "Blocker B1: total:11 contradicted the 6-row disposition map; the README acknowledged this in prose, which is not a fix.",
+        "Blocker B2: roles.json and schemas/ directories had no disposition rows, leaving two hand-authored contracts unaccounted for.",
+        "Blocker B3: README line 18 said 'four candidate adopt-rule rows' but the JSON had three.",
+        "High H1: README described omp as 'read-only, approval-gated'; the provenance record explicitly says omp is approval-gated, not read-only.",
+        "High H2: auditor field blended the reviewing model with the invoking harness; harness-bridge does not mediate omp's WebFetch calls."
+      ],
+      "fix_commit": "38cf161 (applied nine corrections)"
+    },
+    {
+      "round": 3,
+      "verdict": "REFINE on lean-autoprompt-audit @ 38cf161",
+      "reviewer": "puku-cli adversarial (lean-autoprompt-audit @ 38cf161)",
+      "outcome": "REFINE",
+      "key_corrections": [
+        "High H1: provenance.json's source-rejections-autoprompt-skill entry left 'applied in commit [pending]' as the only [pending] literal in the file.",
+        "Medium M1: three cursor-plugins/README.md line citations (:47-50 and :47-52) drifted on the next edit; should be section anchors."
+      ],
+      "fix_commit": "d388171 (backfilled H1 + M1)"
+    },
+    {
+      "round": 4,
+      "verdict": "APPROVE on lean-autoprompt-audit @ d388171; merged to main as 50559bb",
+      "reviewer": "puku-cli adversarial (lean-autoprompt-audit @ d388171)",
+      "outcome": "APPROVE",
+      "key_corrections": [
+        "Five L-severity items noted as stylistic/scope-of-future-risk, not blocking: schema extension not documented for `destination`, the `auditor` collapsing rationale, the corpus-flavour reject on README.md, the `reviewer_trail` capturing only round 1, and the README paraphrase of the contract inventory.",
+        "All accepted as out-of-scope for this audit; the merge proceeded."
+      ],
+      "fix_commit": "n/a (merge only)"
+    },
+    {
+      "round": 5,
+      "verdict": "REFINE on lean-route-nonselectors @ 0656118",
+      "reviewer": "puku-cli adversarial (lean-route-nonselectors @ 0656118)",
+      "outcome": "REFINE",
+      "key_corrections": [
+        "Blocker 1: writing-plans SKILL.md.sha256 in provenance.json was stale (98b1cbad... vs actual fd9cd749... after the 56b8894 commit); writing-plans also had no decisions entry.",
+        "Blocker 2: writing-plans/SKILL.md line 52 used autoprompt contract vocabulary (nonSelector, ROADMAP, DIRECT) that is meaningless in the corpus context; stripped.",
+        "High 1: reviewer_trail omitted rounds 2-4 of the audit history; added.",
+        "High 2: summary.landed and summary.unresolved schema extension was undocumented in README's Reading-a-row block."
+      ],
+      "fix_commit": "8c9cf2b"
     }
   ]
 }

@@ -33,6 +33,24 @@ Before handing the plan off, optionally dispatch a reviewer subagent with `./pro
 
 If the spec covers multiple independent subsystems, it should have been broken into sub-project specs during `brainstorming`. If it wasn't, suggest breaking this into separate plans — one per subsystem. Each plan should produce working, testable software on its own.
 
+## Not by themselves reasons to plan
+
+Some signals look like scope but do not actually justify writing a plan. None of the following, on its own, is a reason to escalate the work into a planning document:
+
+- **File count** — touching N files is not a planning signal; the dependency shape between those files is.
+- **Repository size** — the size of the codebase does not scale the work.
+- **Max subs** — the configured maximum number of subagents is a ceiling on parallelism, not a reason to add more.
+- **Available agent count** — how many agents happen to be reachable is not a workload signal.
+- **Security word alone** — a request mentioning security or privacy is not, by itself, a multi-subsystem undertaking. A bounded change that happens to touch auth is still a bounded change.
+- **Refactor word alone** — the word "refactor" appearing in a request is not a planning trigger. Many refactors are bounded, with known checks and no dependency between files.
+- **Research word alone** — "research", "investigate", or "explore" does not automatically justify a plan; the rules for investigation work are short and reversible.
+- **One failed implementation** — a previous attempt that failed is not a planning signal. The failure fingerprint and the unchanged inputs are what matter.
+- **Benchmark label** — a label like "spike" or "POC" attached to a request does not change the routing; the actual scope does.
+
+This rule is the complement of the Scope Check above, not a replacement. Scope Check says **DO split a plan** when a spec covers multiple independent subsystems. This section says **DO NOT escalate to a plan** when the inputs only look big. Use both: the dependency shape and the route facts decide; the labels and counts do not.
+
+A signal from this list combined with a real dependency (for example, a large file count plus a proven integration owner) is no longer excluded by this rule. The rule is about each input **alone**.
+
 ## File Structure
 
 Before defining tasks, map out which files will be created or modified and what each one is responsible for. This is where decomposition decisions get locked in.

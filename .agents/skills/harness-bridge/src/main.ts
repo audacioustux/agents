@@ -6,20 +6,89 @@ import { parseArgs } from "jsr:@std/cli@1/parse-args";
 // `--input-format stream-json --replay-user-messages` with a single
 // user-message envelope. Missing it means large reviews hard-fail
 // rather than silently hanging on stdin.
+//
+// `build` is an optional per-CLI argv translator. When present it owns
+// the full argv shape and is responsible for honoring the shared contract
+// (read-only mode, fork-on-resume, prompt delivery). Use it when a CLI's
+// argv shape differs from the shared one; omit it to inherit the default
+// builder below.
+type ContractArgv = {
+  prompt: string;
+  model?: string;
+  name?: string;
+  resume?: string;
+  sessionId?: string;
+  delivery: "argv" | "stdin";
+  envelope: string | null;
+};
+
+type AgentSpec = {
+  bin: string;
+  identity: string;
+  name: (mode: string, stamp: string) => string;
+  stdin: boolean;
+  build?: (c: ContractArgv) => string[];
+};
+
 const AGENTS = {
   claude: {
     bin: "claude",
     identity: "You are Claude",
     name: (mode: string, stamp: string) => `harness-bridge-claude-${mode}-${stamp}`,
     stdin: true,
+    build: undefined as undefined | ((c: ContractArgv) => string[]),
   },
   "puku-cli": {
     bin: "puku-cli",
     identity: "You are Puku",
     name: (mode: string, stamp: string) => `harness-bridge-puku-${mode}-${stamp}`,
     stdin: true,
+    build: undefined as undefined | ((c: ContractArgv) => string[]),
   },
-} as const;
+  // omp (oh-my-pi) has a different argv surface: no `--name`,
+  // `--fork-session`, `--session-id`, or stream-json input. The hook
+  // translates the shared contract into omp's vocabulary and refuses
+  // resume (omp has no fork primitive, so extending a prior session
+  // would silently bypass the safety contract) and stdin delivery
+  // (omp has no stream-json analogue; the runtime guard would catch
+  // it, but the hook enforces at the contract layer for defence in
+  // depth).
+  //
+  // Note: `--approval-mode always-ask` is *approval-gated*, not
+  // read-only. omp has no equivalent of claude's `--permission-mode
+  // plan`; the model can still write if the user approves each call.
+  omp: {
+    bin: "omp",
+    identity: "You are OMP",
+    name: (mode: string, stamp: string) => `harness-bridge-omp-${mode}-${stamp}`,
+    stdin: false,
+    build: (c: ContractArgv) => {
+      const args = ["-p", "--approval-mode", "always-ask"];
+      if (c.delivery !== "argv") {
+        throw new Error(
+          "omp has no --input-format stream-json; stdin delivery is not supported. " +
+            "Shrink the prompt below PROMPT_ARGV_LIMIT_BYTES (128 KB).",
+        );
+      }
+      if (c.resume) {
+        // Strip all ASCII control chars (including ESC, FF, VT, DEL) so
+        // a hostile --resume value cannot forge log lines or terminal
+        // escapes via interpolation. The control-char regex is
+        // intentional; deno-lint disable-next-line no-control-regex.
+        // deno-lint-ignore no-control-regex
+        const safe = c.resume.replace(/[\x00-\x1f\x7f]/g, " ");
+        throw new Error(
+          `omp has no --fork-session; resume would extend the prior session. ` +
+            `Pass --fresh, or call \`omp --resume ${safe} --no-session\` directly ` +
+            `(fork-on-resume gap is your responsibility).`,
+        );
+      }
+      if (c.model) args.push("--model", c.model);
+      args.push(c.prompt);
+      return args;
+    },
+  },
+} satisfies Record<string, AgentSpec>;
 
 type AgentId = keyof typeof AGENTS;
 const MODES = ["ask", "plan", "adversarial", "review"] as const;
@@ -165,6 +234,22 @@ export function buildCommand(p: CommandShared, delivery: "argv"): DeliveryArgv;
 export function buildCommand(p: CommandShared, delivery: "stdin"): DeliveryStdin;
 export function buildCommand(p: CommandShared, delivery: "argv" | "stdin"): Built {
   const a = AGENTS[p.agent];
+  // Per-CLI hook (e.g. omp) owns its own argv shape and contract.
+  if (a.build) {
+    const envelope = delivery === "stdin"
+      ? JSON.stringify({ type: "user", message: { role: "user", content: p.prompt } }) + "\n"
+      : null;
+    const args = a.build({
+      prompt: p.prompt,
+      model: p.model,
+      name: a.name(p.mode, p.stamp),
+      resume: p.resume,
+      sessionId: p.resume ? undefined : (p.newSessionId || undefined),
+      delivery,
+      envelope,
+    });
+    return { bin: a.bin, args, cwd: p.cwd, envelope };
+  }
   const args = ["-p", "--permission-mode", "plan"];
   if (delivery === "stdin") {
     args.push(

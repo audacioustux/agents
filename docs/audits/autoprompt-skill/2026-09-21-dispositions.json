@@ -2,14 +2,14 @@
   "audited": "Spielewoy/autoprompt-skill",
   "sha": "b6516cf52a7891d797621fdd2a8ca0311e1ae0a9",
   "date": "2026-09-21",
-  "total": 11,
-  "firstParty": 11,
+  "total": 8,
+  "firstParty": 8,
   "thirdParty": 0,
-  "auditor": "omp under harness-bridge (--approval-mode always-ask)",
-  "structure": "Verified by WebFetch 2026-09-21: agents/contracts/ holds routes.json, gates.json, state-machine.json, roles.json (NOT role-policy.json), personas/, schemas/, plus per-provider conformance-evidence JSONs (codex, reasonix). 11 generated provider packages under agents/providers/ project the contracts. Generator script exposes renderCodexOutputs/renderReasonixOutputs/renderHarnessV2Outputs. README cites 25 personas + 18 frameworks as 'complete'; commit messages cite '32 role projections' elsewhere (the overcount the prior verdict propagated). NOT 550 hand-authored artifacts.",
+  "auditor": "omp",
+  "structure": "Verified by WebFetch 2026-09-21: agents/contracts/ holds routes.json, gates.json, state-machine.json, roles.json, personas/, schemas/, plus per-provider conformance-evidence JSONs (codex, reasonix) and a README.md. README cites 25 personas + 18 frameworks as 'complete'; commit messages cite '32 role projections' elsewhere (the overcount the prior verdict propagated). The 7 hand-authored contracts in agents/contracts/ are inventoried as 7 rows in this ledger; the 11 generated provider packages under agents/providers/ are summarised by the single 'agents/providers/*' reject row because they are projections of the contracts (not individually actionable).",
   "decisions": {
     "fork": "no",
-    "fork_ground": "Generation coupling: forking means adopting the generator script + 11 output trees with machine-owned compiled-block markers. The corpus has no compiler pipeline; adopting one would invert the audit model (curated skills become generated projections). provenance.json:1620 already rejects vendor-tool skills on staleness/maintenance grounds."
+    "fork_ground": "Generation coupling: forking means adopting the generator script + 11 output trees with machine-owned compiled-block markers. The corpus has no compiler pipeline; adopting one would invert the audit model (curated skills become generated projections). provenance.json decisions.scope already rejects vendor-tool skills on staleness/maintenance grounds."
   },
   "dispositions": {
     "agents/contracts/routes.json": {
@@ -42,10 +42,22 @@
       "evidence": "directory listing confirmed; README cites 25 personas + 18 frameworks; commits cite 32 role projections (overcount).",
       "note": "reject: the corpus already names personas by skill (reviewing-for-bloat, verifying-before-completion, dispatching-parallel-agents). The autoprompt personas/ tree is provider-coupled and overlaps with skills it would have to displace."
     },
-    "agents/providers/* (11 provider packages)": {
+    "agents/contracts/roles.json": {
       "disposition": "reject",
       "status": "no-action",
-      "evidence": "directory listing of providers/ (claude, codex, omp, opencode, kilo, vscode, prime, deepseek, hermes, grok, reasonix).",
+      "evidence": "directory listing confirmed; contents not read.",
+      "note": "reject: the file is named roles.json (NOT role-policy.json, which the round-1 verdict flagged). The corpus already names roles by skill (reviewing-for-bloat, verifying-before-completion, dispatching-parallel-agents). Adopting roles.json would add a parallel role vocabulary the corpus does not need."
+    },
+    "agents/contracts/schemas/": {
+      "disposition": "reject",
+      "status": "no-action",
+      "evidence": "directory listing confirmed; schema files not read.",
+      "note": "reject: schemas/ is a packaging-model artifact (JSON Schema files projected into each provider package). The corpus uses Markdown frontmatter and Python type hints; adopting JSON Schema would introduce a second validation surface."
+    },
+    "agents/providers/* (11 generated packages)": {
+      "disposition": "reject",
+      "status": "no-action",
+      "evidence": "generator script confirms 11 generated packages exist; the 11 packages themselves were not read (they are machine-owned projections of the contracts, not authored artifacts).",
       "note": "reject: 11 generated provider packages are projections of the 7 contracts. Adopting them would adopt a generation pipeline the corpus does not have."
     },
     "agents/contracts/README.md (architecture framing)": {
@@ -60,7 +72,7 @@
     "adopt-skill": 0,
     "adopt-rule": 3,
     "duplicate": 0,
-    "reject": 3,
+    "reject": 5,
     "product-specific": 0,
     "unresolved": 1
   },
@@ -74,15 +86,16 @@
     {
       "round": 1,
       "verdict": "NOT a fork candidate (proposed)",
-      "reviewer": "omp under harness-bridge",
+      "reviewer": "self-corrections during drafting",
       "outcome": "REFINE",
       "key_corrections": [
         "Decision A (fork) and Decision B (extract) are orthogonal; blending them weakens both halves.",
         "The 550-file claim was an overcount. Real structure is 7 hand-authored contracts + 11 generated provider packages.",
         "The corpus has a documented audit schema (docs/audits/cursor-plugins/README.md:47-50) with disposition/status/note/evidence/landedIn + caveat; ~20% of adopt-rule recommendations historically fail scrutiny. The proposed verdict skipped this entirely.",
         "Generation coupling (adopting a compiler + machine-owned compiled-block markers) is a sharper fork argument than file count or vendor-paths.",
-        "AGENTS.md absence is conditional on provenance.json:1598, not a contradiction. The Python CLI fabrication was unfounded."
-      ]
+        "AGENTS.md absence is conditional on provenance.json decisions.paths, not a contradiction. The Python CLI fabrication was unfounded."
+      ],
+      "note": "The round-1 verdict and its corrections are bundled in commit 64fed6f on lean-autoprompt-audit. There is no separate round-1 artifact in tree; the trail records the corrections as they happened during drafting, not as a separate reviewer pass."
     }
   ]
 }

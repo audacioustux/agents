@@ -2,7 +2,7 @@
 // SKILL.md and src/main.ts together.
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "jsr:@std/assert@1";
-import { buildCommand, buildCommandStdin, buildPrompt, parseCliArgs, readSubject } from "./main.ts";
+import { buildCommand, buildPrompt, chooseDelivery, parseCliArgs, readSubject } from "./main.ts";
 
 const SUBJECT_FILE_BYTE_LIMIT = 20_000;
 
@@ -41,7 +41,7 @@ Deno.test("buildCommand forces --permission-mode plan and --fork-session on resu
     model: "opus",
     stamp,
     cwd: "/tmp",
-  });
+  }, "argv");
   assertEquals(cmd.bin, "claude");
   assertEquals(cmd.args.slice(0, 3), ["-p", "--permission-mode", "plan"]);
   assertEquals(cmd.args.includes("--fork-session"), true);
@@ -57,7 +57,7 @@ Deno.test("buildCommand uses --session-id (not --resume) for fresh sessions", ()
     newSessionId: "new-uuid",
     stamp,
     cwd: "/tmp",
-  });
+  }, "argv");
   assertEquals(cmd.args.includes("--resume"), false);
   assertEquals(cmd.args.includes("--session-id"), true);
 });
@@ -72,7 +72,7 @@ Deno.test("buildCommand puku-cli argv has the same safety flags as claude", () =
     model: "opus",
     stamp,
     cwd: "/tmp",
-  });
+  }, "argv");
   assertEquals(cmd.bin, "puku-cli");
   assertEquals(cmd.args.slice(0, 3), ["-p", "--permission-mode", "plan"]);
   assertEquals(cmd.args.includes("--fork-session"), true);
@@ -175,16 +175,16 @@ Deno.test("buildPrompt strips stray ``` so a markdown fence in the subject canno
   assertStringIncludes(prompt, "after");
 });
 
-Deno.test("buildCommandStdin keeps the safety contract and never puts the prompt in argv", () => {
-  const prompt = "x".repeat(200 * 1024); // 200 KB — above PROMPT_ARGV_LIMIT
-  const cmd = buildCommandStdin({
+Deno.test("buildCommand stdin path keeps the safety contract and never puts the prompt in argv", () => {
+  const prompt = "x".repeat(200 * 1024); // 200 KB — above PROMPT_ARGV_LIMIT_BYTES (128 KB)
+  const cmd = buildCommand({
     agent: "puku-cli",
     mode: "ask",
     prompt,
     newSessionId: "new-uuid",
     stamp,
     cwd: "/tmp",
-  });
+  }, "stdin");
   assertEquals(cmd.bin, "puku-cli");
   assertEquals(cmd.args.slice(0, 3), ["-p", "--permission-mode", "plan"]);
   assertEquals(cmd.args.includes("--input-format"), true);
@@ -193,32 +193,30 @@ Deno.test("buildCommandStdin keeps the safety contract and never puts the prompt
   assertEquals(cmd.args.includes("--replay-user-messages"), true);
   assertEquals(cmd.args.includes("--fork-session"), false);
   assertEquals(cmd.args.includes("--session-id"), true);
-  // The 200 KB prompt must NOT appear in argv — only the envelope carries it.
   assertEquals(cmd.args.some((a) => a.length > 1024), false);
   assertStringIncludes(cmd.envelope, `"content":"${prompt.slice(0, 32)}`);
-  // Envelope is valid JSON ending with a newline.
   const parsed = JSON.parse(cmd.envelope.trimEnd());
   assertEquals(parsed.type, "user");
   assertEquals(parsed.message.role, "user");
   assertEquals(parsed.message.content, prompt);
 });
 
-Deno.test("buildCommandStdin escapes JSON special characters in the prompt", () => {
+Deno.test("buildCommand stdin escapes JSON special characters in the prompt", () => {
   const tricky = `quote " backslash \\ newline\ndone`;
-  const cmd = buildCommandStdin({
+  const cmd = buildCommand({
     agent: "claude",
     mode: "ask",
     prompt: tricky,
     newSessionId: "x",
     stamp,
     cwd: "/tmp",
-  });
+  }, "stdin");
   const parsed = JSON.parse(cmd.envelope.trimEnd());
   assertEquals(parsed.message.content, tricky);
 });
 
-Deno.test("buildCommandStdin preserves --fork-session on resume", () => {
-  const cmd = buildCommandStdin({
+Deno.test("buildCommand stdin preserves --fork-session on resume", () => {
+  const cmd = buildCommand({
     agent: "claude",
     mode: "review",
     prompt: "x".repeat(200 * 1024),
@@ -226,8 +224,42 @@ Deno.test("buildCommandStdin preserves --fork-session on resume", () => {
     newSessionId: "ignored",
     stamp,
     cwd: "/tmp",
-  });
+  }, "stdin");
   assertEquals(cmd.args.includes("--resume"), true);
   assertEquals(cmd.args.includes("--fork-session"), true);
   assertEquals(cmd.args.includes("--session-id"), false);
+});
+
+Deno.test("buildCommand argv path does not include stream-json flags", () => {
+  const cmd = buildCommand({
+    agent: "puku-cli",
+    mode: "ask",
+    prompt: "small",
+    newSessionId: "x",
+    stamp,
+    cwd: "/tmp",
+  }, "argv");
+  assertEquals(cmd.args.includes("--input-format"), false);
+  assertEquals(cmd.args.includes("--output-format"), false);
+  assertEquals(cmd.args.includes("--verbose"), false);
+  assertEquals(cmd.envelope, null);
+});
+
+// Threshold uses BYTES, not UTF-16 code units. A 100K-character prompt
+// of 4-byte emoji is 200 KB on the wire and must route to stdin even
+// though .length (code units) is only 50K.
+Deno.test("chooseDelivery routes on byte length, not UTF-16 code units", () => {
+  const emoji = "\u{1F4E6}"; // 📦 = U+1F4E6, 4 bytes in UTF-8, 2 UTF-16 code units
+  // 50_000 emoji = 200_000 UTF-8 bytes (over the 131_072 byte threshold)
+  // but only 100_000 UTF-16 code units. Must route to stdin.
+  const prompt = emoji.repeat(50_000);
+  assertEquals(prompt.length, 100_000); // .length is UTF-16 code units
+  assertEquals(new TextEncoder().encode(prompt).byteLength, 200_000);
+  assertEquals(chooseDelivery(prompt), "stdin");
+});
+
+Deno.test("chooseDelivery keeps a small ASCII prompt on argv", () => {
+  assertEquals(chooseDelivery("hello world"), "argv");
+  assertEquals(chooseDelivery("x".repeat(100_000)), "argv");
+  assertEquals(chooseDelivery("x".repeat(200_000)), "stdin");
 });

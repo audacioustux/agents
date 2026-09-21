@@ -2,16 +2,22 @@
 
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 
+// `stdin: true` is a per-CLI capability: the child must accept
+// `--input-format stream-json --replay-user-messages` with a single
+// user-message envelope. Missing it means large reviews hard-fail
+// rather than silently hanging on stdin.
 const AGENTS = {
   claude: {
     bin: "claude",
     identity: "You are Claude",
     name: (mode: string, stamp: string) => `harness-bridge-claude-${mode}-${stamp}`,
+    stdin: true,
   },
   "puku-cli": {
     bin: "puku-cli",
     identity: "You are Puku",
     name: (mode: string, stamp: string) => `harness-bridge-puku-${mode}-${stamp}`,
+    stdin: true,
   },
 } as const;
 
@@ -21,8 +27,13 @@ type Mode = typeof MODES[number];
 
 const SUBJECT_LIMIT = 20_000;
 const DIFF_LIMIT = 1_000_000;
-const PROMPT_ARGV_LIMIT = 128 * 1024;
+const PROMPT_ARGV_LIMIT_BYTES = 128 * 1024;
 const EMPTY_SUBJECT = { text: "", path: "", truncated: false };
+
+// Byte-based, not UTF-16 code units — emoji and CJK expand 2–4× on the wire.
+export function chooseDelivery(prompt: string): "stdin" | "argv" {
+  return new TextEncoder().encode(prompt).byteLength > PROMPT_ARGV_LIMIT_BYTES ? "stdin" : "argv";
+}
 
 export function parseCliArgs(argv: readonly string[]) {
   const cleaned = argv[0] === "--" ? argv.slice(1) : argv;
@@ -135,7 +146,7 @@ export function buildPrompt(p: {
   }
 }
 
-export function buildCommand(p: {
+type CommandShared = {
   agent: AgentId;
   mode: Mode;
   prompt: string;
@@ -144,51 +155,40 @@ export function buildCommand(p: {
   model?: string;
   stamp: string;
   cwd: string;
-}): { bin: string; args: string[]; cwd: string } {
+};
+
+type DeliveryArgv = { bin: string; args: string[]; cwd: string; envelope: null };
+type DeliveryStdin = { bin: string; args: string[]; cwd: string; envelope: string };
+type Built = DeliveryArgv | DeliveryStdin;
+
+export function buildCommand(p: CommandShared, delivery: "argv"): DeliveryArgv;
+export function buildCommand(p: CommandShared, delivery: "stdin"): DeliveryStdin;
+export function buildCommand(p: CommandShared, delivery: "argv" | "stdin"): Built {
   const a = AGENTS[p.agent];
   const args = ["-p", "--permission-mode", "plan"];
+  if (delivery === "stdin") {
+    args.push(
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--replay-user-messages",
+    );
+  }
   if (p.model) args.push("--model", p.model);
   args.push("--name", a.name(p.mode, p.stamp));
   if (p.resume) args.push("--resume", p.resume, "--fork-session");
   else args.push("--session-id", p.newSessionId);
+  if (delivery === "stdin") {
+    const envelope = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: p.prompt },
+    }) + "\n";
+    return { bin: a.bin, args, cwd: p.cwd, envelope };
+  }
   args.push(p.prompt);
-  return { bin: a.bin, args, cwd: p.cwd };
-}
-
-// For prompts that would overflow argv, switch to stream-json over stdin.
-// Both `claude` and `puku-cli` accept `--input-format stream-json` with a
-// single user-message envelope and replay it as the prompt body.
-export function buildCommandStdin(p: {
-  agent: AgentId;
-  mode: Mode;
-  prompt: string;
-  resume?: string;
-  newSessionId: string;
-  model?: string;
-  stamp: string;
-  cwd: string;
-}): { bin: string; args: string[]; cwd: string; envelope: string } {
-  const a = AGENTS[p.agent];
-  const args = [
-    "-p",
-    "--permission-mode",
-    "plan",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--replay-user-messages",
-  ];
-  if (p.model) args.push("--model", p.model);
-  args.push("--name", a.name(p.mode, p.stamp));
-  if (p.resume) args.push("--resume", p.resume, "--fork-session");
-  else args.push("--session-id", p.newSessionId);
-  const envelope = JSON.stringify({
-    type: "user",
-    message: { role: "user", content: p.prompt },
-  }) + "\n";
-  return { bin: a.bin, args, cwd: p.cwd, envelope };
+  return { bin: a.bin, args, cwd: p.cwd, envelope: null };
 }
 
 async function gitDiff(
@@ -262,8 +262,14 @@ export async function run(args: ParsedArgs, now: () => Date = () => new Date()):
 
   const newSessionId = args.resume ? undefined : crypto.randomUUID();
   const stamp = now().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const useStdin = prompt.length > PROMPT_ARGV_LIMIT;
-  const shared = {
+  const promptBytes = new TextEncoder().encode(prompt).byteLength;
+  const useStdin = chooseDelivery(prompt) === "stdin";
+  if (useStdin && !AGENTS[args.agent].stdin) {
+    throw new Error(
+      `prompt is ${promptBytes} bytes (over ${PROMPT_ARGV_LIMIT_BYTES}); ${args.agent} does not declare stdin support, refusing to fall back to argv (which would risk E2BIG). Set AGENTS["${args.agent}"].stdin = true only after verifying --input-format stream-json works on this CLI.`,
+    );
+  }
+  const sharedCmd = {
     agent: args.agent,
     mode: args.mode,
     prompt,
@@ -272,17 +278,12 @@ export async function run(args: ParsedArgs, now: () => Date = () => new Date()):
     model: args.model,
     stamp,
     cwd,
-  } as const;
-  const stdinBuilt = useStdin ? buildCommandStdin(shared) : null;
-  const cmd = stdinBuilt
-    ? { bin: stdinBuilt.bin, args: stdinBuilt.args, cwd: stdinBuilt.cwd }
-    : buildCommand(shared);
-  const envelope = stdinBuilt?.envelope;
+  };
+  const built = useStdin ? buildCommand(sharedCmd, "stdin") : buildCommand(sharedCmd, "argv");
+  const { bin, args: argv, cwd: cmdCwd, envelope } = built;
 
   if (args.dryRun) {
-    const redacted = cmd.args.map((a) =>
-      a === prompt ? `[prompt redacted: ${prompt.length} chars]` : a
-    );
+    const redacted = argv.map((a) => a === prompt ? `[prompt redacted: ${promptBytes} bytes]` : a);
     console.log(JSON.stringify(
       {
         agent: args.agent,
@@ -292,11 +293,11 @@ export async function run(args: ParsedArgs, now: () => Date = () => new Date()):
         newSessionId: args.resume ? null : newSessionId,
         prompt: {
           redacted: true,
-          chars: prompt.length,
-          delivery: useStdin ? "stdin-stream-json" : "argv",
+          bytes: promptBytes,
+          delivery: useStdin ? "stdin" : "argv",
           ...meta,
         },
-        command: [cmd.bin, ...redacted],
+        command: [bin, ...redacted],
       },
       null,
       2,
@@ -305,9 +306,9 @@ export async function run(args: ParsedArgs, now: () => Date = () => new Date()):
   }
 
   if (newSessionId) console.error(`harness-bridge: new session id = ${newSessionId}`);
-  const child = new Deno.Command(cmd.bin, {
-    args: cmd.args,
-    cwd: cmd.cwd,
+  const child = new Deno.Command(bin, {
+    args: argv,
+    cwd: cmdCwd,
     stdin: envelope ? "piped" : "inherit",
     stdout: "inherit",
     stderr: "inherit",

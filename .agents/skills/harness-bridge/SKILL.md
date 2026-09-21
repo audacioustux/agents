@@ -67,14 +67,31 @@ file cannot accidentally bypass them.
 
 ### Large prompts (stdin-pipe path)
 
-Prompts whose byte length exceeds `PROMPT_ARGV_LIMIT` (128 KB) are delivered
-via `--input-format stream-json --output-format stream-json --verbose
---replay-user-messages`, with a single `{"type":"user","message":{"role":"user","content":…}}`
-envelope written to the child's stdin. The argv slot that normally holds the
-prompt is empty; the prompt body never enters argv, so the kernel's `ARG_MAX`
-cannot trigger `E2BIG`. The safety contract (`--permission-mode plan`,
-`--fork-session`, `--session-id`) is preserved on this path. Use this path
-for `review` mode against large diffs; it kicks in automatically.
+Prompts whose **byte length** exceeds `PROMPT_ARGV_LIMIT_BYTES` (128 KB =
+131 072 bytes) are delivered via `--input-format stream-json --output-format
+stream-json --verbose --replay-user-messages`, with a single
+`{"type":"user","message":{"role":"user","content":…}}` envelope written to
+the child's stdin. The argv slot that normally holds the prompt is empty;
+the prompt body never enters argv, so the kernel's `ARG_MAX` cannot trigger
+`E2BIG`. The safety contract (`--permission-mode plan`, `--fork-session`,
+`--session-id`) is preserved on this path.
+
+The threshold measures **bytes**, not UTF-16 code units. A prompt of 100 K
+emoji (4 bytes each = 400 KB on the wire) routes to stdin even though
+`.length` is only 100 K. This is the difference between the bridge
+correctly avoiding `E2BIG` and silently accepting a payload that will
+later be rejected by the kernel.
+
+Use this path for `review` mode against large diffs; it kicks in
+automatically. The `--dry-run` JSON output exposes the chosen path as
+`prompt.delivery` (`"argv"` or `"stdin"`) so a caller can verify which
+argv shape will be used without invoking the child.
+
+If the CLI selected for the call has `stdin: false` (or unset) in the
+`AGENTS` map and the prompt exceeds the threshold, the bridge **throws**
+rather than silently falling back to argv (which would risk `E2BIG`).
+Adding a new CLI requires both argv and stream-json support; see
+[Supported CLIs](#supported-clis).
 
 ## Supported CLIs
 
@@ -83,13 +100,15 @@ for `review` mode against large diffs; it kicks in automatically.
 | `claude` | Anthropic's Claude Code CLI |
 | `puku-cli` | Puku CLI (Claude-compatible surface; routed to OmniRoute-managed models) |
 
-Adding a new CLI is a one-line entry in `src/main.ts`'s `AGENTS` map — both
-CLIs share the same argv shape (`-p --permission-mode plan [--model M]
-[--name N] [--resume ID --fork-session | --session-id UUID] <prompt>`)
-and accept the same `--input-format stream-json --replay-user-messages`
-stdin envelope (see [Large prompts](#large-prompts-stdin-pipe-path)). The CLI
-is considered supported if it accepts both shapes; missing the stdin shape
-means large reviews will silently fall back to argv and may hit `E2BIG`.
+Adding a new CLI is a one entry in `src/main.ts`'s `AGENTS` map. The entry
+must declare `stdin: true` after you verify the CLI accepts
+`--input-format stream-json --replay-user-messages` with a single
+user-message envelope (see [Large prompts](#large-prompts-stdin-pipe-path)).
+Both CLIs share the same argv shape
+(`-p --permission-mode plan [--model M] [--name N] [--resume ID --fork-session | --session-id UUID] <prompt>`).
+The CLI is considered supported if it accepts both shapes; missing the
+stdin shape means large reviews will hard-fail with a clear error rather
+than silently degrading to argv.
 
 ## Privacy
 

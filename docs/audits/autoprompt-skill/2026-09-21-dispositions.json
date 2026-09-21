@@ -91,7 +91,7 @@
       "key_corrections": [
         "Decision A (fork) and Decision B (extract) are orthogonal; blending them weakens both halves.",
         "The 550-file claim was an overcount. Real structure is 7 hand-authored contracts + 11 generated provider packages.",
-        "The corpus has a documented audit schema (docs/audits/cursor-plugins/README.md:47-50) with disposition/status/note/evidence/landedIn + caveat; ~20% of adopt-rule recommendations historically fail scrutiny. The proposed verdict skipped this entirely.",
+        "The corpus has a documented audit schema (docs/audits/cursor-plugins/README.md § Reading a row) with disposition/status/note/evidence/landedIn + caveat; ~20% of adopt-rule recommendations historically fail scrutiny. The proposed verdict skipped this entirely.",
         "Generation coupling (adopting a compiler + machine-owned compiled-block markers) is a sharper fork argument than file count or vendor-paths.",
         "AGENTS.md absence is conditional on provenance.json decisions.paths, not a contradiction. The Python CLI fabrication was unfounded."
       ],

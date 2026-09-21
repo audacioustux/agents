@@ -39,7 +39,7 @@ The prior round framed the no-fork argument as "550 hand-authored artifacts" and
 
 ## What changed since round 1
 
-A first-pass verdict (drafted by puku-cli, not the corpus) blended two orthogonal decisions — "fork?" and "extract?" — into one statement. omp, reviewing under the harness-bridge safety contract (approval-gated, not read-only), surfaced the conflation and the missing audit schema. The revised verdict uses the corpus's documented `dispositions` format from `docs/audits/cursor-plugins/README.md:47-50`, names each contract by its verified path, and records caveats for every row that needs further reading.
+A first-pass verdict (drafted by puku-cli, not the corpus) blended two orthogonal decisions — "fork?" and "extract?" — into one statement. omp, reviewing under the harness-bridge safety contract (approval-gated, not read-only), surfaced the conflation and the missing audit schema. The revised verdict uses the corpus's documented `dispositions` format from `docs/audits/cursor-plugins/README.md § Reading a row`, names each contract by its verified path, and records caveats for every row that needs further reading.
 
 ## Reading a row
 
@@ -53,7 +53,7 @@ caveat       conditions that would change the verdict; present on adopt-rule row
 destination  corpus skill or new-skill name; present on adopt-rule rows
 ```
 
-The first five fields are the cursor-plugins schema (`docs/audits/cursor-plugins/README.md:47-52`). The autoprompt-skill ledger extends that schema with two optional fields:
+The first five fields are the cursor-plugins schema (`docs/audits/cursor-plugins/README.md § Reading a row`). The autoprompt-skill ledger extends that schema with two optional fields:
 
 - `caveat` — borrowed from the cursor-plugins *naming convention* (the field is mentioned in their `Notes on method` section even though the README schema block does not list it) because roughly 20% of `adopt-rule` recommendations do not survive scrutiny as stated, so every adopt-rule row carries one.
 - `destination` — new in this ledger. The cursor-plugins schema conveys routing through `note` text. This ledger makes the destination a structured field so it can be machine-checked. If `destination` is `unresolved`, the `note` records the discriminator owed.

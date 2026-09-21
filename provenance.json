@@ -962,7 +962,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "6d9550079d78f0a4d9fe641e62763e9609b761ccfabdde7bf351e7622f2e2e45",
+          "sha256": "2606b5c508a60536cdaa10115f92db6fb15c4e5bc3ea9cf1d01487f3b8f66074",
           "upstream": {
             "status": "diverged",
             "sha256": "82e003d477c4cd3c1ee09963abc29db2fc31f68539c4e6c9b2bfafa43efd8a16"
@@ -976,7 +976,9 @@
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-09-20: trimmed SKILL.md (-14 LOC, -13%). The Common Mistakes section restated Review Rules in negative form — same content twice, in violation of rule 1 (Evidence over labels) and rule 2 (Compress root causes). The Set the scope table was a verbose three-mode expansion of what the workflow already implies; collapsed to one line that keeps the load-bearing \"do not turn a narrow review into an unsolicited architecture rewrite\" warning."
+      ],
       "rationale": "audacioustux-owned, pristine",
       "owned": true
     },

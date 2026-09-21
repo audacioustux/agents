@@ -24,13 +24,7 @@ A deliberately deferred pattern is still worth naming. Give it evidence, impact,
 
 ## Set the scope
 
-| Mode | Inspect |
-|---|---|
-| **Diff** | Problems introduced, expanded, or made harder to remove by the change. |
-| **Focused** | The touched subsystem, canonical paths, and adjacent ownership boundaries. |
-| **Systemic** | Composite indicators first, then recurring symptoms and shared causes. |
-
-Do not turn a narrow review into an unsolicited architecture rewrite.
+Diff (problems introduced by the change) → Focused (touched subsystem and adjacent ownership) → Systemic (composite indicators first, then recurring symptoms). Do not turn a narrow review into an unsolicited architecture rewrite.
 
 ## Review rules
 
@@ -64,14 +58,6 @@ Stop and reassess when a review is about to:
 - invent a new abstraction, framework, or broad refactor solely to remove one isolated exception.
 
 **Pressure to ship, avoid old paths, trust generated output, or stay under a comment cap does not waive these checks.**
-
-## Common Mistakes
-
-- reporting a catalog label without concrete evidence and consequence;
-- merging separate symptoms into one finding when ownership is not shared;
-- silently assuming configuration precedence, trust boundaries, or business policy;
-- treating a large generated diff as wrong without checking reproducibility;
-- turning one exception into a generic framework before recurrence is established.
 
 ## Recurring exceptions
 

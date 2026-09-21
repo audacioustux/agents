@@ -1,0 +1,101 @@
+{
+  "audited": "Spielewoy/autoprompt-skill",
+  "sha": "b6516cf52a7891d797621fdd2a8ca0311e1ae0a9",
+  "date": "2026-09-21",
+  "total": 8,
+  "firstParty": 8,
+  "thirdParty": 0,
+  "auditor": "omp",
+  "structure": "Verified by WebFetch 2026-09-21: agents/contracts/ holds routes.json, gates.json, state-machine.json, roles.json, personas/, schemas/, plus per-provider conformance-evidence JSONs (codex, reasonix) and a README.md. README cites 25 personas + 18 frameworks as 'complete'; commit messages cite '32 role projections' elsewhere (the overcount the prior verdict propagated). The 7 hand-authored contracts in agents/contracts/ are inventoried as 7 rows in this ledger; the 11 generated provider packages under agents/providers/ are summarised by the single 'agents/providers/*' reject row because they are projections of the contracts (not individually actionable).",
+  "decisions": {
+    "fork": "no",
+    "fork_ground": "Generation coupling: forking means adopting the generator script + 11 output trees with machine-owned compiled-block markers. The corpus has no compiler pipeline; adopting one would invert the audit model (curated skills become generated projections). provenance.json decisions.scope already rejects vendor-tool skills on staleness/maintenance grounds."
+  },
+  "dispositions": {
+    "agents/contracts/routes.json": {
+      "disposition": "adopt-rule",
+      "status": "no-action",
+      "evidence": "directory listing confirmed; contents not yet read in full.",
+      "note": "adopt-rule: 'file count, repository size, failed attempt, or preference for more agents never selects a larger route'. The corpus's escalation rules are scattered (dispatching-parallel-agents for parallelism, brainstorming for option count, writing-plans for plan depth); no single rule refuses upward routing on those four signals. This is the most distinctive autoprompt rule — likely the strongest candidate for adoption.",
+      "destination": "unresolved",
+      "caveat": "destination owed. verifying-before-completion owns completion evidence; this rule is about route CLASSIFICATION, which is upstream. A new lightweight 'route-classification' skill may be the right home. Decide after reading routes.json in full."
+    },
+    "agents/contracts/gates.json + state-machine.json (freeze-before-check + non-resetting retry)": {
+      "disposition": "adopt-rule",
+      "status": "no-action",
+      "evidence": "directory listing confirmed; contents not yet read in full.",
+      "note": "adopt-rule: 'freeze-before-check + state-machine-driven retry with non-resetting limits'. Structurally similar to verifying-before-completion's Gate Function (IDENTIFY/RUN/READ/VERIFY) but the corpus's Gate Function does not pin retry-budget discipline. The non-resetting-limits property is a real addition: the corpus's verifying-before-completion does not currently say what to do after N failures.",
+      "destination": "verifying-before-completion",
+      "caveat": "scope of 'failure' is ambiguous — agent failure vs. check failure vs. tool failure. Must be specified before adopting. The combination of gates.json AND state-machine.json suggests these are two related contracts; read both before deciding whether to fold them as one rule or two."
+    },
+    "agents/contracts/codex-live-conformance-evidence.json + reasonix-live-conformance-evidence.json (conformance-evidence refusal)": {
+      "disposition": "adopt-rule",
+      "status": "no-action",
+      "evidence": "directory listing confirmed; structure is per-provider conformance evidence JSONs, which matches the 'refuse without current provider conformance evidence' rule.",
+      "note": "adopt-rule: 'refuse any required capability without current provider conformance evidence'. harness-bridge comes closest (it pins --permission-mode plan and --fork-session) but the rule is about CAPABILITY discovery, not ARG translation. The autoprompt model pins per-provider live conformance evidence; the corpus currently relies on static capability flags.",
+      "destination": "harness-bridge",
+      "caveat": "harness-bridge already enforces capability evidence by setting stdin:true/false and refusing CLIs that lack stream-json. The new rule is more general — apply to any capability, not just stream-json. Verify the existing capability flags meet the autoprompt bar before adopting the rule."
+    },
+    "agents/contracts/personas/ (25 personas + 32 projections)": {
+      "disposition": "reject",
+      "status": "no-action",
+      "evidence": "directory listing confirmed; README cites 25 personas + 18 frameworks; commits cite 32 role projections (overcount).",
+      "note": "reject: the corpus already names personas by skill (reviewing-for-bloat, verifying-before-completion, dispatching-parallel-agents). The autoprompt personas/ tree is provider-coupled and overlaps with skills it would have to displace."
+    },
+    "agents/contracts/roles.json": {
+      "disposition": "reject",
+      "status": "no-action",
+      "evidence": "directory listing confirmed; contents not read.",
+      "note": "reject: the file is named roles.json (NOT role-policy.json, which the round-1 verdict flagged). The corpus already names roles by skill (reviewing-for-bloat, verifying-before-completion, dispatching-parallel-agents). Adopting roles.json would add a parallel role vocabulary the corpus does not need."
+    },
+    "agents/contracts/schemas/": {
+      "disposition": "reject",
+      "status": "no-action",
+      "evidence": "directory listing confirmed; schema files not read.",
+      "note": "reject: schemas/ is a packaging-model artifact (JSON Schema files projected into each provider package). The corpus uses Markdown frontmatter and Python type hints; adopting JSON Schema would introduce a second validation surface."
+    },
+    "agents/providers/* (11 generated packages)": {
+      "disposition": "reject",
+      "status": "no-action",
+      "evidence": "generator script confirms 11 generated packages exist; the 11 packages themselves were not read (they are machine-owned projections of the contracts, not authored artifacts).",
+      "note": "reject: 11 generated provider packages are projections of the 7 contracts. Adopting them would adopt a generation pipeline the corpus does not have."
+    },
+    "agents/contracts/README.md (architecture framing)": {
+      "disposition": "reject",
+      "status": "no-action",
+      "evidence": "directory listing confirmed.",
+      "note": "reject: the architecture framing ('provider-neutral source of truth, generator projects into provider packages') is a packaging model the corpus does not use. audacioustux/agents ships curated Markdown + Python CLI."
+    }
+  },
+  "summary": {
+    "fork": "no (ground: generation coupling, not file count)",
+    "adopt-skill": 0,
+    "adopt-rule": 3,
+    "duplicate": 0,
+    "reject": 5,
+    "product-specific": 0,
+    "unresolved": 1
+  },
+  "next_steps": [
+    "Read agents/contracts/routes.json in full to resolve the destination for the no-fallback-route rule (verifying-before-completion vs new route-classification skill).",
+    "Read agents/contracts/gates.json AND state-machine.json in full to specify what 'failure' means under non-resetting retry limits.",
+    "Read agents/contracts/codex-live-conformance-evidence.json to confirm the conformance-evidence rule generalises beyond stream-json and meets the harness-bridge bar.",
+    "If all three resolve to clear adopt-rule destinations, file 3 PRs targeting verifying-before-completion, harness-bridge, and one new skill (route-classification). Update this ledger with landedIn SHAs."
+  ],
+  "reviewer_trail": [
+    {
+      "round": 1,
+      "verdict": "NOT a fork candidate (proposed)",
+      "reviewer": "self-corrections during drafting",
+      "outcome": "REFINE",
+      "key_corrections": [
+        "Decision A (fork) and Decision B (extract) are orthogonal; blending them weakens both halves.",
+        "The 550-file claim was an overcount. Real structure is 7 hand-authored contracts + 11 generated provider packages.",
+        "The corpus has a documented audit schema (docs/audits/cursor-plugins/README.md § Reading a row) with disposition/status/note/evidence/landedIn + caveat; ~20% of adopt-rule recommendations historically fail scrutiny. The proposed verdict skipped this entirely.",
+        "Generation coupling (adopting a compiler + machine-owned compiled-block markers) is a sharper fork argument than file count or vendor-paths.",
+        "AGENTS.md absence is conditional on provenance.json decisions.paths, not a contradiction. The Python CLI fabrication was unfounded."
+      ],
+      "note": "The round-1 verdict and its corrections are bundled in commit 64fed6f on lean-autoprompt-audit. There is no separate round-1 artifact in tree; the trail records the corrections as they happened during drafting, not as a separate reviewer pass."
+    }
+  ]
+}

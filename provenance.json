@@ -115,7 +115,7 @@
           }
         },
         "scripts/frame-template.html": {
-          "sha256": "ef07a47ef19a7249e3c7f982e388428ba3ab6b8e78d0d553a9f1d63e9c3131d8",
+          "sha256": "b6a00d1b73e2c3212672291f2410dc686bb3eff98e0a826868cc6b117115ed18",
           "upstream": {
             "status": "diverged",
             "sha256": "6a8a4e58bd6a44b904e2e3c57de774481d909204597e1498de53f1b2fecc4c4e"

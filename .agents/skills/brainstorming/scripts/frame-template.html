@@ -188,6 +188,10 @@
       // option label — supplied by the agent — is treated as text, not
       // markup. We pull the bounded .option/.card heading, falling back to
       // the choice data attribute, instead of rendering the full body.
+      // Threat model: the same principal (the agent) supplies both the
+      // option and the indicator, so an XSS here would only self-XSS the
+      // agent's own brainstorming session. No sanitisation needed — but
+      // the bounded selector keeps the indicator text concise.
       const indicator = document.getElementById('indicator-text');
       if (!indicator) return;
       const selected = container ? container.querySelectorAll('.selected') : [];

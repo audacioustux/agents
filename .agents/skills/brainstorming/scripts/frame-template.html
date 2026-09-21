@@ -173,8 +173,10 @@
       }
       if (multi) el.classList.toggle('selected');
       else el.classList.add('selected');
-      // sendBeacon survives page reloads and is delivered best-effort, which
-      // matches "record the click, agent will read state/events" semantics.
+      // sendBeacon is best-effort: the browser drops the request silently
+      // if the page unloads or the body exceeds its size cap. A missed event
+      // is acceptable here because the indicator text below always reflects
+      // the live selection state in the DOM regardless of network.
       const payload = JSON.stringify({
         type: 'click',
         choice: el.dataset.choice,
@@ -182,19 +184,38 @@
         id: el.id || null,
       });
       navigator.sendBeacon('/event', new Blob([payload], { type: 'application/json' }));
+      // Update the indicator. Build with DOM nodes (not innerHTML) so the
+      // option label — supplied by the agent — is treated as text, not
+      // markup. We pull the bounded .option/.card heading, falling back to
+      // the choice data attribute, instead of rendering the full body.
       const indicator = document.getElementById('indicator-text');
       if (!indicator) return;
       const selected = container ? container.querySelectorAll('.selected') : [];
+      const idle = 'Click an option above, then return to the terminal';
+      const tail = ' — return to terminal to continue';
+      indicator.replaceChildren();
       if (selected.length === 0) {
-        indicator.textContent = 'Click an option above, then return to the terminal';
+        indicator.appendChild(document.createTextNode(idle));
       } else if (selected.length === 1) {
-        indicator.innerHTML = '<span class="selected-text">' + selected[0].textContent.trim() + ' selected</span> — return to terminal to continue';
+        const span = document.createElement('span');
+        span.className = 'selected-text';
+        const heading = selected[0].querySelector('.content h3, .card-body h3');
+        const label = (heading?.textContent || selected[0].dataset.choice || '').trim();
+        span.appendChild(document.createTextNode(label + ' selected'));
+        indicator.appendChild(span);
+        indicator.appendChild(document.createTextNode(tail));
       } else {
-        indicator.innerHTML = '<span class="selected-text">' + selected.length + ' selected</span> — return to terminal to continue';
+        const span = document.createElement('span');
+        span.className = 'selected-text';
+        span.appendChild(document.createTextNode(selected.length + ' selected'));
+        indicator.appendChild(span);
+        indicator.appendChild(document.createTextNode(tail));
       }
     });
-    // Server-Sent Events: server pushes `data: reload\n\n` whenever the
-    // agent updates a screen file. EventSource auto-reconnects on drop.
+    // Server-Sent Events: server pushes `event: reload\ndata: reload\n\n`
+    // whenever the agent updates a screen file. EventSource auto-reconnects
+    // on drop. Listening on the named event type (not 'message') matches
+    // the server's `event: reload` line.
     new EventSource('/events').addEventListener('reload', () => location.reload());
   </script>
 </body>

@@ -5,7 +5,8 @@
 //   1. User clicks a [data-choice] element → browser POSTs JSON to /event
 //      via navigator.sendBeacon (survives page reloads, no JS plumbing).
 //   2. fs.watch fires when the agent updates a screen file → server pushes
-//      `data: reload\n\n` over text/event-stream → browser reloads.
+//      `event: reload\ndata: reload\n\n` over text/event-stream → browser
+//      reloads.
 //
 // Both are HTTP primitives; no framing, masking, opcodes, or hand-rolled
 // protocol. The companion is reachable on any local browser tab and, when
@@ -137,7 +138,7 @@ const sseClients = new Set();
 
 function broadcastReload() {
   for (const res of sseClients) {
-    try { res.write('data: reload\n\n'); }
+    try { res.write('event: reload\ndata: reload\n\n'); }
     catch (_) { sseClients.delete(res); }
   }
 }

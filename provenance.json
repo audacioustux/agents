@@ -115,14 +115,14 @@
           }
         },
         "scripts/frame-template.html": {
-          "sha256": "314ccd688b5647f0cae9cb86e59615145875307eca5480fdb5416e39da4e9b4f",
+          "sha256": "ef07a47ef19a7249e3c7f982e388428ba3ab6b8e78d0d553a9f1d63e9c3131d8",
           "upstream": {
             "status": "diverged",
             "sha256": "6a8a4e58bd6a44b904e2e3c57de774481d909204597e1498de53f1b2fecc4c4e"
           }
         },
         "scripts/server.cjs": {
-          "sha256": "6cfa4a26cf3814747eb5a9438272c13a8a0c6105a18dace5ce90ee5a3f435e8e",
+          "sha256": "a3341d56578ad51dda52a2cf9c9f1792cd2871f0759e83ac2982f063a6174c9f",
           "upstream": {
             "status": "diverged",
             "sha256": "2d2961ea8d11f56c5f4c3a1a68d22709efa5d7601a2246d8c880774e7e9e8412"
@@ -145,7 +145,8 @@
       },
       "decisions": [
         "2026-09-10: recovered three safety mechanisms the corpus fork never adopted from obra/superpowers — per-session token auth (?key= plus HttpOnly SameSite=Strict cookie, timing-safe compare, 403 + forbidden page, 0o600 token file, refusal to rebind when BRAINSTORM_TOKEN is explicit), a 10 MiB WebSocket frame cap, and PID instance-identity in stop-server.sh. The corpus server honours BRAINSTORM_HOST, so a non-loopback bind was previously unauthenticated. Branding, telemetry and version pinning stay removed. Verified live: correct key 200, no key 403, wrong key 403, cookie-only 200; stale PID left alive with status stale_pid; real server stopped cleanly.",
-        "2026-09-20: replaced the hand-rolled RFC 6455 WebSocket in scripts/server.cjs with HTTP primitives. Two client flows now use platform primitives: form-POST to /event (handled by navigator.sendBeacon in the inline script; survives page reloads that WebSocket.send did not) and Server-Sent Events on /events (text/event-stream; no framing, masking, opcodes, or ping/pong). scripts/helper.js was deleted — its 88 LOC existed entirely to talk to the WebSocket; the 30 LOC of click-capture and selection-tracking logic moved into an inline <script> at the bottom of scripts/frame-template.html. The frame template lost its inline mockup primitives (.mockup, .mock-nav, .split, .pros-cons) — agent-generated content rarely used them, and when needed it inlines the styles. Net: scripts/ from ~811 LOC to ~556 LOC. All existing safety contracts preserved (token auth via ?key= and HttpOnly cookie, DNS-rebinding defense, owner-PID + idle-timeout shutdown, EADDRINUSE fallback, server-info + server-stopped state files). Verified live: GET / 403/200, POST /event 200/413/400, SSE data:reload broadcast on fs.watch fire."
+        "2026-09-20: replaced the hand-rolled RFC 6455 WebSocket in scripts/server.cjs with HTTP primitives. Two client flows now use platform primitives: form-POST to /event (handled by navigator.sendBeacon in the inline script; survives page reloads that WebSocket.send did not) and Server-Sent Events on /events (text/event-stream; no framing, masking, opcodes, or ping/pong). scripts/helper.js was deleted — its 88 LOC existed entirely to talk to the WebSocket; the 30 LOC of click-capture and selection-tracking logic moved into an inline <script> at the bottom of scripts/frame-template.html. The frame template lost its inline mockup primitives (.mockup, .mock-nav, .split, .pros-cons) — agent-generated content rarely used them, and when needed it inlines the styles. Net: scripts/ from ~811 LOC to ~556 LOC. All existing safety contracts preserved (token auth via ?key= and HttpOnly cookie, DNS-rebinding defense, owner-PID + idle-timeout shutdown, EADDRINUSE fallback, server-info + server-stopped state files). Verified live: GET / 403/200, POST /event 200/413/400, SSE data:reload broadcast on fs.watch fire.",
+        "2026-09-20 (same day, follow-up): reviewer pass on the prior commit found three blocking issues that all shipped in the diff: (1) SSE broadcast wrote only `data: reload` without an `event: reload` line, so the named `addEventListener(\"reload\")` on the client never fired — the headline agent→browser reload feature was silently dead. Fixed by writing the event line. (2) The new inline indicator-builder used `innerHTML` to concatenate the option label, regressing an XSS defence the old helper.js had via its bounded `.h3` selector. Fixed by switching to DOM nodes + textContent (replaceChildren) and restricting the label source to `.content h3` / `.card-body h3` with `data-choice` fallback. (3) frame-template.html was missing a trailing newline. Added. Also tightened the top-of-file comment to reference `event: reload\\ndata: reload` instead of the old WebSocket payload shape."
       ],
       "rationale": "diverged both ways; 5 hardcoded .superpowers/brainstorm paths to fix",
       "owned": true

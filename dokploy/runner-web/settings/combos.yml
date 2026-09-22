@@ -19,6 +19,7 @@ combos:
       # - cx/gpt-6-astra
   coding:
     models:
+      - puku/puku-ai-2.8
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
       - minimax/MiniMax-M3
@@ -49,6 +50,7 @@ combos:
     models:
       - antigravity/claude-sonnet-4-6
       - minimax/MiniMax-M2.7
+      - puku/puku-ai-2.8
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
   ###
@@ -72,6 +74,7 @@ combos:
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
       - minimax/MiniMax-M3
+      - puku/puku-ai-2.8
   ###
   pro-vision:
     models:

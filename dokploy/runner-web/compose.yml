@@ -30,10 +30,10 @@ services:
     deploy:
       resources:
         reservations:
-          cpu: 1
+          cpus: 1
           memory: 16G
         limits:
-          cpu: 2
+          cpus: 2
           memory: 16G
     env_file: .env
     volumes:

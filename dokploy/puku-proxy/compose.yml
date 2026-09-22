@@ -13,7 +13,7 @@ services:
       # base image), bump the CACHEBUST value here (or in the proxy repo's
       # Dockerfile default) to force a fresh build of the runtime stage.
       args:
-        - CACHEBUST=deploy-2026-09-22T17-50Z
+        - CACHEBUST=deploy-2026-09-22T18-30Z
     pull_policy: always
     restart: unless-stopped
     stop_grace_period: 30s

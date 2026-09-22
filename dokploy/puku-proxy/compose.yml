@@ -14,12 +14,12 @@ services:
     networks:
       - dokploy-network
     ports:
-      - ${PORT:?}
+      - ${PORT:-8787}:8787
     healthcheck:
       # curl isn't in the slim Bun image, so use bun's built-in fetch.
       test:
         - CMD-SHELL
-        - "bun -e 'fetch(`http://127.0.0.1:${PORT}/healthz`).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'"
+        - "bun -e 'fetch(`http://127.0.0.1:${PORT:-8787}/healthz`).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'"
       interval: 30s
       timeout: 5s
       retries: 3

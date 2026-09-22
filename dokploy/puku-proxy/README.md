@@ -59,6 +59,16 @@ Two independent layers:
    Until one of those resolves, `POST /v1/chat/completions` returns 500
    with `Not logged in` even though the proxy itself is healthy.
 
+## Required vs optional env vars
+
+| Var                       | Required | Default | Notes |
+|---------------------------|----------|---------|-------|
+| `PUKU_PROXY_AUTH_KEYS`    | **yes**  | —       | Comma-separated bearer tokens. Proxy fails to start without this. |
+| `PORT`                    | no       | `8787`  | Port inside the container. Compose publishes `${PORT:-8787}:8787`. |
+| `PUKU_AI_API_KEY`         | no       | —       | Upstream API key for `puku-cli`. CLI may reject env-var keys (see below). |
+| `PUKU_AUTH_TOKEN`         | no       | —       | OAuth alternative to API key. |
+| `PUKU_BASE_URL`           | no       | upstream default | Override the upstream gateway. |
+
 ## Smoke test after deploy
 
 ```bash

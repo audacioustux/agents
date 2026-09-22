@@ -1133,7 +1133,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "bc2e9b1128b069fea854baca9283ffeb23d10cc6dac109835c7ceba092c25a3a",
+          "sha256": "f1fdcdf0f07bc048a19c4926b7d4907266eac73c257c822a4129802f302ebe07",
           "upstream": {
             "status": "diverged",
             "sha256": "808fc5717aa88ad65efff312b11c186294d3e6ee301afb584e2f86599b137787"
@@ -1148,7 +1148,7 @@
           }
         },
         "references/condition-based-waiting.md": {
-          "sha256": "75e5894e1f83d181903a9775de6eb48d1c5444b1b24d8d3055c9565b7c3707a1",
+          "sha256": "f02491d2b52258c433189d56c93b5f93bf0a2ea0fe123cb741ec08125efda5d8",
           "upstream": {
             "status": "diverged",
             "sha256": "e89fec8400d6cd50f43407cec9fab50976ba4d55d0ec2eb51c0bd68036b54c26",
@@ -1170,7 +1170,7 @@
           }
         },
         "references/root-cause-tracing.md": {
-          "sha256": "bb7966fa38638c6a0d9ba6dc69be6fd5386141b6ca35bcbf449575a84d71f198",
+          "sha256": "ada536e7f6a2032a2acc2b334baf5c3cb342c0e040e7e761fc3ac846f633bba5",
           "upstream": {
             "status": "diverged",
             "sha256": "6b0622269e098ca1399e123e553fd385f0b6412d88ef0e9c4f5a8ea9cf1cec7b",
@@ -1318,7 +1318,7 @@
           }
         },
         "references/testing-with-subagents.md": {
-          "sha256": "d1784205659bbce728a3ca0d164cccd522097ddebf19d69664f17eb21f85b0c5",
+          "sha256": "ea049097a8eb717aadf5c23b9e1f8343fa53fd45b6c0d7a97229ef51860e1808",
           "upstream": {
             "status": "diverged",
             "sha256": "c711346852c911b24a84aa161e0cff06a4cd7f4e2fa9e9c0a266cead5afcbade",
@@ -1566,7 +1566,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "430582b553cb5cfd3b5087c580bc762d768eb8861b6d23e4a538ae5c2e2107cf",
+          "sha256": "ebedf0ee8e94404faf94bcf5ec66dc9539f729c03aa1f244c74a9bff05953445",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"
@@ -1585,6 +1585,9 @@
           "upstream": {
             "status": "added-locally"
           }
+        },
+        "references/corpus-defect-patterns.md": {
+          "sha256": "4ba6a501103f81cd8b11f52a925fa773fd23bb455acc4f6964edf575a9539eba"
         }
       },
       "decisions": [

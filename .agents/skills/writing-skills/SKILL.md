@@ -177,8 +177,9 @@ Two-column table. Left column is the observable symptom, right column is the fix
 | --- | --- |
 | What the agent can actually detect | What to do about it |
 
-## Real-World Impact (optional)
-Concrete results
+## Evidence (optional)
+What the rule is grounded in — a reproducible command, a cited spec, a
+linked commit. Not statistics from a session nobody can re-run.
 ```
 
 ## Calibrate how hard to press
@@ -219,6 +220,15 @@ Each rule lives in exactly one skill. Siblings point at the owner by name rather
 ## Claude Search Optimization (CSO)
 
 How to make a skill findable: naming, description keywords, and trigger phrasing. See `references/discovery-and-triggers.md`.
+
+## Maintaining a skill after it ships
+
+Skills drift in ways authoring rules do not cover: an extraction breaks the
+pointer it was meant to follow, a limit gets corrected in the prose and not the
+checklist, a citation resolves but carries nothing the reader can use. Six such
+patterns, each with the instance that produced it and the check that catches it,
+are in `references/corpus-defect-patterns.md`. Read it before splitting a skill
+or moving content into `references/`.
 
 ## Flowchart Usage
 

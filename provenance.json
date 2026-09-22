@@ -385,7 +385,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "d4f0f9c1cacc0c7b7664acec163a4e79cef7a0f8d58e4130b945c5373f0c8945",
+          "sha256": "3bc4248fc8931da463573c1f518dd564e995abceb31d53be2afd1b17b0b0364d",
           "upstream": {
             "status": "diverged",
             "sha256": "1968923066f3b707eb01d1992cdf4c42284c3855f70253b9cd5000ff45fca13c"
@@ -1077,7 +1077,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "205735185de7c37dc9f044d9fa44927113118b06dbb8b9fafef2ca8340629af1",
+          "sha256": "1e0feddc3e61aeef2f26af63cf67570119150d4030a6cc2678667b156a97fa61",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
@@ -1318,7 +1318,7 @@
           }
         },
         "references/testing-with-subagents.md": {
-          "sha256": "e39e81b08087b8b1dd012dc0286853bbdf743d8cc9aa9bf22adfc90dca98f23d",
+          "sha256": "d1784205659bbce728a3ca0d164cccd522097ddebf19d69664f17eb21f85b0c5",
           "upstream": {
             "status": "diverged",
             "sha256": "c711346852c911b24a84aa161e0cff06a4cd7f4e2fa9e9c0a266cead5afcbade",
@@ -1339,7 +1339,7 @@
       ],
       "files": {
         "SKILL.md": {
-          "sha256": "8bfec8d6e40949ddfbdd1d450c2705cc4aa99cf5fb7a2f479a06efdcdd639058"
+          "sha256": "372a577123d42ac98f67ad774de33e53920e8798ad582aae69c15636060c98e4"
         },
         "examples/tsconfig.example.jsonc": {
           "sha256": "a96b6ac58e1c7a54a7d5bf790780858498b4ee0b662a00b08306478ce364e855"
@@ -1566,7 +1566,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "184a1890d5aef789866061fd34fe24d5aa74618ff80c251c736db4507fa08e7a",
+          "sha256": "430582b553cb5cfd3b5087c580bc762d768eb8861b6d23e4a538ae5c2e2107cf",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"

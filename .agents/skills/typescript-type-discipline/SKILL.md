@@ -6,8 +6,6 @@ uses:
     source: audacioustux/agents
   - name: evolving-shared-contracts
     source: audacioustux/agents
-  - name: speeding-up-rust-builds
-    source: audacioustux/agents
 ---
 
 # TypeScript Type Discipline
@@ -29,8 +27,8 @@ owns Zod, Valibot, or hand-rolled guards.
 | `type Route<T extends string> = \`/api/${T}\`` for pattern strings the codebase produces | `evolving-shared-contracts` § "Change the contract first, then the implementations" |
 | `Parameters<typeof fn>` / `ReturnType<typeof fn>` to derive a consumer shape from a single source of truth | `evolving-shared-contracts` § "Change the contract first, then the implementations" |
 | Strict tsconfig flags (`strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`, `noFallthroughCasesInSwitch`) | `modelling-domain-invariants` § "Put the invariant where it cannot be bypassed" |
-| `incremental` + `tsBuildInfoFile` for the edit-check loop; `skipLibCheck` to stop re-checking `.d.ts` in `node_modules` | `speeding-up-rust-builds` § "Measure first" and "The crate graph" |
-| `tsc --build` with project references for a monorepo, at boundaries that already own their dependency direction | `speeding-up-rust-builds` § "The crate graph"; `evolving-shared-contracts` § "Do not let storage shape the contract" |
+| `incremental` + `tsBuildInfoFile` for the edit-check loop; `skipLibCheck` to stop re-checking `.d.ts` in `node_modules` | No corpus owner. Measure the incremental case before changing flags — the clean build and the edit-check loop have different bottlenecks, and the second is the one developers feel |
+| `tsc --build` with project references for a monorepo, at boundaries that already own their dependency direction | `evolving-shared-contracts` § "Do not let storage shape the contract" |
 | `isolatedModules: true` so every file parses without cross-file type information | `evolving-shared-contracts` § "Change the contract first, then the implementations" |
 
 Read the owner for the principle. Read this skill to recognise the TS form and

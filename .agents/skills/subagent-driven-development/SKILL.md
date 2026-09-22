@@ -40,6 +40,8 @@ flowchart TD
 
 **vs. Executing Plans (no subagents available):** same session, no context pollution, two-stage review after each task, no human-in-loop between tasks.
 
+The full comparison, including what this costs — more invocations per task, more controller prep, extra review iterations — is in `references/why-subagents.md`.
+
 ## The Process
 
 ### Track progress in a file, not only in memory

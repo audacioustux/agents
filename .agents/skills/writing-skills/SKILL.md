@@ -343,8 +343,8 @@ helper1, helper2, step3, pattern4
 **IMPORTANT: Use TodoWrite to create todos for EACH checklist item below.**
 
 **RED Phase - Write Failing Test:** run the RED checklist in `testing-skills`
-(`references/testing-with-subagents.md`). It owns the procedure; do not work
-from a copy.
+(`testing-skills/references/testing-with-subagents.md`). It owns the procedure;
+do not work from a copy.
 
 **GREEN Phase - Write Minimal Skill:**
 - [ ] Name uses only letters, numbers, hyphens (no parentheses/special chars)

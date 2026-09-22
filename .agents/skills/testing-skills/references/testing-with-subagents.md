@@ -10,7 +10,7 @@ You run scenarios without the skill (RED - watch agent fail), write skill addres
 
 **Core principle:** If you didn't watch an agent fail without the skill, you don't know if the skill prevents the right failures.
 
-**REQUIRED BACKGROUND:** You MUST understand test-driven-development before using this skill. That skill defines the fundamental RED-GREEN-REFACTOR cycle. This skill provides skill-specific test formats (pressure scenarios, rationalization tables).
+**Background:** `test-driven-development` owns the RED-GREEN-REFACTOR cycle this procedure assumes; read it first where it is installed. Where it is not, the cycle in short: write the failing case, watch it fail for the reason you predicted, then make it pass. This file provides the skill-specific test formats (pressure scenarios, rationalization tables).
 
 **Complete worked example:** See `examples/claude-md-test-campaign.md` for a full test campaign testing CLAUDE.md documentation variants.
 

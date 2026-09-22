@@ -27,11 +27,11 @@ flowchart TD
     N2 -->|"yes"| N4{"Can they work in parallel?"}
     N4 -->|"yes"| N5["Parallel dispatch"]
     N4 -->|"no - shared state"| N6["Partition ownership,<br/>else sequential"]
-    N7["One agent per problem domain"]
+    N5 --> N7["One agent per problem domain"]
 ```
 
 **Use when:**
-- 3+ test files failing with different root causes
+- 2+ test files failing with different root causes
 - Multiple subsystems broken independently
 - Each problem can be understood without context from others
 - No shared state between investigations

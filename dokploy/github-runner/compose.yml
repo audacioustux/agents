@@ -38,6 +38,13 @@ services:
     <<: *runner
     deploy:
       replicas: 1
+      resources:
+        reservations:
+          cpu: 1
+          memory: 16G
+        limits:
+          cpu: 4
+          memory: 16G
     environment:
       RUNNER_SCOPE: repo
       REPO_URL: ${REPO_URL:?}

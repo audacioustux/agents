@@ -7,6 +7,13 @@ services:
       # of truth for the image; this compose file only wires deploy-time config.
       context: https://github.com/audacioustux/puku-proxy.git
       dockerfile: Dockerfile
+      # NOTE: Dokploy's BuildKit layer cache is NOT cleared by the UI's
+      # "Clear Build Cache" button — that only purges dangling images. If a
+      # build replays a stale failed layer (e.g. after changing the runtime
+      # base image), bump the CACHEBUST arg in the proxy repo's Dockerfile
+      # to force a fresh build of the runtime stage.
+      args:
+        - CACHEBUST=deploy-2026-09-22T14-25Z
     pull_policy: always
     restart: unless-stopped
     stop_grace_period: 30s

@@ -38,6 +38,25 @@ it fast).
 - Healthcheck: `GET /healthz` via Bun's `fetch` (no curl in the image).
 - Logs: JSON-file driver, 10m rotation, 3 files retained.
 
+## Build cache gotcha
+
+Dokploy's "Clear Build Cache" button in the service UI purges dangling
+images but does **not** invalidate BuildKit's layer cache. If a build
+keeps replaying an old failed layer (e.g. `npm: not found` from a previous
+`-slim` base image), bump the `CACHEBUST` build arg in `compose.yml`:
+
+```yaml
+build:
+  args:
+    - CACHEBUST=deploy-<ISO-timestamp>
+```
+
+The arg is consumed by a `RUN echo` at the top of the runtime stage, which
+changes the layer hash and forces every layer below it to rebuild. Without
+this, changes to the runtime base image (e.g. swapping `-slim` for the
+full image) may be invisible to BuildKit until something else invalidates
+the chain.
+
 ## Auth
 
 Two independent layers:

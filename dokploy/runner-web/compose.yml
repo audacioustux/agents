@@ -33,7 +33,7 @@ services:
           cpus: 1
           memory: 16G
         limits:
-          cpus: 2
+          cpus: 4
           memory: 16G
     env_file: .env
     volumes:

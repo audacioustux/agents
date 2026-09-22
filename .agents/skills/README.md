@@ -166,6 +166,7 @@ entry survives so a later pass finds the reasoning instead of re-adopting the sk
 1. Check whether an existing skill already owns the rule. Extending beats adding.
 2. Read `writing-skills` before authoring, and follow the calibration and
    detection-table conventions there.
-3. Keep the body tight. Long reference material belongs in `references/`.
+3. Keep the body tight. Long reference material belongs in `references/` — the
+   pointer must move with it; see `writing-skills/references/corpus-defect-patterns.md`.
 4. Never assume a sibling skill is installed. Imperative hand-offs need a fallback.
 5. Record provenance for anything derived from an upstream source.

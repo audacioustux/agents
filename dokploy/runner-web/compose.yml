@@ -27,6 +27,14 @@ services:
     pull_policy: always
     restart: unless-stopped
     stop_grace_period: 40s
+    deploy:
+      resources:
+        reservations:
+          cpu: 1
+          memory: 16G
+        limits:
+          cpu: 2
+          memory: 16G
     env_file: .env
     volumes:
       - omniroute-data:/app/data

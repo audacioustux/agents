@@ -19,10 +19,10 @@ combos:
       # - cx/gpt-6-astra
   coding:
     models:
-      - puku/puku-ai-2.8
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
       - minimax/MiniMax-M3
+      - puku/puku-ai-2.8
   ###
   best-coding-fast:
     models:
@@ -30,6 +30,7 @@ combos:
       - minimax/MiniMax-M2.7
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
+      - puku/puku-ai-2.8
   ###
   pro-reasoning:
     # strategy: pipeline
@@ -46,11 +47,11 @@ combos:
     models:
       - antigravity/gemini-3.8-flash-tiered
       - cx/gpt-5.6-luna
+      - puku/puku-ai-2.8
   reasoning:
     models:
       - antigravity/claude-sonnet-4-6
       - minimax/MiniMax-M2.7
-      - puku/puku-ai-2.8
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
   ###
@@ -90,10 +91,11 @@ combos:
     models:
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
+      - minimax/MiniMax-M3
+      - puku/puku-ai-2.8
   best-fast:
     models:
       - antigravity/gemini-3.8-flash-tiered
-      - minimax/MiniMax-M3
       - oc/big-pickle
   fast:
     models:

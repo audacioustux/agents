@@ -87,6 +87,7 @@ Two independent layers:
 | `PUKU_AI_API_KEY`         | no       | —       | Upstream API key for `puku-cli`. CLI may reject env-var keys (see below). |
 | `PUKU_AUTH_TOKEN`         | no       | —       | OAuth alternative to API key. |
 | `PUKU_BASE_URL`           | no       | upstream default | Override the upstream gateway. |
+| `PUKU_PROXY_DEBUG`        | no       | off              | Set to `1` to enable verbose debug logs (see "Debug mode" below). |
 
 ## Smoke test after deploy
 
@@ -120,3 +121,22 @@ To rotate the bearer token:
 3. Redeploy the service.
 
 Tokens are matched with constant-time comparison and never logged.
+
+## Debug mode
+
+Set `PUKU_PROXY_DEBUG=1` in the container env (or in `.env`) and restart
+the service. The boot banner prints `debug: on` to confirm. With debug
+on, every `/v1/chat/completions` request gets a `[chat-N]` log prefix and
+the proxy records:
+
+- `req.signal.aborted` and `req.signal.reason` at request entry
+- The same signal state at the moment an error fires (so you can tell
+  whether the proxy or the client initiated the abort)
+- A heartbeat counter + Δt since last SSE chunk during streaming
+- The response headers being sent (so you can confirm SSE actually
+  reaches the edge)
+
+When filing a bug about a streaming abort or a `puku-cli` failure, turn
+on debug mode, re-run the failing request, and paste the `docker logs
+--tail 100 puku-proxy` output. The signal-state lines alone are usually
+enough to tell where the abort originated.

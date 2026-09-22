@@ -83,6 +83,13 @@ curl -s -H "authorization: Bearer <token>" \
      https://<host>:8787/v1/chat/completions
 ```
 
+Or use the bundled script, which exits with distinct codes for each failure
+mode (proxy down vs token rejected vs upstream "Not logged in"):
+
+```bash
+HOST=https://<host> PORT=8787 TOKEN=pk_live_<token> ./scripts/smoke.sh
+```
+
 ## Rotation
 
 To rotate the bearer token:

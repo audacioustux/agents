@@ -209,10 +209,10 @@ writing it down is the same as dropping it.
 
 ## Integration
 
-**Required workflow skills:**
-- **`using-git-worktrees`** - Ensures isolated workspace (creates one or verifies existing)
-- **`writing-plans`** - Creates the plan this skill executes
-- **`requesting-code-review`** - Code review template for reviewer subagents
+**Workflow skills this one hands off to.** None is required to be installed; each line states what to do when it is absent.
+- **`using-git-worktrees`** - Ensures isolated workspace (creates one or verifies existing); if not installed, work in the current checkout and say so before dispatching the first subagent
+- **`writing-plans`** - Creates the plan this skill executes; if not installed, the plan file you were given is the input — execute it as written
+- **`requesting-code-review`** - Code review template for reviewer subagents; if not installed, ask the reviewer for findings ranked by severity with a file:line citation each
 - **`finishing-a-development-branch`** - Complete development after all tasks; if not installed, merge or open a PR yourself and remove any worktree you created
 
 **Subagents should use:**

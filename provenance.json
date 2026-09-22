@@ -107,7 +107,7 @@
           }
         },
         "references/visual-companion.md": {
-          "sha256": "f151e1f4a0a51ba14a5a6fd67cb44902e84f727136297b5aaa199f78a1db3d11",
+          "sha256": "e120b901874709764164955262bd4d5daf6be3e306b46bfaaf41989d4c74ab7c",
           "upstream": {
             "status": "diverged",
             "sha256": "77eb44a4ec3408bb3dafb872288ecd94beb8cf21da4f2bafa54fd08255d7808b",
@@ -349,7 +349,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "8d45f4b0987b1269fa89912ddc568c8148501fca623f375b23deaa4123c416a6",
+          "sha256": "421620c214c75e7045e2c968113714c7529a0f212843eabdd72a7341b2ba960b",
           "upstream": {
             "status": "diverged",
             "sha256": "ed2addbaba3b1bdf5013c6741640bd4e08c087e14026ed29bf16c427a39dd6ad"
@@ -421,7 +421,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "b313516e931090de72d7b30afaf08e61953d61984fd813f87e00c85bed300cdb",
+          "sha256": "ae015944b88b4bd075c534a84f2930b3b96744037f9baf813abaca8d045fac86",
           "upstream": {
             "status": "diverged",
             "sha256": "c4c3d8b628c51114cd165fb8246fe02744cd8be180032328391252e653028d9b"
@@ -1077,7 +1077,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "4dca312f4abfa4011383499cc01bc24dc9077d36551d4574205fbfc65e95f2e1",
+          "sha256": "205735185de7c37dc9f044d9fa44927113118b06dbb8b9fafef2ca8340629af1",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
@@ -1339,10 +1339,10 @@
       ],
       "files": {
         "SKILL.md": {
-          "sha256": "748697b4ed0a306c6d3a19f77462215652221cae4513567b251fb7d1ad0f8849"
+          "sha256": "8bfec8d6e40949ddfbdd1d450c2705cc4aa99cf5fb7a2f479a06efdcdd639058"
         },
         "examples/tsconfig.example.jsonc": {
-          "sha256": "4cacfa78037865968ac623738950cdf378c7bfee35f1c642630955a9a11d78c5"
+          "sha256": "a96b6ac58e1c7a54a7d5bf790780858498b4ee0b662a00b08306478ce364e855"
         }
       }
     },
@@ -1566,7 +1566,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "252b74b130dbd1f7dc6f10ceeb826a80c16ca353515fa92470b93a633450e8b5",
+          "sha256": "184a1890d5aef789866061fd34fe24d5aa74618ff80c251c736db4507fa08e7a",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"

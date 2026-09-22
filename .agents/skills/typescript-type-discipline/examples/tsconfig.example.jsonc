@@ -10,7 +10,8 @@
     "strict": true,
     // strict enables: noImplicitAny, strictNullChecks, strictFunctionTypes,
     // strictBindCallApply, strictPropertyInitialization, alwaysStrict,
-    // useUnknownInCatchVariables, noImplicitThis, noImplicitReturns.
+    // useUnknownInCatchVariables, noImplicitThis. It does NOT enable
+    // noImplicitReturns — that one is independent, and worth adding.
 
     "noUncheckedIndexedAccess": true,
     // arr[i] becomes T | undefined; record[k] becomes T | undefined.

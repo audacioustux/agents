@@ -135,7 +135,7 @@ vendored skill runs with the same permissions as one you wrote.
 
 **Frontmatter (YAML):**
 - Two required fields: `name` and `description` (see [agentskills.io/specification](https://agentskills.io/specification) for all supported fields)
-- Max 1024 characters total
+- `name` max 64 characters; `description` max 1024. The limits are per field, not a budget for the whole block.
 - `name`: Use letters, numbers, and hyphens only (no parentheses, special chars)
 - `description`: Third-person, describes ONLY when to use (NOT what it does)
   - Open with the trigger: "Use when..." normally, or "Use before..." when the skill runs ahead of its trigger rather than in response to it
@@ -348,7 +348,7 @@ from a copy.
 
 **GREEN Phase - Write Minimal Skill:**
 - [ ] Name uses only letters, numbers, hyphens (no parentheses/special chars)
-- [ ] YAML frontmatter with required `name` and `description` fields (max 1024 chars; see [spec](https://agentskills.io/specification))
+- [ ] YAML frontmatter with required `name` (max 64 chars) and `description` (max 1024 chars) fields; see [spec](https://agentskills.io/specification)
 - [ ] Description opens with the trigger, normally "Use when..." and "Use before..." where the skill runs ahead of the trigger rather than in response to it
 - [ ] Description written in third person
 - [ ] Keywords throughout for search (errors, symptoms, tools)

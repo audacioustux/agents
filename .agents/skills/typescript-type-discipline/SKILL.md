@@ -1,6 +1,13 @@
 ---
 name: typescript-type-discipline
 description: Use when designing or reviewing TypeScript types — handler maps, discriminated unions, branded primitives, route or event string templates, or a tsconfig posture — and the choice between `satisfies`, `assertNever`, exhaustive `switch`, branded types, template literal types, or strict tsconfig flags will change what the compiler accepts. Maps TS expressions to corpus-owned rules; the rule itself lives at the owner. Not for vendor framework APIs, not for runtime validation (types are erased), not for syntax reference.
+uses:
+  - name: modelling-domain-invariants
+    source: audacioustux/agents
+  - name: evolving-shared-contracts
+    source: audacioustux/agents
+  - name: speeding-up-rust-builds
+    source: audacioustux/agents
 ---
 
 # TypeScript Type Discipline

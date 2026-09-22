@@ -73,7 +73,7 @@ After all tasks complete and verified:
 
 ## Integration
 
-**Required workflow skills:**
-- **`using-git-worktrees`** - Ensures isolated workspace (creates one or verifies existing)
-- **`writing-plans`** - Creates the plan this skill executes
-- **`finishing-a-development-branch`** - Complete development after all tasks
+**Workflow skills this one hands off to.** None is required to be installed; each line states what to do when it is absent.
+- **`using-git-worktrees`** - Ensures isolated workspace (creates one or verifies existing); if not installed, work in the current checkout and say so before the first edit
+- **`writing-plans`** - Creates the plan this skill executes; if not installed, the plan file you were given is the input — execute it as written
+- **`finishing-a-development-branch`** - Complete development after all tasks; if not installed, merge or open a PR yourself and remove any worktree you created

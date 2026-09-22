@@ -1,6 +1,6 @@
 ---
 name: diagramming-with-mermaid
-description: "Use when creating, reviewing, or fixing a Mermaid diagram embedded in Markdown documentation — choosing a diagram type, writing or debugging a mermaid fence, or reviewing a doc PR that touches one."
+description: Use when creating, reviewing, or fixing a Mermaid diagram embedded in Markdown documentation — choosing a diagram type, writing or debugging a mermaid fence, or reviewing a doc PR that touches one.
 ---
 # Mermaid Diagrams
 

@@ -1,6 +1,6 @@
 ---
 name: harness-bridge
-description: Use when an agent needs to invoke a sibling agent CLI — currently `claude`, `puku-cli`, or `omp` — under a small safety contract: `--continue/-c` is rejected, `--permission-mode plan` (or its equivalent) is forced, `--fork-session` is forced on resume where the CLI supports it. The bridge is general-purpose (any task the caller would otherwise pass to a CLI), not limited to "second opinion" framing. Adding a new CLI is one entry in the `AGENTS` map if it accepts the same argv shape, or a small per-CLI argv hook if it does not. Not for invoking a CLI without the safety contract (call the CLI directly); not for parsing or scoring session JSONL (the bridge does not read session stores).
+description: 'Use when an agent needs to invoke a sibling agent CLI — currently `claude`, `puku-cli`, or `omp` — under a small safety contract: `--continue/-c` is rejected, `--permission-mode plan` (or its equivalent) is forced, `--fork-session` is forced on resume where the CLI supports it. The bridge is general-purpose (any task the caller would otherwise pass to a CLI), not limited to "second opinion" framing. Adding a new CLI is one entry in the `AGENTS` map if it accepts the same argv shape, or a small per-CLI argv hook if it does not. Not for invoking a CLI without the safety contract (call the CLI directly); not for parsing or scoring session JSONL (the bridge does not read session stores).'
 ---
 
 # harness-bridge

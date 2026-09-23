@@ -6,8 +6,8 @@ combos:
     models:
       # - cc/claude-fable-5-1
       - cc/claude-opus-5
-      # - cx/gpt-6-astra
-      - cx/gpt-5.6-sol-xhigh
+      - cx/gpt-6-astra
+      # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-3.8-flash-tiered
       # - antigravity/gemini-pro-agent
       # - minimax/MiniMax-M3
@@ -16,7 +16,7 @@ combos:
   best-coding:
     models:
       - cc/claude-opus-5
-      # - cx/gpt-6-astra
+      - cx/gpt-6-astra
   coding:
     models:
       - cc/claude-sonnet-5
@@ -36,7 +36,7 @@ combos:
     # strategy: pipeline
     models:
       - cx/gpt-6-astra
-      # - cc/claude-fable-5-1
+      - cc/claude-fable-5-1
       - cc/claude-opus-5
       # - antigravity/gemini-pro-agent
       # - cx/gpt-5.6-sol-xhigh
@@ -58,10 +58,10 @@ combos:
   pro-chat:
     # strategy: fusion
     models:
-      # - cc/claude-fable-5-1
+      - cc/claude-fable-5-1
       - cc/claude-opus-5
-      # - cx/gpt-6-astra
-      - cx/gpt-5.6-sol-xhigh
+      - cx/gpt-6-astra
+      # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-3.8-flash-tiered
       # - minimax/MiniMax-M3
       # - antigravity/gemini-pro-agent
@@ -69,7 +69,7 @@ combos:
   best-chat:
     models:
       - cc/claude-opus-5
-      # - cx/gpt-6-astra
+      - cx/gpt-6-astra
   chat:
     models:
       - cc/claude-sonnet-5
@@ -79,12 +79,12 @@ combos:
   ###
   pro-vision:
     models:
-      # - cx/gpt-6-astra
-      # - cc/claude-fable-5-1
+      - cx/gpt-6-astra
+      - cc/claude-fable-5-1
       - cc/claude-opus-5
   best-vision:
     models:
-      # - cx/gpt-6-astra
+      - cx/gpt-6-astra
       - cc/claude-opus-5
   ###
   pro-fast:

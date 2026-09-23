@@ -5,8 +5,8 @@ combos:
     # strategy: fusion
     models:
       # - cc/claude-fable-5-1
-      - cc/claude-opus-5
-      - cx/gpt-6-astra
+      - cc/claude-opus-5-5
+      - cx/gpt-6-astra-medium
       # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-3.8-flash-tiered
       # - antigravity/gemini-pro-agent
@@ -15,8 +15,8 @@ combos:
       # - gh/claude-sonnet-5
   best-coding:
     models:
-      - cc/claude-opus-5
-      - cx/gpt-6-astra
+      - cc/claude-opus-5-5
+      - cx/gpt-6-astra-medium
   coding:
     models:
       - cc/claude-sonnet-5
@@ -35,9 +35,9 @@ combos:
   pro-reasoning:
     # strategy: pipeline
     models:
-      - cx/gpt-6-astra
+      - cx/gpt-6-astra-high
       - cc/claude-fable-5-1
-      - cc/claude-opus-5
+      - cc/claude-opus-5-5
       # - antigravity/gemini-pro-agent
       # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-pro-agent
@@ -59,8 +59,8 @@ combos:
     # strategy: fusion
     models:
       - cc/claude-fable-5-1
-      - cc/claude-opus-5
-      - cx/gpt-6-astra
+      - cc/claude-opus-5-5
+      - cx/gpt-6-astra-medium
       # - cx/gpt-5.6-sol-xhigh
       # - antigravity/gemini-3.8-flash-tiered
       # - minimax/MiniMax-M3
@@ -68,8 +68,8 @@ combos:
       # - gh/claude-sonnet-5
   best-chat:
     models:
-      - cc/claude-opus-5
-      - cx/gpt-6-astra
+      - cc/claude-opus-5-5
+      - cx/gpt-6-astra-medium
   chat:
     models:
       - cc/claude-sonnet-5
@@ -79,13 +79,13 @@ combos:
   ###
   pro-vision:
     models:
-      - cx/gpt-6-astra
+      - cx/gpt-6-astra-medium
       - cc/claude-fable-5-1
-      - cc/claude-opus-5
+      - cc/claude-opus-5-5
   best-vision:
     models:
-      - cx/gpt-6-astra
-      - cc/claude-opus-5
+      - cx/gpt-6-astra-medium
+      - cc/claude-opus-5-5
   ###
   pro-fast:
     models:
@@ -119,7 +119,7 @@ combos:
       - groq/openai/gpt-oss-120b
   claude-opus:
     models:
-      - cc/claude-opus-5
+      - cc/claude-opus-5-5
       - antigravity/claude-opus-4-6-thinking
   claude-sonnet:
     models:

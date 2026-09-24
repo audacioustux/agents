@@ -23,8 +23,27 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    image: diegosouzapw/omniroute:main
-    pull_policy: always
+    # Built from source rather than a published tag: the Docker Hub tags lag
+    # main by days (main-web was 3 days behind at the time of writing), and we
+    # want current code.
+    #
+    # `target: runner-base` is the plain image — the same stage the published
+    # `:main` tag is built from (see the upstream docker-publish.yml). Omitting
+    # it would default to the Dockerfile's last stage, `runner-cli`, which adds
+    # codex/claude-code/droid/openclaw and docker.io. `runner-web` is the other
+    # variant, adding Playwright + Chromium; we don't use the web-session
+    # providers, so we skip that cost.
+    #
+    # Bump CACHEBUST to force BuildKit to refetch the source repo — without it
+    # a cached clone of an older commit can be replayed indefinitely.
+    build:
+      context: https://github.com/diegosouzapw/OmniRoute.git#main
+      dockerfile: Dockerfile
+      target: runner-base
+      args:
+        - CACHEBUST=build-2026-09-24T11-40Z
+        - OMNIROUTE_BUILD_MEMORY_MB=6144
+    pull_policy: build
     restart: unless-stopped
     stop_grace_period: 40s
     deploy:

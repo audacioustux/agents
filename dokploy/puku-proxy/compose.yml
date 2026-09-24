@@ -5,15 +5,18 @@ services:
       # Build context is the puku-proxy source repo (audacioustux/puku-proxy).
       # The Dockerfile lives at the root of that repo and is the single source
       # of truth for the image; this compose file only wires deploy-time config.
-      context: https://github.com/audacioustux/puku-proxy.git
+      # The `#main` fragment pins the branch explicitly. Without it BuildKit
+      # resolves the repo's default branch, which is the same thing today but
+      # silently changes if the default is ever moved.
+      context: https://github.com/audacioustux/puku-proxy.git#main
       dockerfile: Dockerfile
       # NOTE: Dokploy's BuildKit layer cache is NOT cleared by the UI's
       # "Clear Build Cache" button — that only purges dangling images. If a
-      # build replays a stale failed layer (e.g. after changing the runtime
-      # base image), bump the CACHEBUST value here (or in the proxy repo's
-      # Dockerfile default) to force a fresh build of the runtime stage.
+      # build replays a stale layer, or serves a previously-fetched commit of
+      # the source repo, bump the CACHEBUST value here (or in the proxy repo's
+      # Dockerfile default) to force a fresh fetch and rebuild.
       args:
-        - CACHEBUST=deploy-2026-09-22T21-40Z
+        - CACHEBUST=deploy-2026-09-24T10-55Z
     pull_policy: always
     restart: unless-stopped
     stop_grace_period: 30s

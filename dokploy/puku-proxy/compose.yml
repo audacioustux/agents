@@ -16,7 +16,7 @@ services:
       # the source repo, bump the CACHEBUST value here (or in the proxy repo's
       # Dockerfile default) to force a fresh fetch and rebuild.
       args:
-        - CACHEBUST=deploy-2026-09-24T11-05Z
+        - CACHEBUST=deploy-2026-09-24T11-15Z
     pull_policy: always
     restart: unless-stopped
     stop_grace_period: 30s

@@ -45,9 +45,9 @@ combos:
   best-reasoning:
     # strategy: pipeline
     models:
+      - puku/puku-ai-2.8
       - antigravity/gemini-3.8-flash-tiered
       - cx/gpt-5.6-luna
-      - puku/puku-ai-2.8
   reasoning:
     models:
       - antigravity/claude-sonnet-4-6

@@ -37,11 +37,11 @@ services:
     deploy:
       resources:
         reservations:
-          cpus: "0.5"
-          memory: 512M
-        limits:
           cpus: "1"
           memory: 1G
+        limits:
+          cpus: "4"
+          memory: 2G
     logging:
       driver: json-file
       options:

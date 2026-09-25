@@ -32,7 +32,7 @@ services:
     # Building from source would track the branch exactly, but costs a ~6GB
     # Turbopack compile on every deploy for a few days' freshness. Not worth
     # it here.
-    image: diegosouzapw/omniroute:next-web
+    image: diegosouzapw/omniroute:next
     pull_policy: always
     restart: unless-stopped
     stop_grace_period: 40s

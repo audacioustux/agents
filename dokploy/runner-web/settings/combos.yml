@@ -79,11 +79,12 @@ combos:
   ###
   pro-vision:
     models:
+      - cc/claude-fable-5-1
       - cx/gpt-6-astra-medium
-      # - cc/claude-fable-5-1
       - cc/claude-opus-5
   best-vision:
     models:
+      - cc/claude-fable-5-1
       - cx/gpt-6-astra-medium
       - cc/claude-opus-5
   ###

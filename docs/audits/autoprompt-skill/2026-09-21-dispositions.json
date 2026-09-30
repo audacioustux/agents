@@ -28,7 +28,7 @@
       "note": "adopt-rule: 'freeze-before-check + state-machine-driven retry with non-resetting limits'. Structurally similar to verifying-before-completion's Gate Function (IDENTIFY/RUN/READ/VERIFY) but the corpus's Gate Function does not pin retry-budget discipline. The non-resetting-limits property is a real addition: the corpus's verifying-before-completion does not currently say what to do after N failures.",
       "destination": "verifying-before-completion",
       "caveat": "scope of 'failure' is ambiguous — agent failure vs. check failure vs. tool failure. Must be specified before adopting. The combination of gates.json AND state-machine.json suggests these are two related contracts; read both before deciding whether to fold them as one rule or two.",
-      "landedIn": "c3df31f"
+      "landedIn": "b215b76"
     },
     "agents/contracts/codex-live-conformance-evidence.json + reasonix-live-conformance-evidence.json (conformance-evidence refusal)": {
       "disposition": "adopt-rule",
@@ -37,7 +37,7 @@
       "note": "adopt-rule: 'refuse any required capability without current provider conformance evidence'. harness-bridge comes closest (it pins --permission-mode plan and --fork-session) but the rule is about CAPABILITY discovery, not ARG translation. The autoprompt model pins per-provider live conformance evidence; the corpus currently relies on static capability flags.",
       "destination": "harness-bridge",
       "caveat": "harness-bridge already enforces capability evidence by setting stdin:true/false and refusing CLIs that lack stream-json. The new rule is more general — apply to any capability, not just stream-json. Verify the existing capability flags meet the autoprompt bar before adopting the rule.",
-      "landedIn": "c3df31f"
+      "landedIn": "b215b76"
     },
     "agents/contracts/personas/ (25 personas + 32 projections)": {
       "disposition": "reject",
@@ -172,7 +172,7 @@
         "gates.json's retry discipline landed in verifying-before-completion: budget not loop, no reset, a retry requires a changed declared fingerprint, exhaustion reaches a named outcome.",
         "The conformance-evidence rule landed in harness-bridge: its Supported CLIs table is a claim about software this repo does not control, with no expiry and no staleness warning before this change."
       ],
-      "fix_commit": "c3df31f"
+      "fix_commit": "b215b76"
     }
   ]
 }

@@ -33,7 +33,7 @@ services:
     # Turbopack compile on every deploy for a few days' freshness. Not worth
     # it here.
     image: diegosouzapw/omniroute:next
-    pull_policy: always
+    pull_policy: daily
     restart: unless-stopped
     stop_grace_period: 40s
     deploy:

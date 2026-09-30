@@ -58,6 +58,20 @@ process parses, at a feature flag that selects the path at runtime, and at code
 three hops downstream that never names your symbol. A clean grep bounds where
 you looked, not what breaks.
 
+A failing gate is a budget, not a loop. Every attempt spends one unit whether it
+fails on the check or on the setup, so the count never resets and a long session
+cannot quietly buy itself more attempts. The second rule is the one that bites:
+a retry is only permitted if something declared has changed since the last one —
+the inputs, the candidate under test, or the evidence the check reads. Re-running
+an unchanged command against unchanged inputs is not a retry, it is the same
+measurement performed twice, and it consumes budget while producing nothing.
+
+When the budget is gone, stop at a named outcome rather than trailing off.
+Failed, partial, or blocked are all reportable; what is not reportable is a
+status that leaves the reader unable to tell whether the work is finished,
+abandoned, or still running. Exhaustion is a result, and it has to be written
+down as one.
+
 ## Common Failures
 
 | Claim | Requires | Not Sufficient |

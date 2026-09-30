@@ -132,6 +132,27 @@ behavior the caller can observe. Missing shapes mean large reviews (or
 resume, for forks) hard-fail with a clear error rather than silently
 degrading.
 
+That table is a claim about software this repository does not control, and it
+has no expiry. A CLI that renames a flag, gates it behind a new mode, or drops
+it in a minor release leaves the entry describing a version that no longer
+exists, and the bridge goes on building argv from it. The failure surfaces as
+the child CLI's own usage error, attributed to the caller's request rather than
+to a stale table.
+
+So treat a capability as unproven until something observed it on the CLI
+actually installed. `--dry-run` prints the argv the bridge would run without
+invoking anything, which is the cheap version of that check: run it for each
+contract a CLI claims to honour, and compare against what the CLI accepts
+today. Do this when adding an entry, and again after any upgrade to a child
+CLI — an entry that was true at the version it was written against says nothing
+about the one on the machine.
+
+A capability that cannot be demonstrated should be refused rather than
+attempted. `omp` already shows the shape: its `build` hook throws on
+fork-on-resume and stream-json stdin instead of approximating them. Refusing a
+contract the CLI cannot honour produces one clear error at the bridge; letting
+it through produces a confusing one downstream.
+
 ### Contract gaps
 
 `omp` is a first-class CLI but its argv surface is narrower than the

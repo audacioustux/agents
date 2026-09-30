@@ -23,19 +23,21 @@
     },
     "agents/contracts/gates.json + state-machine.json (freeze-before-check + non-resetting retry)": {
       "disposition": "adopt-rule",
-      "status": "no-action",
-      "evidence": "directory listing confirmed; contents not yet read in full.",
+      "status": "landed",
+      "evidence": "Full read at b6516cf. gates.json definitions[].retryPolicy pins kind bounded-progress, maxAttempts, requiresProgressAfterFailure, progressFingerprintFields and maxUnchangedFailures; terminationPolicy.retryProgressRule states 'Every failed attempt consumes one maxAttempts unit; a retry also requires a changed declared fingerprint after maxUnchangedFailures', and requirements.exhaustedRetryMustReachTypedBoundary forces a named terminal state.",
       "note": "adopt-rule: 'freeze-before-check + state-machine-driven retry with non-resetting limits'. Structurally similar to verifying-before-completion's Gate Function (IDENTIFY/RUN/READ/VERIFY) but the corpus's Gate Function does not pin retry-budget discipline. The non-resetting-limits property is a real addition: the corpus's verifying-before-completion does not currently say what to do after N failures.",
       "destination": "verifying-before-completion",
-      "caveat": "scope of 'failure' is ambiguous — agent failure vs. check failure vs. tool failure. Must be specified before adopting. The combination of gates.json AND state-machine.json suggests these are two related contracts; read both before deciding whether to fold them as one rule or two."
+      "caveat": "scope of 'failure' is ambiguous — agent failure vs. check failure vs. tool failure. Must be specified before adopting. The combination of gates.json AND state-machine.json suggests these are two related contracts; read both before deciding whether to fold them as one rule or two.",
+      "landedIn": "c3df31f"
     },
     "agents/contracts/codex-live-conformance-evidence.json + reasonix-live-conformance-evidence.json (conformance-evidence refusal)": {
       "disposition": "adopt-rule",
-      "status": "no-action",
-      "evidence": "directory listing confirmed; structure is per-provider conformance evidence JSONs, which matches the 'refuse without current provider conformance evidence' rule.",
+      "status": "landed",
+      "evidence": "Full read at b6516cf. codex-live-conformance-evidence.json ships providerAdmission.verifiedCapabilities as an empty array with verifiedCapabilitiesExact false and result FAIL, so a capability is earned by a live canary rather than declared. harness-bridge's Supported CLIs table was the static counterpart: verified by grep that the skill contained no mention of staleness, re-verification or drift before this change.",
       "note": "adopt-rule: 'refuse any required capability without current provider conformance evidence'. harness-bridge comes closest (it pins --permission-mode plan and --fork-session) but the rule is about CAPABILITY discovery, not ARG translation. The autoprompt model pins per-provider live conformance evidence; the corpus currently relies on static capability flags.",
       "destination": "harness-bridge",
-      "caveat": "harness-bridge already enforces capability evidence by setting stdin:true/false and refusing CLIs that lack stream-json. The new rule is more general — apply to any capability, not just stream-json. Verify the existing capability flags meet the autoprompt bar before adopting the rule."
+      "caveat": "harness-bridge already enforces capability evidence by setting stdin:true/false and refusing CLIs that lack stream-json. The new rule is more general — apply to any capability, not just stream-json. Verify the existing capability flags meet the autoprompt bar before adopting the rule.",
+      "landedIn": "c3df31f"
     },
     "agents/contracts/personas/ (25 personas + 32 projections)": {
       "disposition": "reject",
@@ -75,14 +77,12 @@
     "duplicate": 0,
     "reject": 5,
     "product-specific": 0,
-    "landed": 1,
-    "pending": 2,
+    "landed": 3,
+    "pending": 0,
     "unresolved": 0
   },
   "next_steps": [
-    "Read agents/contracts/gates.json AND state-machine.json in full to specify what 'failure' means under non-resetting retry limits.",
-    "Read agents/contracts/codex-live-conformance-evidence.json to confirm the conformance-evidence rule generalises beyond stream-json and meets the harness-bridge bar.",
-    "If those two resolve to clear adopt-rule destinations, file 2 PRs targeting verifying-before-completion and harness-bridge. Update this ledger with landedIn SHAs."
+    "No open reads remain. All three adopt-rule rows have landed; re-check them if the source repository moves past b6516cf."
   ],
   "reviewer_trail": [
     {
@@ -161,6 +161,18 @@
         "Medium 1: round 1's reviewer field did not start with the model identifier, unlike rounds 2-5."
       ],
       "fix_commit": "857fe44"
+    },
+    {
+      "round": 7,
+      "verdict": "CLOSE on main @ 677722e",
+      "reviewer": "omp (closing pass; source cloned and read at the pinned SHA)",
+      "outcome": "CLOSE",
+      "key_corrections": [
+        "Both no-action adopt-rule rows carried evidence reading 'contents not yet read in full'. The source was cloned at b6516cf and both files read.",
+        "gates.json's retry discipline landed in verifying-before-completion: budget not loop, no reset, a retry requires a changed declared fingerprint, exhaustion reaches a named outcome.",
+        "The conformance-evidence rule landed in harness-bridge: its Supported CLIs table is a claim about software this repo does not control, with no expiry and no staleness warning before this change."
+      ],
+      "fix_commit": "c3df31f"
     }
   ]
 }

@@ -107,7 +107,7 @@
           }
         },
         "references/visual-companion.md": {
-          "sha256": "e120b901874709764164955262bd4d5daf6be3e306b46bfaaf41989d4c74ab7c",
+          "sha256": "30da624ca8353175e17d3a09b5288cc4b07e5056a064d10a4e31788cb4dc74d9",
           "upstream": {
             "status": "diverged",
             "sha256": "77eb44a4ec3408bb3dafb872288ecd94beb8cf21da4f2bafa54fd08255d7808b",
@@ -385,7 +385,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "3bc4248fc8931da463573c1f518dd564e995abceb31d53be2afd1b17b0b0364d",
+          "sha256": "a7d5f7a02cbecf42867b686bc2e2d39727ebe4b0703531ae911213b3b3ec3904",
           "upstream": {
             "status": "diverged",
             "sha256": "1968923066f3b707eb01d1992cdf4c42284c3855f70253b9cd5000ff45fca13c"
@@ -421,7 +421,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "ae015944b88b4bd075c534a84f2930b3b96744037f9baf813abaca8d045fac86",
+          "sha256": "c7076026a93dbe9d7642bf7451a1a3e8f097897dffe368bc4c54fc4316edebec",
           "upstream": {
             "status": "diverged",
             "sha256": "c4c3d8b628c51114cd165fb8246fe02744cd8be180032328391252e653028d9b"
@@ -826,7 +826,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "7b086aad65373a8cff2cf9903af06695e9492ebc735e7f3ca904ffe01dd17fda",
+          "sha256": "e85ff0df3f068653ddf3b7c6f750a04d3bd8167ed2ae11d90dd644a2bc5b9144",
           "upstream": {
             "status": "diverged",
             "sha256": "091df1629510af1b92fc4abd6f96732ebedb4cb2c0f3457e8f2740b0504a2438"
@@ -923,7 +923,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "692bc9722fa468ce90d5a2b9e3990baa19b9dee80a50a5526636d04a104bffdb",
+          "sha256": "6da33dee073403a487536d08f73f18064dec2df5df17185ccf7a96d8cce9fd36",
           "upstream": {
             "status": "diverged",
             "sha256": "d71cc01ba56d2325cf8af5f7c11837819b63ecd57de0bfdb812f7f3ff7751df8"
@@ -1077,7 +1077,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "1e0feddc3e61aeef2f26af63cf67570119150d4030a6cc2678667b156a97fa61",
+          "sha256": "8cef8d6cbdd436d65335dbf4d4c89eb063f35acced86dfe46acc76b4e8c486ac",
           "upstream": {
             "status": "diverged",
             "sha256": "8dd1b8e698edec3700c6d89517dbe96febd3bacd3f6ea21c1a3569c62ea104b5"
@@ -1304,7 +1304,7 @@
           }
         },
         "references/persuasion-principles.md": {
-          "sha256": "c3c84f572a51dd8b6d4fc6e5cbdc2bc3b9e07ba381a45bdabfce7ad2894dd828",
+          "sha256": "54142567a5159252b05a8072be34b34ec2f8644c916ba4bd06416d2973befcf5",
           "upstream": {
             "status": "added-locally"
           }
@@ -1566,7 +1566,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "ebedf0ee8e94404faf94bcf5ec66dc9539f729c03aa1f244c74a9bff05953445",
+          "sha256": "9953c0cff29b39e3b8643885ee98dbc4f86dcc5c69c004b1412bd5f6392139b8",
           "upstream": {
             "status": "diverged",
             "sha256": "d34db5c8aed6a4e0440132bd0613aace70a693ec7819d5637ad77481d8e10d1b"

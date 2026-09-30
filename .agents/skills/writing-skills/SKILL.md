@@ -18,7 +18,7 @@ uses:
 
 **Writing skills IS Test-Driven Development applied to process documentation.**
 
-**Personal skills live in agent-specific directories (`~/.claude/skills` for Claude Code, `~/.agents/skills/` for Codex)**
+**Personal skills live wherever the running agent looks for them.** That path is the harness's to define — `~/.agents/skills/` and `~/.claude/skills` are two current examples. A skill should not hardcode one; if it needs to name a location, read the convention from the environment it is installed into.
 
 You write test cases (pressure scenarios with subagents), watch them fail (baseline behavior), write the skill (documentation), watch tests pass (agents comply), and refactor (close loopholes).
 
@@ -66,7 +66,7 @@ The entire skill creation process follows RED-GREEN-REFACTOR.
 **Don't create for:**
 - One-off solutions
 - Standard practices well-documented elsewhere
-- Project-specific conventions (put in CLAUDE.md)
+- Project-specific conventions (put in the repository's own instruction file, whatever the harness reads)
 - Mechanical constraints (if it's enforceable with regex/validation, automate it—save documentation for judgment calls)
 
 ## Skill Types
@@ -350,7 +350,7 @@ helper1, helper2, step3, pattern4
 
 ## Skill Creation Checklist (TDD Adapted)
 
-**IMPORTANT: Use TodoWrite to create todos for EACH checklist item below.**
+**Track every checklist item below in a durable record, not in memory.** A todo tool where one exists, a file where none does — the requirement is that an interrupted session can see what is left.
 
 **RED Phase - Write Failing Test:** run the RED checklist in `testing-skills`
 (`testing-skills/references/testing-with-subagents.md`). It owns the procedure;

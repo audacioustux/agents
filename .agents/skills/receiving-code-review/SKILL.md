@@ -27,7 +27,7 @@ WHEN receiving code review feedback:
 ## Forbidden Responses
 
 **NEVER:**
-- "You're absolutely right!" (explicit CLAUDE.md violation)
+- "You're absolutely right!" — reflexive agreement, and a phrasing many repository instruction files ban outright
 - "Great point!" / "Excellent feedback!" (performative)
 - "Let me implement that now" (before verification)
 

@@ -45,7 +45,7 @@ the reviewer a narrower diff with no indication anything is missing.
 
 **2. Dispatch code reviewer subagent:**
 
-Use Task tool with `general-purpose` type, fill template at `prompts/code-reviewer.md`
+Dispatch a general-purpose subagent, filling the template at `prompts/code-reviewer.md`. Where subagents are unavailable, the template is still the brief — hand it to a person, or to a second session.
 
 **Order the change for reading, not for the file tree.** Alphabetical order puts
 a generated file above the one behavior actually changed in. Lead with core

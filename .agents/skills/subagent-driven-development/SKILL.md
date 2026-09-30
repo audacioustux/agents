@@ -83,8 +83,8 @@ flowchart TD
         N8["Dispatch code quality reviewer subagent (./prompts/code-quality-reviewer.md)"]
         N9{"Code quality reviewer subagent approves?"}
         N10["Implementer subagent fixes quality issues"]
-        N11["Mark task complete in TodoWrite"]
-        N12["Read plan, extract all tasks with full text, note context, create TodoWrite"]
+        N11["Mark task complete in the progress record"]
+        N12["Read plan, extract all tasks with full text, note context, open a progress record"]
         N13{"More tasks remain?"}
         N14["Dispatch final code reviewer subagent for entire implementation"]
         N15["Use `finishing-a-development-branch`"]

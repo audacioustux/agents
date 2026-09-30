@@ -1,0 +1,23 @@
+# Agent tool state — per-session, not shared. `.omp/` is deliberately absent:
+# it holds committed config (agent definitions, models, rules), not session
+# state, and ignoring it would shadow real edits.
+.puku-cli/
+.claude/
+
+# Linked worktrees. Both layouts appear in this corpus's own skills.
+.worktrees/
+worktrees/
+
+# Dependency trees. This repository has no build step; these appear only when a
+# tool is run inside it. package.json is deliberately not ignored — if this
+# repository ever gains real tooling, that file should be committed, and an
+# ignore rule would hide it silently.
+node_modules/
+package-lock.json
+bun.lock
+bun.lockb
+
+# OS and editor noise.
+.DS_Store
+Thumbs.db
+*.swp

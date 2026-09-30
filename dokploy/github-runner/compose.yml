@@ -37,13 +37,13 @@ services:
   runner-tickify:
     <<: *runner
     deploy:
-      replicas: 1
+      replicas: 3
       resources:
         reservations:
           cpus: 1
           memory: 16G
         limits:
-          cpus: 4
+          cpus: 2
           memory: 16G
     environment:
       RUNNER_SCOPE: repo

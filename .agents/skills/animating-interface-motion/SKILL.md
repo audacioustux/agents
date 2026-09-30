@@ -89,10 +89,28 @@ retargets it. A keyframe sequence runs a fixed timeline and cannot change course
 started. Drive interactive state changes with transitions, and reserve keyframes for
 staged sequences that run once.
 
+Retargeting is continuous in position but not in velocity. A duration-based curve
+restarts its easing from the new target, so an interruption mid-flight resets the speed
+and the element visibly stutters at the seam. A spring carries the current velocity into
+the new target instead, which is why motion the user can interrupt — and gesture-driven
+motion especially, where a drag or flick hands over real input energy — should be sprung
+rather than timed. Keep durations for system-driven motion, where the start and end are
+the point and nothing is competing with them, and linear for anything representing
+elapsed time.
+
 Animate a property the engine can interpolate rather than swapping the class or rule
 that sets it. A swap flips to the end value immediately while the rest of the
 transition still runs, so corners and colours snap mid-flight even though the movement
 itself is smooth.
+
+A theme flip is the one case where the right amount of transition is none. It changes
+colour, background, border and shadow on nearly every element at once, so every
+transition on those properties fires together and the switch smears instead of snapping.
+Suppress them for the swap: inject `*, *::before, *::after { transition: none !important }`,
+force a reflow so the new values commit un-animated, then remove the rule on the next
+frame. The reflow is the step that is easy to omit and the one that makes it work —
+without it the injection and its removal coalesce into a single frame and the
+transitions run regardless.
 
 A hover effect must not change the element's layout box. Growing a card by width or
 height reflows its neighbours under the cursor; a transform scale avoids that but

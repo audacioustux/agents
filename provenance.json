@@ -1596,6 +1596,17 @@
       "rationale": "becomes the authoring standard for the agents repo",
       "owned": true,
       "note": "2026-09-12: three rules added after surveying wshobson/agents (94 plugins / 202 agents / 183 skills, HEAD 2026-09-01). The repo is predominantly persona prompts; its adoptable content was in its own CI-enforced authoring guide, docs/authoring.md. (1) The flat-namespace failure mode restates docs/authoring.md:81-85 vendor-neutrally. (2) The diagnostic blast-radius/false-positive rule generalises the authoring habit in plugins/dgx-spark-ops/skills/spark-training-gotchas/references/gotcha-checks.md, which is hardware-locked and was not adopted as content. (3) The caller-supplied-input rule derives from docs/authoring.md:89-115. It was rejected in the first pass on a zero-surface measurement that scanned only top-level SKILL.md files; a wider scan of all 241 installed markdown files found three unframed interpolations in the vendored guide and recommend skills, so it was adopted and stated as a consumption rule as well as an authoring one. It does not carry upstream's claim that values inside fenced code 'are not prompt text' (docs/authoring.md:110) - that is false; fenced text still reaches the model, and upstream's own clause is about what its gardener checks. The PostgreSQL NULL-vacuity gotcha was rejected as already owned by the managed skill schema-constraint-vacuity-audit."
+    },
+    "handling-secrets-and-credentials": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "2026-09-22: written after surveying sethdford/claude-skills (454 skills). That corpus's security/ directory was the only slice with checkable rules, but its figures could not be adopted as written — it states PBKDF2 at 100,000 iterations where OWASP's current minimum is 600,000 for SHA-256, and gives bcrypt cost without the 72-byte truncation limit. The skill is built from the primary sources instead: NIST SP 800-63B for composition and rotation (quoted verbatim, verified against pages.nist.gov), OWASP Password Storage and Session Management cheat sheets for parameters, NIST SP 800-38D for GCM nonce uniqueness. Adopted as a gap: this corpus had zero security content before it.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "8c258952bdba894e607b1bcb88c8e95cd831a5c3acde6e5ffe56ea1a2969754a"
+        }
+      }
     }
   },
   "dispositionsRecorded": "2026-09-04",

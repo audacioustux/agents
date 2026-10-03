@@ -74,8 +74,8 @@ combos:
     models:
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
-      - minimax/MiniMax-M3
       - puku/puku-ai-2.8
+      - minimax/MiniMax-M3
   ###
   pro-vision:
     models:
@@ -92,8 +92,8 @@ combos:
     models:
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
-      - minimax/MiniMax-M3
       - puku/puku-ai-2.8
+      - minimax/MiniMax-M3
   best-fast:
     models:
       - antigravity/gemini-3.8-flash-tiered

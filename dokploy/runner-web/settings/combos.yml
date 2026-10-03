@@ -75,6 +75,7 @@ combos:
       - cc/claude-sonnet-5
       - gh/claude-sonnet-5
       - puku/puku-ai-2.8
+      - cx/gpt-5.6-luna
       - minimax/MiniMax-M3
   ###
   pro-vision:

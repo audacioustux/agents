@@ -40,10 +40,10 @@ services:
       replicas: 3
       resources:
         reservations:
-          cpus: 1
+          cpus: 2
           memory: 16G
         limits:
-          cpus: 4
+          cpus: 6
           memory: 16G
     environment:
       RUNNER_SCOPE: repo

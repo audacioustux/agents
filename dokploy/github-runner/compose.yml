@@ -43,7 +43,7 @@ services:
           cpus: 2
           memory: 16G
         limits:
-          cpus: 6
+          cpus: 8
           memory: 16G
     environment:
       RUNNER_SCOPE: repo

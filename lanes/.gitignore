@@ -1,0 +1,3 @@
+# Per-installation state: the real config and everything the runner writes under its root.
+lanes.config.json
+state/

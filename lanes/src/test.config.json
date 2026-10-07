@@ -1,0 +1,32 @@
+{
+  "harnesses": {
+    "claude1": { "kind": "claude", "home": "~/.claude.account1", "cap": 4 },
+    "claude2": { "kind": "claude", "home": "~/.claude.account2", "cap": 1 },
+    "claude3": { "kind": "claude", "home": "~/.claude.account3", "cap": 0 },
+    "claude4": { "kind": "claude", "home": "~/.claude.account4", "cap": 5 },
+    "claude5": { "kind": "claude", "home": "~/.claude.account5", "cap": 4 },
+    "omp": { "kind": "omp", "cap": 6 }
+  },
+  "defaults": { "harness": "claude2", "model": "sonnet", "effort": "high", "budget": 200 },
+  "modelCaps": { "provider-a/model-large": 2, "provider-b/model-small": 3 },
+  "banned": { "^provider-a/model-retired$": "retired: use provider-a/model-large" },
+  "quotaFloors": [
+    { "model": "^provider-a/model-large", "section": "Provider A", "floor": 20 },
+    { "model": "^provider-b/model-small", "section": "Provider B", "floor": 12 }
+  ],
+  "claudeQuota": { "weeklyMax": 90, "sessionMax": 90, "cacheMinutes": 10 },
+  "machine": { "maxLoad": 24, "minFreeGb": 6, "startsPerTick": 2 },
+  "supervisor": { "interval": 120, "maxResumes": 3 },
+  "launch": { "nice": 10, "timeoutSeconds": 14400, "ompMaxTime": "45m" },
+  "laneEnv": { "LANES_TEST": "1" },
+  "db": {
+    "dir": "db",
+    "pgPort": 54330,
+    "redis": { "port": 63790, "databases": 16 },
+    "maxConnections": 200,
+    "sharedBuffers": "256MB",
+    "templateInputs": ["inputs"],
+    "templateKeepMinutes": 120,
+    "orphanHours": 24
+  }
+}

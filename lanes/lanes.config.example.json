@@ -1,0 +1,16 @@
+{
+  "harnesses": {
+    "claude1": { "kind": "claude", "home": "~/.claude.account1", "cap": 3 },
+    "claude2": { "kind": "claude", "home": "~/.claude.account2", "cap": 3 },
+    "omp": { "kind": "omp", "cap": 4 }
+  },
+  "defaults": { "harness": "claude1", "model": "sonnet", "effort": "high", "budget": 50 },
+  "modelCaps": { "provider-a/model-large": 2 },
+  "banned": { "^provider-a/model-retired$": "retired: use provider-a/model-large" },
+  "quotaFloors": [{ "model": "^provider-a/", "section": "Provider A", "floor": 20 }],
+  "claudeQuota": { "weeklyMax": 90, "sessionMax": 90, "cacheMinutes": 10 },
+  "machine": { "maxLoad": 16, "minFreeGb": 4, "startsPerTick": 2 },
+  "supervisor": { "interval": 120, "maxResumes": 3 },
+  "launch": { "nice": 10, "timeoutSeconds": 14400, "ompMaxTime": "45m" },
+  "laneEnv": { "LANES": "1" }
+}

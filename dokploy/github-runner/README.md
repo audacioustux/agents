@@ -8,7 +8,7 @@ GitHub plan; jobs run here instead of drawing on the hosted-runner quota.
 
 | Service | Scope | Label | Replicas |
 |---|---|---|---|
-| `runner-tickify` | repo `stage-crew/tickify` | `dokploy-tickify` | 3 |
+| `runner-tickify` | repo `stage-crew/tickify` | `dokploy-tickify` | 2 (10 CPUs each) |
 
 A runner registers to exactly one scope, so each pool is its own service;
 scaling is its `deploy.replicas`. A TheGrid pool was tried and retired:

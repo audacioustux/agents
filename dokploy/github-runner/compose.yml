@@ -36,14 +36,20 @@ x-runner: &runner
 services:
   runner-tickify:
     <<: *runner
+    # replicas x limits.cpus must not exceed the host's 20 cores. At 3 x 8 (24)
+    # three concurrent CI runs slowed each other until units hit their 600 s
+    # cap and the 50-minute step cap (stage-crew/tickify run 37960180645: 65 of
+    # 66 units passed, then the step timed out). 2 x 10 runs two full checks at
+    # once without contention, and the check's CHECK_CONCURRENCY=auto reads the
+    # 10-CPU limit (5 units at a time instead of 4).
     deploy:
-      replicas: 3
+      replicas: 2
       resources:
         reservations:
           cpus: 2
           memory: 16G
         limits:
-          cpus: 8
+          cpus: 10
           memory: 16G
     environment:
       RUNNER_SCOPE: repo

@@ -37,7 +37,7 @@ services:
   runner-tickify:
     <<: *runner
     deploy:
-      replicas: 2
+      replicas: 3
       resources:
         reservations:
           cpus: 2

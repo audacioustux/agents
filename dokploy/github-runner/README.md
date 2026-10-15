@@ -9,6 +9,7 @@ GitHub plan; jobs run here instead of drawing on the hosted-runner quota.
 | Service | Scope | Label | Replicas |
 |---|---|---|---|
 | `runner-tickify` | repo `stage-crew/tickify` | `dokploy-tickify` | 2 (10 CPUs each) |
+| `runner-optics` | repo `nobinalo/Optics` | `dokploy-optics` | 2 (4 CPUs each, idle cores only) |
 
 A runner registers to exactly one scope, so each pool is its own service;
 scaling is its `deploy.replicas`. A TheGrid pool was tried and retired:
@@ -26,16 +27,29 @@ hosted runners. Add pools only for repos whose jobs are container-clean.
 1. In Dokploy, create a project and add a Compose service.
 2. Point the service at this repo path: `dokploy/github-runner`.
 3. Use `compose.yml` as the Compose file.
-4. Set the variables from `.env.example` in Dokploy env.
-5. Deploy. Runners appear under the repo's Settings → Actions → Runners,
-   named `dokploy-tickify-…`.
+4. Set the variables from `.env.example` in Dokploy env, every one of them:
+   a missing token fails the whole deploy, and the running pools stay as
+   they are.
+5. Deploy. Runners appear under each repo's Settings → Actions → Runners,
+   named `dokploy-tickify-…` and `dokploy-optics-…`.
 
 ## Runtime
 
 - Image: `myoung34/github-runner:ubuntu-noble`; one replica = one concurrent
   job.
-- Docker: host socket mounted — workflow `services:` containers (Tickify's
-  CI runs postgres:18 and redis:8) run as siblings on the host daemon.
+- Docker (tickify only): host socket mounted and host networking —
+  workflow `services:` containers (Tickify's CI runs postgres:18 and
+  redis:8) run as siblings on the host daemon. Optics' jobs start no
+  containers, so its pool has neither, and runs on the stack's own network.
+- Secrets: each pool is given only its own repo's token. The image
+  un-exports `ACCESS_TOKEN`, but any other variable reaches every job, so a
+  shared `.env` would hand `OPTICS_ACCESS_TOKEN` to tickify's jobs. A pool's
+  own token stays readable by its root jobs (`/proc/1/environ`).
+- CPU: tickify's two replicas hold the host's 20 cores. Optics' replicas
+  borrow idle ones at a small weight (`cpu_shares: 64` each against
+  tickify's default): with all four busy, Optics gets roughly 0.6-2.1 cores
+  depending on the host's cgroup version, and tickify keeps 89-97%. If
+  Optics' jobs time out while tickify is busy, raise that weight.
 - Persistent runners, container-local state: each replica self-registers on
   start and deregisters on graceful stop (the 60 s grace period exists for
   that trap), so redeploys don't leak offline duplicates. `/nix` stays warm
@@ -47,3 +61,9 @@ hosted runners. Add pools only for repos whose jobs are container-clean.
 
 `runs-on: dokploy-tickify`. Keep hosted and
 self-hosted interchangeable by reverting that one line to `ubuntu-latest`.
+
+Optics chooses with a repository variable instead:
+`runs-on: ${{ vars.CHECK_RUNNER || 'ubuntu-latest' }}`. Set `CHECK_RUNNER`
+to `dokploy-optics` once its runners show as online, and unset it to go
+back to hosted runners. A job sent to a pool with no runner online waits in
+the queue rather than falling back.

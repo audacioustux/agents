@@ -11,12 +11,15 @@
 #   redeploy — a shared named volume is not an option, since concurrent
 #   replicas would race the nix store's sqlite db.
 #
+# Each pool reads the same two variables, prefixed with its name:
+# <POOL>_REPO_URL and <POOL>_ACCESS_TOKEN (.env.example).
+#
 # Each pool is given only its own repo's token, never the whole `.env` (no
 # `env_file`). The image un-exports ACCESS_TOKEN before the runner starts,
 # but every other variable reaches each job's environment, so a shared env
-# file would hand OPTICS_ACCESS_TOKEN to tickify's jobs. Dokploy's
-# environment still fills the `${…}` below. A pool's own token stays
-# readable by its jobs, which run as root, in PID 1's environment
+# file would hand each pool's <POOL>_ACCESS_TOKEN to the other's jobs.
+# Dokploy's environment still fills the `${…}` below. A pool's own token
+# stays readable by its jobs, which run as root, in PID 1's environment
 # (/proc/1/environ); the image's UNSET_CONFIG_VARS would not change that,
 # and it drops the token the stop trap deregisters with.
 x-runner: &runner
@@ -62,8 +65,8 @@ services:
           memory: 16G
     environment:
       RUNNER_SCOPE: repo
-      REPO_URL: ${REPO_URL:?}
-      ACCESS_TOKEN: ${ACCESS_TOKEN:?}
+      REPO_URL: ${TICKIFY_REPO_URL:?}
+      ACCESS_TOKEN: ${TICKIFY_ACCESS_TOKEN:?}
       RUNNER_NAME_PREFIX: dokploy-tickify
       LABELS: dokploy-tickify
       # Persistent runner (not EPHEMERAL): keeps the workspace and /nix warm
@@ -101,7 +104,7 @@ services:
           memory: 8G
     environment:
       RUNNER_SCOPE: repo
-      REPO_URL: https://github.com/nobinalo/Optics
+      REPO_URL: ${OPTICS_REPO_URL:?}
       ACCESS_TOKEN: ${OPTICS_ACCESS_TOKEN:?}
       RUNNER_NAME_PREFIX: dokploy-optics
       LABELS: dokploy-optics

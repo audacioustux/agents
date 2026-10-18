@@ -34,7 +34,11 @@ x-runner: &runner
       max-file: "3"
 
 services:
-  runner-tickify:
+  # Every stage-crew/tickify job but production's takes
+  # dokploy-tickify-nonprod. The pool also carries dokploy-tickify,
+  # production's label, which every tickify job requests until tickify moves
+  # the rest to -nonprod (README, "Pointing workflows at a pool").
+  runner-tickify-nonprod:
     <<: *runner
     # Jobs start sibling containers on the host daemon (socket below) with
     # host-published ports (Tickify's ci.yml: postgres:18 on 5432, redis:8).
@@ -67,8 +71,8 @@ services:
       RUNNER_SCOPE: repo
       REPO_URL: ${TICKIFY_REPO_URL:?}
       ACCESS_TOKEN: ${TICKIFY_ACCESS_TOKEN:?}
-      RUNNER_NAME_PREFIX: dokploy-tickify
-      LABELS: dokploy-tickify
+      RUNNER_NAME_PREFIX: dokploy-tickify-nonprod
+      LABELS: dokploy-tickify-nonprod,dokploy-tickify
       # Persistent runner (not EPHEMERAL): keeps the workspace and /nix warm
       # across jobs. Safe for these workflows: every checkout uses
       # persist-credentials:false and actions/checkout cleans the tree.

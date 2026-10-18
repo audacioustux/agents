@@ -21,20 +21,23 @@ hosted runners. Add pools only for repos whose jobs are container-clean.
 ## Files
 
 - `compose.yml` — Dokploy Compose definition.
-- `.env.example` — required secrets; paste into Dokploy environment variables.
+- `register-entrypoint.sh` — registers tickify's runners from the access-token file.
+- `.env.example` — required variables; paste into Dokploy environment variables.
 
 ## Deploy
 
 1. In Dokploy, create a project and add a Compose service.
 2. Point the service at this repo path: `dokploy/github-runner`.
 3. Use `compose.yml` as the Compose file.
-4. Set the variables from `.env.example` in Dokploy env, every one of them:
-   a missing token fails the whole deploy, and the running pools stay as
-   they are. Each pool reads `<POOL>_REPO_URL` and `<POOL>_ACCESS_TOKEN`
-   (`TICKIFY_…`, `OPTICS_…`). A deployment set up before these names has
-   tickify's as `REPO_URL` and `ACCESS_TOKEN`: rename them
-   `TICKIFY_REPO_URL` and `TICKIFY_ACCESS_TOKEN`, and add
-   `OPTICS_REPO_URL` and `OPTICS_ACCESS_TOKEN`, before redeploying.
+4. On the host, write tickify's access-token file ("Registration
+   credential"), then set the variables from `.env.example` in Dokploy env,
+   every one of them: a missing one fails the whole deploy, and the running
+   pools stay as they are. Each pool reads `<POOL>_REPO_URL` and
+   `<POOL>_ACCESS_TOKEN` (`TICKIFY_…`, `OPTICS_…`), except that tickify's
+   token is the file `TICKIFY_ACCESS_TOKEN_FILE` names. A deployment that
+   has `TICKIFY_ACCESS_TOKEN` (or the older `ACCESS_TOKEN`): write the token
+   to the file, set `TICKIFY_ACCESS_TOKEN_FILE`, and delete the token
+   variable from Dokploy, before redeploying.
 5. Deploy. Runners appear under each repo's Settings → Actions → Runners,
    named `dokploy-tickify-nonprod-…`, `dokploy-tickify-…` and
    `dokploy-optics-…`.
@@ -50,19 +53,41 @@ hosted runners. Add pools only for repos whose jobs are container-clean.
 - Secrets: each pool is given only its own repo's token. The image
   un-exports `ACCESS_TOKEN`, but any other variable reaches every job, so a
   shared `.env` would hand each pool's `<POOL>_ACCESS_TOKEN` to the other's
-  jobs. A pool's own token stays readable by its root jobs
-  (`/proc/1/environ`).
+  jobs. Optics' token stays readable by its root jobs (`/proc/1/environ`);
+  tickify's is a file ("Registration credential").
 - CPU: tickify's two replicas hold the host's 20 cores. Optics' replicas
   borrow idle ones at a small weight (`cpu_shares: 64` each against
   tickify's default): with all four busy, Optics gets roughly 0.6-2.1 cores
   depending on the host's cgroup version, and tickify keeps 89-97%. If
   Optics' jobs time out while tickify is busy, raise that weight.
-- Persistent runners, container-local state: each replica self-registers on
-  start and deregisters on graceful stop (the 60 s grace period exists for
-  that trap), so redeploys don't leak offline duplicates. `/nix` stays warm
-  for the replica's lifetime and is cold after a redeploy — a shared volume
-  is off the table because concurrent replicas would race the store's
-  sqlite db.
+- Container-local state: each Optics replica self-registers on start and
+  deregisters on graceful stop (the 60 s grace period exists for that trap),
+  so redeploys don't leak offline duplicates. Each tickify replica registers
+  for one job (`EPHEMERAL`), deregisters itself, and the restart policy
+  brings it back to register again. `/nix` stays warm for the replica's
+  lifetime and is cold after a redeploy — a shared volume is off the table
+  because concurrent replicas would race the store's sqlite db. The restart
+  keeps the filesystem, so a job's leftovers still reach the next job.
+
+## Registration credential
+
+Tickify's access token needs `administration:write` on the repo: it can add
+deploy keys and change an environment's branch rule, so no job should read it.
+The image's own options do not keep it from one: `ACCESS_TOKEN` stays in PID
+1's environment (`/proc/1/environ`, `docker inspect`), and `UNSET_CONFIG_VARS`
+only unsets it inside bash. So the token lives in a root-only file
+(`TICKIFY_ACCESS_TOKEN_FILE`, owner root, mode 0400, written over ssh:
+Dokploy's file mounts cannot set the mode) mounted as a compose secret;
+`register-entrypoint.sh` reads it once and starts the image with the one-hour
+registration token alone. It refuses to start if `ACCESS_TOKEN`,
+`RUNNER_TOKEN` or `APP_PRIVATE_KEY` is in the environment, if the file is not
+root 0400, or if GitHub returns no registration token.
+
+On this host the file is still reachable from a job: CI's jobs run as root
+with the Docker socket, so `docker exec` reads anything in a runner container.
+The token is out of the environment, not out of the jobs' reach, and a job
+holding it can register a runner of its own under any label,
+`dokploy-tickify` included.
 
 ## Pointing workflows at a pool
 

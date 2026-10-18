@@ -1,4 +1,4 @@
-# Three runner pools on one host. A runner registers to exactly one scope, so
+# Two runner pools on one host. A runner registers to exactly one scope, so
 # each pool is its own service; scaling either is its `deploy.replicas`.
 #
 # Replicas rule out `container_name` and per-replica named volumes, so runner
@@ -55,9 +55,8 @@ x-runner: &runner
       max-file: "3"
 
 services:
-  # Every stage-crew/tickify job but production's takes
-  # dokploy-tickify-nonprod. The pool also carries dokploy-tickify, so that
-  # a production job can take an idle runner here as well as its own below.
+  # Every stage-crew/tickify job but production's, whose runner is
+  # ../github-runner-tickify on a host of its own (README, "Pools").
   runner-tickify-nonprod:
     <<: [*runner, *tickify-registration]
     # Jobs start sibling containers on the host daemon (socket below) with
@@ -92,41 +91,7 @@ services:
       RUNNER_SCOPE: repo
       REPO_URL: ${TICKIFY_REPO_URL:?}
       RUNNER_NAME_PREFIX: dokploy-tickify-nonprod
-      LABELS: dokploy-tickify-nonprod,dokploy-tickify
-      EPHEMERAL: "true"
-      RANDOM_RUNNER_SUFFIX: "false"
-      DISABLE_AUTO_UPDATE: "true"
-
-  # stage-crew/tickify's production jobs (label dokploy-tickify; no
-  # environment word, its owner's naming), on a runner no CI job can take:
-  # tickify's CI requests dokploy-tickify-nonprod, which this runner lacks.
-  # GitHub has no job priority, and twice on 18 Oct a production deploy sat
-  # queued behind CI's two 35-40 minute shards while production was down.
-  # Same host and token as the CI pool, so it is not isolated from CI's jobs
-  # (they hold the host's Docker socket); it only keeps production off CI's
-  # queue.
-  runner-tickify:
-    <<: [*runner, *tickify-registration]
-    volumes:
-      - ./register-entrypoint.sh:/register-entrypoint.sh:ro
-    # 2 CPUs and 7 GB: GitHub's hosted runner for a private repo, on which
-    # tickify's production apply ran in 13-14 minutes (its runs of 18 Oct).
-    # Production's jobs start no containers and need no fixed port, so no
-    # Docker socket and no host network.
-    deploy:
-      replicas: 1
-      resources:
-        limits:
-          cpus: 2
-          memory: 7G
-    environment:
-      RUNNER_SCOPE: repo
-      REPO_URL: ${TICKIFY_REPO_URL:?}
-      RUNNER_NAME_PREFIX: dokploy-tickify
-      LABELS: dokploy-tickify
-      # Without `self-hosted`, `Linux` and `X64`, only a job that names
-      # dokploy-tickify lands here.
-      NO_DEFAULT_LABELS: "true"
+      LABELS: dokploy-tickify-nonprod
       EPHEMERAL: "true"
       RANDOM_RUNNER_SUFFIX: "false"
       DISABLE_AUTO_UPDATE: "true"

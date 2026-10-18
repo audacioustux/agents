@@ -9,6 +9,7 @@ GitHub plan; jobs run here instead of drawing on the hosted-runner quota.
 | Service | Scope | Label | Replicas |
 |---|---|---|---|
 | `runner-tickify-nonprod` | repo `stage-crew/tickify` | `dokploy-tickify-nonprod`, `dokploy-tickify` | 2 (10 CPUs each) |
+| `runner-tickify` | repo `stage-crew/tickify` | `dokploy-tickify` only | 1 (2 CPUs, 7 GB) |
 | `runner-optics` | repo `nobinalo/Optics` | `dokploy-optics` | 2 (4 CPUs each, idle cores only) |
 
 A runner registers to exactly one scope, so each pool is its own service;
@@ -35,7 +36,8 @@ hosted runners. Add pools only for repos whose jobs are container-clean.
    `TICKIFY_REPO_URL` and `TICKIFY_ACCESS_TOKEN`, and add
    `OPTICS_REPO_URL` and `OPTICS_ACCESS_TOKEN`, before redeploying.
 5. Deploy. Runners appear under each repo's Settings → Actions → Runners,
-   named `dokploy-tickify-nonprod-…` and `dokploy-optics-…`.
+   named `dokploy-tickify-nonprod-…`, `dokploy-tickify-…` and
+   `dokploy-optics-…`.
 
 ## Runtime
 
@@ -80,10 +82,10 @@ a runner that cannot run it:
    job keeps running as before.
 2. Land tickify's change of its `runs-on` lines (`-nonprod` for everything
    but production's jobs).
-3. Then add production's own runner, `runner-tickify` (the next change). It
-   has no Docker socket and no host network, which tickify's CI needs for its
-   service containers, so it must not exist while CI still requests
-   `dokploy-tickify`.
+3. Then deploy production's own runner, `runner-tickify` (this compose's
+   third service). It has no Docker socket and no host network, which
+   tickify's CI needs for its service containers, so it must not exist while
+   CI still requests `dokploy-tickify`.
 
 Optics chooses with a repository variable instead:
 `runs-on: ${{ vars.CHECK_RUNNER || 'ubuntu-latest' }}`. Set `CHECK_RUNNER`

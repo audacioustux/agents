@@ -1,0 +1,22 @@
+# One job per container: the runner exits after its job (EPHEMERAL), `run --rm`
+# removes the container, and Restart= starts the next one from a clean image.
+[Unit]
+Description=stage-crew/tickify production GitHub Actions runner (one job per container)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+# A bad token fails every start: ten failed starts in five minutes stop the
+# unit (`systemctl status` shows why) instead of looping.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+WorkingDirectory=/opt/agents/dokploy/github-runner-tickify
+ExecStart=/usr/bin/docker compose run --rm --no-deps -T runner-tickify
+Restart=always
+# Short, because a deploy's jobs run one after another on this one runner
+# and each waits for the next container to register.
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

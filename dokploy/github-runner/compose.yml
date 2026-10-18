@@ -1,4 +1,4 @@
-# Three runner pools on one host. A runner registers to exactly one scope, so
+# Two runner pools on one host. A runner registers to exactly one scope, so
 # each pool is its own service; scaling either is its `deploy.replicas`.
 #
 # Replicas rule out `container_name` and per-replica named volumes, so runner
@@ -18,10 +18,31 @@
 # `env_file`). The image un-exports ACCESS_TOKEN before the runner starts,
 # but every other variable reaches each job's environment, so a shared env
 # file would hand each pool's <POOL>_ACCESS_TOKEN to the other's jobs.
-# Dokploy's environment still fills the `${…}` below. A pool's own token
-# stays readable by its jobs, which run as root, in PID 1's environment
+# Dokploy's environment still fills the `${…}` below. Optics' token stays
+# readable by its jobs, which run as root, in PID 1's environment
 # (/proc/1/environ); the image's UNSET_CONFIG_VARS would not change that,
-# and it drops the token the stop trap deregisters with.
+# and it drops the token the stop trap deregisters with. Tickify's token is
+# a root 0400 file instead, read once by register-entrypoint.sh (README,
+# "Registration credential"): out of the environment, though not out of the
+# reach of jobs that run as root beside the Docker socket.
+#
+# Tickify's runners register once per job (EPHEMERAL), so that a runner is
+# replaced well within the one-hour life of the registration token the
+# wrapper hands the image. A runner idle for over an hour still cannot
+# deregister when stopped and is left listed offline (harmless: an offline
+# runner gets no job). A restart keeps the container filesystem, so /nix
+# stays warm; RANDOM_RUNNER_SUFFIX=false names the runner from the
+# container's hostname, which a restart keeps, so each job reuses the same
+# workspace instead of leaving a new one behind every time.
+x-tickify-registration: &tickify-registration
+  entrypoint: ["/register-entrypoint.sh"]
+  # An `entrypoint` override clears the image's CMD; this is its CMD
+  # (myoung34/docker-github-actions-runner, Dockerfile).
+  command: ["./bin/Runner.Listener", "run", "--startuptype", "service"]
+  secrets:
+    # register-entrypoint.sh reads /run/secrets/runner_access_token.
+    - source: tickify_access_token
+      target: runner_access_token
 x-runner: &runner
   image: myoung34/github-runner:ubuntu-noble
   pull_policy: always
@@ -34,11 +55,10 @@ x-runner: &runner
       max-file: "3"
 
 services:
-  # Every stage-crew/tickify job but production's takes
-  # dokploy-tickify-nonprod. The pool also carries dokploy-tickify, so that
-  # a production job can take an idle runner here as well as its own below.
+  # Every stage-crew/tickify job but production's, whose runner is
+  # ../github-runner-tickify on a host of its own (README, "Pools").
   runner-tickify-nonprod:
-    <<: *runner
+    <<: [*runner, *tickify-registration]
     # Jobs start sibling containers on the host daemon (socket below) with
     # host-published ports (Tickify's ci.yml: postgres:18 on 5432, redis:8).
     # Host networking makes the runner's
@@ -50,6 +70,7 @@ services:
       # Job service containers and any docker steps run as siblings on the
       # host daemon.
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./register-entrypoint.sh:/register-entrypoint.sh:ro
     # replicas x limits.cpus must not exceed the host's 20 cores. At 3 x 8 (24)
     # three concurrent CI runs slowed each other until units hit their 600 s
     # cap and the 50-minute step cap (stage-crew/tickify run 37960180645: 65 of
@@ -69,43 +90,10 @@ services:
     environment:
       RUNNER_SCOPE: repo
       REPO_URL: ${TICKIFY_REPO_URL:?}
-      ACCESS_TOKEN: ${TICKIFY_ACCESS_TOKEN:?}
       RUNNER_NAME_PREFIX: dokploy-tickify-nonprod
-      LABELS: dokploy-tickify-nonprod,dokploy-tickify
-      # Persistent runner (not EPHEMERAL): keeps the workspace and /nix warm
-      # across jobs. Safe for these workflows: every checkout uses
-      # persist-credentials:false and actions/checkout cleans the tree.
-      DISABLE_AUTO_UPDATE: "true"
-
-  # stage-crew/tickify's production jobs (label dokploy-tickify; no
-  # environment word, its owner's naming), on a runner no CI job can take:
-  # tickify's CI requests dokploy-tickify-nonprod, which this runner lacks.
-  # GitHub has no job priority, and twice on 18 Oct a production deploy sat
-  # queued behind CI's two 35-40 minute shards while production was down.
-  # Same host and token as the CI pool, so it is not isolated from CI's jobs
-  # (they hold the host's Docker socket); it only keeps production off CI's
-  # queue.
-  runner-tickify:
-    <<: *runner
-    # 2 CPUs and 7 GB: GitHub's hosted runner for a private repo, on which
-    # tickify's production apply ran in 13-14 minutes (its runs of 18 Oct).
-    # Production's jobs start no containers and need no fixed port, so no
-    # Docker socket and no host network.
-    deploy:
-      replicas: 1
-      resources:
-        limits:
-          cpus: 2
-          memory: 7G
-    environment:
-      RUNNER_SCOPE: repo
-      REPO_URL: ${TICKIFY_REPO_URL:?}
-      ACCESS_TOKEN: ${TICKIFY_ACCESS_TOKEN:?}
-      RUNNER_NAME_PREFIX: dokploy-tickify
-      LABELS: dokploy-tickify
-      # Without `self-hosted`, `Linux` and `X64`, only a job that names
-      # dokploy-tickify lands here.
-      NO_DEFAULT_LABELS: "true"
+      LABELS: dokploy-tickify-nonprod
+      EPHEMERAL: "true"
+      RANDOM_RUNNER_SUFFIX: "false"
       DISABLE_AUTO_UPDATE: "true"
 
   runner-optics:
@@ -142,7 +130,12 @@ services:
       ACCESS_TOKEN: ${OPTICS_ACCESS_TOKEN:?}
       RUNNER_NAME_PREFIX: dokploy-optics
       LABELS: dokploy-optics
-      # Persistent, as tickify's. Optics' checkout keeps the default
+      # Persistent. Optics' checkout keeps the default
       # persist-credentials, but that is the job's own GITHUB_TOKEN: its post
       # step removes it, and it expires when the job ends.
       DISABLE_AUTO_UPDATE: "true"
+
+secrets:
+  tickify_access_token:
+    # Absolute host path of a root:root 0400 file; no default.
+    file: ${TICKIFY_ACCESS_TOKEN_FILE:?}

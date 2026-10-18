@@ -1,0 +1,59 @@
+# The runner for stage-crew/tickify's production jobs: label `dokploy-tickify`,
+# runners `dokploy-tickify-<n>`, no environment word (tickify's owner, 18 Oct).
+# Deployed alone on its own VM, never on the host of ../github-runner
+# (README, "Host").
+#
+# What a job here cannot do, and the line that stops it:
+# - read the access token: it is a root 0400 file, jobs run as `runner`
+#   (RUN_AS_ROOT) and `no-new-privileges` stops that user's passwordless sudo
+#   (the image's base puts `runner` in the sudo group);
+# - reach the host: no Docker socket, no host network;
+# - see another job's leftovers: `docker compose run --rm` (the systemd unit)
+#   builds a fresh container for every job, where a `restart` policy would
+#   reuse the filesystem;
+# - be picked by an unrelated workflow: NO_DEFAULT_LABELS drops `self-hosted`,
+#   so only `runs-on: dokploy-tickify` lands here.
+services:
+  runner-tickify:
+    image: ${RUNNER_IMAGE_REF:?}
+    restart: "no"
+    stop_grace_period: 60s
+    entrypoint: ["/register-entrypoint.sh"]
+    # An `entrypoint` override clears the image's CMD; this is its CMD
+    # (myoung34/docker-github-actions-runner, Dockerfile).
+    command: ["./bin/Runner.Listener", "run", "--startuptype", "service"]
+    secrets:
+      # register-entrypoint.sh reads /run/secrets/runner_access_token.
+      - source: tickify_access_token
+        target: runner_access_token
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      RUNNER_SCOPE: repo
+      REPO_URL: ${TICKIFY_REPO_URL:?}
+      RUNNER_NAME_PREFIX: dokploy-tickify
+      LABELS: dokploy-tickify
+      NO_DEFAULT_LABELS: "true"
+      EPHEMERAL: "true"
+      DISABLE_AUTO_UPDATE: "true"
+      RUN_AS_ROOT: "false"
+    volumes:
+      - ../github-runner/register-entrypoint.sh:/register-entrypoint.sh:ro
+    deploy:
+      resources:
+        limits:
+          # Unmeasured: no production job's peak has been taken here. The
+          # canary (README, "Deploy") is the measurement.
+          cpus: 4
+          memory: 8G
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+secrets:
+  tickify_access_token:
+    # Absolute host path of a root:root 0400 file holding this runner's own
+    # token, never the token of ../github-runner. No default.
+    file: ${TICKIFY_ACCESS_TOKEN_FILE:?}

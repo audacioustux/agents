@@ -26,10 +26,14 @@
 # "Registration credential"): out of the environment, though not out of the
 # reach of jobs that run as root beside the Docker socket.
 #
-# Tickify's runners register once per job (EPHEMERAL): the one-hour
-# registration token the wrapper hands the image cannot deregister a runner
-# that outlives it. A restart keeps the container filesystem, so /nix stays
-# warm and what a job leaves behind still reaches the next job.
+# Tickify's runners register once per job (EPHEMERAL), so that a runner is
+# replaced well within the one-hour life of the registration token the
+# wrapper hands the image. A runner idle for over an hour still cannot
+# deregister when stopped and is left listed offline (harmless: an offline
+# runner gets no job). A restart keeps the container filesystem, so /nix
+# stays warm; RANDOM_RUNNER_SUFFIX=false names the runner from the
+# container's hostname, which a restart keeps, so each job reuses the same
+# workspace instead of leaving a new one behind every time.
 x-tickify-registration: &tickify-registration
   entrypoint: ["/register-entrypoint.sh"]
   # An `entrypoint` override clears the image's CMD; this is its CMD
@@ -90,6 +94,7 @@ services:
       RUNNER_NAME_PREFIX: dokploy-tickify-nonprod
       LABELS: dokploy-tickify-nonprod,dokploy-tickify
       EPHEMERAL: "true"
+      RANDOM_RUNNER_SUFFIX: "false"
       DISABLE_AUTO_UPDATE: "true"
 
   # stage-crew/tickify's production jobs (label dokploy-tickify; no
@@ -123,6 +128,7 @@ services:
       # dokploy-tickify lands here.
       NO_DEFAULT_LABELS: "true"
       EPHEMERAL: "true"
+      RANDOM_RUNNER_SUFFIX: "false"
       DISABLE_AUTO_UPDATE: "true"
 
   runner-optics:

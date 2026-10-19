@@ -77,9 +77,11 @@ self-hosted interchangeable by reverting that one line to `ubuntu-latest`.
 Moving tickify to these labels, in this order, so that no job is handed to
 a runner that cannot run it:
 
-1. Deploy this commit, while no CI run is in progress (renaming the service
-   replaces the old runners): the pool carries both labels, so every tickify
-   job keeps running as before.
+1. Deploy PR #16's intermediate compose, not this commit, while no CI run is
+   in progress (renaming the service replaces the old runners): the pool carries
+   both labels, so every tickify job keeps running as before. This compose also
+   starts `runner-tickify`, which must not exist while CI still requests
+   `dokploy-tickify` (step 3).
 2. Land tickify's change of its `runs-on` lines (`-nonprod` for everything
    but production's jobs).
 3. Then deploy production's own runner, `runner-tickify` (this compose's

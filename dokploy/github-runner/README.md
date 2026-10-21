@@ -8,7 +8,8 @@ GitHub plan; jobs run here instead of drawing on the hosted-runner quota.
 
 | Service | Scope | Label | Replicas |
 |---|---|---|---|
-| `runner-tickify-nonprod` | repo `stage-crew/tickify` | `dokploy-tickify-nonprod`, `dokploy-tickify` | 2 (10 CPUs each) |
+| `runner-tickify-nonprod` | repo `stage-crew/tickify` | `dokploy-tickify-nonprod` | 2 (10 CPUs each) |
+| `runner-tickify` | repo `stage-crew/tickify` | `dokploy-tickify` only | 1 (4 CPUs, 8 GB) |
 | `runner-optics` | repo `nobinalo/Optics` | `dokploy-optics` | 2 (4 CPUs each, idle cores only) |
 
 A runner registers to exactly one scope, so each pool is its own service;
@@ -35,7 +36,8 @@ hosted runners. Add pools only for repos whose jobs are container-clean.
    `TICKIFY_REPO_URL` and `TICKIFY_ACCESS_TOKEN`, and add
    `OPTICS_REPO_URL` and `OPTICS_ACCESS_TOKEN`, before redeploying.
 5. Deploy. Runners appear under each repo's Settings → Actions → Runners,
-   named `dokploy-tickify-nonprod-…` and `dokploy-optics-…`.
+   named `dokploy-tickify-nonprod-…`, `dokploy-tickify-…` and
+   `dokploy-optics-…`.
 
 ## Runtime
 
@@ -65,25 +67,28 @@ hosted runners. Add pools only for repos whose jobs are container-clean.
 ## Pointing workflows at a pool
 
 Tickify: `runs-on: dokploy-tickify-nonprod` for every job but production's,
-`runs-on: dokploy-tickify` for production's. GitHub has no job priority, so
-production's own runner (step 3 below) is what keeps a production deploy
-from queueing behind CI's shards: no CI job requests its one label.
-Production's jobs may also take an idle `-nonprod` runner, which carries
-both. Keep hosted and
-self-hosted interchangeable by reverting that one line to `ubuntu-latest`.
+`runs-on: dokploy-tickify` for production's. GitHub has no job priority, so a
+runner only production requests is what keeps a production deploy from
+queueing behind CI's shards: each label is carried by one service alone, so no
+production job can take a CI runner and no CI job can take production's. Keep
+hosted and self-hosted interchangeable by reverting that one line to
+`ubuntu-latest`.
 
-Moving tickify to these labels, in this order, so that no job is handed to
-a runner that cannot run it:
+`runner-tickify` is one replica: production's jobs queue behind each other,
+never behind CI. It has no Docker socket and no host network, which tickify's
+CI needs for its service containers, so a job of CI that requested
+`dokploy-tickify` would fail at "Initialize containers" there. Deploy this
+compose only once tickify's workflows request `-nonprod` for everything but
+production's jobs (tickify's `ci/prod-runner-labels`); until then the CI pool
+is the only runner with the bare label, and tickify's CI relies on it.
 
-1. Deploy this commit, while no CI run is in progress (renaming the service
-   replaces the old runners): the pool carries both labels, so every tickify
-   job keeps running as before.
-2. Land tickify's change of its `runs-on` lines (`-nonprod` for everything
-   but production's jobs).
-3. Then add production's own runner, `runner-tickify` (the next change). It
-   has no Docker socket and no host network, which tickify's CI needs for its
-   service containers, so it must not exist while CI still requests
-   `dokploy-tickify`.
+CPU: the services' limits sum to 32 CPUs on the host's 20 (production 4, CI
+2 x 10, Optics 2 x 4), which the owner allowed on 20 Oct. A limit is a cap and
+not a reservation, and a busy host divides CPU by weight: production's runner,
+at the default weight beside CI's two replicas and Optics' two at 64, is owed
+about 6.4 cores, so CI cannot hold it below its limit of 4. Production's runner
+shares the host, the repository and the access token with the CI pool, whose
+jobs hold the Docker socket and run as root; that isolation is deferred.
 
 Optics chooses with a repository variable instead:
 `runs-on: ${{ vars.CHECK_RUNNER || 'ubuntu-latest' }}`. Set `CHECK_RUNNER`

@@ -1,4 +1,4 @@
-# Three runner services on one host. A runner registers to exactly one scope, so
+# Four runner services on one host. A runner registers to exactly one scope, so
 # each pool is its own service; scaling either is its `deploy.replicas`.
 #
 # Replicas rule out `container_name` and per-replica named volumes, so runner
@@ -34,9 +34,10 @@ x-runner: &runner
       max-file: "3"
 
 services:
-  # Every stage-crew/tickify job but production's takes
-  # dokploy-tickify-nonprod, which only this pool carries: no production job
-  # can land here (production's runner is below).
+  # The big pool: stage-crew/tickify's check (CI's shards and the Dependabot
+  # checks), the only jobs that take dokploy-tickify-nonprod, which only this
+  # pool carries: no production job and no small workflow can land here
+  # (production's runner and the light pool are below).
   runner-tickify-nonprod:
     <<: *runner
     # Jobs start sibling containers on the host daemon (socket below) with
@@ -55,8 +56,8 @@ services:
     # cap and the 50-minute step cap (stage-crew/tickify run 37960180645: 65 of
     # 66 units passed, then the step timed out). 2 x 10 runs two full checks at
     # once without contention, and the check's CHECK_CONCURRENCY=auto reads the
-    # 10-CPU limit (5 units at a time instead of 4). The Optics pool below
-    # borrows only idle cores, at a small fraction of this pool's weight.
+    # 10-CPU limit (5 units at a time instead of 4). The light and Optics pools
+    # below borrow only idle cores, at a small fraction of this pool's weight.
     deploy:
       replicas: 2
       resources:
@@ -92,10 +93,11 @@ services:
     # 4 CPUs and 8 GB: twice the CPUs of GitHub's hosted runner for a private
     # repo, on which tickify's production apply ran in 13-14 minutes (its runs
     # of 18 Oct). Over-committing the host's 20 cores is allowed (owner,
-    # 20 Oct): the limits sum to 4 + 2 x 10 + 2 x 4 = 32. Limits are not
+    # 20 Oct): the limits sum to 4 + 2 x 10 + 2 x 4 + 4 x 2 = 40. Limits are not
     # reservations, and CPU weight is what a busy host divides by: against two
-    # CI replicas at the default weight and Optics' two at 64, this one is
-    # owed 1024 / (3 x 1024 + 2 x 64) of 20 cores, about 6.4, above its limit of 4,
+    # CI replicas at the default weight, Optics' two at 64 and the light pool's
+    # four at 128, this one is
+    # owed 1024 / (3 x 1024 + 2 x 64 + 4 x 128) of 20 cores, about 5.5, above its limit of 4,
     # so CI cannot hold it below its limit.
     # Production's jobs start no containers and need no fixed port, so no
     # Docker socket and no host network.
@@ -114,6 +116,63 @@ services:
       # Without `self-hosted`, `Linux` and `X64`, only a job that names
       # dokploy-tickify lands here.
       NO_DEFAULT_LABELS: "true"
+      DISABLE_AUTO_UPDATE: "true"
+
+  # stage-crew/tickify's small workflows (every job that is neither the check
+  # nor production's): the security scans, the bucket, Grafana and edge plans,
+  # the reuse verdict, and the deploys' gates and `apply`, which wait on a
+  # service for up to an hour but use little CPU. Before this pool they shared
+  # the big pool's two runners with the check's shards, which then waited 0-2
+  # hours a run (1h54m-3h20m a run, 27 Oct).
+  #
+  # Its label is its own, and the big pool does not carry it: a small job can
+  # never take a runner a shard needs, and a job that needs the big pool's
+  # Docker socket can never land here. Tickify's workflow test holds the
+  # placement; no workflow that asks for this label has a `services:` block, a
+  # container or a docker step.
+  #
+  # No docker socket and no host network, as Optics' pool.
+  #
+  # CPU: it borrows idle cores, at `cpu_shares: 128` against the big pool's
+  # default. Higher than Optics' 64, because a pull request starts its small
+  # workflows together with the check, so they mostly run while the big pool is
+  # busy, and tickify's Semgrep alone measured 507 CPU-seconds, 5 min 24 s at
+  # 169% CPU (security.yml).
+  # Computed, not measured on this host, for the big pool and these four busy:
+  # these get about 4.0 cores in all on cgroup v1 (512 of 2560 shares); on v2,
+  # 1.8 where runc maps 128 shares to weight 5 and 5.9 where it maps them to 21
+  # (the two mappings Optics' note gives). The big pool keeps 76% of the host
+  # on v1 and 88% or 65% on v2 while these and Optics are busy: these jobs are
+  # bursts, but a shard already runs near its bound. If the big pool's units
+  # time out while these are busy, lower the weight; if these jobs time out,
+  # raise it.
+  #
+  # 4 replicas: a pull request starts about seven small jobs at once, and a
+  # deploy's gate and `apply` each hold one for up to an hour. Unmeasured: a
+  # replica starts with an empty /nix, so its first nix job after a redeploy
+  # pays a cold install, and Semgrep's memory in 6 GB (README, "Watching the
+  # first runs", which also says what to read for the queue and the weight).
+  runner-tickify-light:
+    <<: *runner
+    cpu_shares: 128
+    deploy:
+      replicas: 4
+      resources:
+        reservations:
+          memory: 1G
+        limits:
+          cpus: 2
+          memory: 6G
+    environment:
+      RUNNER_SCOPE: repo
+      REPO_URL: ${TICKIFY_REPO_URL:?}
+      ACCESS_TOKEN: ${TICKIFY_ACCESS_TOKEN:?}
+      RUNNER_NAME_PREFIX: dokploy-tickify-light
+      LABELS: dokploy-tickify-light
+      # Without `self-hosted`, `Linux` and `X64`, only a job that names
+      # dokploy-tickify-light lands here, as production's runner.
+      NO_DEFAULT_LABELS: "true"
+      # Persistent, as the big pool's.
       DISABLE_AUTO_UPDATE: "true"
 
   runner-optics:

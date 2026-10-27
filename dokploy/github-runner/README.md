@@ -8,7 +8,7 @@ GitHub plan; jobs run here instead of drawing on the hosted-runner quota.
 
 | Service | Scope | Label | Replicas |
 |---|---|---|---|
-| `runner-tickify-nonprod` | repo `stage-crew/tickify` | `dokploy-tickify-nonprod` | 2 (10 CPUs each) |
+| `runner-tickify-nonprod` | repo `stage-crew/tickify` | `dokploy-tickify-nonprod`, `dokploy-tickify-ci` | 2 (10 CPUs each) |
 | `runner-tickify` | repo `stage-crew/tickify` | `dokploy-tickify` only | 1 (4 CPUs, 8 GB) |
 | `runner-optics` | repo `nobinalo/Optics` | `dokploy-optics` | 2 (4 CPUs each, idle cores only) |
 

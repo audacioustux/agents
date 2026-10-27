@@ -36,7 +36,10 @@ x-runner: &runner
 services:
   # Every stage-crew/tickify job but production's takes
   # dokploy-tickify-nonprod, which only this pool carries: no production job
-  # can land here (production's runner is below).
+  # can land here (production's runner is below). It also carries
+  # dokploy-tickify-ci, which tickify's heavy jobs (the check's shards) will
+  # request together with nonprod, so that a second pool can take the small
+  # jobs without ever being offered a shard (stage-crew/tickify ci/runner-split).
   runner-tickify-nonprod:
     <<: *runner
     # Jobs start sibling containers on the host daemon (socket below) with
@@ -71,7 +74,7 @@ services:
       REPO_URL: ${TICKIFY_REPO_URL:?}
       ACCESS_TOKEN: ${TICKIFY_ACCESS_TOKEN:?}
       RUNNER_NAME_PREFIX: dokploy-tickify-nonprod
-      LABELS: dokploy-tickify-nonprod
+      LABELS: dokploy-tickify-nonprod,dokploy-tickify-ci
       # Persistent runner (not EPHEMERAL): keeps the workspace and /nix warm
       # across jobs. Safe for these workflows: every checkout uses
       # persist-credentials:false and actions/checkout cleans the tree.

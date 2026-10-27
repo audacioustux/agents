@@ -136,7 +136,8 @@ services:
   # CPU: it borrows idle cores, at `cpu_shares: 128` against the big pool's
   # default. Higher than Optics' 64, because a pull request starts its small
   # workflows together with the check, so they mostly run while the big pool is
-  # busy, and security.yml's three jobs measured 5 min 24 s at 169% CPU.
+  # busy, and tickify's Semgrep alone measured 507 CPU-seconds, 5 min 24 s at
+  # 169% CPU (security.yml).
   # Computed, not measured on this host, for the big pool and these four busy:
   # these get about 4.0 cores in all on cgroup v1 (512 of 2560 shares); on v2,
   # 1.8 where runc maps 128 shares to weight 5 and 5.9 where it maps them to 21
@@ -150,7 +151,7 @@ services:
   # deploy's gate and `apply` each hold one for up to an hour. Unmeasured: a
   # replica starts with an empty /nix, so its first nix job after a redeploy
   # pays a cold install, and Semgrep's memory in 6 GB (README, "Watching the
-  # first runs").
+  # first runs", which also says what to read for the queue and the weight).
   runner-tickify-light:
     <<: *runner
     cpu_shares: 128
@@ -168,6 +169,9 @@ services:
       ACCESS_TOKEN: ${TICKIFY_ACCESS_TOKEN:?}
       RUNNER_NAME_PREFIX: dokploy-tickify-light
       LABELS: dokploy-tickify-light
+      # Without `self-hosted`, `Linux` and `X64`, only a job that names
+      # dokploy-tickify-light lands here, as production's runner.
+      NO_DEFAULT_LABELS: "true"
       # Persistent, as the big pool's.
       DISABLE_AUTO_UPDATE: "true"
 

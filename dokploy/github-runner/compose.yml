@@ -50,6 +50,11 @@ services:
       # Job service containers and any docker steps run as siblings on the
       # host daemon.
       - /var/run/docker.sock:/var/run/docker.sock
+    # Tests that start their own PostgreSQL inside the job (Tickify's
+    # PrivateCluster suites) use this container's /dev/shm. Docker's default
+    # 64 MB failed CI run 41156386358 ("could not resize shared memory
+    # segment", Tickify inbox 1807). 2 GB counts against the 16G limit below.
+    shm_size: 2gb
     # replicas x limits.cpus must not exceed the host's 20 cores. At 3 x 8 (24)
     # three concurrent CI runs slowed each other until units hit their 600 s
     # cap and the 50-minute step cap (stage-crew/tickify run 37960180645: 65 of

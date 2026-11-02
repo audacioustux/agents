@@ -3,7 +3,8 @@
 //! selected job's details below. It emits nothing.
 //!
 //! Keys: ↑/↓ (or k/j) select a job, `a` toggles jobs that ended over a day
-//! ago, `q`, Esc or Ctrl-C quits.
+//! ago, `q`, Esc or Ctrl-C quits. A reinstalled relay takes over the window
+//! on its own, so nothing needs to restart the board after an upgrade.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -120,16 +121,31 @@ fn draw(f: &mut Frame<'_>, b: &Board, selected: &mut TableState) {
     );
 }
 
+/// Why the board closed.
+enum Close {
+    Quit,
+    /// The binary was replaced: the new one should take over.
+    Upgraded,
+}
+
 /// Runs the board until a quit key. Redraws on every project's events (the
 /// accounts are shared), on any key or resize, and every few seconds for the clocks.
 pub fn run(ctx: &Ctx, all: bool) -> Result<()> {
     let bell = ctx.doorbell()?;
     let (tx, rang) = mpsc::channel();
     std::thread::spawn(move || while tx.send(bell.wait(Duration::from_secs(60))).is_ok() {});
-    ratatui::run(|terminal| ui(terminal, ctx, all, &rang))
+    match ratatui::run(|terminal| ui(terminal, ctx, all, &rang))? {
+        Close::Quit => Ok(()),
+        // The terminal is restored by now; the new binary takes it over with the same arguments.
+        Close::Upgraded => {
+            use std::os::unix::process::CommandExt;
+            Err(std::process::Command::new(crate::os::own_binary()?).args(std::env::args_os().skip(1)).exec().into())
+        }
+    }
 }
 
-fn ui(terminal: &mut DefaultTerminal, ctx: &Ctx, mut all: bool, rang: &mpsc::Receiver<bool>) -> Result<()> {
+fn ui(terminal: &mut DefaultTerminal, ctx: &Ctx, mut all: bool, rang: &mpsc::Receiver<bool>) -> Result<Close> {
+    let version = crate::os::binary_version();
     let mut selected = TableState::default().with_selected(Some(0));
     let mut board = Board::read(ctx, all)?;
     let mut read_at = Instant::now();
@@ -139,8 +155,8 @@ fn ui(terminal: &mut DefaultTerminal, ctx: &Ctx, mut all: bool, rang: &mpsc::Rec
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => match k.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(Close::Quit),
+                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(Close::Quit),
                     KeyCode::Down | KeyCode::Char('j') => selected.select_next(),
                     KeyCode::Up | KeyCode::Char('k') => selected.select_previous(),
                     KeyCode::Char('a') => (all, stale) = (!all, true),
@@ -151,6 +167,9 @@ fn ui(terminal: &mut DefaultTerminal, ctx: &Ctx, mut all: bool, rang: &mpsc::Rec
             }
         }
         if stale {
+            if crate::os::binary_version() != version {
+                return Ok(Close::Upgraded);
+            }
             board = Board::read(ctx, all)?;
             read_at = Instant::now();
         }

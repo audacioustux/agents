@@ -10,7 +10,7 @@
 //! Every system that emits wakes it, so it never has to be started by hand.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -61,11 +61,11 @@ fn serve(ctx: &Ctx) -> Result<()> {
     let Some(role) = Role::try_take(&ctx.state.join("dispatch.lock"))? else { return Ok(()) };
     // Every project's bus: a seat freed or a limit hit in another project changes our plan too.
     let bell = ctx.doorbell()?;
-    let version = binary_version();
+    let version = os::binary_version();
     let mut idle_since: Option<Instant> = None;
     let mut last_held = Held::default();
     loop {
-        if binary_version() != version {
+        if os::binary_version() != version {
             // A rebuilt binary takes over: drop the role, then start the new one.
             drop(role);
             return ctx.wake_dispatch();
@@ -95,10 +95,6 @@ fn serve(ctx: &Ctx) -> Result<()> {
             bell.wait(Duration::ZERO);
         }
     }
-}
-
-fn binary_version() -> Option<SystemTime> {
-    crate::os::own_binary().ok().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
 }
 
 /// One pass over the world. Returns whether anything is still queued or

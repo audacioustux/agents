@@ -110,6 +110,12 @@ pub fn own_binary() -> std::io::Result<std::path::PathBuf> {
     Ok(s.strip_suffix(" (deleted)").map_or(exe.clone(), std::path::PathBuf::from))
 }
 
+/// When the installed binary was last replaced: a change means a newer
+/// relay should take over from this process.
+pub fn binary_version() -> Option<std::time::SystemTime> {
+    own_binary().ok().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
+}
+
 /// The terminal's columns and rows, when stdout is one.
 pub fn terminal_size() -> Option<(usize, usize)> {
     let w = rustix::termios::tcgetwinsize(std::io::stdout()).ok()?;

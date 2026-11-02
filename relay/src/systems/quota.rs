@@ -10,7 +10,7 @@ use clap::Subcommand;
 use crate::accounts::{self, harness_of};
 use crate::bus::{QuotaEvent, now_micros, secs};
 use crate::ctx::Ctx;
-use crate::harness::{Home, Meters};
+use crate::harness::{Harness, Home, Meter, Meters};
 use crate::os::Role;
 use crate::sandbox;
 use crate::systems::dispatch::seats_taken;
@@ -122,19 +122,34 @@ struct Row<'a> {
     running: usize,
     meters: Option<&'a Meters>,
     read_at: Option<u64>,
+    /// The meter closest to its limit among those that govern the model.
+    #[serde(skip)]
+    tightest: Option<(&'a str, &'a Meter)>,
+    #[serde(skip)]
+    ready: bool,
 }
 
 impl Row<'_> {
-    /// Its cells for a table: what an operator scans first comes first.
-    fn cells(&self, now: u64) -> Vec<String> {
-        let meters = self.meters.into_iter().flatten().map(|(k, m)| {
-            let at = m.resets_at.map_or(String::new(), |r| format!(" (resets {})", fmt_time(r)));
-            format!("{k} {:.0}%{at}", m.utilization * 100.0)
+    /// Its cells for a table: what an operator scans first comes first, and
+    /// only the meter that decides (`--json` has them all).
+    fn cells(&self) -> Vec<String> {
+        let tightest = self.tightest.map_or(String::new(), |(k, m)| {
+            let at = m.resets_at.map_or(String::new(), |r| format!(", resets {}", fmt_time(r)));
+            format!("{:.0}% {k}{at}", m.utilization * 100.0)
         });
-        let age = self.read_at.map_or(String::new(), |t| format!("read {} ago", crate::systems::view::ago(now, t)));
         let running = if self.running > 0 { format!("{} running", self.running) } else { String::new() };
-        vec![self.account.clone(), self.state.clone(), running, age, meters.collect::<Vec<_>>().join(", ")]
+        vec![self.account.clone(), self.state.clone(), running, tightest]
     }
+}
+
+/// Of the meters that govern `model`, the one closest to its limit.
+fn tightest<'m>(h: &dyn Harness, model: Option<&str>, meters: &'m Meters, now_s: i64) -> Option<(&'m str, &'m Meter)> {
+    let governing = h.meters_for(model, meters).ok()?;
+    meters
+        .iter()
+        .filter(|&(_, m)| governing.iter().any(|g| std::ptr::eq(*g, m)) && m.resets_at.is_none_or(|r| r > now_s))
+        .max_by(|a, b| a.1.utilization.total_cmp(&b.1.utilization))
+        .map(|(k, m)| (k.as_str(), m))
 }
 
 pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
@@ -149,6 +164,8 @@ pub struct AccountsView {
     pub head: String,
     /// One row of table cells per account.
     pub cells: Vec<Vec<String>>,
+    /// Whether each account would take a job now.
+    pub ready: Vec<bool>,
 }
 
 impl AccountsView {
@@ -169,7 +186,9 @@ pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
         let st = world.accounts.get(&key);
         // The dispatcher's own judgment, for the harness's configured model.
         let model = ctx.cfg.harness(a.harness).model;
-        let state = match accounts::fit(a, st, model.as_deref(), ctx.cfg.limits.floor, now) {
+        let fit = accounts::fit(a, st, model.as_deref(), ctx.cfg.limits.floor, now);
+        let ready = fit.is_ok();
+        let state = match fit {
             Ok(_) if !h.caps().quota => "ready (unmetered)".to_owned(),
             Ok(_) => "ready".to_owned(),
             Err(accounts::Refusal::Limited) => {
@@ -184,6 +203,8 @@ pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
             state,
             meters: st.map(|s| &s.meters),
             read_at: st.and_then(|s| s.read_at),
+            tightest: st.and_then(|s| tightest(h, model.as_deref(), &s.meters, secs(now))),
+            ready,
         }
     };
     let rows: Vec<Row<'_>> = accounts::discover(&ctx.cfg).iter().map(row).collect();
@@ -191,8 +212,9 @@ pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
     let l = &ctx.cfg.limits;
     let head =
         format!("accounts on {} (floor {:.0}%, {} session(s) each)", names.join(", "), l.floor * 100.0, l.per_account);
-    let cells = rows.iter().map(|r| r.cells(now)).collect();
-    AccountsView { json: serde_json::json!({ "harnesses": names, "accounts": rows }), head, cells }
+    let cells = rows.iter().map(Row::cells).collect();
+    let ready = rows.iter().map(|r| r.ready).collect();
+    AccountsView { json: serde_json::json!({ "harnesses": names, "accounts": rows }), head, cells, ready }
 }
 
 pub fn fmt_time(unix_s: i64) -> String {

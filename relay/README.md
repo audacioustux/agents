@@ -32,7 +32,9 @@ cd ~/work/myproject && relay probe       # checks the sandbox; starts no model s
 
 relay finds its config from `--config`, then `$RELAY_CONFIG`, then the nearest
 `relay.toml` at or above the current directory. [`relay.example.toml`](relay.example.toml)
-lists every key with its default. Unknown keys are errors.
+lists every key with its default. Unknown keys are errors. The file holds
+per-machine choices (accounts, limits), so a project shared across machines
+usually gitignores it.
 
 ## What a job is
 

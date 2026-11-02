@@ -30,9 +30,24 @@ pub fn harness_of(home: &Home) -> &'static dyn Harness {
     crate::harness::by_id(home.harness).expect("homes come from the registry")
 }
 
-/// Utilization of the fullest meter that has not reset yet.
-pub fn pressure(meters: &[&Meter], now_s: i64) -> f64 {
-    meters.iter().filter(|m| m.resets_at.is_none_or(|r| r > now_s)).map(|m| m.utilization).fold(0.0, f64::max)
+/// Of the `governing` meters (a subset of `meters`), the one closest to its
+/// limit that has not reset yet, with its name.
+pub fn tightest<'m>(governing: &[&Meter], meters: &'m Meters, now_s: i64) -> Option<(&'m str, &'m Meter)> {
+    meters
+        .iter()
+        .filter(|&(_, m)| governing.iter().any(|g| std::ptr::eq(*g, m)) && m.resets_at.is_none_or(|r| r > now_s))
+        .max_by(|a, b| a.1.utilization.total_cmp(&b.1.utilization))
+        .map(|(k, m)| (k.as_str(), m))
+}
+
+/// One meter as an operator reads it: `100% openai-codex/5 hours, resets Nov 2 21:42Z`.
+pub fn meter_line(name: &str, m: &Meter) -> String {
+    let at = m.resets_at.map_or(String::new(), |r| format!(", resets {}", fmt_time(r)));
+    format!("{:.0}% {name}{at}", m.utilization * 100.0)
+}
+
+pub fn fmt_time(unix_s: i64) -> String {
+    jiff::Timestamp::from_second(unix_s).map_or_else(|_| "?".into(), |t| t.strftime("%b %-d %H:%MZ").to_string())
 }
 
 /// Higher is better: room left per day until reset, for the tightest meter,
@@ -52,7 +67,8 @@ pub enum Refusal {
     Disabled,
     SignedOut,
     Limited,
-    AtFloor,
+    /// The governing meter closest to its limit is at the floor; it names that meter.
+    AtFloor(String),
     Unread,
     /// The last reading is too old to trust; a fresh one has been asked for.
     Stale,
@@ -66,7 +82,7 @@ impl Refusal {
             Self::Disabled => "disabled".into(),
             Self::SignedOut => "signed out (sign in, then: relay quota enable)".into(),
             Self::Limited => "limited".into(),
-            Self::AtFloor => "at floor".into(),
+            Self::AtFloor(meter) => format!("at floor: {meter}"),
             Self::Unread => "not read yet".into(),
             Self::Stale => "reading is stale".into(),
             Self::Blind(why) => why.clone(),
@@ -112,8 +128,10 @@ pub fn fit(
     let empty = Meters::new();
     let meters = state.map_or(&empty, |s| &s.meters);
     let governing = h.meters_for(model, meters).map_err(|e| Refusal::Blind(e.0))?;
-    if pressure(&governing, now_s) >= floor {
-        return Err(Refusal::AtFloor);
+    if let Some((name, m)) = tightest(&governing, meters, now_s)
+        && m.utilization >= floor
+    {
+        return Err(Refusal::AtFloor(meter_line(name, m)));
     }
     Ok(score(&governing, now_s))
 }
@@ -163,7 +181,8 @@ mod tests {
         assert_eq!(fit(&claude("a"), Some(&old), None, 0.9, now_us), Err(Refusal::Stale));
         let mut full = read.clone();
         full.meters.insert("seven_day".into(), m(0.95, Some(now + 10)));
-        assert_eq!(fit(&claude("a"), Some(&full), None, 0.9, now_us), Err(Refusal::AtFloor));
+        let held = fit(&claude("a"), Some(&full), None, 0.9, now_us).unwrap_err();
+        assert!(held.describe().starts_with("at floor: 95% seven_day, resets "), "{}", held.describe());
         full.meters.insert("seven_day".into(), m(0.95, Some(now - 10)));
         assert!(fit(&claude("a"), Some(&full), None, 0.9, now_us).is_ok(), "a meter past its reset no longer counts");
         let limited = AccountState { limited_until: Some(now + 1), ..read.clone() };

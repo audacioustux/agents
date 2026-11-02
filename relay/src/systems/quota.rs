@@ -10,7 +10,7 @@ use clap::Subcommand;
 use crate::accounts::{self, harness_of};
 use crate::bus::{QuotaEvent, now_micros, secs};
 use crate::ctx::Ctx;
-use crate::harness::{Harness, Home, Meter, Meters};
+use crate::harness::{Home, Meter, Meters};
 use crate::os::Role;
 use crate::sandbox;
 use crate::systems::dispatch::seats_taken;
@@ -133,23 +133,10 @@ impl Row<'_> {
     /// Its cells for a table: what an operator scans first comes first, and
     /// only the meter that decides (`--json` has them all).
     fn cells(&self) -> Vec<String> {
-        let tightest = self.tightest.map_or(String::new(), |(k, m)| {
-            let at = m.resets_at.map_or(String::new(), |r| format!(", resets {}", fmt_time(r)));
-            format!("{:.0}% {k}{at}", m.utilization * 100.0)
-        });
+        let tightest = self.tightest.map_or(String::new(), |(k, m)| accounts::meter_line(k, m));
         let running = if self.running > 0 { format!("{} running", self.running) } else { String::new() };
         vec![self.account.clone(), self.state.clone(), running, tightest]
     }
-}
-
-/// Of the meters that govern `model`, the one closest to its limit.
-fn tightest<'m>(h: &dyn Harness, model: Option<&str>, meters: &'m Meters, now_s: i64) -> Option<(&'m str, &'m Meter)> {
-    let governing = h.meters_for(model, meters).ok()?;
-    meters
-        .iter()
-        .filter(|&(_, m)| governing.iter().any(|g| std::ptr::eq(*g, m)) && m.resets_at.is_none_or(|r| r > now_s))
-        .max_by(|a, b| a.1.utilization.total_cmp(&b.1.utilization))
-        .map(|(k, m)| (k.as_str(), m))
 }
 
 pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
@@ -192,7 +179,7 @@ pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
             Ok(_) if !h.caps().quota => "ready (unmetered)".to_owned(),
             Ok(_) => "ready".to_owned(),
             Err(accounts::Refusal::Limited) => {
-                format!("limited until {}", fmt_time(st.and_then(|s| s.limited_until).unwrap_or(0)))
+                format!("limited until {}", accounts::fmt_time(st.and_then(|s| s.limited_until).unwrap_or(0)))
             }
             Err(r) => r.describe(),
         };
@@ -203,7 +190,10 @@ pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
             state,
             meters: st.map(|s| &s.meters),
             read_at: st.and_then(|s| s.read_at),
-            tightest: st.and_then(|s| tightest(h, model.as_deref(), &s.meters, secs(now))),
+            tightest: st.and_then(|s| {
+                let governing = h.meters_for(model.as_deref(), &s.meters).ok()?;
+                accounts::tightest(&governing, &s.meters, secs(now))
+            }),
             ready,
         }
     };
@@ -215,8 +205,4 @@ pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
     let cells = rows.iter().map(Row::cells).collect();
     let ready = rows.iter().map(|r| r.ready).collect();
     AccountsView { json: serde_json::json!({ "harnesses": names, "accounts": rows }), head, cells, ready }
-}
-
-pub fn fmt_time(unix_s: i64) -> String {
-    jiff::Timestamp::from_second(unix_s).map_or_else(|_| "?".into(), |t| t.strftime("%b %-d %H:%MZ").to_string())
 }

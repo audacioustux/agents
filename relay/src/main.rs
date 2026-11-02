@@ -50,7 +50,7 @@ enum System {
     /// Take work in, withdraw it, stop it.
     #[command(subcommand)]
     Queue(systems::queue::Cmd),
-    /// Give queued jobs a slot; reap dead sessions.
+    /// Give queued jobs a seat; reap dead sessions.
     #[command(subcommand)]
     Dispatch(systems::dispatch::Cmd),
     /// Run one job (started by dispatch).

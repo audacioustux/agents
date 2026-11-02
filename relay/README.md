@@ -124,7 +124,7 @@ same 10 minutes. An account is used only when:
 - the meters that govern the job's model are below `limits.floor` (omp meters
   each provider, so its model must name one: `minimax-code/MiniMax-M3.1-Flash`);
 - it is not limited or signed out;
-- it has a free slot.
+- it has a free seat.
 
 Of those, relay picks the one with the most room left per day until reset,
 because quota still unused at a reset is lost. A session that already ran
@@ -227,7 +227,7 @@ own process, and owns one output port:
 | System | Responsibility | Emits |
 | --- | --- | --- |
 | queue | takes work in, withdraws it, stops it | queued, resumed, dequeued, stop-requested |
-| dispatch | gives queued jobs a slot; reaps dead runners | dispatched, reaped |
+| dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
 | session | runs one job and reports what happened | cloned, started, rate, limited, signed-out, follow-up, ended |
 | quota | account readings and switches | reading, unreadable, account-enabled |
 | land | brings branches back; cleans up | forgotten |
@@ -259,6 +259,24 @@ It drops:
 
 Like lanes, relay never pushes or merges. Landing work on your main branch
 stays with your project's gate.
+
+## In TheGrid's words
+
+relay is built to move onto TheGrid, so it uses TheGrid's model where it can.
+
+| relay | TheGrid | how it differs |
+| --- | --- | --- |
+| system (queue, dispatch, quota, land) | System | A process, not a step machine; it changes state only by appending events. |
+| a session attempt | System | One per attempt at one incarnation of a job, with its own file. |
+| event file, `bus/<…>.ndjson` | Coupling, with the system's Port as its one source | Readers are listeners; nothing else can write it. |
+| `Source` | source Capability | Linear and unforgeable: only the owning module can make one. |
+| event | message | A fact that happened (queued, dispatched, reaped); it never commands. |
+| the fold, `world.json` | state, checkpoint | relay keeps the event files as the record and the checkpoint as a cache; TheGrid keeps state and may forget history. |
+| doorbell, idle exit | wake, rest | Nothing runs while nothing is queued or running. |
+| a retry, on any account | recovery | A new attempt writes a fresh file; the old runner lacks the capability to be heard. |
+| reaped | reap | A runner that died without reporting. |
+| forgotten (`land clean`) | end | The job leaves the state; its files stay as the record. |
+| job, account | (none) | A unit of work, and a resource outside the model. |
 
 ## Development
 

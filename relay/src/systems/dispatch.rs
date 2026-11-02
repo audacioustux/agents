@@ -1,4 +1,4 @@
-//! dispatch: gives queued jobs a slot on the account with the most room, and
+//! dispatch: gives queued jobs a seat on the account with the most room, and
 //! reaps sessions whose runner died. Emits: dispatched, reaped.
 //!
 //! It is the only system that acts on its own. `serve` takes the dispatcher

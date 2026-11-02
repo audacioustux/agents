@@ -1,14 +1,19 @@
-//! The state every system works from, derived by folding the bus. Nothing
-//! here is stored; it is recomputed from the events each time.
+//! The state every system works from, derived by folding the bus. The only
+//! thing stored is a checkpoint of that fold (`world.json`): a cache, so a
+//! command reads only what was written since, never the source of truth.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
-use crate::bus::{DispatchEvent, Event, LandEvent, Meters, Outcome, QueueEvent, QuotaEvent, SessionEvent, Stamped};
+use crate::bus::{
+    self, DispatchEvent, Event, LandEvent, Meters, Offsets, Outcome, QueueEvent, QuotaEvent, SessionEvent, Stamped,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
     Queued,
@@ -34,7 +39,7 @@ impl Status {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Job {
     pub name: String,
     pub task: String,
@@ -71,7 +76,7 @@ pub struct Job {
     pub stop_requested: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountState {
     pub enabled: bool,
     pub signed_out: bool,
@@ -97,13 +102,89 @@ impl Default for AccountState {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct World {
     pub jobs: BTreeMap<String, Job>,
     pub accounts: BTreeMap<String, AccountState>,
 }
 
+/// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
+/// holds), so checkpoints folded the old way are discarded.
+const FOLD_VERSION: u32 = 1;
+
+fn fold_version() -> String {
+    format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
+}
+
+/// The fold up to `offsets`, stored as `<state>/world.json`.
+#[derive(Debug, Serialize, Deserialize)]
+struct Checkpoint {
+    version: String,
+    /// The latest event time folded in. A new event no later than this
+    /// arrived out of order, and only a full fold places it right.
+    last: u64,
+    offsets: Offsets,
+    world: World,
+}
+
+impl Checkpoint {
+    fn full(bus: &Path) -> Result<Self> {
+        let (events, offsets) = bus::read_since(bus, &Offsets::new())?.unwrap_or_default();
+        let last = events.iter().map(|e| e.t).max().unwrap_or(0);
+        Ok(Self { version: fold_version(), last, offsets, world: World::fold(&events) })
+    }
+
+    /// Folds what was written since, or `None` if only a full fold will do.
+    fn advance(mut self, bus: &Path) -> Result<Option<Self>> {
+        let Some((events, offsets)) = bus::read_since(bus, &self.offsets)? else { return Ok(None) };
+        if events.first().is_some_and(|e| e.t <= self.last) {
+            return Ok(None);
+        }
+        for e in &events {
+            self.world.apply(e);
+        }
+        self.last = events.last().map_or(self.last, |e| e.t);
+        self.offsets = offsets;
+        Ok(Some(self))
+    }
+}
+
+/// Writes `bytes` to `path` whole or not at all, readable by its owner only.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    f.write_all(bytes)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
 impl World {
+    /// The fold of the bus at `bus`, from the checkpoint at `file` when it is
+    /// usable, which is then brought up to date. Any process may do this: the
+    /// checkpoint is a cache of a deterministic fold, replaced atomically, and
+    /// rewritten only when it changed. A failure to write it costs only time.
+    pub fn load(bus: &Path, file: &Path) -> Result<Self> {
+        let old = std::fs::read(file).unwrap_or_default();
+        let cached = serde_json::from_slice::<Checkpoint>(&old).ok().filter(|c| c.version == fold_version());
+        let cp = match cached {
+            Some(c) => c.advance(bus)?,
+            None => None,
+        };
+        let cp = match cp {
+            Some(c) => c,
+            None => Checkpoint::full(bus)?,
+        };
+        if let Ok(bytes) = serde_json::to_vec(&cp)
+            && bytes != old
+        {
+            let _ = write_atomic(file, &bytes);
+        }
+        Ok(cp.world)
+    }
+
     pub fn fold(events: &[Stamped]) -> Self {
         let mut w = Self::default();
         for e in events {
@@ -452,5 +533,168 @@ mod tests {
     fn forgotten_jobs_disappear() {
         let w = World::fold(&[st(1, queued("a")), st(2, Event::Land(LandEvent::Forgotten { job: "a".into() }))]);
         assert!(w.jobs.is_empty());
+    }
+
+    mod checkpoint {
+        use super::super::*;
+        use crate::config::tempdir::Dir;
+
+        struct Fixture {
+            _dir: Dir,
+            bus: PathBuf,
+            file: PathBuf,
+        }
+
+        impl Fixture {
+            fn new() -> Self {
+                let dir = Dir::new();
+                let bus = dir.path().join("bus");
+                std::fs::create_dir_all(bus.join("session")).unwrap();
+                let file = dir.path().join("world.json");
+                Self { _dir: dir, bus, file }
+            }
+
+            fn append(&self, rel: &str, text: &str) {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(self.bus.join(rel)).unwrap();
+                f.write_all(text.as_bytes()).unwrap();
+            }
+
+            fn load(&self) -> World {
+                World::load(&self.bus, &self.file).unwrap()
+            }
+
+            fn full(&self) -> World {
+                World::fold(&bus::read_all(&self.bus).unwrap())
+            }
+
+            fn checkpoint(&self) -> serde_json::Value {
+                serde_json::from_slice(&std::fs::read(&self.file).unwrap()).unwrap()
+            }
+
+            /// Plants an account no event names, so a load that keeps it read incrementally.
+            fn plant(&self) {
+                let mut c = self.checkpoint();
+                c["world"]["accounts"]["planted"] = serde_json::to_value(AccountState::default()).unwrap();
+                std::fs::write(&self.file, serde_json::to_vec(&c).unwrap()).unwrap();
+            }
+        }
+
+        fn queued(t: u64, job: &str) -> String {
+            format!(
+                r#"{{"t":{t},"type":"queued","job":"{job}","task":"x","readonly":false,"effort":null,"budget_usd":1.0,"pinned":null}}
+"#
+            )
+        }
+
+        fn dispatched(t: u64, job: &str) -> String {
+            format!(
+                r#"{{"t":{t},"type":"dispatched","job":"{job}","account":"c:w","runner_pid":7,"runner_started":1}}
+"#
+            )
+        }
+
+        fn ended(t: u64, job: &str) -> String {
+            format!(
+                r#"{{"t":{t},"type":"ended","job":"{job}","outcome":"done","cost_usd":0.25,"turns":3,"reason":null}}
+"#
+            )
+        }
+
+        fn limited(t: u64, until: i64) -> String {
+            format!(
+                r#"{{"t":{t},"type":"limited","account":"c:w","until":{until}}}
+"#
+            )
+        }
+
+        #[test]
+        fn incremental_equals_full_fold() {
+            let b = Fixture::new();
+            b.append("queue.ndjson", &(queued(1, "a") + &queued(2, "b")));
+            assert_eq!(b.load(), b.full());
+            b.plant();
+            b.append("dispatch.ndjson", &(dispatched(3, "a") + &dispatched(4, "b")));
+            b.append("session/a.1.ndjson", &(limited(5, 99) + &ended(6, "a")));
+            b.append("session/b.1.ndjson", &limited(7, 50));
+            b.append("quota.ndjson", "{\"t\":8,\"type\":\"unreadable\",\"account\":\"c:w\"}\n");
+            let w = b.load();
+            assert!(w.accounts.contains_key("planted"), "read only what is new");
+            let mut full = b.full();
+            full.accounts.insert("planted".into(), AccountState::default());
+            assert_eq!(w, full);
+            assert_eq!(w.jobs["a"].status, Status::Done);
+            assert_eq!(w.jobs["b"].status, Status::Running);
+            assert_eq!(b.checkpoint()["offsets"]["session/b.1.ndjson"], limited(7, 50).len());
+            // Nothing new: the checkpoint is not rewritten.
+            let before = std::fs::metadata(&b.file).unwrap().modified().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            assert_eq!(b.load(), w);
+            assert_eq!(std::fs::metadata(&b.file).unwrap().modified().unwrap(), before);
+            // A forgotten job's session files go; what they said stays folded.
+            std::fs::remove_file(b.bus.join("session/b.1.ndjson")).unwrap();
+            b.append("land.ndjson", "{\"t\":9,\"type\":\"forgotten\",\"job\":\"b\"}\n");
+            let w = b.load();
+            assert!(w.accounts.contains_key("planted") && !w.jobs.contains_key("b"));
+            assert!(b.checkpoint()["offsets"].get("session/b.1.ndjson").is_none());
+        }
+
+        #[test]
+        fn a_torn_line_is_read_once_complete() {
+            let b = Fixture::new();
+            b.append("queue.ndjson", &queued(1, "a"));
+            b.load();
+            b.plant();
+            let line = dispatched(2, "a");
+            let (head, tail) = line.split_at(20);
+            b.append("dispatch.ndjson", head);
+            assert_eq!(b.load().jobs["a"].status, Status::Queued);
+            assert_eq!(b.checkpoint()["offsets"]["dispatch.ndjson"], 0);
+            b.append("dispatch.ndjson", tail);
+            let w = b.load();
+            assert!(w.accounts.contains_key("planted"));
+            assert_eq!(w.jobs["a"].status, Status::Running);
+        }
+
+        #[test]
+        fn a_mismatched_version_folds_in_full() {
+            let b = Fixture::new();
+            b.append("queue.ndjson", &queued(1, "a"));
+            b.load();
+            b.plant();
+            let mut c = b.checkpoint();
+            c["version"] = "0.0.0+fold0".into();
+            std::fs::write(&b.file, serde_json::to_vec(&c).unwrap()).unwrap();
+            assert_eq!(b.load(), b.full());
+            assert_eq!(b.checkpoint()["version"], fold_version());
+            // Unreadable is the same as missing.
+            std::fs::write(&b.file, "{").unwrap();
+            assert_eq!(b.load(), b.full());
+        }
+
+        #[test]
+        fn a_shrunk_file_folds_in_full() {
+            let b = Fixture::new();
+            b.append("queue.ndjson", &(queued(1, "a") + &queued(2, "b")));
+            b.load();
+            b.plant();
+            std::fs::write(b.bus.join("queue.ndjson"), queued(3, "c")).unwrap();
+            let w = b.load();
+            assert_eq!(w, b.full());
+            assert_eq!(w.jobs.keys().collect::<Vec<_>>(), ["c"]);
+        }
+
+        #[test]
+        fn a_late_event_folds_in_full() {
+            let b = Fixture::new();
+            b.append("queue.ndjson", &queued(1, "a"));
+            b.append("dispatch.ndjson", &dispatched(2, "a"));
+            b.append("session/a.1.ndjson", &limited(5, 99));
+            b.load();
+            b.plant();
+            // Stamped before the last event folded, appended after it.
+            b.append("session/a.1.ndjson", &ended(4, "a"));
+            assert_eq!(b.load(), b.full());
+        }
     }
 }

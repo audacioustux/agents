@@ -110,7 +110,7 @@ impl Ctx {
     }
 
     pub fn world(&self) -> Result<World> {
-        Ok(World::fold(&self.events()?))
+        World::load(&self.bus, &self.state.join("world.json"))
     }
 
     pub fn job_file(&self, job: &str, ext: &str) -> PathBuf {

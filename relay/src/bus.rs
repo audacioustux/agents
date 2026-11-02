@@ -15,8 +15,8 @@
 //! from an inotify watch on the directory, which is only a doorbell.
 
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -302,36 +302,88 @@ impl<E: Owned> Port<E> {
     }
 }
 
-fn read_file<E: Owned>(file: &Path, from: Option<&(String, u32)>, out: &mut Vec<(u64, usize, Stamped)>) -> Result<()> {
-    let text = match std::fs::read_to_string(file) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+/// For each bus file (relative to the bus), how many bytes of it have been read.
+pub type Offsets = BTreeMap<PathBuf, u64>;
+
+/// Reads `file`'s complete lines past `offset` into `out`, and returns the
+/// offset just past the last `\n`: a torn last line (a writer mid-append) is
+/// left for the next read. `None` when the file is shorter than `offset`
+/// (truncated or replaced), so what was read before no longer describes it.
+/// A missing file reads as empty. A line that is not `E` is skipped.
+fn read_file<E: Owned>(
+    file: &Path,
+    offset: u64,
+    from: Option<&(String, u32)>,
+    out: &mut Vec<(u64, usize, Stamped)>,
+) -> Result<Option<u64>> {
+    let mut f = match File::open(file) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((offset == 0).then_some(0)),
         Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
     };
-    // A torn last line (a writer mid-append) or a foreign event type is skipped.
+    let len = f.metadata().with_context(|| format!("reading {}", file.display()))?.len();
+    if len < offset {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    f.seek(SeekFrom::Start(offset))
+        .and_then(|_| f.read_to_end(&mut bytes))
+        .with_context(|| format!("reading {}", file.display()))?;
+    let complete = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let text = String::from_utf8_lossy(&bytes[..complete]);
     out.extend(text.lines().enumerate().filter_map(|(i, l)| {
         let line = serde_json::from_str::<Line<E>>(l).ok()?;
         Some((line.t, i, Stamped { t: line.t, event: line.event.wrap(), from: from.cloned() }))
     }));
-    Ok(())
+    Ok(Some(offset + complete as u64))
 }
 
 /// Every event on the bus, oldest first.
 pub fn read_all(bus: &Path) -> Result<Vec<Stamped>> {
+    Ok(read_since(bus, &Offsets::new())?.map(|(events, _)| events).unwrap_or_default())
+}
+
+/// The events written since `offsets` were taken, oldest first, with the
+/// offsets to read from next time. A session file no longer there is dropped
+/// (`land clean` forgets them); `None` if any other file is shorter than its
+/// offset, when only a full read from empty offsets makes sense.
+pub fn read_since(bus: &Path, offsets: &Offsets) -> Result<Option<(Vec<Stamped>, Offsets)>> {
+    fn one<E: Owned>(
+        bus: &Path,
+        rel: PathBuf,
+        from: Option<&(String, u32)>,
+        offsets: &Offsets,
+        next: &mut Offsets,
+        all: &mut Vec<(u64, usize, Stamped)>,
+    ) -> Result<bool> {
+        let Some(end) = read_file::<E>(&bus.join(&rel), offsets.get(&rel).copied().unwrap_or(0), from, all)? else {
+            return Ok(false);
+        };
+        next.insert(rel, end);
+        Ok(true)
+    }
     let mut all = Vec::new();
-    read_file::<QueueEvent>(&bus.join(system_file("queue")), None, &mut all)?;
-    read_file::<DispatchEvent>(&bus.join(system_file("dispatch")), None, &mut all)?;
-    read_file::<QuotaEvent>(&bus.join(system_file("quota")), None, &mut all)?;
-    read_file::<LandEvent>(&bus.join(system_file("land")), None, &mut all)?;
-    // Before sessions had a file per attempt, they shared one; read it as is.
-    read_file::<SessionEvent>(&bus.join(system_file("session")), None, &mut all)?;
+    let mut next = Offsets::new();
+    let mut ok = one::<QueueEvent>(bus, system_file("queue"), None, offsets, &mut next, &mut all)?
+        && one::<DispatchEvent>(bus, system_file("dispatch"), None, offsets, &mut next, &mut all)?
+        && one::<QuotaEvent>(bus, system_file("quota"), None, offsets, &mut next, &mut all)?
+        && one::<LandEvent>(bus, system_file("land"), None, offsets, &mut next, &mut all)?
+        // Before sessions had a file per attempt, they shared one; read it as is.
+        && one::<SessionEvent>(bus, system_file("session"), None, offsets, &mut next, &mut all)?;
     for e in std::fs::read_dir(bus.join("session")).into_iter().flatten().flatten() {
-        if let Some(from) = parse_session_file(&e.file_name().to_string_lossy()) {
-            read_file::<SessionEvent>(&e.path(), Some(&from), &mut all)?;
+        if !ok {
+            break;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(from) = parse_session_file(&name) {
+            ok = one::<SessionEvent>(bus, Path::new("session").join(name), Some(&from), offsets, &mut next, &mut all)?;
         }
     }
+    if !ok {
+        return Ok(None);
+    }
     all.sort_by_key(|(t, i, _)| (*t, *i));
-    Ok(all.into_iter().map(|(_, _, s)| s).collect())
+    Ok(Some((all.into_iter().map(|(_, _, s)| s).collect(), next)))
 }
 
 /// Forgets a job's session history: its attempts' files.

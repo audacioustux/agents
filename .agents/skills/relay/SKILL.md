@@ -81,6 +81,13 @@ that run alone.
 one fails or stops, the job shows `waits for A (failed)` and never starts on
 its own: queue A again, or `relay queue release NAME [--from A]`.
 
+`relay profiles [--json]` lists the owner's named job kinds (harness, model,
+effort, budget, read-only, limits, and a note on when to use each);
+`relay queue add NAME --profile P` fills each field the command line leaves
+unset, and explicit flags win. Which profile a job is, is your judgment; relay
+only maps it to settings and enforces the limits and bans. An unknown profile
+exits 3 and lists the names.
+
 The brief is the session's only context. See
 [relay/README.md](../../../relay/README.md) for accounts, quota, the sandbox
 and moving sessions between accounts.

@@ -28,6 +28,138 @@ pub struct Config {
     pub session: Session,
     #[serde(default)]
     pub sandbox: Sandbox,
+    /// Named job profiles, merged from the owner's policy file and this project's config.
+    #[serde(default)]
+    pub profiles: BTreeMap<String, Profile>,
+    /// The policy file this was merged with, when one was read.
+    #[serde(skip)]
+    pub policy_path: Option<PathBuf>,
+    /// Where each merged setting came from: `profiles.NAME.FIELD` and
+    /// `session.banned_models.REGEX`, each `policy` or `project`.
+    #[serde(skip)]
+    pub origins: BTreeMap<String, Origin>,
+}
+
+/// Which file a merged setting came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Origin {
+    Policy,
+    Project,
+}
+
+impl Origin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Policy => "policy",
+            Self::Project => "project",
+        }
+    }
+}
+
+/// A named kind of job: what `queue add --profile` fills in when the command line says nothing.
+/// Choosing the profile is the orchestrator's judgment; this only maps it to settings.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Profile {
+    /// The one harness the job runs on.
+    pub harness: Option<String>,
+    /// The model, for `harness` (or for the single harness that applies).
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// Spend cap per attempt, in USD.
+    pub budget: Option<f64>,
+    pub readonly: Option<bool>,
+    /// What the profile is for, shown by `relay profiles`.
+    pub note: Option<String>,
+    /// No more than this many jobs of the profile run at once.
+    pub max_running: Option<usize>,
+    /// No more than this many sessions of the profile start in a rolling 24 hours.
+    pub max_per_day: Option<usize>,
+}
+
+impl Profile {
+    /// The fields of the profile, as `(name, value)` for those that are set.
+    pub fn fields(&self) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        let mut put = |k, v: Option<String>| out.extend(v.map(|v| (k, v)));
+        put("harness", self.harness.clone());
+        put("model", self.model.clone());
+        put("effort", self.effort.clone());
+        put("budget", self.budget.map(|b| b.to_string()));
+        put("readonly", self.readonly.map(|b| b.to_string()));
+        put("max_running", self.max_running.map(|n| n.to_string()));
+        put("max_per_day", self.max_per_day.map(|n| n.to_string()));
+        put("note", self.note.clone());
+        out
+    }
+
+    /// `self`, with every field it leaves unset taken from `base`.
+    fn over(&self, base: &Self) -> Self {
+        Self {
+            harness: self.harness.clone().or_else(|| base.harness.clone()),
+            model: self.model.clone().or_else(|| base.model.clone()),
+            effort: self.effort.clone().or_else(|| base.effort.clone()),
+            budget: self.budget.or(base.budget),
+            readonly: self.readonly.or(base.readonly),
+            note: self.note.clone().or_else(|| base.note.clone()),
+            max_running: self.max_running.or(base.max_running),
+            max_per_day: self.max_per_day.or(base.max_per_day),
+        }
+    }
+
+    fn validate(&self, name: &str) -> Result<()> {
+        ensure!(valid_name(name), "profile names are lowercase letters, digits and dashes, not {name:?}");
+        if let Some(h) = &self.harness {
+            crate::harness::by_id(h).map_err(|e| anyhow::anyhow!("profiles.{name}.harness: {e}"))?;
+        }
+        ensure!(self.budget.is_none_or(positive), "profiles.{name}.budget must be a positive number");
+        ensure!(self.max_running.is_none_or(|n| n >= 1), "profiles.{name}.max_running must be at least 1");
+        ensure!(self.max_per_day.is_none_or(|n| n >= 1), "profiles.{name}.max_per_day must be at least 1");
+        Ok(())
+    }
+}
+
+/// The owner's policy file: what every project on the machine starts from.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Policy {
+    session: PolicySession,
+    profiles: BTreeMap<String, Profile>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct PolicySession {
+    banned_models: BTreeMap<String, String>,
+}
+
+/// The policy file's default place, under `$HOME`.
+const POLICY_FILE: &str = ".config/relay/policy.toml";
+
+impl Policy {
+    pub fn parse(text: &str) -> Result<Self> {
+        Ok(toml::from_str(text)?)
+    }
+
+    /// `$RELAY_POLICY`, else `~/.config/relay/policy.toml`; optional. A
+    /// file named by `$RELAY_POLICY` must exist.
+    pub fn load() -> Result<Option<(Self, PathBuf)>> {
+        let (path, named) = match std::env::var_os("RELAY_POLICY").filter(|p| !p.is_empty()) {
+            Some(p) => (PathBuf::from(p), true),
+            None => match std::env::var_os("HOME") {
+                Some(h) => (PathBuf::from(h).join(POLICY_FILE), false),
+                None => return Ok(None),
+            },
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !named => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("reading policy {}", path.display())),
+        };
+        let policy = Self::parse(&text).with_context(|| format!("in policy {}", path.display()))?;
+        Ok(Some((policy, path)))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,7 +249,7 @@ pub struct HarnessConf {
 impl HarnessConf {
     /// The invocation, run by the configured program when one is set, else by
     /// the harness as relay's own `PATH` finds it. A project's `env_shell` must
-    /// not pick the harness: TheGrid's devshell once put a stale `nixpkgs` claude
+    /// not pick the harness: one project's devshell once put a stale `nixpkgs` claude
     /// first, on which `opus` meant an older model and current ids were refused.
     pub fn locate(&self, mut inv: crate::harness::Invocation) -> crate::harness::Invocation {
         if let Some(p) = &self.program {
@@ -267,11 +399,68 @@ fn dot() -> PathBuf {
 }
 
 impl Config {
+    /// The project's config alone, as if there were no policy file.
+    #[cfg(test)]
     pub fn parse(text: &str, dir: &Path) -> Result<Self> {
+        Self::parse_with(text, dir, None)
+    }
+
+    /// The project's config over the owner's policy: a profile field the project
+    /// sets replaces the policy's, one it leaves out stays; banned models add up.
+    pub fn parse_with(text: &str, dir: &Path, policy: Option<(&Policy, &Path)>) -> Result<Self> {
         let mut cfg: Self = toml::from_str(text)?;
         cfg.repo = dir.join(&cfg.repo).canonicalize().with_context(|| format!("repo {}", cfg.repo.display()))?;
+        cfg.merge(policy);
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    fn merge(&mut self, policy: Option<(&Policy, &Path)>) {
+        let mut origins = BTreeMap::new();
+        for re in self.session.banned_models.keys() {
+            origins.insert(format!("session.banned_models.{re}"), Origin::Project);
+        }
+        for (name, p) in &self.profiles {
+            for (field, _) in p.fields() {
+                origins.insert(format!("profiles.{name}.{field}"), Origin::Project);
+            }
+        }
+        if let Some((policy, path)) = policy {
+            for (re, why) in &policy.session.banned_models {
+                self.session.banned_models.insert(re.clone(), why.clone());
+                origins.insert(format!("session.banned_models.{re}"), Origin::Policy);
+            }
+            let mut merged = policy.profiles.clone();
+            for (name, p) in &self.profiles {
+                let base = policy.profiles.get(name).cloned().unwrap_or_default();
+                merged.insert(name.clone(), p.over(&base));
+            }
+            for (name, p) in &policy.profiles {
+                for (field, _) in p.fields() {
+                    origins.entry(format!("profiles.{name}.{field}")).or_insert(Origin::Policy);
+                }
+            }
+            self.profiles = merged;
+            self.policy_path = Some(path.to_path_buf());
+        }
+        self.origins = origins;
+    }
+
+    /// The profile called `name`. The one place a profile is looked up: an unknown name
+    /// is refused (not found) with the names there are.
+    pub fn profile(&self, name: &str) -> Result<&Profile> {
+        let Some(p) = self.profiles.get(name) else {
+            let names: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
+            let known =
+                if names.is_empty() { "there are none".to_owned() } else { format!("profiles: {}", names.join(", ")) };
+            fail!(NotFound, "no profile named {name} ({known})");
+        };
+        Ok(p)
+    }
+
+    /// Where a merged setting came from, `project` when unrecorded.
+    pub fn origin(&self, key: &str) -> Origin {
+        self.origins.get(key).copied().unwrap_or(Origin::Project)
     }
 
     /// `--config`, else `$RELAY_CONFIG`, else the nearest `relay.toml` at or above the current directory.
@@ -284,8 +473,13 @@ impl Config {
         };
         let path = path.canonicalize().with_context(|| format!("config {}", path.display()))?;
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let cfg = Self::parse(&text, path.parent().unwrap_or(Path::new("/")))
-            .with_context(|| format!("in {}", path.display()))?;
+        let policy = Policy::load()?;
+        let cfg = Self::parse_with(
+            &text,
+            path.parent().unwrap_or(Path::new("/")),
+            policy.as_ref().map(|(p, from)| (p, from.as_path())),
+        )
+        .with_context(|| format!("in {}", path.display()))?;
         Ok((cfg, path))
     }
 
@@ -312,6 +506,9 @@ impl Config {
         ensure!(self.session.max_hours > 0.0, "session.max_hours must be positive");
         for re in self.session.banned_models.keys() {
             regex::Regex::new(re).with_context(|| format!("session.banned_models key {re:?}"))?;
+        }
+        for (name, p) in &self.profiles {
+            p.validate(name)?;
         }
         regex::Regex::new(&self.sandbox.env_deny).context("sandbox.env_deny")?;
         for p in self.sandbox.hide_home.iter().chain(&self.sandbox.caches) {
@@ -409,6 +606,102 @@ mod tests {
         assert_eq!(cfg.sandbox.hide_home, defaults.sandbox.hide_home);
         assert_eq!(cfg.sandbox.caches, defaults.sandbox.caches);
         assert_eq!(cfg.session.max_hours, defaults.session.max_hours);
+    }
+
+    const POLICY: &str = r#"
+[session]
+banned_models = { "^minimax-code/" = "MiniMax is banned", "^x/" = "policy says no" }
+
+[profiles.bug-hunt]
+harness = "omp"
+model = "openai-codex/gpt-6.1-sol"
+effort = "high"
+readonly = true
+max_per_day = 3
+note = "costly"
+
+[profiles.mechanical]
+harness = "claude"
+budget = 3
+"#;
+
+    fn merged(project: &str) -> Config {
+        merged_with(POLICY, project)
+    }
+
+    fn merged_with(policy: &str, project: &str) -> Config {
+        let d = repo();
+        let policy = Policy::parse(policy).unwrap();
+        Config::parse_with(&format!("name = \"demo\"\n{project}"), d.path(), Some((&policy, Path::new("/p.toml"))))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_project_profile_overrides_the_policy_field_by_field() {
+        let cfg = merged("[profiles.bug-hunt]\neffort = \"low\"\nmax_running = 1\n");
+        let p = cfg.profile("bug-hunt").unwrap();
+        assert_eq!(p.effort.as_deref(), Some("low"), "the project's own field wins");
+        assert_eq!(p.model.as_deref(), Some("openai-codex/gpt-6.1-sol"), "an unset field stays the policy's");
+        assert_eq!((p.max_per_day, p.max_running, p.readonly), (Some(3), Some(1), Some(true)));
+        assert_eq!(cfg.origin("profiles.bug-hunt.effort"), Origin::Project);
+        assert_eq!(cfg.origin("profiles.bug-hunt.model"), Origin::Policy);
+        assert_eq!(cfg.origin("profiles.bug-hunt.max_running"), Origin::Project);
+        assert_eq!(cfg.profile("mechanical").unwrap().budget, Some(3.0), "a policy-only profile is there");
+        assert_eq!(cfg.policy_path.as_deref(), Some(Path::new("/p.toml")));
+    }
+
+    #[test]
+    fn a_project_adds_its_own_profiles_and_bans_to_the_policy() {
+        let cfg =
+            merged("[session]\nbanned_models = { \"^y/\" = \"project says no\" }\n[profiles.mine]\nmodel = \"m\"\n");
+        assert!(cfg.session.banned("minimax-code/M3").is_some(), "the policy's ban stays");
+        assert_eq!(cfg.session.banned("y/z"), Some("project says no"));
+        assert!(cfg.profile("mine").is_ok() && cfg.profile("bug-hunt").is_ok());
+        assert_eq!(cfg.origin("session.banned_models.^y/"), Origin::Project);
+        assert_eq!(cfg.origin("session.banned_models.^x/"), Origin::Policy);
+    }
+
+    #[test]
+    fn a_project_cannot_lift_a_policy_ban() {
+        let cfg = merged("[session]\nbanned_models = { \"^x/\" = \"fine really\" }\n");
+        assert_eq!(cfg.session.banned("x/y"), Some("policy says no"));
+    }
+
+    #[test]
+    fn the_readme_example_policy_parses() {
+        let readme = include_str!("../README.md");
+        let from = readme.split("## Policy and profiles").nth(1).unwrap();
+        let block = from.split("```toml\n").nth(1).unwrap().split("```").next().unwrap();
+        let cfg = merged_with(block, "");
+        assert!(cfg.session.banned("minimax-code/M3").is_some() && cfg.session.banned("sonnet").is_some());
+        assert_eq!(cfg.profile("bug-hunt").unwrap().max_per_day, Some(3));
+        assert_eq!(cfg.profile("mechanical").unwrap().budget, Some(3.0));
+    }
+
+    #[test]
+    fn without_a_policy_nothing_changes() {
+        let d = repo();
+        let cfg = Config::parse("name = \"demo\"", d.path()).unwrap();
+        assert!(cfg.profiles.is_empty() && cfg.session.banned_models.is_empty() && cfg.policy_path.is_none());
+        let msg = cfg.profile("x").unwrap_err();
+        assert_eq!(msg.downcast_ref::<crate::reply::Fail>().map(|f| f.kind), Some(crate::reply::Kind::NotFound));
+    }
+
+    #[test]
+    fn an_unknown_profile_lists_the_known_ones() {
+        let msg = merged("").profile("nope").unwrap_err().to_string();
+        assert!(msg.contains("bug-hunt, mechanical"), "{msg}");
+    }
+
+    #[test]
+    fn bad_profiles_are_rejected() {
+        let d = repo();
+        for bad in ["harness = \"nope\"", "budget = 0", "max_running = 0", "max_per_day = 0", "colour = 1"] {
+            let text = format!("name = \"demo\"\n[profiles.p]\n{bad}\n");
+            assert!(Config::parse(&text, d.path()).is_err(), "{bad}");
+        }
+        assert!(Config::parse("name = \"demo\"\n[profiles.Bad]\nnote = \"x\"", d.path()).is_err());
+        assert!(Policy::parse("[limits]\nfloor = 0.5").is_err(), "the policy holds only bans and profiles");
     }
 
     #[test]

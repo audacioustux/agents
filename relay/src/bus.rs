@@ -51,6 +51,9 @@ pub enum QueueEvent {
         /// Jobs that must be done before this one starts.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         after: Vec<String>,
+        /// The profile the job was queued under; it stays with the job across resumes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
     },
     /// The job no longer waits for these jobs (empty: for any of them).
     Released {

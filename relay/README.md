@@ -89,6 +89,8 @@ prepend it to your briefs, or have each brief point to it.
 | Command | |
 | --- | --- |
 | `relay queue add NAME (--prompt FILE \| --text TEXT) [--readonly] [--harness H,...] [--model H=M] [--effort E] [--budget USD] [--account H:L] [--task TITLE] [--again]` | Queue a job. `--harness` limits where it may run; `--account` pins it, and it waits for that account |
+| `relay queue add NAME ... --profile P [--no-readonly]` | Fill what the line leaves unset from `[profiles.P]`; explicit flags win. An unknown profile is refused (exit 3, listing the names) |
+| `relay profiles` / `relay config show` | The resolved profiles with their notes / the merged policy and project config, and which file each part came from |
 | `relay queue resume NAME --message TEXT [--budget USD] [--model H=M]` | Continue an ended or checking session, on any account with room. `--budget` caps that run alone, not the job's total; `--model` moves the job to another model from this run on |
 | `relay queue add NAME ... --after A[,B]` | Start only once every named job is `done` (repeat or comma-separate; unknown names are refused, exit 3) |
 | `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
@@ -110,6 +112,59 @@ anything else. An agent driving relay can branch on those, never on wording.
 
 Nothing needs starting by hand. Every command that changes something wakes the
 dispatcher, which exits on its own a minute after the queue empties.
+
+## Policy and profiles
+
+The owner's routing rules live in a policy file, not in an orchestrator's memory:
+the orchestrator judges what kind of task a job is, the config maps that kind to
+harness, model, effort, budget and read-only, and relay enforces what is
+mechanical. The file is `$RELAY_POLICY`, else `~/.config/relay/policy.toml`, and
+is optional (a `$RELAY_POLICY` that names no file is an error). It is read first,
+and the project's `relay.toml` overrides it:
+
+- a project's `[profiles.X]` replaces only the fields it sets;
+- a project's `session.banned_models` adds to the policy's and cannot lift a ban.
+
+```toml
+[session]
+banned_models = { "^minimax-code/" = "MiniMax is banned (owner, 2026-10-21)", "^google-antigravity/" = "Google Antigravity is banned (owner, 2026-10-19)", "^(haiku|sonnet|opus)$" = "use the full id, e.g. claude-opus-5-5" }
+
+[profiles.mechanical]
+harness = "claude"
+model = "claude-haiku-5-5"
+effort = "xhigh"
+budget = 3
+note = "a precise brief: docs, fixtures, citations, regenerated counts"
+
+[profiles.bug-hunt]
+harness = "omp"
+model = "openai-codex/gpt-6.1-sol"
+effort = "high"
+readonly = true
+max_running = 1
+max_per_day = 3
+note = "second-family bug hunt or review of critical code and plans only; costly"
+```
+
+A profile has `harness`, `model`, `effort`, `budget`, `readonly`, `note`,
+`max_running` and `max_per_day`, all optional. `relay queue add NAME --profile P`
+fills each field the command line does not set (`--no-readonly` turns a profile's
+read-only off); explicit flags win. The model reaches the same banned-model check
+as one given by hand, at queue and at start. The job records its profile, and it
+stays with the job across `queue resume`.
+
+Two limits count per profile. `max_running` is the most of its jobs with a
+runner at once. `max_per_day` is the most of its sessions to start in a rolling
+24 hours, counted from `dispatched` events on the bus, so cleaning a job away
+gives nothing back (a retry on another account is a start too). A job they hold
+stays queued with the reason on the board and in the dispatcher's log:
+`profile bug-hunt: 3 started in 24h (max 3), next slot 14:02Z`.
+
+`relay profiles [--json]` prints each resolved profile with its note, which is
+how a fresh orchestrator learns the policy. `relay config show` prints the merged
+bans and profiles with `[policy]` or `[project]` after each setting.
+`relay view status` and `view watch` show a job's profile where it has one, else
+the model it names; `--json` carries both (`profile`, `models`).
 
 ## Harnesses and accounts
 
@@ -284,7 +339,7 @@ own process, and owns one output port:
 
 | System | Responsibility | Emits |
 | --- | --- | --- |
-| queue | takes work in, withdraws it, stops it, releases it from its `--after` jobs | queued, released, resumed, dequeued, stop-requested |
+| queue | takes work in (under a profile, if asked), withdraws it, stops it, releases it from its `--after` jobs | queued, released, resumed, dequeued, stop-requested |
 | dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
 | session | runs one job, checks its progress at a spend cap, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, checking, checked, ended |
 | quota | account readings and switches | reading, unreadable, account-enabled |

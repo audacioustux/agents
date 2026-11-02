@@ -49,7 +49,7 @@ impl Board {
         let accounts = crate::systems::quota::accounts_view(ctx, &world);
         Ok(Self {
             project: ctx.cfg.name.clone(),
-            jobs: filled(jobs.iter().map(|j| job_cells(&world, j, now)).collect()),
+            jobs: filled(jobs.iter().map(|j| job_cells(&ctx.cfg, &world, j, now)).collect()),
             statuses: jobs.iter().map(|j| j.status).collect(),
             details: jobs.iter().map(|j| (format!(" {} ", j.name), details(ctx, j))).collect(),
             accounts_head: format!(" {} ", accounts.head),

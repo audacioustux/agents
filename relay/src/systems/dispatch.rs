@@ -17,11 +17,11 @@ use clap::Subcommand;
 
 use crate::accounts::{self, STALE_MICROS, harness_of};
 use crate::bus::{DispatchEvent, now_micros};
-use crate::config::Config;
+use crate::config::{Config, Profile};
 use crate::ctx::Ctx;
 use crate::harness::{Harness, Home};
 use crate::os::{self, Role};
-use crate::world::{AccountState, Job, Status, Wait, World};
+use crate::world::{AccountState, DAY_MICROS, Job, Status, Wait, World};
 
 /// The longest sleep. Only a runner that dies without a word (one started by
 /// an earlier dispatcher, or killed outright) waits this long to be reaped.
@@ -56,7 +56,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
 
 /// Why nothing more starts this pass, for the log; printed only when it changes.
 #[derive(Debug, Default, PartialEq)]
-struct Held(Vec<String>);
+struct Held(Vec<String>, Option<u64>);
 
 fn serve(ctx: &Ctx) -> Result<()> {
     let Some(role) = Role::try_take(&ctx.state.join("dispatch.lock"))? else { return Ok(()) };
@@ -120,7 +120,7 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     let found = accounts::discover(&ctx.cfg);
     refresh_stale(ctx, &world, &found)?;
     let mut held = Held::default();
-    let plan = plan(ctx, &world, &elsewhere, &found, &mut held);
+    let plan = plan(ctx, &world, &elsewhere, &found, now_micros(), &mut held);
     for (job, account) in plan {
         let (pid, gate) = ctx.spawn_gated(&["session", "run", &job], &ctx.job_file(&job, "runner.log"))?;
         let started = os::start_time(pid).unwrap_or(0);
@@ -133,7 +133,8 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
         world.jobs.values().any(|j| j.status == Status::Running || j.status == Status::Queued && !world.blocked(j));
     let waiting = world.jobs.values().any(|j| world.startable(j));
     let states: Vec<_> = found.iter().map(|a| (harness_of(a), world.accounts.get(&a.key()))).collect();
-    Ok((busy, held, next_due(&states, waiting, now_micros())))
+    let due = next_due(&states, waiting, now_micros());
+    Ok((busy, Held(held.0, None), [due, held.1].into_iter().flatten().min()))
 }
 
 /// The next moment (bus time, after `now_us`) at which the plan could change
@@ -186,18 +187,53 @@ fn refresh_stale(ctx: &Ctx, world: &World, found: &[Home]) -> Result<()> {
     Ok(())
 }
 
+/// Why a job of profile `name` may not start at `now_us`, with when (bus time) that
+/// could change: `running` of the profile's jobs have a runner, and `starts` are
+/// the times its sessions started. `None` when neither `max_running` nor
+/// `max_per_day` holds it.
+pub fn profile_hold(
+    name: &str,
+    p: &Profile,
+    running: usize,
+    starts: &[u64],
+    now_us: u64,
+) -> Option<(String, Option<u64>)> {
+    if let Some(max) = p.max_running.filter(|&max| running >= max) {
+        return Some((format!("profile {name}: {running} running (max {max})"), None));
+    }
+    let max = p.max_per_day?;
+    let mut recent: Vec<u64> = starts.iter().copied().filter(|&s| s + DAY_MICROS > now_us).collect();
+    recent.sort_unstable();
+    let count = recent.len();
+    if count < max {
+        return None;
+    }
+    let slot = recent[count - max] + DAY_MICROS;
+    let at = i64::try_from(slot)
+        .ok()
+        .and_then(|us| jiff::Timestamp::from_microsecond(us).ok())
+        .map_or_else(String::new, |t| format!(", next slot {}", t.strftime("%H:%MZ")));
+    Some((format!("profile {name}: {count} started in 24h (max {max}){at}"), Some(slot)))
+}
+
 /// Which queued jobs start now, and where. Pure apart from reading machine
 /// gauges. `elsewhere` is the seats other projects hold: they count against
-/// `limits.per_account`, but not against this project's `max_running`.
+/// `limits.per_account`, but not against this project's `max_running`. `now_us`
+/// is bus time, so a profile's daily window can be judged at any moment.
 fn plan(
     ctx: &Ctx,
     world: &World,
     elsewhere: &BTreeMap<String, usize>,
     found: &[Home],
+    now_us: u64,
     held: &mut Held,
 ) -> Vec<(String, String)> {
     let limits = &ctx.cfg.limits;
-    let now_us = now_micros();
+    let mut running: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut starts = world.profile_starts.clone();
+    for p in world.jobs.values().filter(|j| j.status.has_runner()).filter_map(|j| j.profile.as_deref()) {
+        *running.entry(p).or_default() += 1;
+    }
     let mut load = elsewhere.clone();
     let mut total = 0;
     for j in world.jobs.values().filter(|j| j.status == Status::Running) {
@@ -225,6 +261,20 @@ fn plan(
             if world.blocked(j) {
                 held.0.push(format!("{}: {}", j.name, Wait::summary(&waits).unwrap_or_default()));
             }
+            continue;
+        }
+        let profile = j.profile.as_deref().and_then(|n| ctx.cfg.profiles.get(n).map(|p| (n, p)));
+        if let Some((n, p)) = profile
+            && let Some((why, until)) = profile_hold(
+                n,
+                p,
+                running.get(n).copied().unwrap_or(0),
+                starts.get(n).map_or(&[], Vec::as_slice),
+                now_us,
+            )
+        {
+            held.0.push(format!("{}: {why}", j.name));
+            held.1 = [held.1, until].into_iter().flatten().min();
             continue;
         }
         if !j.readonly && !disk_ok {
@@ -255,6 +305,10 @@ fn plan(
         };
         let key = a.key();
         total += 1;
+        if let Some((n, _)) = profile {
+            *running.entry(n).or_default() += 1;
+            starts.entry(n.to_owned()).or_default().push(now_us);
+        }
         out.push((j.name.clone(), key.clone()));
         *load.entry(key).or_default() += 1;
     }
@@ -302,6 +356,48 @@ mod tests {
             transcript_account: transcript.map(Into::into),
             ..Job::default()
         }
+    }
+
+    fn profile(max_running: Option<usize>, max_per_day: Option<usize>) -> Profile {
+        Profile { max_running, max_per_day, ..Profile::default() }
+    }
+
+    #[test]
+    fn max_running_holds_the_next_job_with_a_reason() {
+        let p = profile(Some(1), None);
+        assert_eq!(profile_hold("bug-hunt", &p, 0, &[], 5), None);
+        let (why, until) = profile_hold("bug-hunt", &p, 1, &[], 5).unwrap();
+        assert_eq!((why.as_str(), until), ("profile bug-hunt: 1 running (max 1)", None));
+        assert_eq!(profile_hold("other", &profile(None, None), 9, &[1, 2, 3], 5), None, "no limit, no hold");
+    }
+
+    #[test]
+    fn max_per_day_holds_the_fourth_start_until_the_window_passes() {
+        let p = profile(None, Some(3));
+        // 2026-11-02 12:00:00Z, and starts at 13:00, 14:02 and 15:30 the day before.
+        let noon = 1_793_620_800 * 1_000_000_u64;
+        let at = |h: u64, m: u64| noon - DAY_MICROS + (h * 60 + m) * 60 * 1_000_000 - 12 * 3600 * 1_000_000;
+        let starts = [at(14, 2), at(13, 0), at(15, 30)];
+        let (why, until) = profile_hold("bug-hunt", &p, 0, &starts, noon).unwrap();
+        assert_eq!(why, "profile bug-hunt: 3 started in 24h (max 3), next slot 13:00Z");
+        assert_eq!(until, Some(at(13, 0) + DAY_MICROS));
+        let later = at(13, 0) + DAY_MICROS;
+        assert!(profile_hold("bug-hunt", &p, 0, &starts, later - 1).is_some(), "the window is still full");
+        assert_eq!(profile_hold("bug-hunt", &p, 0, &starts, later), None, "the oldest start has left the window");
+        let (why, _) = profile_hold("bug-hunt", &p, 0, &starts, later - 1).unwrap();
+        assert!(why.contains("3 started in 24h"), "{why}");
+        let next = at(14, 2) + DAY_MICROS;
+        assert_eq!(
+            profile_hold("bug-hunt", &p, 0, &[at(14, 2), at(13, 0), at(15, 30), later], next - 1).map(|h| h.1),
+            Some(Some(next))
+        );
+    }
+
+    #[test]
+    fn a_running_limit_is_named_before_a_daily_one() {
+        let p = profile(Some(1), Some(1));
+        let (why, _) = profile_hold("p", &p, 1, &[10], 20).unwrap();
+        assert!(why.contains("running"), "{why}");
     }
 
     #[test]

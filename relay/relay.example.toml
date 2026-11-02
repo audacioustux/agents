@@ -52,6 +52,20 @@ env_shell = []
 [session.banned_models]
 # "haiku" = "too weak for this repository's reviews"
 
+# Named job kinds, for `relay queue add --profile`. The owner's policy file
+# ($RELAY_POLICY, else ~/.config/relay/policy.toml) can hold the same
+# [session] banned_models and [profiles.*]; this file overrides it field by
+# field, and its banned_models add to the policy's (see the README).
+# [profiles.bug-hunt]
+# harness = "omp"
+# model = "openai-codex/gpt-6.1-sol"
+# effort = "high"
+# budget = 5.0
+# readonly = true
+# max_running = 1
+# max_per_day = 3
+# note = "second-family review of critical code; costly"
+
 [sandbox]
 enabled = true           # false runs sessions with your full access; then build jobs use edit-only permissions
 # hide = ["/workspaces"] # shown empty inside; default: the repository's parent directory

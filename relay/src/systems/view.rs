@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::Subcommand;
 
 use crate::bus::now_micros;
+use crate::config::Config;
 use crate::ctx::Ctx;
 use crate::world::{Job, Wait, World};
 
@@ -110,21 +111,38 @@ pub fn listed(world: &crate::world::World, all: bool) -> Vec<&crate::world::Job>
     jobs
 }
 
-/// A job's cells: name, status, account, since when, spend, and its task with any reason
-/// (a queued job also says what it waits for).
-pub fn job_cells(world: &World, j: &Job, now: u64) -> Vec<String> {
+/// What a job is asked to run as: its profile, else the model it names.
+pub fn kind(j: &Job) -> String {
+    j.profile.clone().unwrap_or_else(|| j.models.values().cloned().collect::<Vec<_>>().join(","))
+}
+
+/// Why a queued job's profile holds it back now, by `max_running` or `max_per_day`.
+fn profile_hold(cfg: &Config, world: &World, j: &Job, now: u64) -> Option<String> {
+    let name = j.profile.as_deref()?;
+    let p = cfg.profiles.get(name)?;
+    let running = world.jobs.values().filter(|o| o.status.has_runner() && o.profile.as_deref() == Some(name)).count();
+    let starts = world.profile_starts.get(name).map_or(&[][..], Vec::as_slice);
+    crate::systems::dispatch::profile_hold(name, p, running, starts, now).map(|(why, _)| why)
+}
+
+/// A job's cells: name, status, account, profile (or model), since when, spend, and its
+/// task with any reason (a queued job also says what it waits for, or which profile limit holds it).
+pub fn job_cells(cfg: &Config, world: &World, j: &Job, now: u64) -> Vec<String> {
     let since = match j.status {
         crate::world::Status::Running | crate::world::Status::Checking => j.started_at,
         crate::world::Status::Queued => j.ended_at.or(Some(j.created_at)),
         _ => j.ended_at,
     };
-    let waits = if j.status == crate::world::Status::Queued { Wait::summary(&world.waits(j)) } else { None };
-    let reason = waits.or_else(|| j.reason.clone()).map_or(String::new(), |r| format!("  [{r}]"));
+    let queued = j.status == crate::world::Status::Queued;
+    let waits = if queued { Wait::summary(&world.waits(j)) } else { None };
+    let held = if queued && waits.is_none() { profile_hold(cfg, world, j, now) } else { None };
+    let reason = waits.or(held).or_else(|| j.reason.clone()).map_or(String::new(), |r| format!("  [{r}]"));
     let check = j.checkpoints.last().map_or(String::new(), |c| format!("  {}", c.summary()));
     vec![
         j.name.clone(),
         j.status.as_str().to_owned(),
         j.account.as_deref().or(j.pinned.as_deref()).unwrap_or("-").to_owned(),
+        kind(j),
         since.map_or_else(|| "-".into(), |t| ago(now, t)),
         if j.cost_usd > 0.0 { format!("${:.2}", j.cost_usd) } else { String::new() },
         format!("{}{reason}{check}", j.task),
@@ -135,7 +153,7 @@ pub fn job_cells(world: &World, j: &Job, now: u64) -> Vec<String> {
 fn board(ctx: &Ctx, world: &crate::world::World, all: bool) -> String {
     let now = now_micros();
     let jobs = listed(world, all);
-    let rows: Vec<Vec<String>> = jobs.iter().map(|j| job_cells(world, j, now)).collect();
+    let rows: Vec<Vec<String>> = jobs.iter().map(|j| job_cells(&ctx.cfg, world, j, now)).collect();
     let mut lines = vec![format!("jobs (at most {} running)", ctx.cfg.limits.max_running)];
     lines.extend(table(&rows).into_iter().map(|r| format!("  {r}")));
     if jobs.is_empty() {

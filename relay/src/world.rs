@@ -67,6 +67,9 @@ pub struct Job {
     /// and any that were done when cleaned away.
     #[serde(default)]
     pub after: Vec<String>,
+    /// The profile it was queued under, which its limits (`max_running`, `max_per_day`) count.
+    #[serde(default)]
+    pub profile: Option<String>,
     /// The clean commit the last attempt of a read-only job read.
     #[serde(default)]
     pub ran_at: Option<String>,
@@ -138,11 +141,18 @@ impl Default for AccountState {
 pub struct World {
     pub jobs: BTreeMap<String, Job>,
     pub accounts: BTreeMap<String, AccountState>,
+    /// When (bus time, microseconds) each profile's sessions started, within a day
+    /// of the latest start. Kept apart from the jobs, which can be cleaned away.
+    #[serde(default)]
+    pub profile_starts: BTreeMap<String, Vec<u64>>,
 }
+
+/// The window a profile's `max_per_day` counts over.
+pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 
 /// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
 /// holds, how a mark is kept), so checkpoints folded the old way are discarded.
-const FOLD_VERSION: u32 = 6;
+const FOLD_VERSION: u32 = 7;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -364,6 +374,7 @@ impl World {
                 pinned,
                 reuse_key,
                 after,
+                profile,
             } => {
                 let j = Job {
                     name: job.clone(),
@@ -376,6 +387,7 @@ impl World {
                     pinned: pinned.clone(),
                     reuse_key: reuse_key.clone(),
                     after: after.clone(),
+                    profile: profile.clone(),
                     created_at: t,
                     ..Job::default()
                 };
@@ -418,6 +430,11 @@ impl World {
     fn apply_dispatch(&mut self, t: u64, e: &DispatchEvent) {
         match e {
             DispatchEvent::Dispatched { job, account, runner_pid, runner_started } => {
+                if let Some(profile) = self.jobs.get(job).and_then(|j| j.profile.clone()) {
+                    let starts = self.profile_starts.entry(profile).or_default();
+                    starts.push(t);
+                    starts.retain(|&s| s + DAY_MICROS > t);
+                }
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.status = Status::Running;
                     j.account = Some(account.clone());
@@ -560,6 +577,7 @@ mod tests {
             pinned: None,
             reuse_key: None,
             after: Vec::new(),
+            profile: None,
         })
     }
 
@@ -574,6 +592,7 @@ mod tests {
             budget_usd,
             pinned,
             reuse_key,
+            profile,
             ..
         }) = queued(job)
         else {
@@ -590,6 +609,7 @@ mod tests {
             pinned,
             reuse_key,
             after: after.iter().map(|a| (*a).to_owned()).collect(),
+            profile,
         })
     }
 
@@ -610,6 +630,42 @@ mod tests {
         let w = World::fold(&[st(1, queued("a")), st(2, fail), st(3, resumed)]);
         assert_eq!(w.jobs["a"].models, to("claude-opus-5-5"));
         assert_eq!(w.jobs["a"].status, Status::Queued);
+    }
+
+    #[test]
+    fn a_profiles_starts_are_kept_for_a_day_and_outlive_the_job() {
+        let mut q = queued("a");
+        if let Event::Queue(QueueEvent::Queued { profile, .. }) = &mut q {
+            *profile = Some("hunt".into());
+        }
+        let dispatched = |t, job: &str| {
+            st(
+                t,
+                Event::Dispatch(DispatchEvent::Dispatched {
+                    job: job.into(),
+                    account: "claude:a".into(),
+                    runner_pid: 1,
+                    runner_started: 1,
+                }),
+            )
+        };
+        let day = DAY_MICROS;
+        let events = [
+            st(1, q),
+            st(2, queued("plain")),
+            dispatched(10, "a"),
+            dispatched(11, "plain"),
+            dispatched(10 + day, "a"),
+            st(20 + day, Event::Land(LandEvent::Forgotten { job: "a".into() })),
+        ];
+        let w = World::fold(&events);
+        assert_eq!(
+            w.profile_starts["hunt"],
+            [10 + day],
+            "a start older than a day is dropped; a job without a profile counts for none"
+        );
+        assert_eq!(w.profile_starts.len(), 1);
+        assert!(!w.jobs.contains_key("a"), "the starts remain after the job is cleaned away");
     }
 
     #[test]

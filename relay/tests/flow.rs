@@ -13,6 +13,17 @@ struct Env {
     repo: PathBuf,
 }
 
+impl Env {
+    /// The owner's policy file, when the test wrote one (the machine's own is never read).
+    fn policy(&self) -> Option<PathBuf> {
+        Some(self.root.join("policy.toml")).filter(|p| p.exists())
+    }
+
+    fn write_policy(&self, text: &str) {
+        std::fs::write(self.root.join("policy.toml"), text).unwrap();
+    }
+}
+
 impl Drop for Env {
     fn drop(&mut self) {
         // RELAY_TEST_KEEP=1 leaves the files for a post-mortem.
@@ -118,6 +129,8 @@ fn relay_cmd(env: &Env, cmd: &mut Command) -> Output {
         .env("XDG_STATE_HOME", env.root.join("state"))
         .env("XDG_DATA_HOME", env.root.join("data"))
         .env_remove("RELAY_CONFIG")
+        .env_remove("RELAY_POLICY")
+        .envs(env.policy().map(|p| ("RELAY_POLICY", p)))
         .env_remove("OMP_PROFILE")
         .envs(identity())
         .output()
@@ -418,4 +431,198 @@ fn after_names_only_jobs_that_exist() {
     let out = relay(&env, &["queue", "add", "b", "--text", "x", "--after", "b"]);
     assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(job(&env, "b").is_null(), "a refused job is not recorded");
+}
+
+const POLICY: &str = r#"
+[session]
+banned_models = { "^minimax-code/" = "MiniMax is banned", "^(haiku|sonnet|opus)$" = "use the full id" }
+
+[profiles.mechanical]
+harness = "claude"
+model = "claude-haiku-5-5"
+effort = "xhigh"
+budget = 3
+note = "a precise brief"
+
+[profiles.hunt]
+harness = "claude"
+model = "claude-opus-5-5"
+effort = "high"
+readonly = true
+max_running = 1
+note = "costly"
+
+[profiles.daily]
+harness = "claude"
+readonly = true
+max_per_day = 1
+
+[profiles.bad]
+harness = "claude"
+model = "minimax-code/M3"
+"#;
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn a_profile_fills_what_the_line_leaves_and_flags_win() {
+    let env = setup("profile-fill", false);
+    env.write_policy(POLICY);
+    ok(&relay(&env, &["queue", "add", "plain", "--text", "One.", "--profile", "mechanical"]), "queue plain");
+    let j = job(&env, "plain");
+    assert_eq!(j["profile"], "mechanical");
+    assert_eq!(j["harnesses"], serde_json::json!(["claude"]));
+    assert_eq!(j["models"], serde_json::json!({"claude": "claude-haiku-5-5"}));
+    assert_eq!(
+        (j["effort"].as_str(), j["budget_usd"].as_f64(), j["readonly"].as_bool()),
+        (Some("xhigh"), Some(3.0), Some(false))
+    );
+
+    let args = [
+        "queue",
+        "add",
+        "mine",
+        "--text",
+        "Two.",
+        "--profile",
+        "hunt",
+        "--effort",
+        "low",
+        "--budget",
+        "7",
+        "--no-readonly",
+        "--model",
+        "claude-sonnet-5-5",
+    ];
+    ok(&relay(&env, &args), "queue mine");
+    let j = job(&env, "mine");
+    assert_eq!(j["models"], serde_json::json!({"claude": "claude-sonnet-5-5"}), "{j}");
+    assert_eq!(
+        (j["effort"].as_str(), j["budget_usd"].as_f64(), j["readonly"].as_bool()),
+        (Some("low"), Some(7.0), Some(false))
+    );
+    assert_eq!(j["profile"], "hunt", "the job still records its profile");
+
+    ok(&relay(&env, &["queue", "add", "ro", "--text", "Three.", "--profile", "hunt"]), "queue ro");
+    assert_eq!(job(&env, "ro")["readonly"], true, "the profile's read-only fills the unset flag");
+    assert_eq!(job(&env, "ro")["budget_usd"], 10.0, "no budget anywhere: the project's default");
+
+    let out = relay(&env, &["queue", "add", "pinned", "--text", "Four.", "--profile", "hunt", "--harness", "omp"]);
+    assert_eq!(out.status.code(), Some(5), "omp is disabled here: {}", stderr(&out));
+}
+
+#[test]
+fn an_unknown_or_banned_profile_is_refused() {
+    let env = setup("profile-refuse", false);
+    let out = relay(&env, &["queue", "add", "a", "--text", "x", "--profile", "nope"]);
+    assert_eq!(out.status.code(), Some(3), "no policy and no profiles: {}", stderr(&out));
+    env.write_policy(POLICY);
+    let out = relay(&env, &["queue", "add", "a", "--text", "x", "--profile", "nope"]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(stderr(&out).contains("bad, daily, hunt, mechanical"), "{}", stderr(&out));
+    let out = relay(&env, &["queue", "add", "a", "--text", "x", "--profile", "bad"]);
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert!(stderr(&out).contains("MiniMax is banned"), "{}", stderr(&out));
+    let out = relay(&env, &["queue", "add", "a", "--text", "x", "--profile", "mechanical", "--model", "sonnet"]);
+    assert_eq!(out.status.code(), Some(5), "the policy's ban reaches the project: {}", stderr(&out));
+    assert!(job(&env, "a").is_null(), "a refused job is not recorded");
+}
+
+#[test]
+fn profiles_and_the_merged_config_are_shown() {
+    let env = setup("profile-show", false);
+    let out = relay(&env, &["profiles"]);
+    ok(&out, "profiles without a policy");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no profiles"));
+    env.write_policy(POLICY);
+    let mut conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    conf.push_str("[profiles.hunt]\neffort = \"medium\"\n");
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+    let out = relay(&env, &["profiles", "--json"]);
+    ok(&out, "profiles");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["profiles"]["hunt"]["effort"], "medium", "the project's field");
+    assert_eq!(v["profiles"]["hunt"]["model"], "claude-opus-5-5", "the policy's field");
+    assert_eq!(v["profiles"]["hunt"]["note"], "costly");
+    assert_eq!(v["profiles"]["bad"]["banned"], "MiniMax is banned");
+    let text = String::from_utf8_lossy(&relay(&env, &["profiles"]).stdout).into_owned();
+    assert!(text.contains("hunt") && text.contains("costly"), "{text}");
+    let out = relay(&env, &["config", "show", "--json"]);
+    ok(&out, "config show");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["profiles"]["hunt"]["effort"]["from"], "project");
+    assert_eq!(v["profiles"]["hunt"]["model"]["from"], "policy");
+    assert_eq!(v["banned_models"]["^minimax-code/"]["from"], "policy");
+    let text = String::from_utf8_lossy(&relay(&env, &["config", "show"]).stdout).into_owned();
+    assert!(
+        text.contains("effort = medium  [project]") && text.contains("model = claude-opus-5-5  [policy]"),
+        "{text}"
+    );
+}
+
+#[test]
+fn max_running_holds_a_second_job_of_the_profile() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("profile-running", false);
+    env.write_policy(POLICY);
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    std::fs::write(env.home.join(".claude.b/hold"), "").unwrap();
+    ok(&relay(&env, &["queue", "add", "h1", "--text", "One.", "--profile", "hunt"]), "queue h1");
+    ok(&relay(&env, &["queue", "add", "h2", "--text", "Two.", "--profile", "hunt"]), "queue h2");
+    until(&env, "h1", "running");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(job(&env, "h2")["status"], "queued", "a free account does not matter: the profile is full");
+    assert!(board(&env).contains("[profile hunt: 1 running (max 1)]"), "{}", board(&env));
+    assert!(board(&env).contains("hunt"), "the board names the profile");
+
+    std::fs::remove_file(&hold).unwrap();
+    std::fs::remove_file(env.home.join(".claude.b/hold")).unwrap();
+    assert_eq!(wait_for(&env, "h1")["status"], "done");
+    assert_eq!(wait_for(&env, "h2")["status"], "done", "it starts once the first is done");
+}
+
+#[test]
+fn max_per_day_counts_starts_from_the_bus_and_the_profile_stays_across_resumes() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("profile-daily", false);
+    env.write_policy(POLICY);
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "d1", "--text", "One.", "--profile", "daily"]), "queue d1");
+    assert_eq!(wait_for(&env, "d1")["status"], "done");
+    ok(&relay(&env, &["queue", "add", "d2", "--text", "Two.", "--profile", "daily"]), "queue d2");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(job(&env, "d2")["status"], "queued");
+    let board = board(&env);
+    assert!(board.contains("[profile daily: 1 started in 24h (max 1), next slot "), "{board}");
+    // Cleaning the first job away does not give its start back.
+    ok(&relay(&env, &["land", "clean", "d1"]), "clean d1");
+    ok(&relay(&env, &["queue", "dequeue", "d2"]), "dequeue d2");
+    ok(&relay(&env, &["queue", "add", "d3", "--text", "Three.", "--profile", "daily"]), "queue d3");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(job(&env, "d3")["status"], "queued", "the start is counted from the bus, not from the job");
+    ok(&relay(&env, &["queue", "dequeue", "d3"]), "dequeue d3");
+}
+
+#[test]
+fn a_resumed_job_keeps_its_profile() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("profile-resume", false);
+    env.write_policy(POLICY);
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "m1", "--text", "One.", "--profile", "mechanical"]), "queue m1");
+    assert_eq!(wait_for(&env, "m1")["status"], "done");
+    ok(&relay(&env, &["queue", "resume", "m1", "--message", "Go on."]), "resume");
+    assert_eq!(job(&env, "m1")["profile"], "mechanical");
+    assert_eq!(wait_for(&env, "m1")["profile"], "mechanical");
 }

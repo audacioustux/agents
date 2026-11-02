@@ -5,6 +5,7 @@ pub mod checkpoint;
 pub mod dispatch;
 pub mod land;
 pub mod probe;
+pub mod profiles;
 pub mod queue;
 pub mod quota;
 pub mod session;

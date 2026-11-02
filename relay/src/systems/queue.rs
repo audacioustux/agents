@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
 use crate::bus::QueueEvent;
-use crate::config::valid_name;
+use crate::config::{Profile, valid_name};
 use crate::ctx::Ctx;
 use crate::os;
 use crate::world::{Job, Status};
@@ -65,9 +65,15 @@ pub struct Add {
     /// A short title for the board. Defaults to the brief's first line.
     #[arg(long)]
     task: Option<String>,
+    /// Fill what this command line leaves unset from `[profiles.NAME]` (see: relay profiles). Flags win.
+    #[arg(long)]
+    profile: Option<String>,
     /// Mount the repository read-only and make no clone.
     #[arg(long)]
     readonly: bool,
+    /// Make a build job even when the profile says read-only.
+    #[arg(long, conflicts_with = "readonly")]
+    no_readonly: bool,
     /// Run only on these harnesses (repeat, or comma-separate). Default: any enabled harness.
     #[arg(long = "harness", value_delimiter = ',')]
     harnesses: Vec<String>,
@@ -164,10 +170,11 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
 impl Add {
     /// Checks the request, stores the brief, and says what to record.
     fn queued(self, ctx: &Ctx, jobs: &BTreeMap<String, Job>) -> Result<QueueEvent> {
-        let name = self.name;
-        if !valid_name(&name) {
+        if !valid_name(&self.name) {
             fail!(Usage, "job names are lowercase letters, digits and dashes");
         }
+        let fill = Filled::new(self.profile.as_deref().map(|p| ctx.cfg.profile(p)).transpose()?, &self);
+        let name = self.name;
         let brief = match (self.prompt, self.text) {
             (Some(p), _) => std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?,
             (None, Some(t)) => t,
@@ -177,13 +184,13 @@ impl Add {
             fail!(Usage, "the brief is empty");
         }
         let after = dependencies(&name, self.after, jobs)?;
-        let harnesses = allowed_harnesses(ctx, self.harnesses, self.account.as_deref())?;
-        let models = parse_models(ctx, &harnesses, &self.models)?;
+        let harnesses = allowed_harnesses(ctx, fill.harnesses.clone(), self.account.as_deref())?;
+        let models = parse_models(ctx, &harnesses, &fill.models(&harnesses))?;
         if let Some((m, reason)) = models.values().find_map(|m| ctx.cfg.session.banned(m).map(|r| (m, r))) {
             fail!(Refused, "model {m} is banned: {reason}");
         }
-        let commit = if self.readonly { Ctx::clean_head(&ctx.cfg.repo) } else { None };
-        let reuse_key = commit.as_deref().map(|c| reuse_key(&brief, &harnesses, &models, self.effort.as_deref(), c));
+        let commit = if fill.readonly { Ctx::clean_head(&ctx.cfg.repo) } else { None };
+        let reuse_key = commit.as_deref().map(|c| reuse_key(&brief, &harnesses, &models, fill.effort.as_deref(), c));
         if let (Some(key), Some(commit), false) = (&reuse_key, &commit, self.again) {
             refuse_repeat(jobs, key, commit, |job| {
                 std::fs::metadata(ctx.job_file(job, "result.md")).is_ok_and(|m| m.len() > 0)
@@ -196,15 +203,63 @@ impl Add {
         Ok(QueueEvent::Queued {
             job: name,
             task,
-            readonly: self.readonly,
+            readonly: fill.readonly,
             harnesses,
             models,
-            effort: self.effort,
-            budget_usd: self.budget.unwrap_or(ctx.cfg.limits.budget_usd),
+            effort: fill.effort,
+            budget_usd: fill.budget.unwrap_or(ctx.cfg.limits.budget_usd),
             pinned: self.account,
             reuse_key,
             after,
+            profile: self.profile,
         })
+    }
+}
+
+/// The command line's settings with a profile's under them: each field the line sets
+/// itself stays, the rest is the profile's.
+struct Filled {
+    harnesses: Vec<String>,
+    /// The `--model`s as given.
+    given: Vec<String>,
+    /// The profile's `(harness, model)`, used when the line gives no model.
+    profile_model: Option<(Option<String>, String)>,
+    effort: Option<String>,
+    budget: Option<f64>,
+    readonly: bool,
+}
+
+impl Filled {
+    fn new(profile: Option<&Profile>, add: &Add) -> Self {
+        let mut f = Self {
+            harnesses: add.harnesses.clone(),
+            given: add.models.clone(),
+            profile_model: None,
+            effort: add.effort.clone(),
+            budget: add.budget,
+            readonly: add.readonly,
+        };
+        let Some(p) = profile else { return f };
+        // The harness is the profile's unless the line names harnesses or pins an account.
+        if let (Some(h), true) = (&p.harness, add.harnesses.is_empty() && add.account.is_none()) {
+            f.harnesses = vec![h.clone()];
+        }
+        f.profile_model = p.model.clone().map(|m| (p.harness.clone(), m));
+        f.effort = f.effort.or_else(|| p.effort.clone());
+        f.budget = f.budget.or(p.budget);
+        f.readonly = add.readonly || (!add.no_readonly && p.readonly == Some(true));
+        f
+    }
+
+    /// The `--model` values for a job allowed on `harnesses`. The profile's model is for
+    /// its harness, so it is dropped when the line sent the job elsewhere.
+    fn models(&self, harnesses: &[String]) -> Vec<String> {
+        match &self.profile_model {
+            Some((h, m)) if self.given.is_empty() && h.as_ref().is_none_or(|h| harnesses.contains(h)) => {
+                vec![h.as_ref().map_or_else(|| m.clone(), |h| format!("{h}={m}"))]
+            }
+            _ => self.given.clone(),
+        }
     }
 }
 
@@ -376,6 +431,7 @@ mod tests {
                     pinned: None,
                     reuse_key: key.map(Into::into),
                     after: Vec::new(),
+                    profile: None,
                 }),
             });
             if let Some(outcome) = outcome {

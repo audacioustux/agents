@@ -203,6 +203,17 @@ struct JsonReader {
 }
 
 impl Reader for JsonReader {
+    /// `*_update` events are deltas of a message or tool call that its
+    /// `*_end` event repeats in full; kept, they made one docs job's log 85 MB.
+    fn keep(&self, line: &str) -> bool {
+        #[derive(serde::Deserialize)]
+        struct Kind<'a> {
+            #[serde(borrow, rename = "type")]
+            kind: Option<&'a str>,
+        }
+        serde_json::from_str::<Kind<'_>>(line).ok().and_then(|k| k.kind).is_none_or(|k| !k.ends_with("_update"))
+    }
+
     fn line(&mut self, line: &str) -> Option<Meters> {
         let v: Value = serde_json::from_str(line).ok()?;
         let r = &mut self.report;
@@ -306,5 +317,8 @@ Openai Codex — 1 account\n  ● someone · plan: plus\n      ● 5 hours  ░�
         let mut e = Omp.reader();
         e.line(r#"{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"429 Too Many Requests"}}"#);
         assert!(e.report().is_error && e.report().error_text.contains("429"));
+        let r = JsonReader::default();
+        assert!(!r.keep(r#"{"type":"tool_execution_update","x":1}"#) && !r.keep(r#"{"type":"message_update"}"#));
+        assert!(r.keep(r#"{"type":"message_end"}"#) && r.keep("not json"));
     }
 }

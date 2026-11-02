@@ -258,7 +258,9 @@ fn drive(
         let wait = silent_after.min(deadline.saturating_duration_since(Instant::now()));
         match rx.recv_timeout(wait) {
             Ok(Ok(line)) => {
-                writeln!(log, "{line}")?;
+                if reader.keep(&line) {
+                    writeln!(log, "{line}")?;
+                }
                 if let Some(meters) = reader.line(&line) {
                     port.emit(SessionEvent::Rate { account: account.to_owned(), meters })?;
                 }

@@ -167,6 +167,11 @@ pub trait Reader: Send {
     /// Feeds one line of stdout. Returns fresh quota meters if the line carried some.
     fn line(&mut self, line: &str) -> Option<Meters>;
     fn report(&self) -> &report::Report;
+    /// Whether the line belongs in the job's log. A harness that streams
+    /// partial updates, which a later event repeats in full, drops them.
+    fn keep(&self, _line: &str) -> bool {
+        true
+    }
 }
 
 /// One harness. Implement it and add it to [`ALL`] to plug a CLI in.

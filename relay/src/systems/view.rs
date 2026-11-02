@@ -29,7 +29,7 @@ pub enum Cmd {
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Status { all } => status(ctx, all),
-        Cmd::Watch { all } => watch(ctx, all),
+        Cmd::Watch { all } => crate::systems::watch::run(ctx, all),
         Cmd::Result { name } => result(ctx, &name),
         Cmd::Events => {
             for e in ctx.events()? {
@@ -55,38 +55,14 @@ fn status(ctx: &Ctx, all: bool) -> Result<()> {
         out!("{}", serde_json::to_string_pretty(&world)?);
         return Ok(());
     }
-    let text = board(ctx, &world, all, false);
+    let text = board(ctx, &world, all);
     // On a terminal, one screen line per line; piped, every line whole.
     let width = crate::os::terminal_size().map(|(cols, _)| cols);
-    out!("{}", fit(&text, width, None));
+    out!("{}", fit(&text, width));
     Ok(())
 }
 
 /// Redraws the board whenever the bus changes, and every few seconds for the clocks.
-/// Redraws on every project's events (accounts are shared), on a resize, and
-/// every few seconds for the clocks. Each line fits the terminal's width and
-/// the board its height, so nothing wraps or scrolls.
-fn watch(ctx: &Ctx, all: bool) -> Result<()> {
-    use std::time::{Duration, Instant};
-    let buses = ctx.buses();
-    let bell = crate::os::Doorbell::watch(&buses.iter().map(std::path::PathBuf::as_path).collect::<Vec<_>>())?;
-    let (mut drawn_at, mut drawn_size) = (Instant::now(), None);
-    let mut rang = true;
-    loop {
-        let size = crate::os::terminal_size();
-        if rang || size != drawn_size || drawn_at.elapsed() >= Duration::from_secs(3) {
-            let world = ctx.world()?;
-            let now = jiff::Timestamp::now().strftime("%H:%M:%S");
-            let text = format!("{} · {now} · Ctrl-C to stop\n\n{}", ctx.cfg.name, board(ctx, &world, all, true));
-            // Home and clear, then the board: one write, so it does not flicker.
-            out!("\x1b[H\x1b[2J{}", fit(&text, size.map(|s| s.0), size.map(|s| s.1)));
-            (drawn_at, drawn_size) = (Instant::now(), size);
-        }
-        // Short waits, so a resize redraws within a second.
-        rang = bell.wait(Duration::from_secs(1));
-    }
-}
-
 /// Rows as aligned text: each column as wide as its widest cell, a column
 /// empty in every row left out, and the last column never padded.
 pub fn table(rows: &[Vec<String>]) -> Vec<String> {
@@ -102,68 +78,62 @@ pub fn table(rows: &[Vec<String>]) -> Vec<String> {
         .collect()
 }
 
-/// Cuts each line to `width` columns, marking the cut, and the text to
-/// `height` rows, saying how many were left out.
-fn fit(text: &str, width: Option<usize>, height: Option<usize>) -> String {
+/// Cuts each line to `width` columns, marking the cut.
+fn fit(text: &str, width: Option<usize>) -> String {
     let cut = |line: &str| match width {
         Some(w) if line.chars().count() > w => {
             line.chars().take(w.saturating_sub(1)).chain(std::iter::once('…')).collect::<String>()
         }
         _ => line.to_owned(),
     };
-    let mut lines: Vec<String> = text.lines().map(cut).collect();
-    if let Some(h) = height.filter(|&h| lines.len() > h) {
-        let hidden = lines.len() - (h - 1);
-        lines.truncate(h - 1);
-        lines.push(cut(&format!("… {hidden} more lines (a taller window, or relay view status)")));
-    }
-    lines.join("\n")
+    text.lines().map(cut).collect::<Vec<_>>().join("\n")
 }
 
-/// The jobs and accounts, as text. `live` adds each running session's latest output.
-fn board(ctx: &Ctx, world: &crate::world::World, all: bool, live: bool) -> String {
-    let now = now_micros();
-    let day_ago = now.saturating_sub(24 * 3600 * 1_000_000);
+/// The jobs worth showing, oldest first: live ones, those ended within a day, or all.
+pub fn listed(world: &crate::world::World, all: bool) -> Vec<&crate::world::Job> {
+    let day_ago = now_micros().saturating_sub(24 * 3600 * 1_000_000);
     let mut jobs: Vec<_> =
         world.jobs.values().filter(|j| all || j.status.is_live() || j.ended_at.is_some_and(|t| t > day_ago)).collect();
     jobs.sort_by_key(|j| j.created_at);
+    jobs
+}
+
+/// A job's cells: name, status, account, since when, spend, and its task with any reason.
+pub fn job_cells(j: &crate::world::Job, now: u64) -> Vec<String> {
+    let since = match j.status {
+        crate::world::Status::Running => j.started_at,
+        crate::world::Status::Queued => j.ended_at.or(Some(j.created_at)),
+        _ => j.ended_at,
+    };
+    let reason = j.reason.as_deref().map_or(String::new(), |r| format!("  [{r}]"));
+    vec![
+        j.name.clone(),
+        j.status.as_str().to_owned(),
+        j.account.as_deref().or(j.pinned.as_deref()).unwrap_or("-").to_owned(),
+        since.map_or_else(|| "-".into(), |t| ago(now, t)),
+        if j.cost_usd > 0.0 { format!("${:.2}", j.cost_usd) } else { String::new() },
+        format!("{}{reason}", j.task),
+    ]
+}
+
+/// The jobs and accounts, as text.
+fn board(ctx: &Ctx, world: &crate::world::World, all: bool) -> String {
+    let now = now_micros();
+    let jobs = listed(world, all);
+    let rows: Vec<Vec<String>> = jobs.iter().map(|j| job_cells(j, now)).collect();
     let mut lines = vec![format!("jobs (at most {} running)", ctx.cfg.limits.max_running)];
-    let rows: Vec<Vec<String>> = jobs
-        .iter()
-        .map(|j| {
-            let since = match j.status {
-                crate::world::Status::Running => j.started_at,
-                crate::world::Status::Queued => j.ended_at.or(Some(j.created_at)),
-                _ => j.ended_at,
-            };
-            let reason = j.reason.as_deref().map_or(String::new(), |r| format!("  [{r}]"));
-            vec![
-                j.name.clone(),
-                j.status.as_str().to_owned(),
-                j.account.as_deref().or(j.pinned.as_deref()).unwrap_or("-").to_owned(),
-                since.map_or_else(|| "-".into(), |t| ago(now, t)),
-                if j.cost_usd > 0.0 { format!("${:.2}", j.cost_usd) } else { String::new() },
-                format!("{}{reason}", j.task),
-            ]
-        })
-        .collect();
-    for (j, row) in jobs.iter().zip(table(&rows)) {
-        lines.push(format!("  {row}"));
-        if live && j.status == crate::world::Status::Running {
-            lines.push(format!("      └ {}", activity(&ctx.job_file(&j.name, "log.ndjson"))));
-        }
-    }
+    lines.extend(table(&rows).into_iter().map(|r| format!("  {r}")));
     if jobs.is_empty() {
         lines.push("  (none)".into());
     }
     lines.push(String::new());
-    lines.push(crate::systems::quota::accounts_view(ctx, world).1);
+    lines.push(crate::systems::quota::accounts_view(ctx, world).text());
     lines.join("\n")
 }
 
 /// When the session last said something, and the gist of it: the last text
 /// or tool name in its output, whichever harness wrote it.
-fn activity(log: &std::path::Path) -> String {
+pub fn activity(log: &std::path::Path) -> String {
     let Ok(meta) = std::fs::metadata(log) else { return "no output yet".into() };
     let quiet = meta.modified().ok().and_then(|m| m.elapsed().ok()).map_or(0, |d| d.as_secs());
     let tail = read_tail(log, 64 * 1024);
@@ -251,11 +221,8 @@ mod tests {
     #[test]
     fn the_board_fits_the_window() {
         let text = "short\na line far too long for it\nthird\nfourth";
-        assert_eq!(fit(text, Some(10), None), "short\na line fa…\nthird\nfourth");
-        assert_eq!(fit(text, None, None), text, "piped: whole lines");
-        let tall = fit(text, Some(80), Some(3));
-        assert_eq!(tall.lines().count(), 3);
-        assert!(tall.ends_with("2 more lines (a taller window, or relay view status)"), "{tall}");
-        assert!(fit("·×·×·×", Some(4), None).chars().count() == 4, "counted in characters, not bytes");
+        assert_eq!(fit(text, Some(10)), "short\na line fa…\nthird\nfourth");
+        assert_eq!(fit(text, None), text, "piped: whole lines");
+        assert!(fit("·×·×·×", Some(4)).chars().count() == 4, "counted in characters, not bytes");
     }
 }

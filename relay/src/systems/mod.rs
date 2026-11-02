@@ -8,3 +8,4 @@ pub mod queue;
 pub mod quota;
 pub mod session;
 pub mod view;
+pub mod watch;

@@ -81,7 +81,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one |
 | `relay view status [--all]` | Jobs and accounts. With `--json`, the whole folded state |
 | `relay view result NAME` | Final report, status, cost, branch, log path |
-| `relay view watch [--all]` | The status live, redrawn as events land, with each running session's latest output |
+| `relay view watch [--all]` | The status live in a terminal UI (ratatui): jobs, the selected job's latest output and answer, and accounts, redrawn as events land in any project. ↑↓ select, `a` all jobs, `q` quit |
 | `relay view events` | The merged event log |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room, a fresh reading, switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout) / delete its clone and records |

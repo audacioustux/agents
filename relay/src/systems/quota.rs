@@ -138,13 +138,27 @@ impl Row<'_> {
 }
 
 pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
-    let (value, text) = accounts_view(ctx, world);
-    ctx.reply(&value, &text)
+    let v = accounts_view(ctx, world);
+    ctx.reply(&v.json, &v.text())
 }
 
-/// Every account's room, as JSON and as text: as every project on this
-/// machine knows it, with the sessions all of them run there.
-pub fn accounts_view(ctx: &Ctx, world: &World) -> (serde_json::Value, String) {
+/// Every account's room: as every project on this machine knows it, with
+/// the sessions all of them run there.
+pub struct AccountsView {
+    pub json: serde_json::Value,
+    pub head: String,
+    /// One row of table cells per account.
+    pub cells: Vec<Vec<String>>,
+}
+
+impl AccountsView {
+    pub fn text(&self) -> String {
+        let lines = crate::systems::view::table(&self.cells).into_iter().map(|l| format!("  {l}"));
+        std::iter::once(self.head.clone()).chain(lines).collect::<Vec<_>>().join("\n")
+    }
+}
+
+pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
     let now = now_micros();
     let neighbours = ctx.neighbours();
     let mut world = world.clone();
@@ -177,10 +191,8 @@ pub fn accounts_view(ctx: &Ctx, world: &World) -> (serde_json::Value, String) {
     let l = &ctx.cfg.limits;
     let head =
         format!("accounts on {} (floor {:.0}%, {} session(s) each)", names.join(", "), l.floor * 100.0, l.per_account);
-    let cells: Vec<Vec<String>> = rows.iter().map(|r| r.cells(now)).collect();
-    let lines = crate::systems::view::table(&cells).into_iter().map(|l| format!("  {l}"));
-    let text = std::iter::once(head).chain(lines).collect::<Vec<_>>().join("\n");
-    (serde_json::json!({ "harnesses": names, "accounts": rows }), text)
+    let cells = rows.iter().map(|r| r.cells(now)).collect();
+    AccountsView { json: serde_json::json!({ "harnesses": names, "accounts": rows }), head, cells }
 }
 
 pub fn fmt_time(unix_s: i64) -> String {

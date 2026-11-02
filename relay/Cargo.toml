@@ -11,6 +11,7 @@ publish = false
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 jiff = "0.2.38"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 regex = "1.13.1"
 rustix = { version = "1.1.6", features = ["fs", "process", "event", "termios"] }
 serde = { version = "1.0.229", features = ["derive"] }

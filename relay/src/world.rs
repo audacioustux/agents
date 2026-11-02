@@ -13,9 +13,10 @@ use crate::bus::{
     self, DispatchEvent, Event, LandEvent, Meters, Offsets, Outcome, QueueEvent, QuotaEvent, SessionEvent, Stamped,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
+    #[default]
     Queued,
     Running,
     Done,
@@ -39,7 +40,7 @@ impl Status {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Job {
     pub name: String,
     pub task: String,
@@ -204,55 +205,38 @@ impl World {
         e.job().is_none_or(|j| j == job) && self.jobs.get(job).is_some_and(|j| j.attempts == *attempt)
     }
 
-    #[allow(clippy::too_many_lines)] // one arm per event
     fn apply(&mut self, s: &Stamped) {
-        let t = s.t;
         match &s.event {
-            Event::Queue(QueueEvent::Queued {
-                job,
-                task,
-                readonly,
-                harnesses,
-                models,
-                effort,
-                budget_usd,
-                pinned,
-                reuse_key,
-            }) => {
-                self.jobs.insert(
-                    job.clone(),
-                    Job {
-                        name: job.clone(),
-                        task: task.clone(),
-                        status: Status::Queued,
-                        readonly: *readonly,
-                        harnesses: harnesses.clone(),
-                        models: models.clone(),
-                        effort: effort.clone(),
-                        budget_usd: *budget_usd,
-                        pinned: pinned.clone(),
-                        reuse_key: reuse_key.clone(),
-                        account: None,
-                        session_id: None,
-                        transcript_account: None,
-                        message: None,
-                        follow_ups: 0,
-                        reruns: 0,
-                        attempts: 0,
-                        runner: None,
-                        workdir: None,
-                        branch: None,
-                        created_at: t,
-                        started_at: None,
-                        ended_at: None,
-                        cost_usd: 0.0,
-                        turns: 0,
-                        reason: None,
-                        stop_requested: false,
-                    },
-                );
+            Event::Queue(e) => self.apply_queue(s.t, e),
+            Event::Dispatch(e) => self.apply_dispatch(s.t, e),
+            Event::Session(e) if self.current(s, e) => self.apply_session(s.t, e),
+            Event::Session(_) => {}
+            Event::Quota(e) => self.apply_quota(s.t, e),
+            Event::Land(LandEvent::Forgotten { job }) => {
+                self.jobs.remove(job);
             }
-            Event::Queue(QueueEvent::Resumed { job, message, budget_usd }) => {
+        }
+    }
+
+    fn apply_queue(&mut self, t: u64, e: &QueueEvent) {
+        match e {
+            QueueEvent::Queued { job, task, readonly, harnesses, models, effort, budget_usd, pinned, reuse_key } => {
+                let j = Job {
+                    name: job.clone(),
+                    task: task.clone(),
+                    readonly: *readonly,
+                    harnesses: harnesses.clone(),
+                    models: models.clone(),
+                    effort: effort.clone(),
+                    budget_usd: *budget_usd,
+                    pinned: pinned.clone(),
+                    reuse_key: reuse_key.clone(),
+                    created_at: t,
+                    ..Job::default()
+                };
+                self.jobs.insert(job.clone(), j);
+            }
+            QueueEvent::Resumed { job, message, budget_usd } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.status = Status::Queued;
                     j.message = Some(message.clone());
@@ -260,24 +244,25 @@ impl World {
                     j.stop_requested = false;
                     j.follow_ups = 0;
                     j.reruns = 0;
-                    if let Some(b) = budget_usd {
-                        j.budget_usd = *b;
-                    }
+                    j.budget_usd = budget_usd.unwrap_or(j.budget_usd);
                 }
             }
-            Event::Queue(QueueEvent::Dequeued { job }) => {
+            QueueEvent::Dequeued { job } => {
                 if let Some(j) = self.jobs.get_mut(job) {
-                    j.status = Status::Stopped;
-                    j.reason = Some("dequeued".into());
-                    j.ended_at = Some(t);
+                    (j.status, j.reason, j.ended_at) = (Status::Stopped, Some("dequeued".into()), Some(t));
                 }
             }
-            Event::Queue(QueueEvent::StopRequested { job }) => {
+            QueueEvent::StopRequested { job } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.stop_requested = true;
                 }
             }
-            Event::Dispatch(DispatchEvent::Dispatched { job, account, runner_pid, runner_started }) => {
+        }
+    }
+
+    fn apply_dispatch(&mut self, t: u64, e: &DispatchEvent) {
+        match e {
+            DispatchEvent::Dispatched { job, account, runner_pid, runner_started } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.status = Status::Running;
                     j.account = Some(account.clone());
@@ -287,7 +272,7 @@ impl World {
                     j.reason = None;
                 }
             }
-            Event::Dispatch(DispatchEvent::Reaped { job }) => {
+            DispatchEvent::Reaped { job } => {
                 // A runner can report and exit between dispatch's snapshot and its liveness check.
                 if let Some(j) = self.jobs.get_mut(job).filter(|j| j.status == Status::Running) {
                     // A stop kills the runner, so its silent death is the stop.
@@ -299,24 +284,21 @@ impl World {
                     j.ended_at = Some(t);
                 }
             }
-            Event::Session(e) if self.current(s, e) => self.apply_session(t, e),
-            Event::Session(_) => {}
-            Event::Quota(QuotaEvent::AccountEnabled { account, enabled }) => {
+        }
+    }
+
+    fn apply_quota(&mut self, t: u64, e: &QuotaEvent) {
+        match e {
+            QuotaEvent::AccountEnabled { account, enabled } => {
                 let a = self.account(account);
-                a.enabled = *enabled;
-                a.signed_out = false;
+                (a.enabled, a.signed_out) = (*enabled, false);
             }
-            Event::Quota(QuotaEvent::Reading { account, meters }) => {
+            QuotaEvent::Reading { account, meters } => {
                 let a = self.account(account);
                 a.meters.clone_from(meters);
                 a.read_at = Some(t);
             }
-            Event::Quota(QuotaEvent::Unreadable { account }) => {
-                self.account(account).unreadable_at = Some(t);
-            }
-            Event::Land(LandEvent::Forgotten { job }) => {
-                self.jobs.remove(job);
-            }
+            QuotaEvent::Unreadable { account } => self.account(account).unreadable_at = Some(t),
         }
     }
 

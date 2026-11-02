@@ -248,32 +248,9 @@ mod tests {
     fn job(session: Option<&str>, transcript: Option<&str>) -> Job {
         Job {
             name: "j".into(),
-            task: String::new(),
-            status: Status::Queued,
-            readonly: false,
-            harnesses: Vec::new(),
-            models: BTreeMap::new(),
-            effort: None,
-            budget_usd: 0.0,
-            pinned: None,
-            reuse_key: None,
-            account: None,
             session_id: session.map(Into::into),
             transcript_account: transcript.map(Into::into),
-            message: None,
-            follow_ups: 0,
-            reruns: 0,
-            attempts: 0,
-            runner: None,
-            workdir: None,
-            branch: None,
-            created_at: 0,
-            started_at: None,
-            ended_at: None,
-            cost_usd: 0.0,
-            turns: 0,
-            reason: None,
-            stop_requested: false,
+            ..Job::default()
         }
     }
 

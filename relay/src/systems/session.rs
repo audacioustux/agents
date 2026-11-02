@@ -302,30 +302,25 @@ fn judge(ctx: &Ctx, job: &Job, prompt: &str) -> (Option<String>, f64, Result<che
 /// An account of the checker's harness that may take a session: another
 /// than the worker's and idle where there is one, so no worker grades itself.
 fn checker_home(ctx: &Ctx, job: &Job) -> Option<Home> {
-    let harness = &ctx.cfg.limits.checker.harness;
+    let c = &ctx.cfg.limits.checker;
+    let model = c.model.clone().or_else(|| ctx.cfg.harness(&c.harness).model);
     let world = ctx.world().ok()?;
-    let now = now_s();
+    let now = now_micros();
     let found = accounts::discover(&ctx.cfg);
+    // The same judgment the dispatcher makes: a check never spends past an
+    // account's floor or on a reading it cannot trust.
     let usable: Vec<&Home> = found
         .iter()
-        .filter(|h| h.harness == harness.as_str())
-        .filter(|h| {
-            world
-                .accounts
-                .get(&h.key())
-                .is_none_or(|a| a.enabled && !a.signed_out && a.limited_until.is_none_or(|u| u <= now))
-        })
+        .filter(|h| h.harness == c.harness.as_str())
+        .filter(|h| accounts::fit(h, world.accounts.get(&h.key()), model.as_deref(), ctx.cfg.limits.floor, now).is_ok())
         .collect();
     let worker = |h: &&&Home| job.account.as_deref() == Some(h.key().as_str());
     let busy = |h: &&&Home| {
         world.jobs.values().any(|j| j.status == Status::Running && j.account.as_deref() == Some(h.key().as_str()))
     };
-    usable
-        .iter()
-        .find(|h| !worker(h) && !busy(h))
-        .or_else(|| usable.iter().find(worker))
-        .or_else(|| usable.first())
-        .map(|h| (*h).clone())
+    // Another idle account, else the worker's own, whose seat its ended run
+    // just freed; never a seat another job holds.
+    usable.iter().find(|h| !worker(h) && !busy(h)).or_else(|| usable.iter().find(worker)).map(|h| (*h).clone())
 }
 
 /// The session to resume, when the job has one its history can follow here:

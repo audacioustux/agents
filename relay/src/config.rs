@@ -139,10 +139,18 @@ impl Default for Session {
 }
 
 const DEFAULT_BRIEFING: &str = "You are an unattended session started by relay. Nobody is watching, so \
-do not ask questions: take the safe, reversible default and record it as DECIDED. {workspace} \
-Other workspaces, other accounts and credentials are not mounted; do not look for them. End with a \
-section headed FINAL: commits made, evidence (each command and its output), what you did not run, \
-DECIDED items, and FOUND ON THE WAY problems with file:line.";
+do not ask questions: take the safe, reversible default and record it under decided. {workspace} \
+Other workspaces, other accounts and credentials are not mounted; do not look for them. Read only what \
+the task needs, starting from the files the brief names; do not survey the repository. End with a short \
+section, at most about 40 lines, that never pastes command output, in this shape:
+
+FINAL
+status: done | partial | blocked
+commits: <short sha> <subject> (one per line, or none)
+checked: <command> -> pass | fail (one per line, no output)
+decided: <choice made without asking> (one per line, or none)
+found: <file:line> <problem> (one per line, or none)
+notes: <at most 5 lines, only what the reader must know>";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]

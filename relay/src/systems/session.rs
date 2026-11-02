@@ -134,7 +134,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
     }
     *spend = (report.cost_usd, report.turns);
-    conclude(ctx, job, &key, verdict(&report, ending, &s.final_marker, now_s()), now_s())
+    conclude(ctx, job, &key, verdict(&report, ending, &s.final_marker, job.readonly, now_s()), now_s())
 }
 
 /// The session to resume, when the job has one its history can follow here:

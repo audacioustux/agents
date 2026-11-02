@@ -53,8 +53,15 @@ passed on stdin or as a private file, never in argv, so it can be any size and i
 - **Read-only jobs** (`--readonly`) run in your repository mounted read-only,
   for reviews and analysis.
 
-The session is told to end with a `FINAL` section. If it ends without one, it
-is asked once more, since ending the turn ends the job.
+The session is told to end with a short `FINAL` section: a `status` line
+(done, partial or blocked), then `commits`, `checked` (each command and pass
+or fail, never its output), `decided`, `found` (file:line and the problem) and
+a few `notes`, about 40 lines at most. It is told to read only what the task
+needs, starting from the files the brief names.
+
+A build job that ends without `FINAL` is asked once more, since ending the
+turn ends the job and it may have unfinished commits. A read-only job is not:
+its answer, with or without the section, is the result.
 [`rules.example.md`](rules.example.md) is a template of general rules for
 unattended sessions, each with its reason. Edit it for your project and
 prepend it to your briefs, or have each brief point to it.

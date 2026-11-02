@@ -69,8 +69,9 @@ static AUTH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(failed to authenticate|oauth (session|token) (has )?expired|refresh token expired|not logged in|please run /login|re-?login|invalid api key|unauthorized|\b401\b)").expect("regex")
 });
 
-/// `final_marker` empty means any answer counts as the report.
-pub fn verdict(r: &Report, end: Ending, final_marker: &str, now_s: i64) -> Verdict {
+/// `final_marker` empty means any answer counts as the report. A read-only job
+/// has no commits left to finish, so any non-empty answer is its result.
+pub fn verdict(r: &Report, end: Ending, final_marker: &str, readonly: bool, now_s: i64) -> Verdict {
     if end.over_budget || r.budget_hit {
         return Verdict::Budget;
     }
@@ -101,7 +102,8 @@ pub fn verdict(r: &Report, end: Ending, final_marker: &str, now_s: i64) -> Verdi
     if !end.exit_ok {
         return Verdict::Failed("the agent exited with an error after its result".into());
     }
-    if !final_marker.is_empty() && !r.answer.contains(final_marker) {
+    let answered = readonly && !r.answer.trim().is_empty();
+    if !final_marker.is_empty() && !r.answer.contains(final_marker) && !answered {
         return Verdict::FollowUp(format!(
             "Your last message has no {final_marker} section, so the job is not finished. Ending your turn ends \
              the job: nothing waits for you. Finish any remaining work now, then end with the {final_marker} section."
@@ -188,29 +190,38 @@ mod tests {
 
     #[test]
     fn done_needs_the_marker_once() {
-        assert_eq!(verdict(&done("x\nFINAL ok"), OK, "FINAL", NOW), Verdict::Done);
-        assert!(matches!(verdict(&done("I'll continue"), OK, "FINAL", NOW), Verdict::FollowUp(_)));
-        assert_eq!(verdict(&done("anything"), OK, "", NOW), Verdict::Done);
+        assert_eq!(verdict(&done("x\nFINAL ok"), OK, "FINAL", false, NOW), Verdict::Done);
+        assert!(matches!(verdict(&done("I'll continue"), OK, "FINAL", false, NOW), Verdict::FollowUp(_)));
+        assert_eq!(verdict(&done("anything"), OK, "", false, NOW), Verdict::Done);
+    }
+
+    #[test]
+    fn readonly_answer_needs_no_marker() {
+        assert_eq!(verdict(&done("the review, no marker"), OK, "FINAL", true, NOW), Verdict::Done);
+        assert!(matches!(verdict(&done("  \n"), OK, "FINAL", true, NOW), Verdict::FollowUp(_)));
     }
 
     #[test]
     fn errors_are_classified_from_their_message() {
         assert!(matches!(
-            verdict(&error("You've hit your weekly limit · resets Nov 6, 5am (UTC)"), OK, "FINAL", NOW),
+            verdict(&error("You've hit your weekly limit · resets Nov 6, 5am (UTC)"), OK, "FINAL", false, NOW),
             Verdict::Limited { until: Some(_) }
         ));
         // lanes' regression case: the underscore spelling, with no status code.
-        assert_eq!(verdict(&error("API Error: rate_limit_error"), OK, "FINAL", NOW), Verdict::Limited { until: None });
-        let r = Report { api_status: Some(429), ..error("") };
-        assert_eq!(verdict(&r, OK, "FINAL", NOW), Verdict::Limited { until: None });
         assert_eq!(
-            verdict(&error("Failed to authenticate: OAuth session expired"), OK, "FINAL", NOW),
+            verdict(&error("API Error: rate_limit_error"), OK, "FINAL", false, NOW),
+            Verdict::Limited { until: None }
+        );
+        let r = Report { api_status: Some(429), ..error("") };
+        assert_eq!(verdict(&r, OK, "FINAL", false, NOW), Verdict::Limited { until: None });
+        assert_eq!(
+            verdict(&error("Failed to authenticate: OAuth session expired"), OK, "FINAL", false, NOW),
             Verdict::SignedOut
         );
-        assert!(matches!(verdict(&error("tool crashed"), OK, "FINAL", NOW), Verdict::Failed(_)));
-        assert_eq!(verdict(&Report::default(), OK, "FINAL", NOW), Verdict::NoOutput);
+        assert!(matches!(verdict(&error("tool crashed"), OK, "FINAL", false, NOW), Verdict::Failed(_)));
+        assert_eq!(verdict(&Report::default(), OK, "FINAL", false, NOW), Verdict::NoOutput);
         let over = Ending { over_budget: true, ..OK };
-        assert_eq!(verdict(&done("FINAL"), over, "FINAL", NOW), Verdict::Budget);
+        assert_eq!(verdict(&done("FINAL"), over, "FINAL", false, NOW), Verdict::Budget);
     }
 
     #[test]

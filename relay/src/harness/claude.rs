@@ -37,6 +37,11 @@ fn can_refresh(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Tools that schedule the session's own later turns. Nothing is there to take
+/// a later turn of a `-p` run: it only spends tokens, and its closing message
+/// replaces the report the session already gave.
+const SELF_SCHEDULING: &str = "ScheduleWakeup,CronCreate,CronDelete,RemoteTrigger";
+
 fn session_args(i: &mut Invocation, task: &Task<'_>) {
     i.arg("-p");
     if task.events {
@@ -52,6 +57,7 @@ fn session_args(i: &mut Invocation, task: &Task<'_>) {
         Permissions::ReadOnly => i.args(["--permission-mode", "plan"]),
         Permissions::EditsOnly => i.args(["--permission-mode", "acceptEdits"]),
     };
+    i.args(["--disallowedTools", SELF_SCHEDULING]);
     if let Some(b) = task.budget_usd {
         i.args(["--max-budget-usd".to_owned(), format!("{b}")]);
     }
@@ -335,6 +341,7 @@ mod tests {
         assert!(a.contains("--session-id id") && a.contains("--dangerously-skip-permissions"), "{a}");
         assert!(a.contains("--output-format stream-json --verbose") && a.contains("--max-budget-usd 2.5"));
         assert!(a.contains("--model m") && a.contains("--effort high") && a.contains("--strict-mcp-config"));
+        assert!(a.contains("--disallowedTools ScheduleWakeup,CronCreate"), "no self-scheduled turns: {a}");
         assert_eq!(fresh.stdin.as_deref(), Some("p"));
         assert!(fresh.env.contains(&("CLAUDE_CONFIG_DIR".into(), Some("/h/w".into()))));
         let fork = argv(&Claude.invocation(&h, &task("p", Session::Fork("o"), Permissions::ReadOnly, s)).unwrap());

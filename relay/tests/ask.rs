@@ -112,6 +112,7 @@ fn claude_argv_matches_the_installed_claude() {
         "--session-id",
         "--resume",
         "--fork-session",
+        "--disallowedTools",
     ] {
         assert!(help.contains(flag), "claude --help no longer lists {flag}");
     }

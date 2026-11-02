@@ -45,6 +45,9 @@ pub enum QueueEvent {
         budget_usd: f64,
         /// An account (`harness:label`) the owner chose. A pinned job never moves.
         pinned: Option<String>,
+        /// A read-only job's question at a clean commit; equal keys get the same kind of answer.
+        #[serde(default)]
+        reuse_key: Option<String>,
     },
     Resumed {
         job: String,

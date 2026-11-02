@@ -53,6 +53,12 @@ passed on stdin or as a private file, never in argv, so it can be any size and i
 - **Read-only jobs** (`--readonly`) run in your repository mounted read-only,
   for reviews and analysis.
 
+A read-only job cannot change the repository, so the same brief, for the same
+harnesses, models and effort, at the same clean `HEAD` commit, asks the same
+question. `queue add` refuses it (exit 4, conflict) while another job is
+answering it, or once one has answered it, naming that job (`relay view result
+NAME`); `--again` asks anyway. A dirty working tree is never matched.
+
 The session is told to end with a short `FINAL` section: a `status` line
 (done, partial or blocked), then `commits`, `checked` (each command and pass
 or fail, never its output), `decided`, `found` (file:line and the problem) and
@@ -68,7 +74,7 @@ prepend it to your briefs, or have each brief point to it.
 
 | Command | |
 | --- | --- |
-| `relay queue add NAME (--prompt FILE \| --text TEXT) [--readonly] [--harness H,...] [--model H=M] [--effort E] [--budget USD] [--account H:L] [--task TITLE]` | Queue a job. `--harness` limits where it may run; `--account` pins it, and it waits for that account |
+| `relay queue add NAME (--prompt FILE \| --text TEXT) [--readonly] [--harness H,...] [--model H=M] [--effort E] [--budget USD] [--account H:L] [--task TITLE] [--again]` | Queue a job. `--harness` limits where it may run; `--account` pins it, and it waits for that account |
 | `relay queue resume NAME --message TEXT [--budget USD]` | Continue an ended session, on any account with room |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one |
 | `relay view status [--all]` | Jobs and accounts. With `--json`, the whole folded state |

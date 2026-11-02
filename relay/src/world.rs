@@ -47,6 +47,8 @@ pub struct Job {
     pub effort: Option<String>,
     pub budget_usd: f64,
     pub pinned: Option<String>,
+    /// See `QueueEvent::Queued`.
+    pub reuse_key: Option<String>,
     pub account: Option<String>,
     /// The session the last attempt ran in, once one started.
     pub session_id: Option<String>,
@@ -121,10 +123,21 @@ impl World {
         e.job().is_none_or(|j| j == job) && self.jobs.get(job).is_some_and(|j| j.attempts == *attempt)
     }
 
+    #[allow(clippy::too_many_lines)] // one arm per event
     fn apply(&mut self, s: &Stamped) {
         let t = s.t;
         match &s.event {
-            Event::Queue(QueueEvent::Queued { job, task, readonly, harnesses, models, effort, budget_usd, pinned }) => {
+            Event::Queue(QueueEvent::Queued {
+                job,
+                task,
+                readonly,
+                harnesses,
+                models,
+                effort,
+                budget_usd,
+                pinned,
+                reuse_key,
+            }) => {
                 self.jobs.insert(
                     job.clone(),
                     Job {
@@ -137,6 +150,7 @@ impl World {
                         effort: effort.clone(),
                         budget_usd: *budget_usd,
                         pinned: pinned.clone(),
+                        reuse_key: reuse_key.clone(),
                         account: None,
                         session_id: None,
                         transcript_account: None,
@@ -300,6 +314,7 @@ mod tests {
             effort: None,
             budget_usd: 1.0,
             pinned: None,
+            reuse_key: None,
         })
     }
 

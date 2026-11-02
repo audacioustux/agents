@@ -256,6 +256,7 @@ mod tests {
             effort: None,
             budget_usd: 0.0,
             pinned: None,
+            reuse_key: None,
             account: None,
             session_id: session.map(Into::into),
             transcript_account: transcript.map(Into::into),

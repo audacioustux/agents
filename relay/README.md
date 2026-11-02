@@ -53,6 +53,18 @@ passed on stdin or as a private file, never in argv, so it can be any size and i
 - **Read-only jobs** (`--readonly`) run in your repository mounted read-only,
   for reviews and analysis.
 
+**Dependencies.** A job queued `--after` other jobs gets no seat until each is
+`done`, so build → review → fix chains need no watching. `view status` shows
+`after a, b` (then `after b` once a is done); `--json` carries `after` and
+`pending`, the dependencies still to finish. A job counts as done when its
+session ended `done`, landed or not: landing stays your step, so a job that
+needs the other's files must `land fetch` them itself. A dependency that fails,
+is stopped, dequeued or cleaned away before it was done never finishes, so the
+dependent shows `waits for a (failed)` and does not start on its own, nor keep
+the dispatcher awake. Queue the dependency again (or `queue resume` it), or
+`relay queue release NAME [--from a]`. Only existing jobs can be named, so there
+are no cycles.
+
 A read-only job cannot change the repository, so the same brief, for the same
 harnesses, models and effort, at the same clean `HEAD` commit, asks the same
 question. `queue add` refuses it (exit 4, conflict) while another job is
@@ -78,6 +90,8 @@ prepend it to your briefs, or have each brief point to it.
 | --- | --- |
 | `relay queue add NAME (--prompt FILE \| --text TEXT) [--readonly] [--harness H,...] [--model H=M] [--effort E] [--budget USD] [--account H:L] [--task TITLE] [--again]` | Queue a job. `--harness` limits where it may run; `--account` pins it, and it waits for that account |
 | `relay queue resume NAME --message TEXT [--budget USD]` | Continue an ended or checking session, on any account with room. `--budget` caps that run alone, not the job's total |
+| `relay queue add NAME ... --after A[,B]` | Start only once every named job is `done` (repeat or comma-separate; unknown names are refused, exit 3) |
+| `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one |
 | `relay view status [--all]` | Jobs and accounts. With `--json`, the whole folded state |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends |
@@ -270,7 +284,7 @@ own process, and owns one output port:
 
 | System | Responsibility | Emits |
 | --- | --- | --- |
-| queue | takes work in, withdraws it, stops it | queued, resumed, dequeued, stop-requested |
+| queue | takes work in, withdraws it, stops it, releases it from its `--after` jobs | queued, released, resumed, dequeued, stop-requested |
 | dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
 | session | runs one job, checks its progress at a spend cap, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, checking, checked, ended |
 | quota | account readings and switches | reading, unreadable, account-enabled |
@@ -299,7 +313,10 @@ It drops:
 
 - **Project add-ons:** the database-per-lane module, the worktree pool and the
   `gum` board (`relay view status` and `--json` replace the board).
-- **Scheduling extras:** `--after` dependencies and per-model caps.
+- **Scheduling extras:** per-model caps.
+
+`--after` is kept, with one change: a dependency that did not finish blocks
+its dependents (`relay queue release` frees them) instead of freeing them.
 
 Like lanes, relay never pushes or merges. Landing work on your main branch
 stays with your project's gate.

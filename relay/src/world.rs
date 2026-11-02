@@ -63,6 +63,10 @@ pub struct Job {
     pub pinned: Option<String>,
     /// See `QueueEvent::Queued`.
     pub reuse_key: Option<String>,
+    /// Jobs this one still waits for: those it was queued after, less any released
+    /// and any that were done when cleaned away.
+    #[serde(default)]
+    pub after: Vec<String>,
     /// The clean commit the last attempt of a read-only job read.
     #[serde(default)]
     pub ran_at: Option<String>,
@@ -138,7 +142,7 @@ pub struct World {
 
 /// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
 /// holds, how a mark is kept), so checkpoints folded the old way are discarded.
-const FOLD_VERSION: u32 = 5;
+const FOLD_VERSION: u32 = 6;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -227,7 +231,58 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     })
 }
 
+/// A job another job still waits for.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Wait {
+    pub job: String,
+    /// What the dependency is doing: queued, running, or how it ended (failed,
+    /// stopped, dequeued, gone).
+    pub state: String,
+    /// It has ended without being done, so the waiting job never starts on its own.
+    pub blocked: bool,
+}
+
+impl Wait {
+    /// One line for a board: `after a, b` while they work, `waits for a (failed)` once one cannot finish.
+    pub fn summary(waits: &[Self]) -> Option<String> {
+        let names = |w: &[&Self]| w.iter().map(|w| w.job.as_str()).collect::<Vec<_>>().join(", ");
+        let blocked: Vec<_> = waits.iter().filter(|w| w.blocked).collect();
+        if blocked.is_empty() {
+            let all: Vec<_> = waits.iter().collect();
+            return (!all.is_empty()).then(|| format!("after {}", names(&all)));
+        }
+        let reasons: Vec<_> = blocked.iter().map(|w| format!("{} ({})", w.job, w.state)).collect();
+        Some(format!("waits for {}", reasons.join(", ")))
+    }
+}
+
 impl World {
+    /// The jobs `job` still waits for. A dependency that is done, or was done
+    /// when it was cleaned away, is not among them; landing it is a later step.
+    pub fn waits(&self, job: &Job) -> Vec<Wait> {
+        let wait = |name: &String, state: &str, blocked| Wait { job: name.clone(), state: state.into(), blocked };
+        job.after
+            .iter()
+            .filter_map(|a| match self.jobs.get(a) {
+                Some(d) if d.status == Status::Done => None,
+                Some(d) if d.status.is_live() => Some(wait(a, d.status.as_str(), false)),
+                Some(d) if d.reason.as_deref() == Some("dequeued") => Some(wait(a, "dequeued", true)),
+                Some(d) => Some(wait(a, d.status.as_str(), true)),
+                None => Some(wait(a, "gone", true)),
+            })
+            .collect()
+    }
+
+    /// Whether `job` is queued with every dependency done: the dispatcher may give it a seat.
+    pub fn startable(&self, job: &Job) -> bool {
+        job.status == Status::Queued && self.waits(job).is_empty()
+    }
+
+    /// Whether `job` is queued and can never start on its own until released or its dependency is queued again.
+    pub fn blocked(&self, job: &Job) -> bool {
+        job.status == Status::Queued && self.waits(job).iter().any(|w| w.blocked)
+    }
+
     /// The fold of the bus at `bus`, from the checkpoint at `file` when it is
     /// usable, which is then brought up to date. Any process may do this: the
     /// checkpoint is a cache of a deterministic fold, replaced atomically, and
@@ -288,14 +343,28 @@ impl World {
             Event::Session(_) => {}
             Event::Quota(e) => self.apply_quota(s.t, e),
             Event::Land(LandEvent::Forgotten { job }) => {
-                self.jobs.remove(job);
+                // A job cleaned away after it finished has been waited for.
+                if self.jobs.remove(job).is_some_and(|j| j.status == Status::Done) {
+                    self.jobs.values_mut().for_each(|j| j.after.retain(|a| a != job));
+                }
             }
         }
     }
 
     fn apply_queue(&mut self, t: u64, e: &QueueEvent) {
         match e {
-            QueueEvent::Queued { job, task, readonly, harnesses, models, effort, budget_usd, pinned, reuse_key } => {
+            QueueEvent::Queued {
+                job,
+                task,
+                readonly,
+                harnesses,
+                models,
+                effort,
+                budget_usd,
+                pinned,
+                reuse_key,
+                after,
+            } => {
                 let j = Job {
                     name: job.clone(),
                     task: task.clone(),
@@ -306,10 +375,16 @@ impl World {
                     budget_usd: *budget_usd,
                     pinned: pinned.clone(),
                     reuse_key: reuse_key.clone(),
+                    after: after.clone(),
                     created_at: t,
                     ..Job::default()
                 };
                 self.jobs.insert(job.clone(), j);
+            }
+            QueueEvent::Released { job, from } => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    j.after.retain(|a| !from.is_empty() && !from.contains(a));
+                }
             }
             QueueEvent::Resumed { job, message, budget_usd } => {
                 if let Some(j) = self.jobs.get_mut(job) {
@@ -483,7 +558,113 @@ mod tests {
             budget_usd: 1.0,
             pinned: None,
             reuse_key: None,
+            after: Vec::new(),
         })
+    }
+
+    fn queued_after(job: &str, after: &[&str]) -> Event {
+        let Event::Queue(QueueEvent::Queued {
+            job,
+            task,
+            readonly,
+            harnesses,
+            models,
+            effort,
+            budget_usd,
+            pinned,
+            reuse_key,
+            ..
+        }) = queued(job)
+        else {
+            unreachable!()
+        };
+        Event::Queue(QueueEvent::Queued {
+            job,
+            task,
+            readonly,
+            harnesses,
+            models,
+            effort,
+            budget_usd,
+            pinned,
+            reuse_key,
+            after: after.iter().map(|a| (*a).to_owned()).collect(),
+        })
+    }
+
+    fn ended(job: &str, outcome: Outcome) -> Event {
+        Event::Session(SessionEvent::Ended { job: job.into(), outcome, cost_usd: 0.0, turns: 1, reason: None })
+    }
+
+    #[test]
+    fn dependencies_fold_the_same_every_time() {
+        let release = |from: &[&str]| {
+            Event::Queue(QueueEvent::Released { job: "c".into(), from: from.iter().map(|f| (*f).to_owned()).collect() })
+        };
+        let events = [
+            st(1, queued("a")),
+            st(2, queued("b")),
+            st(3, queued_after("c", &["a", "b", "a"])),
+            st(4, release(&["b"])),
+            st(5, release(&["zzz"])),
+        ];
+        let w = World::fold(&events);
+        assert_eq!(w, World::fold(&events), "a replay is the same state");
+        assert_eq!(w.jobs["c"].after, ["a", "a"], "only what was released is dropped");
+        let all = World::fold(&[&events[..3], &[st(4, release(&[]))]].concat());
+        assert!(all.jobs["c"].after.is_empty(), "no names releases all");
+        let stored: World = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
+        assert_eq!(stored, w, "the checkpoint keeps it");
+    }
+
+    #[test]
+    fn a_job_waits_for_done_and_is_blocked_by_anything_else() {
+        let dispatched = |job: &str| {
+            Event::Dispatch(DispatchEvent::Dispatched {
+                job: job.into(),
+                account: "c:w".into(),
+                runner_pid: 7,
+                runner_started: 1,
+            })
+        };
+        let mut events = vec![st(1, queued("a")), st(2, queued_after("b", &["a"]))];
+        let state = |events: &[Stamped]| {
+            let w = World::fold(events);
+            (w.startable(&w.jobs["b"]), w.blocked(&w.jobs["b"]), Wait::summary(&w.waits(&w.jobs["b"])))
+        };
+        assert_eq!(state(&events), (false, false, Some("after a".into())), "queued");
+        events.push(st(3, dispatched("a")));
+        assert_eq!(state(&events), (false, false, Some("after a".into())), "running");
+        events.push(st(4, ended("a", Outcome::Failed)));
+        assert_eq!(state(&events), (false, true, Some("waits for a (failed)".into())), "failed");
+        events.push(st(
+            5,
+            Event::Queue(QueueEvent::Resumed { job: "a".into(), message: "again".into(), budget_usd: None }),
+        ));
+        assert_eq!(state(&events), (false, false, Some("after a".into())), "queued again, the dependent waits again");
+        events.extend([st(6, dispatched("a")), st(7, ended("a", Outcome::Done))]);
+        assert_eq!(state(&events), (true, false, None), "done");
+        events.push(st(8, Event::Land(LandEvent::Forgotten { job: "a".into() })));
+        assert_eq!(state(&events), (true, false, None), "a done job cleaned away was waited for");
+    }
+
+    #[test]
+    fn a_dependency_that_ended_otherwise_or_vanished_blocks() {
+        let events = [
+            st(1, queued("a")),
+            st(2, Event::Queue(QueueEvent::Dequeued { job: "a".into() })),
+            st(3, queued_after("b", &["a"])),
+            st(4, queued_after("c", &["a", "gone"])),
+            st(5, Event::Land(LandEvent::Forgotten { job: "a".into() })),
+        ];
+        let w = World::fold(&events[..4]);
+        assert_eq!(Wait::summary(&w.waits(&w.jobs["b"])).as_deref(), Some("waits for a (dequeued)"));
+        let w = World::fold(&events);
+        assert_eq!(
+            Wait::summary(&w.waits(&w.jobs["b"])).as_deref(),
+            Some("waits for a (gone)"),
+            "not done when cleaned"
+        );
     }
 
     #[test]

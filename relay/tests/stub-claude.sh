@@ -6,6 +6,8 @@
 #   cost     what each session costs, in USD (default 0.02)
 #   verdict  the progress check's answer (default continue)
 #   checks   appended to by every progress check run there
+#   hold     sessions wait, after starting, until the file is removed
+#   fail     every session there ends in an error
 # A brief containing [idle] makes no commit.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
@@ -33,6 +35,11 @@ fi
 mkdir -p "$(dirname "$transcript")"
 echo '{"turn":1}' >>"$transcript"
 echo '{"type":"system","subtype":"init"}'
+while [ -f "$acct/hold" ]; do sleep 0.1; done
+if [ -f "$acct/fail" ]; then
+  echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","num_turns":1,"total_cost_usd":0.01}'
+  exit 1
+fi
 if [ -f "$acct/limited" ]; then
   echo '{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"seven_day":{"utilization":1.0,"resetsAt":4102444800}}}}'
   echo '{"type":"result","subtype":"success","is_error":true,"result":"You'"'"'ve hit your weekly limit · resets Jan 1, 12am (UTC)","num_turns":1,"total_cost_usd":0.01}'

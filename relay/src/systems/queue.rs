@@ -1,5 +1,5 @@
 //! queue: takes work in and lets it be withdrawn.
-//! Emits: queued, resumed, dequeued, stop-requested.
+//! Emits: queued, released, resumed, dequeued, stop-requested.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -35,6 +35,13 @@ pub enum Cmd {
         /// Spend cap for this run alone, in USD; not the job's total, which `limits.job_ceiling_usd` bounds.
         #[arg(long, value_parser = usd)]
         budget: Option<f64>,
+    },
+    /// Stop a queued job waiting for the jobs it was queued `--after`.
+    Release {
+        name: String,
+        /// Drop only these (repeat, or comma-separate). Default: all of them.
+        #[arg(long = "from", value_delimiter = ',')]
+        from: Vec<String>,
     },
     /// Withdraw a job that has not started.
     Dequeue { name: String },
@@ -74,6 +81,9 @@ pub struct Add {
     /// Queue a read-only job even when the same question was already answered at this commit.
     #[arg(long)]
     again: bool,
+    /// Start only once these jobs are done (repeat, or comma-separate). Archived jobs count; landing is a later step.
+    #[arg(long = "after", value_delimiter = ',')]
+    after: Vec<String>,
 }
 
 fn usd(s: &str) -> Result<f64, String> {
@@ -85,9 +95,11 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
     let name = match &cmd {
-        Cmd::Add(Add { name, .. }) | Cmd::Resume { name, .. } | Cmd::Dequeue { name } | Cmd::Stop { name } => {
-            name.clone()
-        }
+        Cmd::Add(Add { name, .. })
+        | Cmd::Resume { name, .. }
+        | Cmd::Release { name, .. }
+        | Cmd::Dequeue { name }
+        | Cmd::Stop { name } => name.clone(),
     };
     let job = world.jobs.get(&name);
     // The job, when its status is one the command applies to.
@@ -109,6 +121,16 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Resume { message, budget, .. } => {
             when(|s| !s.is_live() || s == Status::Checking)?;
             (QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget }, None)
+        }
+        Cmd::Release { from, .. } => {
+            let waiting = &when(|s| s == Status::Queued)?.after;
+            if waiting.is_empty() {
+                fail!(Conflict, "{name} waits for no job");
+            }
+            if let Some(other) = from.iter().find(|f| !waiting.contains(f)) {
+                fail!(Usage, "{name} does not wait for {other} (it waits for {})", waiting.join(", "));
+            }
+            (QueueEvent::Released { job: name.clone(), from }, None)
         }
         Cmd::Dequeue { .. } => {
             when(|s| s == Status::Queued)?;
@@ -143,6 +165,7 @@ impl Add {
         if brief.trim().is_empty() {
             fail!(Usage, "the brief is empty");
         }
+        let after = dependencies(&name, self.after, jobs)?;
         let harnesses = allowed_harnesses(ctx, self.harnesses, self.account.as_deref())?;
         let models = parse_models(ctx, &harnesses, &self.models)?;
         if let Some((m, reason)) = models.values().find_map(|m| ctx.cfg.session.banned(m).map(|r| (m, r))) {
@@ -169,8 +192,27 @@ impl Add {
             budget_usd: self.budget.unwrap_or(ctx.cfg.limits.budget_usd),
             pinned: self.account,
             reuse_key,
+            after,
         })
     }
+}
+
+/// The jobs to wait for, each once. Only existing jobs can be named, so no cycle can form;
+/// a job naming itself is refused all the same.
+fn dependencies(name: &str, asked: Vec<String>, jobs: &BTreeMap<String, Job>) -> Result<Vec<String>> {
+    let mut after = Vec::new();
+    for a in asked {
+        if a == name {
+            fail!(Usage, "{name} cannot wait for itself");
+        }
+        if !jobs.contains_key(&a) {
+            fail!(NotFound, "--after {a}: no job named {a}");
+        }
+        if !after.contains(&a) {
+            after.push(a);
+        }
+    }
+    Ok(after)
 }
 
 /// The harnesses a job may use: those asked for (all must be enabled), or the
@@ -322,6 +364,7 @@ mod tests {
                     budget_usd: 1.0,
                     pinned: None,
                     reuse_key: key.map(Into::into),
+                    after: Vec::new(),
                 }),
             });
             if let Some(outcome) = outcome {

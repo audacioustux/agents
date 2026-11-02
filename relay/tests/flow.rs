@@ -336,3 +336,86 @@ fn a_spend_cap_is_a_checkpoint_while_progress_is_real() {
     ok(&relay(&env, &["queue", "resume", "idle", "--message", "Go on.", "--budget", "0.05"]), "resume");
     assert_eq!(wait_for(&env, "idle")["status"], "done");
 }
+
+/// The job's status, once it has been `want` (bounded, so a hang fails the test).
+fn until(env: &Env, name: &str, want: &str) {
+    for _ in 0..300 {
+        if job(env, name)["status"] == want {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("{name} never became {want}: {}", job(env, name));
+}
+
+fn board(env: &Env) -> String {
+    String::from_utf8_lossy(&relay(env, &["view", "status"]).stdout).into_owned()
+}
+
+#[test]
+fn a_job_starts_when_what_it_waits_for_is_done() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("after", false);
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "first", "--text", "One.", "--readonly"]), "queue first");
+    until(&env, "first", "running");
+    ok(&relay(&env, &["queue", "add", "second", "--text", "Two.", "--readonly", "--after", "first"]), "queue second");
+    std::thread::sleep(Duration::from_secs(2));
+    let second = job(&env, "second");
+    assert_eq!(second["status"], "queued", "it waits while first runs: {second}");
+    assert_eq!(second["after"], serde_json::json!(["first"]));
+    assert_eq!(second["pending"][0]["job"], "first");
+    assert_eq!(second["pending"][0]["state"], "running");
+    assert!(board(&env).contains("[after first]"), "{}", board(&env));
+
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(wait_for(&env, "first")["status"], "done");
+    let second = wait_for(&env, "second");
+    assert_eq!(second["status"], "done", "{second}");
+    assert!(second["started_at"].as_u64() >= job(&env, "first")["ended_at"].as_u64(), "started after first ended");
+    assert_eq!(job(&env, "second")["pending"], serde_json::json!([]));
+}
+
+#[test]
+fn a_job_whose_dependency_failed_is_blocked_until_released() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("blocked", false);
+    claude_account(&env.home, "a", 10, false);
+    let fail = env.home.join(".claude.a/fail");
+    std::fs::write(&fail, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "base", "--text", "One.", "--readonly"]), "queue base");
+    ok(&relay(&env, &["queue", "add", "late", "--text", "Two.", "--readonly", "--after", "base"]), "queue late");
+    ok(&relay(&env, &["queue", "add", "free", "--text", "Three.", "--readonly", "--after", "base,base"]), "queue free");
+    until(&env, "base", "failed");
+    std::fs::remove_file(&fail).unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let late = job(&env, "late");
+    assert_eq!((late["status"].as_str(), late["attempts"].as_u64()), (Some("queued"), Some(0)), "{late}");
+    assert_eq!(late["pending"][0]["blocked"], true);
+    assert!(board(&env).contains("[waits for base (failed)]"), "{}", board(&env));
+
+    let out = relay(&env, &["queue", "release", "late", "--from", "elsewhere"]);
+    assert_eq!(out.status.code(), Some(2), "it does not wait for that");
+    ok(&relay(&env, &["queue", "release", "late", "--from", "base"]), "release");
+    assert_eq!(job(&env, "late")["after"], serde_json::json!([]));
+    assert_eq!(wait_for(&env, "late")["status"], "done");
+    assert_eq!(job(&env, "free")["status"], "queued", "release was for late only");
+    let out = relay(&env, &["queue", "release", "late"]);
+    assert_eq!(out.status.code(), Some(4), "nothing left to release");
+}
+
+#[test]
+fn after_names_only_jobs_that_exist() {
+    let env = setup("unknown", false);
+    let out = relay(&env, &["queue", "add", "b", "--text", "x", "--after", "nope"]);
+    assert_eq!(out.status.code(), Some(3), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = relay(&env, &["queue", "add", "b", "--text", "x", "--after", "b"]);
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(job(&env, "b").is_null(), "a refused job is not recorded");
+}

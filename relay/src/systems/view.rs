@@ -7,7 +7,7 @@ use clap::Subcommand;
 
 use crate::bus::now_micros;
 use crate::ctx::Ctx;
-use crate::world::{Job, World};
+use crate::world::{Job, Wait, World};
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
@@ -60,7 +60,11 @@ pub fn ago(now_us: u64, then_us: u64) -> String {
 fn status(ctx: &Ctx, all: bool) -> Result<()> {
     let world = ctx.world()?;
     if ctx.json {
-        out!("{}", serde_json::to_string_pretty(&world)?);
+        let mut v = serde_json::to_value(&world)?;
+        for j in world.jobs.values() {
+            v["jobs"][&j.name]["pending"] = serde_json::to_value(world.waits(j))?;
+        }
+        out!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
     let text = board(ctx, &world, all);
@@ -106,14 +110,16 @@ pub fn listed(world: &crate::world::World, all: bool) -> Vec<&crate::world::Job>
     jobs
 }
 
-/// A job's cells: name, status, account, since when, spend, and its task with any reason.
-pub fn job_cells(j: &crate::world::Job, now: u64) -> Vec<String> {
+/// A job's cells: name, status, account, since when, spend, and its task with any reason
+/// (a queued job also says what it waits for).
+pub fn job_cells(world: &World, j: &Job, now: u64) -> Vec<String> {
     let since = match j.status {
         crate::world::Status::Running | crate::world::Status::Checking => j.started_at,
         crate::world::Status::Queued => j.ended_at.or(Some(j.created_at)),
         _ => j.ended_at,
     };
-    let reason = j.reason.as_deref().map_or(String::new(), |r| format!("  [{r}]"));
+    let waits = if j.status == crate::world::Status::Queued { Wait::summary(&world.waits(j)) } else { None };
+    let reason = waits.or_else(|| j.reason.clone()).map_or(String::new(), |r| format!("  [{r}]"));
     let check = j.checkpoints.last().map_or(String::new(), |c| format!("  {}", c.summary()));
     vec![
         j.name.clone(),
@@ -129,7 +135,7 @@ pub fn job_cells(j: &crate::world::Job, now: u64) -> Vec<String> {
 fn board(ctx: &Ctx, world: &crate::world::World, all: bool) -> String {
     let now = now_micros();
     let jobs = listed(world, all);
-    let rows: Vec<Vec<String>> = jobs.iter().map(|j| job_cells(j, now)).collect();
+    let rows: Vec<Vec<String>> = jobs.iter().map(|j| job_cells(world, j, now)).collect();
     let mut lines = vec![format!("jobs (at most {} running)", ctx.cfg.limits.max_running)];
     lines.extend(table(&rows).into_iter().map(|r| format!("  {r}")));
     if jobs.is_empty() {

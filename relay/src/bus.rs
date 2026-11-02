@@ -48,6 +48,15 @@ pub enum QueueEvent {
         /// A read-only job's question at a clean commit; equal keys get the same kind of answer.
         #[serde(default)]
         reuse_key: Option<String>,
+        /// Jobs that must be done before this one starts.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        after: Vec<String>,
+    },
+    /// The job no longer waits for these jobs (empty: for any of them).
+    Released {
+        job: String,
+        #[serde(default)]
+        from: Vec<String>,
     },
     Resumed {
         job: String,

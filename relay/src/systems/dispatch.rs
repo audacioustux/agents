@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::ctx::Ctx;
 use crate::harness::{Harness, Home};
 use crate::os::{self, Role};
-use crate::world::{AccountState, Job, Status, World};
+use crate::world::{AccountState, Job, Status, Wait, World};
 
 /// The longest sleep. Only a runner that dies without a word (one started by
 /// an earlier dispatcher, or killed outright) waits this long to be reaped.
@@ -128,8 +128,10 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
         port.emit(DispatchEvent::Dispatched { job, account, runner_pid: pid, runner_started: started })?;
         drop(gate);
     }
-    let busy = world.jobs.values().any(|j| j.status.is_live());
-    let waiting = world.jobs.values().any(|j| j.status == Status::Queued);
+    // A job blocked on a dependency that ended badly waits for the operator, not for the dispatcher.
+    let busy =
+        world.jobs.values().any(|j| j.status == Status::Running || j.status == Status::Queued && !world.blocked(j));
+    let waiting = world.jobs.values().any(|j| world.startable(j));
     let states: Vec<_> = found.iter().map(|a| (harness_of(a), world.accounts.get(&a.key()))).collect();
     Ok((busy, held, next_due(&states, waiting, now_micros())))
 }
@@ -217,6 +219,13 @@ fn plan(
     for j in queued {
         if total >= limits.max_running {
             break;
+        }
+        let waits = world.waits(j);
+        if !waits.is_empty() {
+            if world.blocked(j) {
+                held.0.push(format!("{}: {}", j.name, Wait::summary(&waits).unwrap_or_default()));
+            }
+            continue;
         }
         if !j.readonly && !disk_ok {
             held.0.push(format!("{}: free disk below {} GB", j.name, limits.min_free_disk_gb));

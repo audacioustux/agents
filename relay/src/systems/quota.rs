@@ -194,7 +194,7 @@ fn judge<'w>(
 
 /// Whether a queued job may run on `account`, so its reading decides something.
 pub fn wanted(world: &World, account: &Home) -> bool {
-    world.jobs.values().any(|j| j.status == Status::Queued && may_use(j, account))
+    world.jobs.values().any(|j| world.startable(j) && may_use(j, account))
 }
 
 pub fn show(ctx: &Ctx, world: &World) -> Result<()> {

@@ -64,6 +64,7 @@ anything else. Branch on the code; read `error` only to explain it.
 ```sh
 relay queue add fix-parser --prompt briefs/fix-parser.md
 relay queue add audit --text "Review src/auth for races." --readonly --harness omp
+relay queue add review --text "Review fix-parser." --readonly --after fix-parser   # starts once it is done
 relay view status          # jobs, and every account's room
 relay view result fix-parser --wait --json   # blocks until it ends: no polling
 relay land fetch fix-parser
@@ -76,6 +77,9 @@ cap on `continue` or `redirect`, or waits for you on `stop`. No new commit
 means `stop` with no model asked; `limits.job_ceiling_usd` bounds the total.
 `relay queue resume NAME --message M --budget X` still works; `--budget` caps
 that run alone.
+`--after A,B` waits for jobs to be `done`, not landed: landing is your step. If
+one fails or stops, the job shows `waits for A (failed)` and never starts on
+its own: queue A again, or `relay queue release NAME [--from A]`.
 
 The brief is the session's only context. See
 [relay/README.md](../../../relay/README.md) for accounts, quota, the sandbox

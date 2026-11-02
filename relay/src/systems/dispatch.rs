@@ -59,7 +59,9 @@ struct Held(Vec<String>);
 
 fn serve(ctx: &Ctx) -> Result<()> {
     let Some(role) = Role::try_take(&ctx.state.join("dispatch.lock"))? else { return Ok(()) };
-    let bell = Doorbell::watch(&[&ctx.bus, &ctx.bus.join("session")])?;
+    // Every project's bus: a seat freed or a limit hit in another project changes our plan too.
+    let buses = ctx.buses();
+    let bell = Doorbell::watch(&buses.iter().map(std::path::PathBuf::as_path).collect::<Vec<_>>())?;
     let version = binary_version();
     let mut idle_since: Option<Instant> = None;
     let mut last_held = Held::default();
@@ -104,6 +106,8 @@ fn binary_version() -> Option<SystemTime> {
 /// running, why jobs are held, and when (bus time) the plan could next change.
 fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     let _lock = ctx.jobs_lock()?;
+    // Seats are the machine's: no other project's dispatcher plans while this one does.
+    let _seats = Role::take(&ctx.state_root.join("seats.lock"))?;
     let port = ctx.port(&Source(()));
     let mut world = ctx.world()?;
     for j in world.jobs.values_mut().filter(|j| j.status == Status::Running) {

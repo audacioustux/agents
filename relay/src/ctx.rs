@@ -118,12 +118,25 @@ impl Ctx {
     /// checkpoints are theirs, so they are read, never written; one that
     /// cannot be read is left out.
     pub fn neighbours(&self) -> Vec<World> {
-        let Ok(dirs) = std::fs::read_dir(&self.state_root) else { return Vec::new() };
-        dirs.flatten()
-            .map(|e| e.path())
-            .filter(|d| *d != self.state && d.join("bus").is_dir())
+        self.projects()
+            .filter(|d| *d != self.state)
             .filter_map(|d| World::peek(&d.join("bus"), &d.join("world.json")).ok())
             .collect()
+    }
+
+    /// Every project's state directory on this machine, ours included.
+    fn projects(&self) -> impl Iterator<Item = PathBuf> {
+        std::fs::read_dir(&self.state_root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|d| d.join("bus").is_dir())
+    }
+
+    /// Every project's event directories, for a doorbell.
+    pub fn buses(&self) -> Vec<PathBuf> {
+        self.projects().flat_map(|d| [d.join("bus"), d.join("bus/session")]).filter(|d| d.is_dir()).collect()
     }
 
     pub fn job_file(&self, job: &str, ext: &str) -> PathBuf {

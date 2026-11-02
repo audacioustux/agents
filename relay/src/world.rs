@@ -84,6 +84,10 @@ pub struct Job {
 pub struct AccountState {
     pub enabled: bool,
     pub signed_out: bool,
+    /// When the sign-in state last changed (signed out, or enabled again):
+    /// across projects, the latest change wins.
+    #[serde(default)]
+    pub signed_at: Option<u64>,
     pub meters: Meters,
     /// Unix microseconds of the last reading.
     pub read_at: Option<u64>,
@@ -98,6 +102,7 @@ impl Default for AccountState {
         Self {
             enabled: true,
             signed_out: false,
+            signed_at: None,
             meters: Meters::new(),
             read_at: None,
             unreadable_at: None,
@@ -114,7 +119,7 @@ pub struct World {
 
 /// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
 /// holds, how a mark is kept), so checkpoints folded the old way are discarded.
-const FOLD_VERSION: u32 = 3;
+const FOLD_VERSION: u32 = 4;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -178,9 +183,12 @@ pub fn merge_account(ours: &AccountState, theirs: &AccountState) -> AccountState
     } else {
         (ours.meters.clone(), ours.read_at)
     };
+    // A sign-out stands until someone enables the account again, in any project.
+    let latest = if theirs.signed_at > ours.signed_at { theirs } else { ours };
     AccountState {
         enabled: ours.enabled,
-        signed_out: ours.signed_out || theirs.signed_out,
+        signed_out: latest.signed_out,
+        signed_at: latest.signed_at,
         meters,
         read_at,
         unreadable_at: ours.unreadable_at.max(theirs.unreadable_at),
@@ -339,7 +347,7 @@ impl World {
         match e {
             QuotaEvent::AccountEnabled { account, enabled } => {
                 let a = self.account(account);
-                (a.enabled, a.signed_out) = (*enabled, false);
+                (a.enabled, a.signed_out, a.signed_at) = (*enabled, false, Some(t));
             }
             QuotaEvent::Reading { account, meters } => {
                 let a = self.account(account);
@@ -380,7 +388,10 @@ impl World {
                 let a = self.account(account);
                 a.limited_until = Some(a.limited_until.map_or(*until, |u| u.max(*until)));
             }
-            SessionEvent::SignedOut { account } => self.account(account).signed_out = true,
+            SessionEvent::SignedOut { account } => {
+                let a = self.account(account);
+                (a.signed_out, a.signed_at) = (true, Some(t));
+            }
             SessionEvent::FollowUp { job, message } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.message = Some(message.clone());
@@ -611,11 +622,14 @@ mod tests {
 
         #[test]
         fn a_sign_out_anywhere_counts() {
-            let out = AccountState { signed_out: true, ..AccountState::default() };
+            let out = AccountState { signed_out: true, signed_at: Some(5), ..AccountState::default() };
             let fine = AccountState::default();
             assert!(merge_account(&fine, &out).signed_out);
             assert!(merge_account(&out, &fine).signed_out);
             assert!(!merge_account(&fine, &fine).signed_out);
+            // Enabled again later, in this project or another: the sign-out is over.
+            let back = AccountState { signed_at: Some(9), ..AccountState::default() };
+            assert!(!merge_account(&back, &out).signed_out && !merge_account(&out, &back).signed_out);
         }
 
         #[test]
@@ -632,7 +646,10 @@ mod tests {
             ours.accounts.insert("c:a".into(), read(10, 0.5));
             let mut theirs = World::default();
             theirs.accounts.insert("c:a".into(), read(20, 0.2));
-            theirs.accounts.insert("c:b".into(), AccountState { enabled: false, signed_out: true, ..read(5, 0.0) });
+            theirs.accounts.insert(
+                "c:b".into(),
+                AccountState { enabled: false, signed_out: true, signed_at: Some(5), ..read(5, 0.0) },
+            );
             theirs.jobs.insert("j".into(), Job::default());
             let mut other = World::default();
             other.accounts.insert("c:a".into(), AccountState { limited_until: Some(99), ..read(15, 0.9) });

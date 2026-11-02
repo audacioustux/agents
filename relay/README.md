@@ -133,11 +133,14 @@ provider's prompt cache and its whole transcript is read again at full price.
 
 Accounts belong to the machine, not the project, so every project on it
 shares what it knows of them: each listens to the others' state (never
-writing it) and uses the latest reading, the later limit, and a sign-out any
-of them saw, so a reading one project took is not taken again. Seats are
-shared too: `limits.per_account` counts the sessions every project runs on
-the account. Whether an account is used at all (`relay quota enable` and
-`disable`) and `limits.max_running` stay per project.
+writing it) and uses the latest reading, the later limit, and the latest
+sign-in change (a sign-out stands until the account is enabled again in any
+project), so a reading one project took is not taken again. Seats are shared
+too: `limits.per_account` counts the sessions every project runs on the
+account, and one machine-wide lock keeps two dispatchers from giving out the
+same seat. Each dispatcher's doorbell rings for every project's events.
+Whether an account is used at all (`relay quota enable` and `disable`) and
+`limits.max_running` stay per project.
 
 When a session hits a limit, its account is closed until two minutes after the
 stated reset (or for 15 minutes if none is stated), and the job goes back in

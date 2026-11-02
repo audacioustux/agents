@@ -1,0 +1,157 @@
+//! dispatch: gives queued jobs a slot on the account with the most room, and
+//! reaps sessions whose runner died. Emits: dispatched, reaped.
+//!
+//! It is the only system that acts on its own. `serve` takes the dispatcher
+//! role with flock (a second one exits at once), wakes on the bus doorbell,
+//! re-reads every 30 s as the lossless backstop (dead runners, resets,
+//! staleness), and exits after a minute with nothing queued or running.
+//! Every system that emits wakes it, so it never has to be started by hand.
+
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant, SystemTime};
+
+use anyhow::Result;
+use clap::Subcommand;
+
+use crate::accounts::{self, Account};
+use crate::bus::{DispatchEvent, now_micros};
+use crate::ctx::Ctx;
+use crate::os::{self, Doorbell, Role};
+use crate::world::{Job, Status, World};
+
+#[derive(Debug, Clone, Copy, Subcommand)]
+pub enum Cmd {
+    /// Start the dispatcher if it is not running. Systems do this themselves.
+    Wake,
+    /// The dispatcher itself.
+    Serve,
+}
+
+pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
+    match cmd {
+        Cmd::Wake => ctx.wake_dispatch(),
+        Cmd::Serve => serve(ctx),
+    }
+}
+
+/// Why nothing more starts this pass, for the log; printed only when it changes.
+#[derive(Debug, Default, PartialEq)]
+struct Held(Vec<String>);
+
+fn serve(ctx: &Ctx) -> Result<()> {
+    let Some(role) = Role::try_take(&ctx.state.join("dispatch.lock"))? else { return Ok(()) };
+    let bell = Doorbell::watch(&ctx.bus)?;
+    let version = binary_version();
+    let mut idle_since: Option<Instant> = None;
+    let mut last_held = Held::default();
+    loop {
+        if binary_version() != version {
+            // A rebuilt binary takes over: drop the role, then start the new one.
+            drop(role);
+            return ctx.wake_dispatch();
+        }
+        let (busy, held) = tick(ctx)?;
+        if held != last_held {
+            for h in &held.0 {
+                eprintln!("{} held: {h}", jiff::Timestamp::now());
+            }
+            last_held = held;
+        }
+        idle_since = if busy { None } else { Some(idle_since.unwrap_or_else(Instant::now)) };
+        if idle_since.is_some_and(|t| t.elapsed() > Duration::from_secs(60)) {
+            return Ok(());
+        }
+        if bell.wait(Duration::from_secs(30)) {
+            // Let a burst of events land, then fold them in one pass.
+            std::thread::sleep(Duration::from_millis(200));
+            bell.wait(Duration::ZERO);
+        }
+    }
+}
+
+fn binary_version() -> Option<SystemTime> {
+    std::env::current_exe().ok().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
+}
+
+/// One pass over the world. Returns whether anything is still queued or running.
+fn tick(ctx: &Ctx) -> Result<(bool, Held)> {
+    let port = ctx.port::<DispatchEvent>();
+    let mut world = ctx.world()?;
+    for j in world.jobs.values_mut().filter(|j| j.status == Status::Running) {
+        if !j.runner.is_some_and(|(pid, started)| os::same_process(pid, started)) {
+            port.emit(DispatchEvent::Reaped { job: j.name.clone() })?;
+            j.status = Status::Failed;
+        }
+    }
+    let found = accounts::discover(&ctx.cfg);
+    refresh_stale(ctx, &world, &found)?;
+    let mut held = Held::default();
+    let plan = plan(ctx, &world, &found, &mut held);
+    for (job, account) in plan {
+        let pid = ctx.spawn_self(&["session", "run", &job], &ctx.job_file(&job, "runner.log"))?;
+        let started = os::start_time(pid).unwrap_or(0);
+        port.emit(DispatchEvent::Dispatched { job, account, runner_pid: pid, runner_started: started })?;
+    }
+    let busy = world.jobs.values().any(|j| j.status.is_live());
+    Ok((busy, held))
+}
+
+/// Starts a quota reading for accounts whose reading is old, when some job waits.
+fn refresh_stale(ctx: &Ctx, world: &World, found: &[Account]) -> Result<()> {
+    let waiting = world.jobs.values().any(|j| j.status == Status::Queued);
+    let now = now_micros();
+    if waiting && found.iter().any(|a| accounts::is_stale(world.accounts.get(&a.label), now)) {
+        // `quota refresh` holds its own role, so overlapping passes start it once.
+        ctx.spawn_self(&["quota", "refresh", "--stale"], &ctx.state.join("quota.log"))?;
+    }
+    Ok(())
+}
+
+/// Which queued jobs start now, and where. Pure apart from reading machine gauges.
+fn plan(ctx: &Ctx, world: &World, found: &[Account], held: &mut Held) -> Vec<(String, String)> {
+    let limits = &ctx.cfg.limits;
+    let now_s = i64::try_from(now_micros() / 1_000_000).unwrap_or(i64::MAX);
+    let mut load: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut total = 0;
+    for j in world.jobs.values().filter(|j| j.status == Status::Running) {
+        *load.entry(j.account.as_deref().unwrap_or("")).or_default() += 1;
+        total += 1;
+    }
+    if let (Some(max), Some(now)) = (limits.max_load, os::load_average())
+        && now > max
+    {
+        held.0.push(format!("load {now:.1} is above {max}"));
+        return Vec::new();
+    }
+    let disk_ok =
+        os::free_disk_gb(ctx.clones.parent().unwrap_or(&ctx.state)).is_none_or(|gb| gb >= limits.min_free_disk_gb);
+    let mut queued: Vec<&Job> = world.jobs.values().filter(|j| j.status == Status::Queued).collect();
+    queued.sort_by_key(|j| j.created_at);
+    let mut out = Vec::new();
+    for j in queued {
+        if total >= limits.max_running {
+            break;
+        }
+        if !j.readonly && !disk_ok {
+            held.0.push(format!("{}: free disk below {} GB", j.name, limits.min_free_disk_gb));
+            continue;
+        }
+        let pick = found
+            .iter()
+            .filter(|a| j.pinned.as_ref().is_none_or(|p| p == &a.label))
+            .filter(|a| load.get(a.label.as_str()).copied().unwrap_or(0) < limits.per_account)
+            .filter(|a| accounts::refusal(world.accounts.get(&a.label), limits.floor, now_s).is_none())
+            .max_by(|a, b| {
+                let s = |x: &Account| accounts::score(&world.accounts[&x.label].windows, now_s);
+                s(a).total_cmp(&s(b))
+            });
+        let Some(a) = pick else {
+            held.0.push(format!("{}: no account has room", j.name));
+            continue;
+        };
+        *load.entry(a.label.as_str()).or_default() += 1;
+        total += 1;
+        out.push((j.name.clone(), a.label.clone()));
+    }
+    out
+}

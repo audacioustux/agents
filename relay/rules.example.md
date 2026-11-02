@@ -1,6 +1,6 @@
-# Lane rules (template)
+# Session rules (template)
 
-Prepend this file, edited for your project, to the brief of every lane, or have each brief point to it. A lane is a
+Prepend this file, edited for your project, to the brief of every relay job, or have each brief point to it. A job is a
 non-interactive agent run: it cannot ask a question, and its session ends when its turn ends. Each rule below carries
 its reason in one line.
 
@@ -11,32 +11,33 @@ its reason in one line.
 2. **No background work at the end.** A subagent, monitor or background command cannot report after the session is gone.
    Wait for it, or do not start it.
 3. **Stop what you start.** Servers, databases and watchers you launched are stopped before the final message, and `ps`
-   shows none of yours left. A leftover process holds a port and memory for the next lane.
+   shows none of yours left. A leftover process holds a port and memory for the next session.
 4. **Never end a turn with work or a check pending.** The final message is the report, written only when everything is
    done.
 
 ## Processes
 
-5. **Never kill by pattern** (`pkill -f`, `killall`, `kill $(pgrep ...)`). A pattern matches other lanes' processes and
-   the supervisor's own.
+5. **Never kill by pattern** (`pkill -f`, `killall`, `kill $(pgrep ...)`). A pattern matches other sessions' processes and
+   relay's own.
 6. **Kill only your own PIDs**, recorded when you started the process, or a process group you created.
 
 ## Tests
 
 7. **Targeted tests first**: the files and modules you changed, while you work.
 8. **One full run, at the end**, of only the packages you changed. A full suite run repeatedly multiplies load on a
-   machine shared with other lanes.
+   machine shared with other sessions.
 9. **A gate's result is its exit code.** Never report a gate green from `cmd | tail`, because the pipe's status is
    `tail`'s. Use `set -o pipefail` or read `${PIPESTATUS[0]}`, and state the exit code.
 
 ## Shared repository
 
-10. **Work in your own worktree** and write every output file by absolute path.
-11. **Commit early**, each reviewable step once its checks pass: a lane can be cut off at any moment, and committed work
+10. **Work in the checkout you were given** (relay gives build jobs a private clone) and write every output file by
+    absolute path.
+11. **Commit early**, each reviewable step once its checks pass: a session can be cut off at any moment, and committed work
     survives it.
 12. **Commit with explicit paths** (`git commit -- <paths>`). Never `git add -A` or a bare `git commit`, which can take
-    another lane's staged work.
-13. **Touch only the files in your brief.** Report anything else that looks wrong instead of fixing it: another lane may
+    another session's staged work.
+13. **Touch only the files in your brief.** Report anything else that looks wrong instead of fixing it: another session may
     be editing it.
 14. **No `git stash`, `git reset`, `git clean` or branch switching in a shared checkout**, and never push unless the
     brief says so. Each can destroy work that exists nowhere else.
@@ -44,7 +45,7 @@ its reason in one line.
 
 ## Report
 
-Your final message is the report. It states:
+Your final message is the report, under a heading containing FINAL (relay asks again if it is missing). It states:
 
 - **Done**: what changed, as a list of files.
 - **Verified by execution**: each command you ran, its exit code and its counts.

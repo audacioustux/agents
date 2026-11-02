@@ -1,0 +1,49 @@
+# relay.toml: put it at the root of the repository sessions work on.
+# Every key except `name` is optional; the values shown are the defaults.
+
+# Names this project's queue. State lives under $XDG_STATE_HOME/relay/<name>,
+# clones under $XDG_DATA_HOME/relay/<name>/clones.
+name = "myproject"
+# The repository, relative to this file.
+repo = "."
+
+[limits]
+max_running = 2          # sessions at once, over all accounts
+per_account = 1          # sessions at once on one account
+floor = 0.9              # an account at this utilization of any quota window takes no new session
+budget_usd = 10.0        # --max-budget-usd per attempt, unless the job sets its own
+silent_minutes = 30      # a session that prints nothing this long is ended
+# max_load = 24.0        # hold new sessions while the 1-minute load average is above this
+min_free_disk_gb = 10.0  # hold new build sessions (each makes a clone) below this
+max_retries = 1          # automatic retries for a session that died with no output
+
+[accounts]
+# Claude Code config dirs in $HOME starting with this prefix are accounts:
+# ~/.claude is "default", ~/.claude.work is "work". Sign each in once with
+#   CLAUDE_CONFIG_DIR=~/.claude.work claude
+prefix = ".claude"
+exclude = []             # labels never used, e.g. accounts that belong to another project
+
+[session]
+command = ["claude"]
+# model = "sonnet"
+# effort = "high"
+extra_args = []
+branch_prefix = "relay/"
+final_marker = "FINAL"   # a result without it gets one follow-up asking for the report; "" turns this off
+max_hours = 4.0
+nice = 10
+# Appended to the system prompt. {workspace} says where the session is and
+# what it may change; {branch} is the job's branch.
+# briefing = "..."
+
+[session.banned_models]
+# "haiku" = "too weak for this repository's reviews"
+
+[sandbox]
+enabled = true           # false runs sessions with your full access; then build jobs use acceptEdits only
+# hide = ["/workspaces"] # shown empty inside; default: the repository's parent directory
+hide_home = [".ssh", ".gnupg", ".config/gh", ".git-credentials", ".netrc", ".aws", ".config/gcloud",
+             ".docker", ".npmrc", ".cargo/credentials", ".cargo/credentials.toml", ".local/state"]
+writable_home = [".cache", ".cargo"]
+# env_deny = "..."       # variables whose names match are not passed in (see the README)

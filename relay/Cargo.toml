@@ -1,0 +1,35 @@
+[package]
+name = "relay"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Run queued coding-agent tasks as sandboxed headless Claude Code sessions, spread over several accounts by quota"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+jiff = "0.2.38"
+regex = "1.13.1"
+rustix = { version = "1.1.6", features = ["fs", "process", "event"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.1.8"
+uuid = { version = "1.29.0", features = ["v4"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+
+[profile.release]
+lto = "thin"
+strip = true

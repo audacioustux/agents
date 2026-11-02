@@ -17,6 +17,7 @@ use clap::Subcommand;
 
 use crate::accounts::{self, STALE_MICROS, harness_of};
 use crate::bus::{DispatchEvent, now_micros};
+use crate::config::Config;
 use crate::ctx::Ctx;
 use crate::harness::{Harness, Home};
 use crate::os::{self, Role};
@@ -223,11 +224,10 @@ fn plan(
         let mut why = Vec::new();
         let fits: Vec<(&Home, f64)> = found
             .iter()
-            .filter(|a| j.harnesses.is_empty() || j.harnesses.iter().any(|h| h == a.harness))
-            .filter(|a| j.pinned.as_ref().is_none_or(|p| *p == a.key()))
+            .filter(|a| may_use(j, a))
             .filter(|a| load.get(a.key().as_str()).copied().unwrap_or(0) < limits.per_account)
             .filter_map(|a| {
-                let model = j.models.get(a.harness).cloned().or_else(|| ctx.cfg.harness(a.harness).model);
+                let model = model_for(&ctx.cfg, j, a.harness);
                 match accounts::fit(a, world.accounts.get(&a.key()), model.as_deref(), limits.floor, now_us) {
                     Ok(score) => Some((a, score)),
                     Err(r) => {
@@ -247,6 +247,17 @@ fn plan(
         *load.entry(key).or_default() += 1;
     }
     out
+}
+
+/// Whether `job` may run on `account`: the job allows its harness, and any pin names it.
+pub fn may_use(job: &Job, account: &Home) -> bool {
+    (job.harnesses.is_empty() || job.harnesses.iter().any(|h| h == account.harness))
+        && job.pinned.as_ref().is_none_or(|p| *p == account.key())
+}
+
+/// The model `job` asks for on `harness`: its own choice there, else the harness's configured one.
+pub fn model_for(cfg: &Config, job: &Job, harness: &str) -> Option<String> {
+    job.models.get(harness).cloned().or_else(|| cfg.harness(harness).model)
 }
 
 /// Of the accounts that fit, the one a resumable session already ran on, so

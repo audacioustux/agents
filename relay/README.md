@@ -83,7 +83,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends |
 | `relay view watch [--all]` | The status live in a terminal UI (ratatui): jobs, the selected job's latest output and answer, and accounts, redrawn as events land in any project. Click a job to select it, scroll a pane with the wheel, click a key hint; or ↑↓, PgUp/PgDn, `a` older jobs, `q` quit. A reinstalled relay takes the window over by itself (hold Shift to select text) |
 | `relay view events` | The merged event log |
-| `relay quota show` / `refresh` / `enable L` / `disable L` | Account room, a fresh reading, switches |
+| `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it; a fresh reading; switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout) / delete its clone and records |
 | `relay probe [--account H:L]` | Sandbox self-test for one account of each harness, with controls |
 | `relay ask AGENT MODE ...` | One-shot read-only call, outside the queue ([the skill](../.agents/skills/relay/SKILL.md)) |

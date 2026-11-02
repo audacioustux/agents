@@ -79,7 +79,7 @@ impl Ctx {
                 .with_context(|| format!("creating {}", d.display()))?;
             std::fs::set_permissions(d, Permissions::from_mode(0o700))?;
         }
-        for d in [&ctx.bus, &ctx.jobs] {
+        for d in [&ctx.bus, &ctx.bus.join("session"), &ctx.jobs] {
             DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
@@ -101,8 +101,8 @@ impl Ctx {
         crate::reply::reply(self.json, value, text)
     }
 
-    pub fn port<E: Owned>(&self) -> Port<E> {
-        Port::new(&self.bus)
+    pub fn port<E: Owned>(&self, source: &E::Source) -> Port<E> {
+        Port::new(&self.bus, source)
     }
 
     pub fn events(&self) -> Result<Vec<Stamped>> {

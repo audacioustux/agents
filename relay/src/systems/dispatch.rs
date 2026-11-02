@@ -20,6 +20,16 @@ use crate::harness::Home;
 use crate::os::{self, Doorbell, Role};
 use crate::world::{Job, Status, World};
 
+/// The capability to write dispatch's port; only this module can make one.
+#[derive(Debug)]
+pub struct Source(());
+
+impl crate::bus::Source for Source {
+    fn file(&self) -> std::path::PathBuf {
+        crate::bus::system_file("dispatch")
+    }
+}
+
 #[derive(Debug, Clone, Copy, Subcommand)]
 pub enum Cmd {
     /// Start the dispatcher if it is not running. Systems do this themselves.
@@ -41,7 +51,7 @@ struct Held(Vec<String>);
 
 fn serve(ctx: &Ctx) -> Result<()> {
     let Some(role) = Role::try_take(&ctx.state.join("dispatch.lock"))? else { return Ok(()) };
-    let bell = Doorbell::watch(&ctx.bus)?;
+    let bell = Doorbell::watch(&[&ctx.bus, &ctx.bus.join("session")])?;
     let version = binary_version();
     let mut idle_since: Option<Instant> = None;
     let mut last_held = Held::default();
@@ -77,7 +87,7 @@ fn binary_version() -> Option<SystemTime> {
 /// One pass over the world. Returns whether anything is still queued or running.
 fn tick(ctx: &Ctx) -> Result<(bool, Held)> {
     let _lock = ctx.jobs_lock()?;
-    let port = ctx.port::<DispatchEvent>();
+    let port = ctx.port(&Source(()));
     let mut world = ctx.world()?;
     for j in world.jobs.values_mut().filter(|j| j.status == Status::Running) {
         if !j.runner.is_some_and(|(pid, started)| os::same_process(pid, started)) {

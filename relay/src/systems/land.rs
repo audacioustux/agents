@@ -8,6 +8,16 @@ use clap::Subcommand;
 use crate::bus::LandEvent;
 use crate::ctx::Ctx;
 
+/// The capability to write land's port; only this module can make one.
+#[derive(Debug)]
+pub struct Source(());
+
+impl crate::bus::Source for Source {
+    fn file(&self) -> std::path::PathBuf {
+        crate::bus::system_file("land")
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
     /// Copy the job's branch into the repository as a branch of the same name. No checkout.
@@ -55,7 +65,8 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 let _ = std::fs::remove_file(ctx.job_file(&name, ext));
             }
             let _ = std::fs::remove_dir_all(ctx.job_scratch(&name));
-            ctx.port::<LandEvent>().emit(LandEvent::Forgotten { job: name.clone() })?;
+            crate::bus::forget_sessions(&ctx.bus, &name);
+            ctx.port(&Source(())).emit(LandEvent::Forgotten { job: name.clone() })?;
             ctx.reply(&serde_json::json!({ "job": name, "cleaned": true }), &format!("{name}: cleaned"))?;
         }
     }

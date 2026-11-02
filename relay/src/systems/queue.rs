@@ -13,6 +13,16 @@ use crate::ctx::Ctx;
 use crate::os;
 use crate::world::Status;
 
+/// The capability to write queue's port; only this module can make one.
+#[derive(Debug)]
+pub struct Source(());
+
+impl crate::bus::Source for Source {
+    fn file(&self) -> std::path::PathBuf {
+        crate::bus::system_file("queue")
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
     /// Queue a task. The brief is the only context the session gets.
@@ -101,7 +111,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Stop { .. } => (QueueEvent::StopRequested { job: name.clone() }, when(|s| s == Status::Running)?.runner),
     };
     let recorded = serde_json::to_value(&event)?["type"].clone();
-    ctx.port::<QueueEvent>().emit(event)?;
+    ctx.port(&Source(())).emit(event)?;
     // Only a process that is still the recorded runner is signalled, never a reused pid.
     if let Some((pid, started)) = runner
         && os::same_process(pid, started)

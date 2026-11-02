@@ -52,14 +52,12 @@ impl Role {
 pub struct Doorbell(OwnedFd);
 
 impl Doorbell {
-    pub fn watch(dir: &Path) -> Result<Self> {
+    pub fn watch(dirs: &[&Path]) -> Result<Self> {
         let fd = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK).context("inotify")?;
-        inotify::add_watch(
-            &fd,
-            dir,
-            inotify::WatchFlags::MODIFY | inotify::WatchFlags::CREATE | inotify::WatchFlags::MOVED_TO,
-        )
-        .with_context(|| format!("watching {}", dir.display()))?;
+        let flags = inotify::WatchFlags::MODIFY | inotify::WatchFlags::CREATE | inotify::WatchFlags::MOVED_TO;
+        for dir in dirs {
+            inotify::add_watch(&fd, *dir, flags).with_context(|| format!("watching {}", dir.display()))?;
+        }
         Ok(Self(fd))
     }
 
@@ -137,7 +135,7 @@ mod tests {
     #[test]
     fn doorbell_rings_on_append() {
         let d = Dir::new();
-        let bell = Doorbell::watch(d.path()).unwrap();
+        let bell = Doorbell::watch(&[d.path()]).unwrap();
         assert!(!bell.wait(Duration::from_millis(10)));
         std::fs::write(d.path().join("x"), "1").unwrap();
         assert!(bell.wait(Duration::from_secs(1)));

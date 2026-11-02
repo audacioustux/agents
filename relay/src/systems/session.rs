@@ -28,10 +28,28 @@ pub enum Cmd {
     Run { name: String },
 }
 
+/// The capability to write one attempt's session port; only this module can make one.
+#[derive(Debug)]
+pub struct Source {
+    job: String,
+    attempt: u32,
+}
+
+impl crate::bus::Source for Source {
+    fn file(&self) -> PathBuf {
+        crate::bus::session_file(&self.job, self.attempt)
+    }
+}
+
+/// This attempt's port: the runner is the only writer of its attempt's file.
+fn port(ctx: &Ctx, job: &Job) -> crate::bus::Port<SessionEvent> {
+    ctx.port(&Source { job: job.name.clone(), attempt: job.attempts })
+}
+
 pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
     Ctx::wait_for_gate();
-    let port = ctx.port::<SessionEvent>();
     let job = ctx.world()?.jobs.remove(&name).with_context(|| format!("no job named {name}"))?;
+    let port = port(ctx, &job);
     let mut spend = (0.0, 0);
     let (outcome, reason) =
         attempt(ctx, &job, &mut spend).unwrap_or_else(|e| (Outcome::Failed, Some(format!("{e:#}"))));
@@ -53,7 +71,7 @@ fn workspace_note(ctx: &Ctx, job: &Job) -> String {
 }
 
 fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
-    let port = ctx.port::<SessionEvent>();
+    let port = port(ctx, job);
     let key = job.account.clone().context("dispatched without an account")?;
     let found = accounts::discover(&ctx.cfg);
     let Some(home) = found.iter().find(|h| h.key() == key) else {
@@ -152,7 +170,7 @@ fn now_s() -> i64 {
 
 /// What a verdict means for the job, and what it tells the other systems.
 fn conclude(ctx: &Ctx, job: &Job, key: &str, v: Verdict, now_s: i64) -> Result<Ended> {
-    let port = ctx.port::<SessionEvent>();
+    let port = port(ctx, job);
     let s = &ctx.cfg.session;
     Ok(match v {
         Verdict::Done => (Outcome::Done, None),
@@ -210,7 +228,7 @@ fn drive(
     stdin: Option<&str>,
     mut reader: Box<dyn Reader>,
 ) -> Result<(Report, Ending)> {
-    let port = ctx.port::<SessionEvent>();
+    let port = port(ctx, job);
     let mut log = Ctx::append_private(&ctx.job_file(&job.name, "log.ndjson"))?;
     let mut child = cmd
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })

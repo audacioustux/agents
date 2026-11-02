@@ -114,6 +114,13 @@ impl World {
         self.accounts.entry(label.to_owned()).or_default()
     }
 
+    /// Whether a session event comes from its job's current attempt, the only
+    /// writer the fold listens to. Events from before files were per attempt have no source.
+    fn current(&self, s: &Stamped, e: &SessionEvent) -> bool {
+        let Some((job, attempt)) = &s.from else { return true };
+        e.job().is_none_or(|j| j == job) && self.jobs.get(job).is_some_and(|j| j.attempts == *attempt)
+    }
+
     fn apply(&mut self, s: &Stamped) {
         let t = s.t;
         match &s.event {
@@ -197,7 +204,8 @@ impl World {
                     j.ended_at = Some(t);
                 }
             }
-            Event::Session(e) => self.apply_session(t, e),
+            Event::Session(e) if self.current(s, e) => self.apply_session(t, e),
+            Event::Session(_) => {}
             Event::Quota(QuotaEvent::AccountEnabled { account, enabled }) => {
                 let a = self.account(account);
                 a.enabled = *enabled;
@@ -279,7 +287,7 @@ mod tests {
     use super::*;
 
     fn st(t: u64, event: Event) -> Stamped {
-        Stamped { t, event }
+        Stamped { t, event, from: None }
     }
 
     fn queued(job: &str) -> Event {
@@ -353,6 +361,44 @@ mod tests {
         evs.push(st(3, Event::Queue(QueueEvent::StopRequested { job: "a".into() })));
         evs.push(st(4, Event::Dispatch(DispatchEvent::Reaped { job: "a".into() })));
         assert_eq!(World::fold(&evs).jobs["a"].status, Status::Stopped);
+    }
+
+    #[test]
+    fn only_the_current_attempt_is_heard() {
+        let dispatched = |t| {
+            st(
+                t,
+                Event::Dispatch(DispatchEvent::Dispatched {
+                    job: "a".into(),
+                    account: "x".into(),
+                    runner_pid: 9,
+                    runner_started: t,
+                }),
+            )
+        };
+        let ended = |t, attempt| Stamped {
+            t,
+            event: Event::Session(SessionEvent::Ended {
+                job: "a".into(),
+                outcome: Outcome::Done,
+                cost_usd: 0.0,
+                turns: 1,
+                reason: None,
+            }),
+            from: Some(("a".into(), attempt)),
+        };
+        // Attempt 1's runner outlived its attempt and reports after attempt 2 started: not heard.
+        let w = World::fold(&[st(1, queued("a")), dispatched(2), dispatched(3), ended(4, 1)]);
+        assert_eq!(w.jobs["a"].status, Status::Running);
+        let w = World::fold(&[st(1, queued("a")), dispatched(2), dispatched(3), ended(4, 2)]);
+        assert_eq!(w.jobs["a"].status, Status::Done);
+        // A file speaks only for its own job.
+        let mut other = ended(4, 2);
+        other.from = Some(("b".into(), 2));
+        assert_eq!(
+            World::fold(&[st(1, queued("a")), dispatched(2), dispatched(3), other]).jobs["a"].status,
+            Status::Running
+        );
     }
 
     #[test]

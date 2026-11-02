@@ -15,6 +15,16 @@ use crate::os::Role;
 use crate::sandbox;
 use crate::world::{Status, World};
 
+/// The capability to write quota's port; only this module can make one.
+#[derive(Debug)]
+pub struct Source(());
+
+impl crate::bus::Source for Source {
+    fn file(&self) -> std::path::PathBuf {
+        crate::bus::system_file("quota")
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
     /// Each account's room.
@@ -43,7 +53,7 @@ fn toggle(ctx: &Ctx, account: String, enabled: bool) -> Result<()> {
     if !accounts::discover(&ctx.cfg).iter().any(|a| a.key() == account) {
         fail!(NotFound, "unknown account {account}; accounts are harness:label, see: relay quota show");
     }
-    ctx.port::<QuotaEvent>().emit(QuotaEvent::AccountEnabled { account, enabled })?;
+    ctx.port(&Source(())).emit(QuotaEvent::AccountEnabled { account, enabled })?;
     ctx.wake_dispatch()?;
     show(ctx, &ctx.world()?)
 }
@@ -60,7 +70,7 @@ fn refresh(ctx: &Ctx, only_stale: bool) -> Result<()> {
         .filter(|a| harness_of(a).caps().quota)
         .filter(|a| !only_stale || accounts::due(harness_of(a), world.accounts.get(&a.key()), now))
         .collect();
-    let port = ctx.port::<QuotaEvent>();
+    let port = ctx.port(&Source(()));
     // In parallel: one reading can take a minute and a half.
     let readings: Vec<_> = std::thread::scope(|s| {
         let handles: Vec<_> = todo.iter().map(|a| s.spawn(move || (a, read(ctx, a)))).collect();

@@ -25,7 +25,16 @@ impl Drop for Env {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let ok = Command::new("git").arg("-C").arg(dir).args(args).envs(identity()).status().unwrap().success();
+    // The machine's own git config (commit signing, hooks) is not the test's.
+    let ok = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .envs(identity())
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .status()
+        .unwrap()
+        .success();
     assert!(ok, "git {args:?}");
 }
 

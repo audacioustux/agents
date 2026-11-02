@@ -138,7 +138,7 @@ impl Ctx {
     pub fn spawn_self(&self, args: &[&str], log: &Path) -> Result<u32> {
         let child = self.spawn(args, log, Stdio::null())?;
         let pid = child.id();
-        Self::reap(child);
+        self.reap(child);
         Ok(pid)
     }
 
@@ -149,7 +149,7 @@ impl Ctx {
         let mut child = self.spawn(args, log, Stdio::piped())?;
         let gate = child.stdin.take().context("the gate pipe")?;
         let pid = child.id();
-        Self::reap(child);
+        self.reap(child);
         Ok((pid, gate))
     }
 
@@ -168,9 +168,15 @@ impl Ctx {
             .with_context(|| format!("starting relay {}", args.join(" ")))
     }
 
-    /// Reaps `child` when it exits, so a long-lived dispatcher leaves no zombies.
-    fn reap(mut child: Child) {
-        std::thread::spawn(move || child.wait());
+    /// Reaps `child` when it exits, so a long-lived dispatcher leaves no
+    /// zombies, and rings the bus doorbell: a runner killed outright reports
+    /// nothing, so its exit is the only news that it has gone.
+    fn reap(&self, mut child: Child) {
+        let bell = self.bus.join(".exited");
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            let _ = std::fs::write(bell, "");
+        });
     }
 
     /// Makes sure the dispatcher is awake. If one already runs, the new one

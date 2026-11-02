@@ -97,7 +97,7 @@ fn serve(ctx: &Ctx) -> Result<()> {
 }
 
 fn binary_version() -> Option<SystemTime> {
-    std::env::current_exe().ok().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
+    crate::os::own_binary().ok().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
 }
 
 /// One pass over the world. Returns whether anything is still queued or

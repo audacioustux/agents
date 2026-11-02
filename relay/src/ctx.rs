@@ -155,7 +155,7 @@ impl Ctx {
 
     fn spawn(&self, args: &[&str], log: &Path, stdin: Stdio) -> Result<Child> {
         let out = Self::append_private(log)?;
-        Command::new(std::env::current_exe()?)
+        Command::new(crate::os::own_binary()?)
             .arg("--config")
             .arg(&self.cfg_path)
             .args(args)

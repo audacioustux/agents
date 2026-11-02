@@ -101,6 +101,15 @@ pub fn terminate_group(pid: u32) -> Result<()> {
     kill_process_group(pid, Signal::TERM).context("kill")
 }
 
+/// The path this binary was started from. Once an upgrade replaces it, Linux
+/// names the running image `<path> (deleted)`; the path itself then holds
+/// the new binary, which is the one to start.
+pub fn own_binary() -> std::io::Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    let s = exe.to_string_lossy();
+    Ok(s.strip_suffix(" (deleted)").map_or(exe.clone(), std::path::PathBuf::from))
+}
+
 /// 1-minute load average.
 pub fn load_average() -> Option<f64> {
     std::fs::read_to_string("/proc/loadavg").ok()?.split_whitespace().next()?.parse().ok()
@@ -148,6 +157,7 @@ mod tests {
         assert!(same_process(me, t));
         assert!(!same_process(me, t + 1));
         assert!(load_average().is_some());
+        assert!(own_binary().unwrap().exists());
         assert!(free_disk_gb(Path::new("/")).is_some());
         assert!(free_disk_gb(Path::new("/nonexistent/not/yet")).is_some(), "measured where it will be made");
     }

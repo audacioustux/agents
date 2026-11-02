@@ -282,8 +282,15 @@ fn clone(ctx: &Ctx, name: &str) -> Result<(PathBuf, String)> {
         }
         Ok(())
     };
-    ok(Command::new("git").args(["clone", "--quiet", "--shared"]).arg(&ctx.cfg.repo).arg(&dir), "git clone")?;
-    ok(Ctx::git(&dir).args(["switch", "--quiet", "-c", &branch]), "git switch")?;
-    ok(Ctx::git(&dir).args(["remote", "set-url", "--push", "origin", "relay-jobs-do-not-push"]), "git remote")?;
-    Ok((dir, branch))
+    // The job has no clone on record, so anything here is relay's own leftover from a failed attempt.
+    let _ = std::fs::remove_dir_all(&dir);
+    let made = (|| {
+        ok(Command::new("git").args(["clone", "--quiet", "--shared"]).arg(&ctx.cfg.repo).arg(&dir), "git clone")?;
+        ok(Ctx::git(&dir).args(["switch", "--quiet", "-c", &branch]), "git switch")?;
+        ok(Ctx::git(&dir).args(["remote", "set-url", "--push", "origin", "relay-jobs-do-not-push"]), "git remote")
+    })();
+    if made.is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    made.map(|()| (dir, branch))
 }

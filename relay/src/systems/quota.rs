@@ -152,13 +152,15 @@ pub fn accounts_view(ctx: &Ctx, world: &World) -> (serde_json::Value, String) {
     let row = |a: &Home| {
         let (key, h) = (a.key(), harness_of(a));
         let st = world.accounts.get(&key);
-        let state = match accounts::account_refusal(h, st, secs(now)) {
-            None if !h.caps().quota => "ready (unmetered)".to_owned(),
-            None => "ready".to_owned(),
-            Some(accounts::Refusal::Limited) => {
+        // The dispatcher's own judgment, for the harness's configured model.
+        let model = ctx.cfg.harness(a.harness).model;
+        let state = match accounts::fit(a, st, model.as_deref(), ctx.cfg.limits.floor, now) {
+            Ok(_) if !h.caps().quota => "ready (unmetered)".to_owned(),
+            Ok(_) => "ready".to_owned(),
+            Err(accounts::Refusal::Limited) => {
                 format!("limited until {}", fmt_time(st.and_then(|s| s.limited_until).unwrap_or(0)))
             }
-            Some(r) => r.describe(),
+            Err(r) => r.describe(),
         };
         let running = world.jobs.values().filter(|j| j.status == Status::Running && j.account.as_ref() == Some(&key));
         Row {

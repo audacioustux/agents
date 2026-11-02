@@ -75,7 +75,7 @@ impl Refusal {
 }
 
 /// The account's own state, before any job is considered.
-pub fn account_refusal(harness: &dyn Harness, state: Option<&AccountState>, now_s: i64) -> Option<Refusal> {
+fn account_refusal(harness: &dyn Harness, state: Option<&AccountState>, now_s: i64) -> Option<Refusal> {
     let a = state.cloned().unwrap_or_default();
     if !a.enabled {
         Some(Refusal::Disabled)

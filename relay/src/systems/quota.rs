@@ -134,6 +134,12 @@ impl Row<'_> {
 }
 
 pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
+    let (value, text) = accounts_view(ctx, world);
+    ctx.reply(&value, &text)
+}
+
+/// Every account's room, as JSON and as text.
+pub fn accounts_view(ctx: &Ctx, world: &World) -> (serde_json::Value, String) {
     let now = now_micros();
     let row = |a: &Home| {
         let (key, h) = (a.key(), harness_of(a));
@@ -161,7 +167,7 @@ pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
     let head =
         format!("accounts on {} (floor {:.0}%, {} session(s) each)", names.join(", "), l.floor * 100.0, l.per_account);
     let text = std::iter::once(head).chain(rows.iter().map(|r| r.text(now))).collect::<Vec<_>>().join("\n");
-    ctx.reply(&serde_json::json!({ "harnesses": names, "accounts": rows }), &text)
+    (serde_json::json!({ "harnesses": names, "accounts": rows }), text)
 }
 
 pub fn fmt_time(unix_s: i64) -> String {

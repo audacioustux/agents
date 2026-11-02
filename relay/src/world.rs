@@ -386,7 +386,7 @@ impl World {
                     j.after.retain(|a| !from.is_empty() && !from.contains(a));
                 }
             }
-            QueueEvent::Resumed { job, message, budget_usd } => {
+            QueueEvent::Resumed { job, message, budget_usd, models } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     // Resumed by hand during its check: the checking runner no longer speaks for it.
                     if j.status == Status::Checking {
@@ -399,6 +399,7 @@ impl World {
                     j.follow_ups = 0;
                     j.reruns = 0;
                     j.budget_usd = budget_usd.unwrap_or(j.budget_usd);
+                    j.models.extend(models.clone());
                 }
             }
             QueueEvent::Dequeued { job } => {
@@ -597,6 +598,21 @@ mod tests {
     }
 
     #[test]
+    fn a_resume_may_move_the_job_to_another_model() {
+        let fail = ended("a", Outcome::Failed);
+        let to = |m: &str| BTreeMap::from([("claude".to_owned(), m.to_owned())]);
+        let resumed = Event::Queue(QueueEvent::Resumed {
+            job: "a".into(),
+            message: "go on".into(),
+            budget_usd: None,
+            models: to("claude-opus-5-5"),
+        });
+        let w = World::fold(&[st(1, queued("a")), st(2, fail), st(3, resumed)]);
+        assert_eq!(w.jobs["a"].models, to("claude-opus-5-5"));
+        assert_eq!(w.jobs["a"].status, Status::Queued);
+    }
+
+    #[test]
     fn dependencies_fold_the_same_every_time() {
         let release = |from: &[&str]| {
             Event::Queue(QueueEvent::Released { job: "c".into(), from: from.iter().map(|f| (*f).to_owned()).collect() })
@@ -639,7 +655,12 @@ mod tests {
         assert_eq!(state(&events), (false, true, Some("waits for a (failed)".into())), "failed");
         events.push(st(
             5,
-            Event::Queue(QueueEvent::Resumed { job: "a".into(), message: "again".into(), budget_usd: None }),
+            Event::Queue(QueueEvent::Resumed {
+                job: "a".into(),
+                message: "again".into(),
+                budget_usd: None,
+                models: BTreeMap::new(),
+            }),
         ));
         assert_eq!(state(&events), (false, false, Some("after a".into())), "queued again, the dependent waits again");
         events.extend([st(6, dispatched("a")), st(7, ended("a", Outcome::Done))]);
@@ -828,7 +849,12 @@ mod tests {
         assert_eq!((j.status, j.budget_usd, j.cost_usd), (Status::Queued, 2.0, 1.5));
         assert_eq!((j.message.as_deref(), j.checkpoints.len()), (Some("Checkpoint 1"), 1));
 
-        let by_hand = Event::Queue(QueueEvent::Resumed { job: "a".into(), message: "mine".into(), budget_usd: None });
+        let by_hand = Event::Queue(QueueEvent::Resumed {
+            job: "a".into(),
+            message: "mine".into(),
+            budget_usd: None,
+            models: BTreeMap::new(),
+        });
         let failed = session(SessionEvent::Ended {
             job: "a".into(),
             outcome: Outcome::Failed,

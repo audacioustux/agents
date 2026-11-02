@@ -35,6 +35,10 @@ pub enum Cmd {
         /// Spend cap for this run alone, in USD; not the job's total, which `limits.job_ceiling_usd` bounds.
         #[arg(long, value_parser = usd)]
         budget: Option<f64>,
+        /// `harness=model` (repeatable), or a bare model when the job runs on one harness:
+        /// replaces the job's model there from this run on.
+        #[arg(long = "model")]
+        models: Vec<String>,
     },
     /// Stop a queued job waiting for the jobs it was queued `--after`.
     Release {
@@ -118,9 +122,16 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             }
             (add.queued(ctx, &world.jobs)?, None)
         }
-        Cmd::Resume { message, budget, .. } => {
-            when(|s| !s.is_live() || s == Status::Checking)?;
-            (QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget }, None)
+        Cmd::Resume { message, budget, models, .. } => {
+            let j = when(|s| !s.is_live() || s == Status::Checking)?;
+            let models = parse_models(ctx, &j.harnesses, &models)?;
+            // The model it will run on, checked now: a banned one would only fail at dispatch.
+            let mut next = j.models.clone();
+            next.extend(models.clone());
+            if let Some((h, m, reason)) = next.iter().find_map(|(h, m)| ctx.cfg.session.banned(m).map(|r| (h, m, r))) {
+                fail!(Refused, "model {m} is banned: {reason}; resume with --model {h}=<model>");
+            }
+            (QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget, models }, None)
         }
         Cmd::Release { from, .. } => {
             let waiting = &when(|s| s == Status::Queued)?.after;

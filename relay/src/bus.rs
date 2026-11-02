@@ -62,6 +62,9 @@ pub enum QueueEvent {
         job: String,
         message: String,
         budget_usd: Option<f64>,
+        /// Models that replace the job's own, by harness, from this run on.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        models: std::collections::BTreeMap<String, String>,
     },
     Dequeued {
         job: String,

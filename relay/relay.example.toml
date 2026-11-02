@@ -40,6 +40,11 @@ branch_prefix = "relay/"
 final_marker = "FINAL"   # a result without it gets one follow-up asking for the report; "" turns this off
 max_hours = 4.0
 nice = 10
+# A prefix that enters the project's development environment, run on the host
+# before each attempt (its `env` is passed in), for tools that cannot run in
+# the sandbox, such as single-user Nix:
+# env_shell = ["nix", "develop", "-c"]
+env_shell = []
 # Appended to the system prompt. {workspace} says where the session is and
 # what it may change; {branch} is the job's branch.
 # briefing = "..."
@@ -51,7 +56,7 @@ nice = 10
 enabled = true           # false runs sessions with your full access; then build jobs use edit-only permissions
 # hide = ["/workspaces"] # shown empty inside; default: the repository's parent directory
 hide_home = [".ssh", ".gnupg", ".config/gh", ".git-credentials", ".netrc", ".aws", ".config/gcloud",
-             ".docker", ".npmrc", ".cargo/credentials", ".cargo/credentials.toml", ".local/state",
+             ".docker", ".npmrc", ".cargo/credentials", ".cargo/credentials.toml", ".local/state/gh", ".local/state/claude",
              ".omp/ssh-control"]
 # Writable caches under $HOME: relay's own directory per project is mounted at
 # each, never the host's own, so a session cannot change what the host runs.

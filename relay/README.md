@@ -182,7 +182,13 @@ where the job's own mounts come last, so nothing above can hide them.
 
 Environment variables are cleared and passed back in, except those matching
 `sandbox.env_deny` (tokens, secrets, keys, `AUTH`, cookies, sessions and
-`CLAUDE*`). The adapter then sets the one that selects the account. Signing
+`CLAUDE*`). The adapter then sets the one that selects the account. A
+project whose toolchain comes from a development environment that cannot
+start inside the sandbox (single-user Nix locks its store, which is
+read-only there) names it in `session.env_shell`, such as
+`["nix", "develop", "-c"]`: relay enters it on the host before each attempt,
+as direnv would, passes its variables in through the same filter, and tells
+the session its tools are already loaded. Signing
 keys are hidden, so git inside is told not to sign (`commit.gpgsign` and
 `tag.gpgsign` off); sign commits when you land them.
 

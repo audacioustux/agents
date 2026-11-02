@@ -61,14 +61,52 @@ pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
 type Ended = (Outcome, Option<String>);
 
 fn workspace_note(ctx: &Ctx, job: &Job) -> String {
-    if job.readonly {
+    let place = if job.readonly {
         "The repository is mounted read-only. Report; do not try to change files.".to_owned()
     } else {
         let branch = job.branch.clone().unwrap_or_else(|| format!("{}{}", ctx.cfg.session.branch_prefix, job.name));
         format!(
             "You are on branch {branch} in a private clone. Commit your work there with explicit pathspecs. Never push."
         )
+    };
+    match ctx.cfg.session.env_shell.join(" ") {
+        shell if shell.is_empty() => place,
+        shell => format!(
+            "{place} The project's development environment (`{shell}`) is already loaded: run its tools \
+             directly, never through `{shell}`, which cannot run here."
+        ),
     }
+}
+
+/// The project's development environment, entered on the host in `dir`
+/// through `shell` (`session.env_shell`), minus names `deny` matches.
+fn dev_env(shell: &[String], deny: &regex::Regex, dir: &Path) -> Result<Vec<(OsString, Option<OsString>)>> {
+    use std::os::unix::ffi::OsStrExt;
+    // A marker first, so whatever the environment's own hooks print is not taken for variables.
+    const MARK: &str = "\0relay-env\0";
+    let Some((program, prefix)) = shell.split_first() else { return Ok(Vec::new()) };
+    let out = Command::new("timeout")
+        .arg("600")
+        .arg(program)
+        .args(prefix)
+        .args(["sh", "-c", &format!("printf '{}'; env -0", MARK.replace('\0', "\\0"))])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .with_context(|| format!("entering the development environment ({program})"))?;
+    let at = out.stdout.windows(MARK.len()).position(|w| w == MARK.as_bytes());
+    let Some(at) = at.filter(|_| out.status.success()) else {
+        bail!("the development environment ({}) did not start", shell.join(" "));
+    };
+    Ok(out.stdout[at + MARK.len()..]
+        .split(|&b| b == 0)
+        .filter_map(|kv| {
+            let eq = kv.iter().position(|&b| b == b'=')?;
+            let (k, v) = (std::ffi::OsStr::from_bytes(&kv[..eq]), std::ffi::OsStr::from_bytes(&kv[eq + 1..]));
+            (!deny.is_match(&k.to_string_lossy())).then(|| (k.to_owned(), Some(v.to_owned())))
+        })
+        .collect())
 }
 
 fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
@@ -132,6 +170,10 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         Err(refusal) => return Ok((Outcome::Failed, Some(refusal.0))),
     };
     inv.args.extend(conf.extra_args.iter().map(OsString::from));
+    // The development environment underneath; the harness's own variables (the account) win.
+    let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
+    let dev = dev_env(&ctx.cfg.session.env_shell, &deny, &cwd)?;
+    inv.env = dev.into_iter().chain(std::mem::take(&mut inv.env)).collect();
     inv.write_files().context("writing the prompt file")?;
     let mut cmd = command(ctx, home, &inv, workdir.as_deref(), &scratch, &cwd);
 
@@ -321,4 +363,24 @@ fn clone(ctx: &Ctx, name: &str) -> Result<(PathBuf, String)> {
         let _ = std::fs::remove_dir_all(&dir);
     }
     made.map(|()| (dir, branch))
+}
+
+#[cfg(test)]
+mod dev_env_tests {
+    #[test]
+    fn the_environment_is_read_after_the_marker_and_filtered() {
+        // A "shell" that prints a banner, sets variables, then runs the command it is given.
+        let shell: Vec<String> =
+            ["sh", "-c", "echo welcome; export DEV_TOOL=/nix/store/x API_TOKEN=s3cret; exec \"$@\"", "shell"]
+                .map(String::from)
+                .to_vec();
+        let deny = regex::Regex::new("TOKEN").unwrap();
+        let env = super::dev_env(&shell, &deny, std::path::Path::new("/")).unwrap();
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.clone());
+        assert_eq!(get("DEV_TOOL").as_deref(), Some(std::ffi::OsStr::new("/nix/store/x")));
+        assert_eq!(get("API_TOKEN"), None, "secret-named variables stay out");
+        assert!(env.iter().all(|(k, _)| !k.to_string_lossy().contains("welcome")), "the banner is not a variable");
+        assert!(super::dev_env(&["false".to_owned()], &deny, std::path::Path::new("/")).is_err());
+        assert_eq!(super::dev_env(&[], &deny, std::path::Path::new("/")).unwrap(), Vec::new());
+    }
 }

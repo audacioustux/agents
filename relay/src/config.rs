@@ -114,6 +114,12 @@ pub struct Session {
     pub max_hours: f64,
     /// CPU niceness for sessions, so interactive work stays responsive.
     pub nice: i32,
+    /// A command prefix that enters the project's development environment,
+    /// such as `["nix", "develop", "-c"]`. Such a command usually cannot run
+    /// inside the sandbox (single-user Nix locks its store), so relay runs
+    /// `env` through it on the host before each attempt and passes the result
+    /// in, as direnv would. Empty: the caller's environment as it is.
+    pub env_shell: Vec<String>,
 }
 
 impl Session {
@@ -131,6 +137,7 @@ impl Default for Session {
             briefing: DEFAULT_BRIEFING.into(),
             branch_prefix: "relay/".into(),
             final_marker: "FINAL".into(),
+            env_shell: Vec::new(),
             banned_models: std::collections::BTreeMap::new(),
             max_hours: 4.0,
             nice: 10,
@@ -188,7 +195,11 @@ impl Default for Sandbox {
                 ".npmrc",
                 ".cargo/credentials",
                 ".cargo/credentials.toml",
-                ".local/state",
+                // Not all of ~/.local/state: it holds the Nix profile and mise's trusted
+                // configs, which a project's toolchain needs. relay's own state there is
+                // hidden by its own layer.
+                ".local/state/gh",
+                ".local/state/claude",
                 ".omp/ssh-control",
             ]
             .map(PathBuf::from)

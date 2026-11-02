@@ -57,13 +57,33 @@ passed on stdin or as a private file, never in argv, so it can be any size and i
 `done`, so build → review → fix chains need no watching. `view status` shows
 `after a, b` (then `after b` once a is done); `--json` carries `after` and
 `pending`, the dependencies still to finish. A job counts as done when its
-session ended `done`, landed or not: landing stays your step, so a job that
-needs the other's files must `land fetch` them itself. A dependency that fails,
+session ended `done`, landed or not: landing stays your step. A build job
+waiting for build jobs starts from their branch (below). A dependency that fails,
 is stopped, dequeued or cleaned away before it was done never finishes, so the
 dependent shows `waits for a (failed)` and does not start on its own, nor keep
 the dispatcher awake. Queue the dependency again (or `queue resume` it), or
 `relay queue release NAME [--from a]`. Only existing jobs can be named, so there
 are no cycles.
+
+**Where a build job starts.** A build job starts from the repository's `HEAD`,
+unless it waits for build jobs (`--after`) or forks one (`--fork`): then its
+clone starts from that job's branch tip, so it holds the work it depends on
+before anyone lands it. With several such jobs, it starts from the tip that
+holds all the others; when their branches diverge, so no tip holds them all,
+the job fails at once and says so: land one into another, or queue it after
+one of them. Read-only jobs read your repository, as before.
+
+**Forks.** `queue add NAME --fork JOB` starts the new job as a fork of JOB's
+session (claude: `--resume ID --fork-session`): it begins with JOB's whole
+conversation, under a session id of its own, on a harness whose adapter says it
+can fork (claude can; omp cannot, and is refused). JOB must have run. Queued
+`--after JOB` too, it starts as soon as JOB is done, on JOB's account when that
+has room, while the provider's prompt cache still holds the transcript. That is
+the only saving: past the cache's lifetime (minutes), a fork reads the whole
+transcript again at full input price, so fork only for closely related work
+that needs that context, such as a fix to what JOB just built. **A review must
+never fork its builder**: it would inherit the builder's reasoning and blind
+spots, and independence is what a review is for. Queue reviews fresh.
 
 A read-only job cannot change the repository, so the same brief, for the same
 harnesses, models and effort, at the same clean `HEAD` commit, asks the same
@@ -93,6 +113,8 @@ prepend it to your briefs, or have each brief point to it.
 | `relay profiles` / `relay config show` | The resolved profiles with their notes / the merged policy and project config, and which file each part came from |
 | `relay queue resume NAME --message TEXT [--budget USD] [--model H=M]` | Continue an ended or checking session, on any account with room. `--budget` caps that run alone, not the job's total; `--model` moves the job to another model from this run on |
 | `relay queue add NAME ... --after A[,B]` | Start only once every named job is `done` (repeat or comma-separate; unknown names are refused, exit 3) |
+| `relay queue add NAME ... --fork JOB` | Start as a fork of JOB's session, from its branch when it is a build job ([forks](#what-a-job-is)) |
+| `relay decide list [--wait [--timeout S]]` / `relay decide answer ID --action A ...` | Decisions waiting for the orchestrator / answer one ([hooks](#hooks)) |
 | `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one |
 | `relay view status [--all]` | Jobs and accounts. With `--json`, the whole folded state |
@@ -165,6 +187,72 @@ how a fresh orchestrator learns the policy. `relay config show` prints the merge
 bans and profiles with `[policy]` or `[project]` after each setting.
 `relay view status` and `view watch` show a job's profile where it has one, else
 the model it names; `--json` carries both (`profile`, `models`).
+
+## Hooks
+
+relay meets a few moments where a judgment beats a fixed rule. At each
+**decision point** it asks a chain of **handlers**, in order, and carries out
+only an action from that point's closed set, after checking it against policy:
+
+| point | when | actions |
+| --- | --- | --- |
+| `cap` | a build job's run hits its spend cap | `continue {budget}`, `redirect {message, budget}`, `stop {why}` |
+| `ended` | a run ends done or failed (an error, silence, no FINAL after the follow-up) | `accept`, `resume {message, budget}`, `requeue {profile}`, `follow-up {brief, profile, after, fork, name}`, `stop {why}` |
+| `held` | a queued job has been held by a limit for `held_after_minutes` | `wait`, `reroute {harness, model, profile}`, `force` |
+
+```toml
+[hooks]
+cap   = ["rule", "agent:checker", "orchestrator"]
+ended = ["rule", "orchestrator", "agent:triage"]
+held  = ["rule"]
+held_after_minutes = 60
+orchestrator_timeout_minutes = 20   # then the next handler
+command_timeout_seconds = 120
+allow_force = false                 # whether `held` may answer `force`
+```
+
+Every handler may also answer `defer`, which passes the decision to the next.
+When all defer, relay does what it does without hooks: at `cap` the job waits
+for a human (`failed`, resume with `--budget`), at `ended` the run's outcome
+stands, at `held` the job waits.
+
+- `rule`: relay's own checks, free and deterministic. At `cap`, no new commit
+  and no changed file since the last checkpoint is `stop`. At `ended`, a done
+  run whose FINAL says `status: done` is `accept`, and a run that went silent
+  is resumed once in the same session. Otherwise it defers.
+- `agent:<profile>`: a short read-only session on that profile's harness, model
+  and budget, on another account than the worker's where one is free. Its prompt
+  holds the point, the brief, the branch since the last checkpoint, the worker's
+  last message, the job's earlier decisions and the JSON shape of each allowed
+  action. `limits.checker` with `budget_growth` above 1 is shorthand for
+  `cap = ["rule", "agent:checker"]` (see [checkpoints](#checkpoints)).
+- `command:<argv>`: runs the program (argv split on spaces) on the host with the
+  request as JSON on stdin, and reads one JSON object from stdout:
+  `{"action": "continue", "budget": 20, "why": "..."}` (`cost_usd` optional).
+  A malformed answer, a failure or a timeout is a `defer`.
+- `orchestrator`: parks the request on the bus. `relay decide list --wait`
+  blocks on the doorbell until a request is waiting and prints it (`--json`:
+  each with its full request); `relay decide answer ID --action A [--message M]
+  [--budget USD] [--profile P] [--brief TEXT] [--why W] ...` answers it. Past
+  `orchestrator_timeout_minutes` the chain moves on. A runner waiting for an
+  answer shows `checking` and holds no seat. `relay view status` lists waiting
+  decisions in their own section, so a human sees them too.
+
+**Safety.** relay checks every action before acting: that the point allows it;
+that a budget is positive and keeps the job under `limits.job_ceiling_usd`;
+that a profile exists, its model is not banned, and its `max_running` and
+`max_per_day` have room; that a rerouted model is not banned; that `force` is
+allowed; that a fork's harness can fork. A handler's action that fails is
+recorded with the refusal and counts as `defer`; `decide answer` refuses it at
+once (exit 5). Hooks never land, push or delete: those stay with you.
+
+Every decision is on the bus: `decision-requested {id, job, point}`, `parked
+{id, until}` while it waits for the orchestrator, and one `decided {id,
+handler, action, why, cost_usd, refused}` per handler asked. A handler's spend
+counts toward its job's total. `relay view status --json` has every decision
+under `decisions`. A `follow-up` is queued like `queue add` (by default
+`--after` the job, named `<job>-next`), `requeue` starts the job afresh under
+the profile with its branch kept, and `reroute` and `force` are queue events.
 
 ## Harnesses and accounts
 
@@ -257,7 +345,10 @@ Read-only jobs, and any job without growth, stop at their cap as before.
 `relay view status` and `view result` show the latest checkpoint
 (`checkpoint 2: continue → $30.00`); `--json` has all of them under
 `checkpoints`. `relay queue resume NAME --budget X --message M` works from
-`checking` or `failed` as ever.
+`checking` or `failed` as ever. This is the `cap` [hook](#hooks) with its
+default chain, `["rule", "agent:checker"]`; `hooks.cap` replaces the chain, and
+with it set a cap is a checkpoint even without growth (the next cap is the
+action's `budget`, else the same cap again).
 
 ## The sandbox
 
@@ -351,9 +442,10 @@ own process, and owns one output port:
 
 | System | Responsibility | Emits |
 | --- | --- | --- |
-| queue | takes work in (under a profile, if asked), withdraws it, stops it, releases it from its `--after` jobs | queued, released, resumed, dequeued, stop-requested |
+| queue | takes work in (under a profile, if asked), withdraws it, stops it, releases it from its `--after` jobs, reroutes or forces a held one | queued, released, resumed, rerouted, forced, dequeued, stop-requested |
 | dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
-| session | runs one job, checks its progress at a spend cap, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, checking, checked, ended |
+| session | runs one job, carries out the decisions at its cap and its end, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, requeued, checking, checked, ended |
+| decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); takes the orchestrator's answers | decision-requested, parked, decided |
 | quota | account readings and switches | reading, unreadable, signed-out, account-enabled |
 | land | brings branches back; cleans up | forgotten |
 | view, probe | read-only | — |

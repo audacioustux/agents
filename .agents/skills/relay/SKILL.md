@@ -81,6 +81,34 @@ that run alone.
 one fails or stops, the job shows `waits for A (failed)` and never starts on
 its own: queue A again, or `relay queue release NAME [--from A]`.
 
+### Hooks: deciding for relay
+
+Where the project's `[hooks]` chain names `orchestrator`, relay parks a
+decision for you at a spend cap (`cap`), at a run's end (`ended`) or on a long
+hold (`held`) and goes on with other work. Run this in the background for as
+long as you drive relay, and answer what comes in:
+
+```sh
+relay decide list --wait --json        # blocks on the doorbell until a decision waits; no polling
+relay decide answer ID --action continue --budget 20 --why "on track"
+relay decide answer ID --action follow-up --brief "Fix the lint it left." --profile mechanical
+relay decide answer ID --action stop --why "off brief; I will take it from here"
+```
+
+Each request carries the point, the brief, the branch since the last
+checkpoint, the worker's last message, earlier decisions and the allowed
+actions with their fields. Answer only from that set: an action the point does
+not allow, or one past the job's ceiling, a banned model or a profile's limits,
+exits 5 and changes nothing. Unanswered past `orchestrator_timeout_minutes`,
+the next handler decides (often a cheap `agent:<profile>`), so you can be away.
+Hooks never land, push or delete; those stay with you.
+
+`relay queue add NAME --fork JOB --after JOB` continues JOB's conversation in a
+new job, on JOB's account while the prompt cache is warm; past the cache's
+lifetime it re-reads the whole transcript at full price, so fork only closely
+related work. Never fork a builder for its review: queue reviews fresh. A build
+job queued after build jobs starts from their branch, and fails if they diverge.
+
 `relay profiles [--json]` lists the owner's named job kinds (harness, model,
 effort, budget, read-only, limits, and a note on when to use each);
 `relay queue add NAME --profile P` fills each field the command line leaves

@@ -70,6 +70,9 @@ pub enum Refusal {
     /// The governing meter closest to its limit is at the floor; it names that meter.
     AtFloor(String),
     Unread,
+    /// Never read, and the last attempt failed: nothing will change until
+    /// someone signs it in or excludes it.
+    Unreadable,
     /// The last reading is too old to trust; a fresh one has been asked for.
     Stale,
     /// The harness cannot tell which meters govern this job.
@@ -84,6 +87,7 @@ impl Refusal {
             Self::Limited => "limited".into(),
             Self::AtFloor(meter) => format!("at floor: {meter}"),
             Self::Unread => "not read yet".into(),
+            Self::Unreadable => "usage unreadable (sign it in, or list it in accounts.exclude)".into(),
             Self::Stale => "reading is stale".into(),
             Self::Blind(why) => why.clone(),
         }
@@ -101,7 +105,7 @@ fn account_refusal(harness: &dyn Harness, state: Option<&AccountState>, now_s: i
         Some(Refusal::Limited)
     } else if harness.caps().quota && a.read_at.is_none() {
         // Unread is not the same as having room.
-        Some(Refusal::Unread)
+        Some(if a.unreadable_at.is_some() { Refusal::Unreadable } else { Refusal::Unread })
     } else {
         None
     }
@@ -176,6 +180,8 @@ mod tests {
         let now = secs(now_us);
         let read = AccountState { read_at: Some(now_us - 1), ..Default::default() };
         assert_eq!(fit(&claude("a"), None, None, 0.9, now_us), Err(Refusal::Unread));
+        let failed = AccountState { unreadable_at: Some(now_us - 1), ..Default::default() };
+        assert_eq!(fit(&claude("a"), Some(&failed), None, 0.9, now_us), Err(Refusal::Unreadable));
         assert!(fit(&claude("a"), Some(&read), None, 0.9, now_us).is_ok());
         let old = AccountState { read_at: Some(now_us - STALE_MICROS - 1), ..read.clone() };
         assert_eq!(fit(&claude("a"), Some(&old), None, 0.9, now_us), Err(Refusal::Stale));

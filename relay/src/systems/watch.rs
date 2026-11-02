@@ -123,8 +123,7 @@ fn draw(f: &mut Frame<'_>, b: &Board, selected: &mut TableState) {
 /// Runs the board until a quit key. Redraws on every project's events (the
 /// accounts are shared), on any key or resize, and every few seconds for the clocks.
 pub fn run(ctx: &Ctx, all: bool) -> Result<()> {
-    let buses = ctx.buses();
-    let bell = crate::os::Doorbell::watch(&buses.iter().map(std::path::PathBuf::as_path).collect::<Vec<_>>())?;
+    let bell = ctx.doorbell()?;
     let (tx, rang) = mpsc::channel();
     std::thread::spawn(move || while tx.send(bell.wait(Duration::from_secs(60))).is_ok() {});
     ratatui::run(|terminal| ui(terminal, ctx, all, &rang))

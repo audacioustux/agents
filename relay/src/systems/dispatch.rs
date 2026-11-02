@@ -19,7 +19,7 @@ use crate::accounts::{self, STALE_MICROS, harness_of};
 use crate::bus::{DispatchEvent, now_micros};
 use crate::ctx::Ctx;
 use crate::harness::{Harness, Home};
-use crate::os::{self, Doorbell, Role};
+use crate::os::{self, Role};
 use crate::world::{AccountState, Job, Status, World};
 
 /// The longest sleep. Only a runner that dies without a word (one started by
@@ -60,8 +60,7 @@ struct Held(Vec<String>);
 fn serve(ctx: &Ctx) -> Result<()> {
     let Some(role) = Role::try_take(&ctx.state.join("dispatch.lock"))? else { return Ok(()) };
     // Every project's bus: a seat freed or a limit hit in another project changes our plan too.
-    let buses = ctx.buses();
-    let bell = Doorbell::watch(&buses.iter().map(std::path::PathBuf::as_path).collect::<Vec<_>>())?;
+    let bell = ctx.doorbell()?;
     let version = binary_version();
     let mut idle_since: Option<Instant> = None;
     let mut last_held = Held::default();

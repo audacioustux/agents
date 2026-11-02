@@ -1,10 +1,13 @@
 //! view: read-only. Who is working on what, and what each session said.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use clap::Subcommand;
 
 use crate::bus::now_micros;
 use crate::ctx::Ctx;
+use crate::world::{Job, World};
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
@@ -21,7 +24,12 @@ pub enum Cmd {
         all: bool,
     },
     /// A job's final answer, branch, spend and log.
-    Result { name: String },
+    Result {
+        name: String,
+        /// First wait until the job is no longer queued or running.
+        #[arg(long)]
+        wait: bool,
+    },
     /// The merged event log, oldest first, one JSON object per line.
     Events,
 }
@@ -30,7 +38,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Status { all } => status(ctx, all),
         Cmd::Watch { all } => crate::systems::watch::run(ctx, all),
-        Cmd::Result { name } => result(ctx, &name),
+        Cmd::Result { name, wait } => result(ctx, &name, wait),
         Cmd::Events => {
             for e in ctx.events()? {
                 out!("{}", e.to_json());
@@ -176,9 +184,8 @@ fn gist(line: &str) -> Option<String> {
     out.map(|g| g.chars().take(90).collect())
 }
 
-fn result(ctx: &Ctx, name: &str) -> Result<()> {
-    let world = ctx.world()?;
-    let Some(j) = world.jobs.get(name) else { fail!(NotFound, "no job named {name}") };
+fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
+    let j = &if wait { ended(ctx, name)? } else { job(&ctx.world()?, name)? };
     let answer = std::fs::read_to_string(ctx.job_file(name, "result.md")).ok();
     let log = ctx.job_file(name, "log.ndjson");
     if ctx.json {
@@ -203,6 +210,28 @@ fn result(ctx: &Ctx, name: &str) -> Result<()> {
     out!("log {}\n", log.display());
     out!("{}", answer.as_deref().map_or("(no result yet)", str::trim_end));
     Ok(())
+}
+
+fn job(world: &World, name: &str) -> Result<Job> {
+    let Some(j) = world.jobs.get(name) else { fail!(NotFound, "no job named {name}") };
+    Ok(j.clone())
+}
+
+/// The job once it has ended. Sleeps on the doorbell between reads, and wakes
+/// the dispatcher whenever the bus has been quiet, so the wait cannot outlive it.
+fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
+    let bell = ctx.doorbell()?;
+    let mut quiet = true;
+    loop {
+        let j = job(&ctx.world()?, name)?;
+        if !j.status.is_live() {
+            return Ok(j);
+        }
+        if quiet {
+            ctx.wake_dispatch()?;
+        }
+        quiet = !bell.wait(Duration::from_mins(5));
+    }
 }
 
 #[cfg(test)]

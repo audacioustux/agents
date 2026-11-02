@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 struct Env {
     root: PathBuf,
@@ -109,9 +109,11 @@ fn setup(tag: &str, omp: bool) -> Env {
 }
 
 fn relay(env: &Env, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_relay"))
-        .args(args)
-        .current_dir(&env.repo)
+    relay_cmd(env, Command::new(env!("CARGO_BIN_EXE_relay")).args(args))
+}
+
+fn relay_cmd(env: &Env, cmd: &mut Command) -> Output {
+    cmd.current_dir(&env.repo)
         .env("HOME", &env.home)
         .env("XDG_STATE_HOME", env.root.join("state"))
         .env("XDG_DATA_HOME", env.root.join("data"))
@@ -137,16 +139,13 @@ fn job(env: &Env, name: &str) -> serde_json::Value {
     world["jobs"][name].clone()
 }
 
+/// The job once it ended, by `view result --wait` (bounded, so a hang fails the test).
 fn wait_for(env: &Env, name: &str) -> serde_json::Value {
-    let start = Instant::now();
-    loop {
-        let j = job(env, name);
-        if matches!(j["status"].as_str(), Some("done" | "failed" | "stopped")) {
-            return j;
-        }
-        assert!(start.elapsed() < Duration::from_secs(90), "{name} did not finish: {j}");
-        std::thread::sleep(Duration::from_millis(300));
-    }
+    let mut cmd = Command::new("timeout");
+    cmd.args(["90", env!("CARGO_BIN_EXE_relay"), "view", "result", name, "--wait", "--json"]);
+    let out = relay_cmd(env, &mut cmd);
+    ok(&out, &format!("waiting for {name}"));
+    serde_json::from_slice(&out.stdout).unwrap()
 }
 
 fn result(env: &Env, name: &str) -> String {

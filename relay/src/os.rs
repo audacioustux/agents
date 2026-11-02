@@ -52,11 +52,11 @@ impl Role {
 pub struct Doorbell(OwnedFd);
 
 impl Doorbell {
-    pub fn watch(dirs: &[&Path]) -> Result<Self> {
+    pub fn watch(dirs: &[impl AsRef<Path>]) -> Result<Self> {
         let fd = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK).context("inotify")?;
         let flags = inotify::WatchFlags::MODIFY | inotify::WatchFlags::CREATE | inotify::WatchFlags::MOVED_TO;
-        for dir in dirs {
-            inotify::add_watch(&fd, *dir, flags).with_context(|| format!("watching {}", dir.display()))?;
+        for dir in dirs.iter().map(AsRef::as_ref) {
+            inotify::add_watch(&fd, dir, flags).with_context(|| format!("watching {}", dir.display()))?;
         }
         Ok(Self(fd))
     }

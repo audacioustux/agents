@@ -13,7 +13,7 @@ in your own account ([the skill](../.agents/skills/relay/SKILL.md)).
 ```sh
 relay queue add fix-parser --prompt briefs/fix-parser.md --model claude=sonnet
 relay view status                 # who is working on what, and each account's room
-relay view result fix-parser      # the session's final report, branch and cost
+relay view result fix-parser      # the session's final report, branch and cost (--wait: once it ends)
 relay land fetch fix-parser       # its branch, copied into your repository
 ```
 
@@ -80,7 +80,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue resume NAME --message TEXT [--budget USD]` | Continue an ended session, on any account with room |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one |
 | `relay view status [--all]` | Jobs and accounts. With `--json`, the whole folded state |
-| `relay view result NAME` | Final report, status, cost, branch, log path |
+| `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends |
 | `relay view watch [--all]` | The status live in a terminal UI (ratatui): jobs, the selected job's latest output and answer, and accounts, redrawn as events land in any project. ↑↓ select, `a` all jobs, `q` quit |
 | `relay view events` | The merged event log |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room, a fresh reading, switches |

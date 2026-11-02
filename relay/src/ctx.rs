@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::bus::{self, Owned, Port, Stamped};
 use crate::config::Config;
-use crate::os::Role;
+use crate::os::{Doorbell, Role};
 use crate::world::World;
 
 #[derive(Debug)]
@@ -137,6 +137,11 @@ impl Ctx {
     /// Every project's event directories, for a doorbell.
     pub fn buses(&self) -> Vec<PathBuf> {
         self.projects().flat_map(|d| [d.join("bus"), d.join("bus/session")]).filter(|d| d.is_dir()).collect()
+    }
+
+    /// Rings on any project's events.
+    pub fn doorbell(&self) -> Result<Doorbell> {
+        Doorbell::watch(&self.buses())
     }
 
     pub fn job_file(&self, job: &str, ext: &str) -> PathBuf {

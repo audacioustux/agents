@@ -186,7 +186,8 @@ impl World {
                 }
             }
             Event::Dispatch(DispatchEvent::Reaped { job }) => {
-                if let Some(j) = self.jobs.get_mut(job) {
+                // A runner can report and exit between dispatch's snapshot and its liveness check.
+                if let Some(j) = self.jobs.get_mut(job).filter(|j| j.status == Status::Running) {
                     // A stop kills the runner, so its silent death is the stop.
                     (j.status, j.reason) = if j.stop_requested {
                         (Status::Stopped, Some("stopped by request".into()))
@@ -352,6 +353,26 @@ mod tests {
         evs.push(st(3, Event::Queue(QueueEvent::StopRequested { job: "a".into() })));
         evs.push(st(4, Event::Dispatch(DispatchEvent::Reaped { job: "a".into() })));
         assert_eq!(World::fold(&evs).jobs["a"].status, Status::Stopped);
+    }
+
+    #[test]
+    fn a_reap_after_the_runner_reported_changes_nothing() {
+        let done = Event::Session(SessionEvent::Ended {
+            job: "a".into(),
+            outcome: Outcome::Done,
+            cost_usd: 0.0,
+            turns: 1,
+            reason: None,
+        });
+        let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
+            job: "a".into(),
+            account: "x".into(),
+            runner_pid: 9,
+            runner_started: 1,
+        });
+        let reaped = Event::Dispatch(DispatchEvent::Reaped { job: "a".into() });
+        let w = World::fold(&[st(1, queued("a")), st(2, dispatched), st(3, done), st(4, reaped)]);
+        assert_eq!(w.jobs["a"].status, Status::Done);
     }
 
     #[test]

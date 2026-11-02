@@ -56,5 +56,7 @@ enabled = true           # false runs sessions with your full access; then build
 hide_home = [".ssh", ".gnupg", ".config/gh", ".git-credentials", ".netrc", ".aws", ".config/gcloud",
              ".docker", ".npmrc", ".cargo/credentials", ".cargo/credentials.toml", ".local/state",
              ".omp/ssh-control"]
-writable_home = [".cache", ".cargo"]
+# Writable caches under $HOME: relay's own directory per project is mounted at
+# each, never the host's own, so a session cannot change what the host runs.
+caches = [".cache", ".cargo/registry", ".cargo/git"]
 # env_deny = "..."       # variables whose names match are not passed in (see the README)

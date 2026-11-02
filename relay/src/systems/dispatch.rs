@@ -14,7 +14,7 @@ use anyhow::Result;
 use clap::Subcommand;
 
 use crate::accounts::{self, harness_of};
-use crate::bus::{DispatchEvent, now_micros, secs};
+use crate::bus::{DispatchEvent, now_micros};
 use crate::ctx::Ctx;
 use crate::harness::Home;
 use crate::os::{self, Doorbell, Role};
@@ -76,6 +76,7 @@ fn binary_version() -> Option<SystemTime> {
 
 /// One pass over the world. Returns whether anything is still queued or running.
 fn tick(ctx: &Ctx) -> Result<(bool, Held)> {
+    let _lock = ctx.jobs_lock()?;
     let port = ctx.port::<DispatchEvent>();
     let mut world = ctx.world()?;
     for j in world.jobs.values_mut().filter(|j| j.status == Status::Running) {
@@ -103,7 +104,7 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held)> {
 fn refresh_stale(ctx: &Ctx, world: &World, found: &[Home]) -> Result<()> {
     let waiting = world.jobs.values().any(|j| j.status == Status::Queued);
     let now = now_micros();
-    if waiting && found.iter().any(|a| accounts::is_stale(harness_of(a), world.accounts.get(&a.key()), now)) {
+    if waiting && found.iter().any(|a| accounts::due(harness_of(a), world.accounts.get(&a.key()), now)) {
         // `quota refresh` holds its own role, so overlapping passes start it once.
         ctx.spawn_self(&["quota", "refresh", "--stale"], &ctx.state.join("quota.log"))?;
     }
@@ -113,7 +114,7 @@ fn refresh_stale(ctx: &Ctx, world: &World, found: &[Home]) -> Result<()> {
 /// Which queued jobs start now, and where. Pure apart from reading machine gauges.
 fn plan(ctx: &Ctx, world: &World, found: &[Home], held: &mut Held) -> Vec<(String, String)> {
     let limits = &ctx.cfg.limits;
-    let now_s = secs(now_micros());
+    let now_us = now_micros();
     let mut load: BTreeMap<String, usize> = BTreeMap::new();
     let mut total = 0;
     for j in world.jobs.values().filter(|j| j.status == Status::Running) {
@@ -126,8 +127,9 @@ fn plan(ctx: &Ctx, world: &World, found: &[Home], held: &mut Held) -> Vec<(Strin
         held.0.push(format!("load {now:.1} is above {max}"));
         return Vec::new();
     }
+    // Unmeasured is not the same as enough.
     let disk_ok =
-        os::free_disk_gb(ctx.clones.parent().unwrap_or(&ctx.state)).is_none_or(|gb| gb >= limits.min_free_disk_gb);
+        limits.min_free_disk_gb <= 0.0 || os::free_disk_gb(&ctx.clones).is_some_and(|gb| gb >= limits.min_free_disk_gb);
     let mut queued: Vec<&Job> = world.jobs.values().filter(|j| j.status == Status::Queued).collect();
     queued.sort_by_key(|j| j.created_at);
     let mut out = Vec::new();
@@ -149,7 +151,7 @@ fn plan(ctx: &Ctx, world: &World, found: &[Home], held: &mut Held) -> Vec<(Strin
             .filter(|a| load.get(a.key().as_str()).copied().unwrap_or(0) < limits.per_account)
             .filter_map(|a| {
                 let model = j.models.get(a.harness).cloned().or_else(|| ctx.cfg.harness(a.harness).model);
-                match accounts::fit(a, world.accounts.get(&a.key()), model.as_deref(), limits.floor, now_s) {
+                match accounts::fit(a, world.accounts.get(&a.key()), model.as_deref(), limits.floor, now_us) {
                     Ok(score) => Some((a, score)),
                     Err(r) => {
                         why.push(format!("{} {}", a.key(), r.describe()));

@@ -54,6 +54,8 @@ pub enum Refusal {
     Limited,
     AtFloor,
     Unread,
+    /// The last reading is too old to trust; a fresh one has been asked for.
+    Stale,
     /// The harness cannot tell which meters govern this job.
     Blind(String),
 }
@@ -66,6 +68,7 @@ impl Refusal {
             Self::Limited => "limited".into(),
             Self::AtFloor => "at floor".into(),
             Self::Unread => "not read yet".into(),
+            Self::Stale => "reading is stale".into(),
             Self::Blind(why) => why.clone(),
         }
     }
@@ -88,17 +91,23 @@ pub fn account_refusal(harness: &dyn Harness, state: Option<&AccountState>, now_
     }
 }
 
-/// Whether the account can take a job on `model` now, and how good a fit it is.
+/// Whether the account can take a job on `model` now (`now_us`, bus time),
+/// and how good a fit it is.
 pub fn fit(
     home: &Home,
     state: Option<&AccountState>,
     model: Option<&str>,
     floor: f64,
-    now_s: i64,
+    now_us: u64,
 ) -> Result<f64, Refusal> {
     let h = harness_of(home);
+    let now_s = secs(now_us);
     if let Some(r) = account_refusal(h, state, now_s) {
         return Err(r);
+    }
+    // An old reading may say there is room that has since been spent.
+    if is_stale(h, state, now_us) {
+        return Err(Refusal::Stale);
     }
     let empty = Meters::new();
     let meters = state.map_or(&empty, |s| &s.meters);
@@ -114,15 +123,21 @@ pub fn is_stale(harness: &dyn Harness, state: Option<&AccountState>, now_us: u64
     if !harness.caps().quota {
         return false;
     }
-    let Some(a) = state else { return true };
-    let old = |t: u64| now_us.saturating_sub(t) > STALE_MICROS;
-    // A failed read backs off as long as a good one would last.
-    if a.unreadable_at.is_some_and(|t| !old(t)) {
-        return false;
-    }
-    let Some(read_us) = a.read_at else { return true };
+    let Some(read_us) = state.and_then(|a| a.read_at) else { return true };
     let (now_s, read_s) = (secs(now_us), secs(read_us));
-    old(read_us) || a.meters.values().filter_map(|m| m.resets_at).any(|r| read_s < r && r <= now_s)
+    now_us.saturating_sub(read_us) > STALE_MICROS
+        || state
+            .into_iter()
+            .flat_map(|a| a.meters.values())
+            .filter_map(|m| m.resets_at)
+            .any(|r| read_s < r && r <= now_s)
+}
+
+/// Whether to take a reading now: it is stale, and no failed read is still
+/// backing off (one waits as long as a good reading would last).
+pub fn due(harness: &dyn Harness, state: Option<&AccountState>, now_us: u64) -> bool {
+    is_stale(harness, state, now_us)
+        && state.and_then(|a| a.unreadable_at).is_none_or(|t| now_us.saturating_sub(t) > STALE_MICROS)
 }
 
 #[cfg(test)]
@@ -139,28 +154,32 @@ mod tests {
 
     #[test]
     fn fit_and_refusals() {
-        let now = 1_000;
-        let read = AccountState { read_at: Some(1), ..Default::default() };
-        assert_eq!(fit(&claude("a"), None, None, 0.9, now), Err(Refusal::Unread));
-        assert!(fit(&claude("a"), Some(&read), None, 0.9, now).is_ok());
+        let now_us = 1_000 * 1_000_000;
+        let now = secs(now_us);
+        let read = AccountState { read_at: Some(now_us - 1), ..Default::default() };
+        assert_eq!(fit(&claude("a"), None, None, 0.9, now_us), Err(Refusal::Unread));
+        assert!(fit(&claude("a"), Some(&read), None, 0.9, now_us).is_ok());
+        let old = AccountState { read_at: Some(now_us - STALE_MICROS - 1), ..read.clone() };
+        assert_eq!(fit(&claude("a"), Some(&old), None, 0.9, now_us), Err(Refusal::Stale));
         let mut full = read.clone();
         full.meters.insert("seven_day".into(), m(0.95, Some(now + 10)));
-        assert_eq!(fit(&claude("a"), Some(&full), None, 0.9, now), Err(Refusal::AtFloor));
+        assert_eq!(fit(&claude("a"), Some(&full), None, 0.9, now_us), Err(Refusal::AtFloor));
         full.meters.insert("seven_day".into(), m(0.95, Some(now - 10)));
-        assert!(fit(&claude("a"), Some(&full), None, 0.9, now).is_ok(), "a meter past its reset no longer counts");
+        assert!(fit(&claude("a"), Some(&full), None, 0.9, now_us).is_ok(), "a meter past its reset no longer counts");
         let limited = AccountState { limited_until: Some(now + 1), ..read.clone() };
-        assert_eq!(fit(&claude("a"), Some(&limited), None, 0.9, now), Err(Refusal::Limited));
+        assert_eq!(fit(&claude("a"), Some(&limited), None, 0.9, now_us), Err(Refusal::Limited));
     }
 
     #[test]
     fn omp_fit_depends_on_the_model() {
-        let now = 1_000;
+        let now_us = 1_000 * 1_000_000;
+        let now = secs(now_us);
         let omp = Home { harness: "omp", label: "default".into(), dir: PathBuf::from("/o") };
-        let mut st = AccountState { read_at: Some(1), ..Default::default() };
+        let mut st = AccountState { read_at: Some(now_us - 1), ..Default::default() };
         st.meters.insert("openai-codex/7 days".into(), m(0.2, Some(now + 86_400 * 5)));
-        assert!(fit(&omp, Some(&st), Some("openai-codex/gpt-5.2"), 0.9, now).is_ok());
-        assert!(matches!(fit(&omp, Some(&st), Some("anthropic/x"), 0.9, now), Err(Refusal::Blind(_))));
-        assert!(matches!(fit(&omp, Some(&st), None, 0.9, now), Err(Refusal::Blind(_))));
+        assert!(fit(&omp, Some(&st), Some("openai-codex/gpt-5.2"), 0.9, now_us).is_ok());
+        assert!(matches!(fit(&omp, Some(&st), Some("anthropic/x"), 0.9, now_us), Err(Refusal::Blind(_))));
+        assert!(matches!(fit(&omp, Some(&st), None, 0.9, now_us), Err(Refusal::Blind(_))));
     }
 
     #[test]
@@ -181,8 +200,8 @@ mod tests {
         assert!(is_stale(h, Some(&a), now_us), "read before a reset that has now passed");
         assert!(!is_stale(crate::harness::by_id("puku-cli").unwrap(), None, now_us), "unmetered never needs reading");
         let failed = AccountState { unreadable_at: Some(now_us - 100 * 1_000_000), ..Default::default() };
-        assert!(!is_stale(h, Some(&failed), now_us), "a failed read backs off");
+        assert!(is_stale(h, Some(&failed), now_us) && !due(h, Some(&failed), now_us), "a failed read backs off");
         let failed = AccountState { unreadable_at: Some(now_us - STALE_MICROS - 1), ..failed };
-        assert!(is_stale(h, Some(&failed), now_us), "and is tried again once a reading would be stale");
+        assert!(due(h, Some(&failed), now_us), "and is tried again once a reading would be stale");
     }
 }

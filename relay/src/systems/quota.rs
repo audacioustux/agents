@@ -56,7 +56,7 @@ fn refresh(ctx: &Ctx, only_stale: bool) -> Result<()> {
     let todo: Vec<Home> = accounts::discover(&ctx.cfg)
         .into_iter()
         .filter(|a| harness_of(a).caps().quota)
-        .filter(|a| !only_stale || accounts::is_stale(harness_of(a), world.accounts.get(&a.key()), now))
+        .filter(|a| !only_stale || accounts::due(harness_of(a), world.accounts.get(&a.key()), now))
         .collect();
     let port = ctx.port::<QuotaEvent>();
     // In parallel: one reading can take a minute and a half.

@@ -66,6 +66,10 @@ fn all(tests: impl IntoIterator<Item = String>) -> String {
     if t.is_empty() { "true".into() } else { t.join(" && ") }
 }
 
+fn cache_marker() -> String {
+    format!(".relay-probe-{}", std::process::id())
+}
+
 struct Probe<'a> {
     ctx: &'a Ctx,
     home: &'a Home,
@@ -124,15 +128,29 @@ impl<'a> Probe<'a> {
                 hidden.extend(inside.filter(|e| !shown_later(i, e)).take(3));
             }
         }
-        let writable = plan.iter().filter(|(_, k)| *k == Mount::Writable).map(|(p, _)| format!("test -w {}", q(p)));
+        let paths = |want: fn(&Mount) -> bool| plan.iter().filter(move |(_, k)| want(k)).map(|(p, _)| p);
+        let writable = paths(|k| matches!(k, Mount::Writable | Mount::From(_))).map(|p| format!("test -w {}", q(p)));
+        let read_only = paths(|k| *k == Mount::ReadOnly).map(|p| format!("! test -w {}", q(p)));
+        // Each cache shows relay's directory, which holds the marker, not the host's.
+        let caches = plan.iter().filter_map(|(p, k)| match k {
+            Mount::From(_) => Some(format!("test -e {}", q(&p.join(cache_marker())))),
+            _ => None,
+        });
         let repo = &self.ctx.cfg.repo;
         vec![
             Check {
                 what: format!("{} hidden paths are hidden", hidden.len()),
-                inside: all(hidden.iter().map(|p| format!("test ! -s {}", q(p)))),
+                // A socket has no size either, so it is checked for by type.
+                inside: all(hidden.iter().map(|p| format!("test ! -s {p} && test ! -S {p}", p = q(p)))),
                 outside: Some(all(hidden.iter().map(|p| format!("test -e {}", q(p))))),
             },
             Check { what: "writable mounts are writable".into(), inside: all(writable), outside: None },
+            Check {
+                what: "read-only mounts (repository, harness config) are not writable".into(),
+                inside: all(read_only),
+                outside: None,
+            },
+            Check { what: "caches are relay's own, not the host's".into(), inside: all(caches), outside: None },
             Check {
                 what: "the repository is readable, not writable".into(),
                 inside: format!("test -d {r}/.git && ! test -w {r}", r = q(repo)),
@@ -161,6 +179,17 @@ impl<'a> Probe<'a> {
         let inv = self.invocation()?;
         let mounts = Mounts { home: self.home, workdir: Some(&self.clone), scratch: &self.scratch, cwd: &self.clone };
         let plan = sandbox::plan(self.ctx, &user, &mounts);
+        let markers: Vec<PathBuf> = plan
+            .iter()
+            .filter_map(|(_, k)| match k {
+                Mount::From(src) => Some(src.join(cache_marker())),
+                _ => None,
+            })
+            .collect();
+        for m in &markers {
+            std::fs::create_dir_all(m.parent().unwrap_or(m))?;
+            std::fs::write(m, "")?;
+        }
         let args = sandbox::args(self.ctx, &user, &mounts, sandbox::session_env(self.ctx, &inv));
         let inside =
             |sh: &str| Command::new("bwrap").args(&args).args([OsString::from("sh"), "-c".into(), sh.into()]).output();
@@ -188,6 +217,9 @@ impl<'a> Probe<'a> {
             .filter(|k| deny.is_match(k) && !inv.env.iter().any(|(own, _)| own.as_os_str() == *k))
             .collect();
         report(leaked.is_empty(), "no secret-named variables", &leaked.join(" "));
+        for m in &markers {
+            let _ = std::fs::remove_file(m);
+        }
         Ok(failed)
     }
 }

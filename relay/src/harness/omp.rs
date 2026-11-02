@@ -79,6 +79,22 @@ impl Harness for Omp {
         vec![home.dir.clone()]
     }
 
+    fn protected(&self, home: &Home) -> Vec<PathBuf> {
+        const CONFIG: [&str; 10] = [
+            "agent/config.yml",
+            "agent/models.yml",
+            "agent/agents",
+            "agent/skills",
+            "agent/managed-skills",
+            "agent/extensions",
+            "agent/hooks",
+            "agent/commands",
+            "natives",
+            "security",
+        ];
+        CONFIG.iter().map(|c| home.dir.join(c)).collect()
+    }
+
     fn invocation(&self, home: &Home, task: &Task<'_>) -> Result<Invocation, Refusal> {
         let mut i = Invocation::new("omp");
         i.args(["-p", "--no-title"]);

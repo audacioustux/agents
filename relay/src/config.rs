@@ -156,8 +156,10 @@ pub struct Sandbox {
     pub hide: Option<Vec<PathBuf>>,
     /// Paths under `$HOME` hidden from sessions.
     pub hide_home: Vec<PathBuf>,
-    /// Paths under `$HOME` sessions may write, such as build caches.
-    pub writable_home: Vec<PathBuf>,
+    /// Paths under `$HOME` sessions get as writable caches. Each is relay's own
+    /// directory for the project, mounted there, never the host's: a session
+    /// that could write the host's `~/.cargo` could replace what the host runs.
+    pub caches: Vec<PathBuf>,
     /// Environment variables whose names match this regex are not passed in.
     pub env_deny: String,
 }
@@ -184,10 +186,15 @@ impl Default for Sandbox {
             ]
             .map(PathBuf::from)
             .to_vec(),
-            writable_home: [".cache", ".cargo"].map(PathBuf::from).to_vec(),
+            caches: [".cache", ".cargo/registry", ".cargo/git"].map(PathBuf::from).to_vec(),
             env_deny: DEFAULT_ENV_DENY.into(),
         }
     }
+}
+
+/// A finite amount above zero, such as a spend cap.
+pub fn positive(x: f64) -> bool {
+    x.is_finite() && x > 0.0
 }
 
 /// `AUTH` only as a whole word, so `GH_AUTH` and `SSH_AUTH_SOCK` go but `GIT_AUTHOR_NAME` stays.
@@ -238,7 +245,7 @@ impl Config {
         ensure!(self.repo.join(".git").exists(), "repo {} is not a git repository", self.repo.display());
         ensure!(self.limits.max_running >= 1 && self.limits.per_account >= 1, "limits must be at least 1");
         ensure!((0.0..=1.0).contains(&self.limits.floor), "limits.floor is a fraction between 0 and 1");
-        ensure!(self.limits.budget_usd > 0.0, "limits.budget_usd must be positive");
+        ensure!(positive(self.limits.budget_usd), "limits.budget_usd must be a positive number");
         for id in self.harnesses.keys() {
             crate::harness::by_id(id).map_err(|e| anyhow::anyhow!("[harness.{id}]: {e}"))?;
         }
@@ -250,7 +257,7 @@ impl Config {
             regex::Regex::new(re).with_context(|| format!("session.banned_models key {re:?}"))?;
         }
         regex::Regex::new(&self.sandbox.env_deny).context("sandbox.env_deny")?;
-        for p in self.sandbox.hide_home.iter().chain(&self.sandbox.writable_home) {
+        for p in self.sandbox.hide_home.iter().chain(&self.sandbox.caches) {
             if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
                 bail!("{} must be a path inside $HOME, written relative to it", p.display());
             }
@@ -334,7 +341,7 @@ mod tests {
         let defaults = Config::parse("name = \"myproject\"", d.path()).unwrap();
         assert_eq!(format!("{:?}", cfg.limits), format!("{:?}", defaults.limits));
         assert_eq!(cfg.sandbox.hide_home, defaults.sandbox.hide_home);
-        assert_eq!(cfg.sandbox.writable_home, defaults.sandbox.writable_home);
+        assert_eq!(cfg.sandbox.caches, defaults.sandbox.caches);
         assert_eq!(cfg.session.max_hours, defaults.session.max_hours);
     }
 

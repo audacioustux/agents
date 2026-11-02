@@ -29,7 +29,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Result { name } => result(ctx, &name),
         Cmd::Events => {
             for e in ctx.events()? {
-                out!("{} {:?}", e.t, e.event);
+                out!("{}", e.to_json());
             }
             Ok(())
         }

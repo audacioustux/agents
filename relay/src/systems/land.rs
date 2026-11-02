@@ -17,6 +17,8 @@ pub enum Cmd {
 }
 
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
+    // A clean must not race a resume or a dispatch of the same job.
+    let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
     match cmd {
         Cmd::Fetch { name } => {
@@ -49,6 +51,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             for ext in ["prompt.md", "log.ndjson", "stderr.log", "result.md", "runner.log"] {
                 let _ = std::fs::remove_file(ctx.job_file(&name, ext));
             }
+            let _ = std::fs::remove_dir_all(ctx.job_scratch(&name));
             ctx.port::<LandEvent>().emit(LandEvent::Forgotten { job: name.clone() })?;
             out!("{name}: cleaned");
         }

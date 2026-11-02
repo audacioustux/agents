@@ -199,6 +199,8 @@ mod tests {
             verdict(&error("You've hit your weekly limit · resets Nov 6, 5am (UTC)"), OK, "FINAL", NOW),
             Verdict::Limited { until: Some(_) }
         ));
+        // lanes' regression case: the underscore spelling, with no status code.
+        assert_eq!(verdict(&error("API Error: rate_limit_error"), OK, "FINAL", NOW), Verdict::Limited { until: None });
         let r = Report { api_status: Some(429), ..error("") };
         assert_eq!(verdict(&r, OK, "FINAL", NOW), Verdict::Limited { until: None });
         assert_eq!(

@@ -98,7 +98,8 @@ Quota readings cost no model call. One is taken again after 10 minutes, or
 once a reset it names has passed; a reading that fails is not retried for the
 same 10 minutes. An account is used only when:
 
-- it has been read (unread is not the same as having room);
+- it has a reading, and not a stale one (unread or stale is not the same as
+  having room; a job waits while a fresh one is taken);
 - the meters that govern the job's model are below `limits.floor` (omp meters
   each provider, so its model must name one: `minimax-code/MiniMax-M3.1-Flash`);
 - it is not limited or signed out;
@@ -122,9 +123,25 @@ Each session runs under `bwrap`. It sees the machine read-only, except for:
 
 - **Hidden** (shown empty): `sandbox.hide`, by default your repository's
   siblings; every account of every harness but its own; relay's own state and
-  other jobs' clones; and the credential stores in `sandbox.hide_home`.
-- **Writable**: its own clone and job directory, its own account, and the
-  caches in `sandbox.writable_home`.
+  other jobs' clones; the credential stores in `sandbox.hide_home`; and host
+  sockets (`/run/user/<uid>`, sockets under `/run`), since a read-only mount
+  does not stop a connection to a socket.
+- **Writable**: its own clone and job directory, and its own account, except
+  what in it the host later runs or obeys (claude's settings, hooks, plugins,
+  skills and scripts; omp's config, agents, extensions and natives), which is
+  mounted back read-only.
+- **Caches** (`sandbox.caches`, default `~/.cache` and cargo's registry and
+  git checkouts): writable, but relay's own directory for the project, shared
+  by its sessions and never the host's. A session that could write the host's
+  `~/.cargo` could replace what the host runs. The first build fetches afresh.
+
+What is left open, by design or by necessity:
+
+- **The network**, since the session needs its provider's API, and with it
+  abstract Unix sockets.
+- **claude's `.claude.json`**, which can name MCP servers the host would start
+  later. claude rewrites it by renaming a new file over it, which a read-only
+  mount would break.
 
 The mounts are one declarative plan in layers ([`src/sandbox.rs`](src/sandbox.rs)),
 where the job's own mounts come last, so nothing above can hide them.
@@ -134,14 +151,17 @@ Environment variables are cleared and passed back in, except those matching
 `CLAUDE*`). The adapter then sets the one that selects the account.
 
 The session also gets its own PID namespace, so nothing it starts outlives it.
-The network is shared, since the session needs the API. With the sandbox as
-the boundary, the session runs without approval prompts. Without it
+With the sandbox as the boundary, the session runs without approval prompts. Without it
 (`sandbox.enabled = false`), read-only jobs use the harness's read-only mode
 and build jobs its edits-only mode.
 
 `relay probe` checks the plan from the inside, for one account of each
-harness: every hidden path is empty, with a control proving it exists outside,
-and every writable one is writable.
+harness: every hidden path is empty and no socket, with a control proving it
+exists outside; every writable one is writable and every read-only one is not;
+and every cache shows relay's directory, not the host's.
+
+relay's state directory is owner-only, since it holds briefs, answers and
+resume messages.
 
 Sessions also run with:
 

@@ -63,7 +63,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         dry_run: false,
     };
     let mut words = Vec::new();
-    let mut it = rest.iter();
+    let mut it = rest.iter().peekable();
     while let Some(arg) = it.next() {
         if arg == "--" {
             words.extend(it.by_ref().cloned());
@@ -77,7 +77,14 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             Some((k, v)) => (k, Some(v.to_owned())),
             None => (flag, None),
         };
-        let mut value = || inline.clone().or_else(|| it.next().cloned()).ok_or(format!("--{key} needs a value"));
+        // A value that looks like a flag is a missing value, not text: `--extra --dry-run`
+        // must not start the CLI. A value starting with `-` goes inline: `--extra=-x`.
+        let mut value = || {
+            inline
+                .clone()
+                .or_else(|| it.next_if(|v| !v.starts_with('-')).cloned())
+                .ok_or(format!("--{key} needs a value (for one starting with '-': --{key}=VALUE)"))
+        };
         match key {
             "fresh" => a.fresh = true,
             "dry-run" => a.dry_run = true,
@@ -276,6 +283,9 @@ mod tests {
         assert!(args(&["codex", "ask", "x"]).unwrap_err().contains("unknown agent"));
         assert!(args(&["claude", "nope", "x"]).unwrap_err().contains("unknown mode"));
         assert!(args(&["claude", "ask", "x", "--yolo"]).unwrap_err().contains("unknown flag"));
+        // A flag is never taken as the value before it.
+        assert!(args(&["claude", "ask", "x", "--extra", "--dry-run"]).unwrap_err().contains("needs a value"));
+        assert_eq!(args(&["claude", "ask", "x", "--extra=--dry-run"]).unwrap().extra, "--dry-run");
     }
 
     #[test]

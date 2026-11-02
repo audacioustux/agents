@@ -6,17 +6,21 @@
 //!
 //! | layer | what | mount |
 //! | --- | --- | --- |
-//! | 1 | `sandbox.hide` (default: the repository's siblings) | hidden |
-//! | 2 | the repository | read-only |
+//! | 1 | `sandbox.hide` (default: the repository's siblings); the user's runtime dir and host sockets | hidden |
+//! | 2 | the repository, and its git directories when it is a linked worktree | read-only |
 //! | 3 | every home of every harness but the session's own; its own home | hidden; writable |
-//! | 4 | `sandbox.writable_home` (build caches) | writable |
-//! | 5 | `sandbox.hide_home` (credential stores) | hidden |
-//! | 6 | relay's own state and clones | hidden |
-//! | 7 | the job's own clone and directory | writable |
+//! | 4 | what in its own home the host runs or obeys (settings, hooks, scripts) | read-only |
+//! | 5 | `sandbox.caches`: relay's own directory for each, never the host's | writable |
+//! | 6 | `sandbox.hide_home` (credential stores) | hidden |
+//! | 7 | relay's own state and clones | hidden |
+//! | 8 | the job's own clone and directory | writable |
 //!
-//! The network stays shared, since the session needs its provider's API.
+//! A read-only mount does not stop a process connecting to a Unix socket in
+//! it, so sockets are hidden, not just read-only. The network stays shared,
+//! since the session needs its provider's API, and with it abstract sockets.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
@@ -32,11 +36,13 @@ pub struct Mounts<'a> {
     pub cwd: &'a Path,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mount {
     Hidden,
     ReadOnly,
     Writable,
+    /// Writable, with this directory's contents instead of the host's.
+    From(PathBuf),
 }
 
 /// The mounts, in the order bubblewrap must apply them.
@@ -44,18 +50,19 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
     let cfg = &ctx.cfg;
     let own = crate::accounts::harness_of(m.home);
     let other_homes = crate::harness::ALL.iter().flat_map(|h| h.home_paths(user_home)).filter(|p| *p != m.home.dir);
-    let in_home = |rels: &[PathBuf], mount| rels.iter().map(|r| (user_home.join(r), mount)).collect::<Vec<_>>();
-    let layers: [Vec<(PathBuf, Mount)>; 7] = [
-        cfg.hidden_dirs().into_iter().map(|d| (d, Mount::Hidden)).collect(),
-        vec![(cfg.repo.clone(), Mount::ReadOnly)],
-        other_homes
-            .map(|p| (p, Mount::Hidden))
-            .chain(own.writable(m.home, user_home).into_iter().map(|p| (p, Mount::Writable)))
+    let all = |paths: Vec<PathBuf>, mount: Mount| paths.into_iter().map(|p| (p, mount.clone())).collect::<Vec<_>>();
+    let layers: [Vec<(PathBuf, Mount)>; 8] = [
+        all(cfg.hidden_dirs().into_iter().chain([runtime_dir()]).chain(host_sockets()).collect(), Mount::Hidden),
+        all([cfg.repo.clone()].into_iter().chain(ctx.git_dirs.iter().cloned()).collect(), Mount::ReadOnly),
+        all(other_homes.collect(), Mount::Hidden)
+            .into_iter()
+            .chain(all(own.writable(m.home, user_home), Mount::Writable))
             .collect(),
-        in_home(&cfg.sandbox.writable_home, Mount::Writable),
-        in_home(&cfg.sandbox.hide_home, Mount::Hidden),
-        vec![(ctx.state_root.clone(), Mount::Hidden), (ctx.data_root.clone(), Mount::Hidden)],
-        m.workdir.into_iter().chain([m.scratch]).map(|p| (p.to_path_buf(), Mount::Writable)).collect(),
+        all(own.protected(m.home), Mount::ReadOnly),
+        cfg.sandbox.caches.iter().map(|r| (user_home.join(r), Mount::From(ctx.caches.join(r)))).collect(),
+        all(cfg.sandbox.hide_home.iter().map(|r| user_home.join(r)).collect(), Mount::Hidden),
+        all(vec![ctx.state_root.clone(), ctx.data_root.clone()], Mount::Hidden),
+        all(m.workdir.into_iter().chain([m.scratch]).map(Path::to_path_buf).collect(), Mount::Writable),
     ];
     layers
         .into_iter()
@@ -67,18 +74,46 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
         .collect()
 }
 
+/// `$XDG_RUNTIME_DIR` (`/run/user/<uid>`): the user's D-Bus, systemd and agent sockets.
+fn runtime_dir() -> PathBuf {
+    PathBuf::from(format!("/run/user/{}", rustix::process::getuid().as_raw()))
+}
+
+/// Unix sockets under `/run` (outside the runtime dir, which is hidden whole),
+/// such as a container engine's, a few levels deep.
+fn host_sockets() -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: u8, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            if t.is_socket() {
+                out.push(e.path());
+            } else if t.is_dir() && depth > 0 && e.path() != runtime_dir() {
+                walk(&e.path(), depth - 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(Path::new("/run"), 4, &mut out);
+    out
+}
+
 pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsString)>) -> Vec<OsString> {
     let mut a: Vec<OsString> =
         ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"].map(OsString::from).to_vec();
     for (p, mount) in plan(ctx, user_home, m) {
-        let p = p.as_os_str();
-        let flags: Vec<&OsStr> = match mount {
-            Mount::Hidden if Path::new(p).is_dir() => vec!["--tmpfs".as_ref(), p],
-            Mount::Hidden => vec!["--ro-bind".as_ref(), "/dev/null".as_ref(), p],
-            Mount::ReadOnly => vec!["--ro-bind".as_ref(), p, p],
-            Mount::Writable => vec!["--bind".as_ref(), p, p],
+        let (flag, src) = match &mount {
+            Mount::Hidden if p.is_dir() => ("--tmpfs", None),
+            Mount::Hidden => ("--ro-bind", Some(Path::new("/dev/null"))),
+            Mount::ReadOnly => ("--ro-bind", Some(p.as_path())),
+            Mount::Writable => ("--bind", Some(p.as_path())),
+            Mount::From(src) => {
+                let _ = std::fs::create_dir_all(src);
+                ("--bind", Some(src.as_path()))
+            }
         };
-        a.extend(flags.into_iter().map(OsString::from));
+        a.push(flag.into());
+        a.extend(src.map(OsString::from));
+        a.push(p.into());
     }
     a.extend(
         ["--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent", "--new-session", "--clearenv"]

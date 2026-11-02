@@ -1,7 +1,7 @@
 //! Paths and helpers every system shares.
 
-use std::fs::File;
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs::{DirBuilder, File, Permissions};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::bus::{self, Owned, Port, Stamped};
 use crate::config::Config;
+use crate::os::Role;
 use crate::world::World;
 
 #[derive(Debug)]
@@ -21,9 +22,24 @@ pub struct Ctx {
     pub jobs: PathBuf,
     /// `$XDG_DATA_HOME/relay/<name>/clones`: one private clone per build job.
     pub clones: PathBuf,
+    /// `$XDG_DATA_HOME/relay/<name>/caches`: the sessions' own `sandbox.caches`.
+    pub caches: PathBuf,
     /// Everything relay keeps for every project, hidden from sessions.
     pub state_root: PathBuf,
     pub data_root: PathBuf,
+    /// When the repository is a linked worktree, its git directory and the
+    /// main repository's, which its `.git` file and a clone's alternates name.
+    pub git_dirs: Vec<PathBuf>,
+}
+
+/// A linked worktree's git directories outside it (none for an ordinary checkout).
+fn git_dirs(repo: &Path) -> Vec<PathBuf> {
+    let out = Ctx::git(repo).args(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"]).output();
+    let text = out.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    let mut dirs: Vec<PathBuf> =
+        text.unwrap_or_default().lines().map(PathBuf::from).filter(|d| !d.starts_with(repo)).collect();
+    dirs.dedup();
+    dirs
 }
 
 fn xdg(var: &str, fallback: &str) -> PathBuf {
@@ -38,20 +54,43 @@ impl Ctx {
         let state_root = xdg("XDG_STATE_HOME", ".local/state").join("relay");
         let data_root = xdg("XDG_DATA_HOME", ".local/share").join("relay");
         let state = state_root.join(&cfg.name);
+        let data = data_root.join(&cfg.name);
         let ctx = Self {
             bus: state.join("bus"),
             jobs: state.join("jobs"),
-            clones: data_root.join(&cfg.name).join("clones"),
-            state,
+            clones: data.join("clones"),
+            caches: data.join("caches"),
+            git_dirs: git_dirs(&cfg.repo),
+            state: state.clone(),
             state_root,
             data_root,
             cfg,
             cfg_path,
         };
+        // Briefs, answers and resume messages are private: owner-only from the project directory down.
+        for d in [&state, &data] {
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(d)
+                .with_context(|| format!("creating {}", d.display()))?;
+            std::fs::set_permissions(d, Permissions::from_mode(0o700))?;
+        }
         for d in [&ctx.bus, &ctx.jobs] {
-            std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(d)
+                .with_context(|| format!("creating {}", d.display()))?;
         }
         Ok(ctx)
+    }
+
+    /// Held while a command checks a job's state and records a change to it,
+    /// so two commands cannot both act on one snapshot (two adds of one name,
+    /// a clean racing a resume, a dispatch racing either).
+    pub fn jobs_lock(&self) -> Result<Role> {
+        Role::take(&self.state.join("jobs.lock"))
     }
 
     pub fn port<E: Owned>(&self) -> Port<E> {
@@ -89,7 +128,10 @@ impl Ctx {
     /// This binary, re-run with the same config, as a detached background
     /// process in its own process group, so a closing terminal does not take it.
     pub fn spawn_self(&self, args: &[&str], log: &Path) -> Result<u32> {
-        self.spawn(args, log, Stdio::null()).map(|c| c.id())
+        let child = self.spawn(args, log, Stdio::null())?;
+        let pid = child.id();
+        Self::reap(child);
+        Ok(pid)
     }
 
     /// As `spawn_self`, held at a gate: the child's stdin, which it reads to
@@ -97,7 +139,10 @@ impl Ctx {
     /// so the spawner can first record what the child will need, its pid included.
     pub fn spawn_gated(&self, args: &[&str], log: &Path) -> Result<(u32, ChildStdin)> {
         let mut child = self.spawn(args, log, Stdio::piped())?;
-        Ok((child.id(), child.stdin.take().context("the gate pipe")?))
+        let gate = child.stdin.take().context("the gate pipe")?;
+        let pid = child.id();
+        Self::reap(child);
+        Ok((pid, gate))
     }
 
     fn spawn(&self, args: &[&str], log: &Path, stdin: Stdio) -> Result<Child> {
@@ -113,6 +158,11 @@ impl Ctx {
             .process_group(0)
             .spawn()
             .with_context(|| format!("starting relay {}", args.join(" ")))
+    }
+
+    /// Reaps `child` when it exits, so a long-lived dispatcher leaves no zombies.
+    fn reap(mut child: Child) {
+        std::thread::spawn(move || child.wait());
     }
 
     /// Makes sure the dispatcher is awake. If one already runs, the new one

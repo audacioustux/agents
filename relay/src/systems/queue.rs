@@ -22,7 +22,7 @@ pub enum Cmd {
         name: String,
         #[arg(long)]
         message: String,
-        #[arg(long)]
+        #[arg(long, value_parser = usd)]
         budget: Option<f64>,
     },
     /// Withdraw a job that has not started.
@@ -58,11 +58,17 @@ pub struct Add {
     #[arg(long)]
     effort: Option<String>,
     /// Spend cap for each attempt, in USD.
-    #[arg(long)]
+    #[arg(long, value_parser = usd)]
     budget: Option<f64>,
 }
 
+fn usd(s: &str) -> Result<f64, String> {
+    s.parse().ok().filter(|x| crate::config::positive(*x)).ok_or_else(|| format!("{s:?} is not a positive amount"))
+}
+
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
+    // From the check to the record, so two adds of one name cannot both pass.
+    let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
     let name = match &cmd {
         Cmd::Add(Add { name, .. }) | Cmd::Resume { name, .. } | Cmd::Dequeue { name } | Cmd::Stop { name } => {

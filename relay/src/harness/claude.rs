@@ -131,6 +131,30 @@ impl Harness for Claude {
         vec![home.dir.clone()]
     }
 
+    fn protected(&self, home: &Home) -> Vec<PathBuf> {
+        // `.claude.json` (which can name MCP servers) stays writable: claude
+        // replaces it by rename, which a read-only mount would break.
+        const CONFIG: [&str; 9] = [
+            "settings.json",
+            "settings.local.json",
+            "CLAUDE.md",
+            "hooks",
+            "plugins",
+            "skills",
+            "commands",
+            "agents",
+            "output-styles",
+        ];
+        let scripts = std::fs::read_dir(&home.dir).into_iter().flatten().flatten().filter(|e| {
+            use std::os::unix::fs::PermissionsExt;
+            let p = e.path();
+            p.is_file()
+                && (p.extension().is_some_and(|x| x == "sh")
+                    || e.metadata().is_ok_and(|m| m.permissions().mode() & 0o111 != 0))
+        });
+        CONFIG.iter().map(|c| home.dir.join(c)).chain(scripts.map(|e| e.path())).collect()
+    }
+
     fn identity_of(&self, home: &Home) -> Option<String> {
         read_json(&home.dir.join(".claude.json"))?
             .pointer("/oauthAccount/emailAddress")?

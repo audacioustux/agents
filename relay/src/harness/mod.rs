@@ -186,6 +186,12 @@ pub trait Harness: Sync + fmt::Debug {
     fn home_paths(&self, user_home: &Path) -> Vec<PathBuf>;
     /// What a session on `home` must be able to write, besides its checkout.
     fn writable(&self, home: &Home, user_home: &Path) -> Vec<PathBuf>;
+    /// What inside those the host later runs or obeys (settings, hooks,
+    /// plugins, scripts), so it is mounted back read-only: a session must not
+    /// be able to change what runs outside the sandbox.
+    fn protected(&self, _home: &Home) -> Vec<PathBuf> {
+        Vec::new()
+    }
     /// Who the home is signed in as, to merge homes that share one quota. Never printed.
     fn identity_of(&self, _home: &Home) -> Option<String> {
         None

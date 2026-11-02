@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::marker::PhantomData;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -194,6 +195,27 @@ pub struct Stamped {
     pub event: Event,
 }
 
+impl Stamped {
+    /// The event as its bus line, with the system that owns it.
+    pub fn to_json(&self) -> serde_json::Value {
+        fn line<E: Owned>(t: u64, e: &E) -> serde_json::Value {
+            let mut v = serde_json::to_value(e).unwrap_or_default();
+            if let Some(o) = v.as_object_mut() {
+                o.insert("t".into(), t.into());
+                o.insert("system".into(), E::SYSTEM.into());
+            }
+            v
+        }
+        match &self.event {
+            Event::Queue(e) => line(self.t, e),
+            Event::Dispatch(e) => line(self.t, e),
+            Event::Session(e) => line(self.t, e),
+            Event::Quota(e) => line(self.t, e),
+            Event::Land(e) => line(self.t, e),
+        }
+    }
+}
+
 pub fn now_micros() -> u64 {
     u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_micros()).unwrap_or(u64::MAX)
 }
@@ -221,6 +243,7 @@ impl<E: Owned> Port<E> {
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(0o600)
             .open(&self.file)
             .with_context(|| format!("opening {}", self.file.display()))?;
         // One write of a short line with O_APPEND: concurrent writers never interleave.
@@ -281,6 +304,12 @@ mod tests {
         assert_eq!(evs.len(), 2);
         assert!(matches!(evs[0].event, Event::Queue(QueueEvent::Dequeued { .. })));
         assert!(matches!(evs[1].event, Event::Land(LandEvent::Forgotten { .. })));
+    }
+
+    #[test]
+    fn events_print_as_json_lines() {
+        let s = Stamped { t: 5, event: Event::Land(LandEvent::Forgotten { job: "j".into() }) };
+        assert_eq!(s.to_json(), serde_json::json!({"t":5,"system":"land","type":"forgotten","job":"j"}));
     }
 
     #[test]

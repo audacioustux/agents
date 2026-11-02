@@ -4,6 +4,7 @@
 
 use std::fs::File;
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -20,17 +21,29 @@ pub struct Role(#[allow(dead_code)] File);
 impl Role {
     /// `None` if another live process holds the role.
     pub fn try_take(path: &Path) -> Result<Option<Self>> {
-        let f = File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .with_context(|| format!("opening {}", path.display()))?;
+        let f = Self::open(path)?;
         match flock(&f, FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => Ok(Some(Self(f))),
             Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
             Err(e) => Err(e).context("flock"),
         }
+    }
+
+    /// Waits until the role is free, then takes it.
+    pub fn take(path: &Path) -> Result<Self> {
+        let f = Self::open(path)?;
+        flock(&f, FlockOperation::LockExclusive).context("flock")?;
+        Ok(Self(f))
+    }
+
+    fn open(path: &Path) -> Result<File> {
+        File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("opening {}", path.display()))
     }
 }
 
@@ -95,9 +108,11 @@ pub fn load_average() -> Option<f64> {
     std::fs::read_to_string("/proc/loadavg").ok()?.split_whitespace().next()?.parse().ok()
 }
 
-/// Free space for unprivileged users on the filesystem holding `path`, in GB.
+/// Free space for unprivileged users on the filesystem that holds, or will
+/// hold, `path` (its nearest existing ancestor), in GB.
 pub fn free_disk_gb(path: &Path) -> Option<f64> {
-    let s = rustix::fs::statvfs(path).ok()?;
+    let existing = path.ancestors().find(|p| p.exists())?;
+    let s = rustix::fs::statvfs(existing).ok()?;
     #[allow(clippy::cast_precision_loss)]
     Some((s.f_bavail * s.f_frsize) as f64 / 1e9)
 }
@@ -136,5 +151,6 @@ mod tests {
         assert!(!same_process(me, t + 1));
         assert!(load_average().is_some());
         assert!(free_disk_gb(Path::new("/")).is_some());
+        assert!(free_disk_gb(Path::new("/nonexistent/not/yet")).is_some(), "measured where it will be made");
     }
 }

@@ -125,14 +125,15 @@ struct Row<'a> {
 }
 
 impl Row<'_> {
-    fn text(&self, now: u64) -> String {
+    /// Its cells for a table: what an operator scans first comes first.
+    fn cells(&self, now: u64) -> Vec<String> {
         let meters = self.meters.into_iter().flatten().map(|(k, m)| {
             let at = m.resets_at.map_or(String::new(), |r| format!(" (resets {})", fmt_time(r)));
             format!("{k} {:.0}%{at}", m.utilization * 100.0)
         });
-        let age = self.read_at.map_or(String::new(), |t| format!("  read {} ago", crate::systems::view::ago(now, t)));
-        let (key, state, running) = (&self.account, &self.state, self.running);
-        format!("  {key:<28} {state:<34} running {running}  {}{age}", meters.collect::<Vec<_>>().join(", "))
+        let age = self.read_at.map_or(String::new(), |t| format!("read {} ago", crate::systems::view::ago(now, t)));
+        let running = if self.running > 0 { format!("{} running", self.running) } else { String::new() };
+        vec![self.account.clone(), self.state.clone(), running, age, meters.collect::<Vec<_>>().join(", ")]
     }
 }
 
@@ -176,7 +177,9 @@ pub fn accounts_view(ctx: &Ctx, world: &World) -> (serde_json::Value, String) {
     let l = &ctx.cfg.limits;
     let head =
         format!("accounts on {} (floor {:.0}%, {} session(s) each)", names.join(", "), l.floor * 100.0, l.per_account);
-    let text = std::iter::once(head).chain(rows.iter().map(|r| r.text(now))).collect::<Vec<_>>().join("\n");
+    let cells: Vec<Vec<String>> = rows.iter().map(|r| r.cells(now)).collect();
+    let lines = crate::systems::view::table(&cells).into_iter().map(|l| format!("  {l}"));
+    let text = std::iter::once(head).chain(lines).collect::<Vec<_>>().join("\n");
     (serde_json::json!({ "harnesses": names, "accounts": rows }), text)
 }
 

@@ -110,6 +110,12 @@ pub fn own_binary() -> std::io::Result<std::path::PathBuf> {
     Ok(s.strip_suffix(" (deleted)").map_or(exe.clone(), std::path::PathBuf::from))
 }
 
+/// The terminal's columns and rows, when stdout is one.
+pub fn terminal_size() -> Option<(usize, usize)> {
+    let w = rustix::termios::tcgetwinsize(std::io::stdout()).ok()?;
+    (w.ws_col > 0 && w.ws_row > 0).then(|| (usize::from(w.ws_col), usize::from(w.ws_row)))
+}
+
 /// 1-minute load average.
 pub fn load_average() -> Option<f64> {
     std::fs::read_to_string("/proc/loadavg").ok()?.split_whitespace().next()?.parse().ok()

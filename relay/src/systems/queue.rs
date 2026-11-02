@@ -98,7 +98,9 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     // The event, and for a stop the runner to signal once it is recorded.
     let (event, runner) = match cmd {
         Cmd::Add(add) => {
-            if job.is_some() {
+            // A job that ended before it ever started (dequeued) has nothing to keep:
+            // its name is free again.
+            if job.is_some_and(|j| j.status.is_live() || j.attempts > 0) {
                 fail!(Conflict, "job {name} exists; pick another name, or: relay land clean {name}");
             }
             (add.queued(ctx, &world.jobs)?, None)

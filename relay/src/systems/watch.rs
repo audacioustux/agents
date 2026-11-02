@@ -180,7 +180,8 @@ fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
     let pane = Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((ui.scroll, 0));
     f.render_widget(pane.block(Block::bordered().title(title)), detail);
 
-    let ready = |i: usize| if b.ready[i] { Style::new().fg(Color::Green) } else { Style::new().add_modifier(Modifier::DIM) };
+    let ready =
+        |i: usize| if b.ready[i] { Style::new().fg(Color::Green) } else { Style::new().add_modifier(Modifier::DIM) };
     f.render_widget(table(&b.accounts, ready, Block::bordered().title(b.accounts_head.as_str())), accounts);
 
     let mut spans = Vec::new();

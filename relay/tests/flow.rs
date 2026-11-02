@@ -231,6 +231,18 @@ fn every_harness_is_scheduled_alike_and_a_job_moves_across_harnesses() {
     std::thread::sleep(Duration::from_secs(2));
     assert_eq!(job(&env, "omp-only")["status"], "queued");
     ok(&relay(&env, &["queue", "dequeue", "omp-only"]), "dequeue");
+    // It never started, so its name is free again; a job that ran keeps its name.
+    ok(
+        &relay(&env, &["queue", "add", "omp-only", "--text", "y", "--task", "again", "--readonly", "--harness", "omp"]),
+        "requeue",
+    );
+    assert_eq!(
+        (job(&env, "omp-only")["status"].as_str(), job(&env, "omp-only")["task"].as_str()),
+        (Some("queued"), Some("again"))
+    );
+    ok(&relay(&env, &["queue", "dequeue", "omp-only"]), "dequeue again");
+    let out = relay(&env, &["queue", "add", "look", "--text", "x"]);
+    assert_eq!(out.status.code(), Some(4), "a name whose job ran is taken");
     // A bare model needs exactly one harness to belong to.
     let out = relay(&env, &["queue", "add", "vague", "--text", "x", "--model", "m2"]);
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("harness=model"));

@@ -36,6 +36,9 @@ pub enum Cmd {
     Refresh {
         #[arg(long)]
         stale: bool,
+        /// Only accounts some queued job may run on: a reading nobody waits for is not taken.
+        #[arg(long)]
+        wanted: bool,
     },
     /// Let relay use an account (`harness:label`) again, for example after signing it back in.
     Enable { account: String },
@@ -46,7 +49,7 @@ pub enum Cmd {
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Show => show(ctx, &ctx.world()?),
-        Cmd::Refresh { stale } => refresh(ctx, stale),
+        Cmd::Refresh { stale, wanted } => refresh(ctx, stale, wanted),
         Cmd::Enable { account } => toggle(ctx, account, true),
         Cmd::Disable { account } => toggle(ctx, account, false),
     }
@@ -61,7 +64,7 @@ fn toggle(ctx: &Ctx, account: String, enabled: bool) -> Result<()> {
     show(ctx, &ctx.world()?)
 }
 
-fn refresh(ctx: &Ctx, only_stale: bool) -> Result<()> {
+fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
     // One reader at a time: overlapping requests from dispatch passes collapse into this one.
     let Some(_role) = Role::try_take(&ctx.state.join("quota.lock"))? else {
         return ctx.reply(&serde_json::json!({ "skipped": "a reading is already being taken" }), "");
@@ -74,6 +77,7 @@ fn refresh(ctx: &Ctx, only_stale: bool) -> Result<()> {
         .into_iter()
         .filter(|a| harness_of(a).caps().quota)
         .filter(|a| !only_stale || accounts::due(harness_of(a), world.accounts.get(&a.key()), now))
+        .filter(|a| !only_wanted || wanted(&world, a))
         .collect();
     let port = ctx.port(&Source(()));
     // In parallel: one reading can take a minute and a half.
@@ -186,6 +190,11 @@ fn judge<'w>(
         accounts::tightest(&governing, &s.meters, secs(now))
     });
     (state, tightest, ready)
+}
+
+/// Whether a queued job may run on `account`, so its reading decides something.
+pub fn wanted(world: &World, account: &Home) -> bool {
+    world.jobs.values().any(|j| j.status == Status::Queued && may_use(j, account))
 }
 
 pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
@@ -308,6 +317,18 @@ mod tests {
     fn queued(name: &str, model: Option<&str>) -> Job {
         let models = model.map(|m| BTreeMap::from([("omp".to_owned(), m.to_owned())])).unwrap_or_default();
         Job { name: name.into(), status: Status::Queued, models, ..Job::default() }
+    }
+
+    #[test]
+    fn only_an_account_a_queued_job_may_use_is_worth_reading() {
+        let claude = Home { harness: "claude", label: "a".into(), dir: PathBuf::from("/c") };
+        let mut on_omp = queued("a", None);
+        on_omp.harnesses = vec!["omp".into()];
+        let w = world(&[on_omp.clone()]);
+        assert!(wanted(&w, &omp()) && !wanted(&w, &claude), "a job pinned to omp says nothing about claude");
+        let running = Job { status: Status::Running, ..on_omp };
+        assert!(!wanted(&world(&[running]), &omp()), "nothing waits, so nothing is read");
+        assert!(wanted(&world(&[queued("b", None)]), &claude), "an unpinned job may use any harness");
     }
 
     #[test]

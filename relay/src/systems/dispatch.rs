@@ -170,13 +170,16 @@ pub fn seats_taken(worlds: &[World]) -> BTreeMap<String, usize> {
     seats
 }
 
-/// Starts a quota reading for accounts whose reading is old, when some job waits.
+/// Starts a quota reading for accounts whose reading is old and that a
+/// waiting job may run on: `claude /usage` is not free to call, and a job
+/// pinned to one harness says nothing about another's accounts.
 fn refresh_stale(ctx: &Ctx, world: &World, found: &[Home]) -> Result<()> {
-    let waiting = world.jobs.values().any(|j| j.status == Status::Queued);
     let now = now_micros();
-    if waiting && found.iter().any(|a| accounts::due(harness_of(a), world.accounts.get(&a.key()), now)) {
+    if found.iter().any(|a| {
+        crate::systems::quota::wanted(world, a) && accounts::due(harness_of(a), world.accounts.get(&a.key()), now)
+    }) {
         // `quota refresh` holds its own role, so overlapping passes start it once.
-        ctx.spawn_self(&["quota", "refresh", "--stale"], &ctx.state.join("quota.log"))?;
+        ctx.spawn_self(&["quota", "refresh", "--stale", "--wanted"], &ctx.state.join("quota.log"))?;
     }
     Ok(())
 }

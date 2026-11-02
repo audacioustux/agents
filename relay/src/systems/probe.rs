@@ -166,7 +166,7 @@ impl<'a> Probe<'a> {
             Check { what: "caches are relay's own, not the host's".into(), inside: all(caches), outside: None },
             Check {
                 what: "the repository is readable, not writable".into(),
-                inside: format!("test -d {r}/.git && ! test -w {r}", r = q(repo)),
+                inside: format!("test -e {r}/.git && ! test -w {r}", r = q(repo)),
                 outside: None,
             },
             Check {

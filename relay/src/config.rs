@@ -115,10 +115,15 @@ pub struct HarnessConf {
 }
 
 impl HarnessConf {
-    /// The invocation, run by the configured program when one is set.
+    /// The invocation, run by the configured program when one is set, else by
+    /// the harness as relay's own `PATH` finds it. A project's `env_shell` must
+    /// not pick the harness: TheGrid's devshell once put a stale `nixpkgs` claude
+    /// first, on which `opus` meant an older model and current ids were refused.
     pub fn locate(&self, mut inv: crate::harness::Invocation) -> crate::harness::Invocation {
         if let Some(p) = &self.program {
             inv.program = p.clone().into();
+        } else if let Some(p) = crate::os::on_path(&inv.program) {
+            inv.program = p.into();
         }
         inv
     }
@@ -354,6 +359,17 @@ fn find_upwards(start: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_harness_runs_as_relay_finds_it_not_as_a_project_shell_would() {
+        let conf = HarnessConf::default();
+        let inv = conf.locate(crate::harness::Invocation::new("sh"));
+        assert!(Path::new(&inv.program).is_absolute(), "{:?}", inv.program);
+        let pinned = HarnessConf { program: Some("/opt/x/claude".into()), ..HarnessConf::default() };
+        assert_eq!(pinned.locate(crate::harness::Invocation::new("claude")).program, "/opt/x/claude");
+        let missing = conf.locate(crate::harness::Invocation::new("no-such-harness-xyz"));
+        assert_eq!(missing.program, "no-such-harness-xyz", "left to fail as it would have");
+    }
 
     fn repo() -> tempdir::Dir {
         let d = tempdir::Dir::new();

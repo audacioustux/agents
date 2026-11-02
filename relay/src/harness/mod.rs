@@ -109,7 +109,7 @@ pub struct Invocation {
 }
 
 impl Invocation {
-    fn new(program: &str) -> Self {
+    pub(crate) fn new(program: &str) -> Self {
         Self { program: program.into(), args: Vec::new(), env: Vec::new(), stdin: None, files: Vec::new() }
     }
 

@@ -104,6 +104,18 @@ pub fn terminate_group(pid: u32) -> Result<()> {
 /// The path this binary was started from. Once an upgrade replaces it, Linux
 /// names the running image `<path> (deleted)`; the path itself then holds
 /// the new binary, which is the one to start.
+/// Where `name` resolves on relay's own `PATH`: the program the operator
+/// installed, before any project shell can put another first.
+pub fn on_path(name: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    if Path::new(name).components().count() != 1 {
+        return None;
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|p| p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+}
+
 pub fn own_binary() -> std::io::Result<std::path::PathBuf> {
     let exe = std::env::current_exe()?;
     let s = exe.to_string_lossy();

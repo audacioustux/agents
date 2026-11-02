@@ -79,6 +79,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one |
 | `relay view status [--all]` | Jobs and accounts. With `--json`, the whole folded state |
 | `relay view result NAME` | Final report, status, cost, branch, log path |
+| `relay view watch [--all]` | The status live, redrawn as events land, with each running session's latest output |
 | `relay view events` | The merged event log |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room, a fresh reading, switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout) / delete its clone and records |
@@ -124,7 +125,9 @@ same 10 minutes. An account is used only when:
 - it has a free slot.
 
 Of those, relay picks the one with the most room left per day until reset,
-because quota still unused at a reset is lost.
+because quota still unused at a reset is lost. A session that already ran
+stays on its account while that account is usable, since moving it loses the
+provider's prompt cache and its whole transcript is read again at full price.
 
 When a session hits a limit, its account is closed until two minutes after the
 stated reset (or for 15 minutes if none is stated), and the job goes back in
@@ -166,7 +169,9 @@ where the job's own mounts come last, so nothing above can hide them.
 
 Environment variables are cleared and passed back in, except those matching
 `sandbox.env_deny` (tokens, secrets, keys, `AUTH`, cookies, sessions and
-`CLAUDE*`). The adapter then sets the one that selects the account.
+`CLAUDE*`). The adapter then sets the one that selects the account. Signing
+keys are hidden, so git inside is told not to sign (`commit.gpgsign` and
+`tag.gpgsign` off); sign commits when you land them.
 
 The session also gets its own PID namespace, so nothing it starts outlives it.
 With the sandbox as the boundary, the session runs without approval prompts. Without it
@@ -195,12 +200,20 @@ relay follows a systems model. Each system has one responsibility, runs as its
 own process, and owns one output port:
 
 - **The port:** an append-only file, `bus/<system>.ndjson`, holding only that
-  system's event types. The types enforce this: a system can only build a
-  port for its own event enum. A line that is not its file's type is dropped
-  on read.
+  system's event types. A port is built only from its system's `Source`, a
+  capability only that system's module can make, so a second writer cannot
+  be built. A line that is not its file's type is dropped on read.
+- **One writer per attempt:** each attempt at a job is a session system of its
+  own, writing `bus/session/<job>.<attempt>.ndjson`. The fold hears a session
+  event only from the job's current attempt, about that job, so a runner that
+  outlived its attempt writes where nobody listens. `land clean` deletes a
+  job's attempt files.
 - **State:** everything is derived by folding the bus. Nothing else is stored.
 - **Wake-ups:** the files are the lossless record, and an inotify watch is
-  only a doorbell.
+  only a doorbell. A runner's exit rings it too. Otherwise the dispatcher
+  sleeps until the next moment the plan could change by itself (a limit
+  lifting, a meter resetting, a reading going stale), with a 5-minute
+  backstop, and exits after a minute with nothing to do.
 - **Single roles:** the dispatcher and the quota reader each hold a `flock`,
   which the kernel releases if the holder dies.
 

@@ -8,27 +8,37 @@ name = "myproject"
 repo = "."
 
 [limits]
-max_running = 2          # sessions at once, over all accounts
+max_running = 2          # sessions at once, over all accounts of all harnesses
 per_account = 1          # sessions at once on one account
-floor = 0.9              # an account at this utilization of any quota window takes no new session
-budget_usd = 10.0        # --max-budget-usd per attempt, unless the job sets its own
+floor = 0.9              # an account at this utilization of any meter that governs the job takes no new session
+budget_usd = 10.0        # spend cap per attempt, enforced by relay for every harness
 silent_minutes = 30      # a session that prints nothing this long is ended
 # max_load = 24.0        # hold new sessions while the 1-minute load average is above this
 min_free_disk_gb = 10.0  # hold new build sessions (each makes a clone) below this
 max_retries = 1          # automatic retries for a session that died with no output
 
 [accounts]
-# Claude Code config dirs in $HOME starting with this prefix are accounts:
-# ~/.claude is "default", ~/.claude.work is "work". Sign each in once with
-#   CLAUDE_CONFIG_DIR=~/.claude.work claude
-prefix = ".claude"
-exclude = []             # labels never used, e.g. accounts that belong to another project
+# Every signed-in home of every enabled harness is an account, named harness:label
+# (claude:default for ~/.claude, claude:work for ~/.claude.work, omp:default for
+# ~/.omp, omp:work for ~/.omp/profiles/work). These are never used:
+exclude = []
+
+# One table per harness, all with the same keys. A harness is enabled by
+# default when it is verified and installed; `enabled` overrides that.
+# [harness.claude]
+# enabled = true
+# program = "/path/to/claude"   # a different command; tests use a stub
+# model = "sonnet"              # for jobs that name none for this harness
+# effort = "high"
+# extra_args = []
+#
+# [harness.omp]
+# model = "openai-codex/gpt-5.2"  # omp meters quota per provider, so its model must name one
+#
+# [harness.puku-cli]
+# enabled = true                # unverified adapter: used only when switched on
 
 [session]
-command = ["claude"]
-# model = "sonnet"
-# effort = "high"
-extra_args = []
 branch_prefix = "relay/"
 final_marker = "FINAL"   # a result without it gets one follow-up asking for the report; "" turns this off
 max_hours = 4.0
@@ -41,9 +51,10 @@ nice = 10
 # "haiku" = "too weak for this repository's reviews"
 
 [sandbox]
-enabled = true           # false runs sessions with your full access; then build jobs use acceptEdits only
+enabled = true           # false runs sessions with your full access; then build jobs use edit-only permissions
 # hide = ["/workspaces"] # shown empty inside; default: the repository's parent directory
 hide_home = [".ssh", ".gnupg", ".config/gh", ".git-credentials", ".netrc", ".aws", ".config/gcloud",
-             ".docker", ".npmrc", ".cargo/credentials", ".cargo/credentials.toml", ".local/state"]
+             ".docker", ".npmrc", ".cargo/credentials", ".cargo/credentials.toml", ".local/state",
+             ".omp/ssh-control"]
 writable_home = [".cache", ".cargo"]
 # env_deny = "..."       # variables whose names match are not passed in (see the README)

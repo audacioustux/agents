@@ -1,0 +1,37 @@
+#!/bin/sh
+# A stand-in for omp, for relay's end-to-end tests. The profile's root is
+# ~/.omp, or ~/.omp/profiles/$OMP_PROFILE; files there switch behaviour:
+#   usage    printed for `omp usage`
+#   limited  every session there hits a rate limit
+set -eu
+root=$HOME/.omp
+[ -n "${OMP_PROFILE:-}" ] && root=$HOME/.omp/profiles/$OMP_PROFILE
+case "${1:-}" in
+usage) cat "$root/usage" 2>/dev/null || true; exit 0 ;;
+--version) echo "stub-omp 1.0"; exit 0 ;;
+esac
+dir=""
+id=""
+prompt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --session-dir) dir=$2; shift ;;
+  --resume) id=$2; shift ;;
+  --model | --thinking | --append-system-prompt | --approval-mode | --mode) shift ;;
+  @*) prompt=${1#@} ;;
+  esac
+  shift
+done
+[ -f "$prompt" ] || { echo "no prompt file" >&2; exit 2; }
+[ -n "$id" ] || id="omp-$$"
+mkdir -p "$dir"
+echo '{"turn":1}' >>"$dir/$id.jsonl"
+printf '{"type":"session","id":"%s"}\n' "$id"
+if [ -f "$root/limited" ]; then
+  echo '{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"429 Too Many Requests: rate limit"}}'
+  echo '{"type":"agent_end"}'
+  exit 1
+fi
+turns=$(wc -l <"$dir/$id.jsonl" | tr -d ' ')
+printf '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","usage":{"cost":{"total":0.01}},"content":[{"type":"text","text":"ran on omp:%s with %s transcript turns\\nFINAL ok"}]}}\n' "${OMP_PROFILE:-default}" "$turns"
+echo '{"type":"agent_end"}'

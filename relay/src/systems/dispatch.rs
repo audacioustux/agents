@@ -13,9 +13,10 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::Result;
 use clap::Subcommand;
 
-use crate::accounts::{self, Account};
-use crate::bus::{DispatchEvent, now_micros};
+use crate::accounts::{self, harness_of};
+use crate::bus::{DispatchEvent, now_micros, secs};
 use crate::ctx::Ctx;
+use crate::harness::Home;
 use crate::os::{self, Doorbell, Role};
 use crate::world::{Job, Status, World};
 
@@ -88,19 +89,21 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held)> {
     let mut held = Held::default();
     let plan = plan(ctx, &world, &found, &mut held);
     for (job, account) in plan {
-        let pid = ctx.spawn_self(&["session", "run", &job], &ctx.job_file(&job, "runner.log"))?;
+        let (pid, gate) = ctx.spawn_gated(&["session", "run", &job], &ctx.job_file(&job, "runner.log"))?;
         let started = os::start_time(pid).unwrap_or(0);
+        // The runner reads its account from this event, so it waits at the gate until it is written.
         port.emit(DispatchEvent::Dispatched { job, account, runner_pid: pid, runner_started: started })?;
+        drop(gate);
     }
     let busy = world.jobs.values().any(|j| j.status.is_live());
     Ok((busy, held))
 }
 
 /// Starts a quota reading for accounts whose reading is old, when some job waits.
-fn refresh_stale(ctx: &Ctx, world: &World, found: &[Account]) -> Result<()> {
+fn refresh_stale(ctx: &Ctx, world: &World, found: &[Home]) -> Result<()> {
     let waiting = world.jobs.values().any(|j| j.status == Status::Queued);
     let now = now_micros();
-    if waiting && found.iter().any(|a| accounts::is_stale(world.accounts.get(&a.label), now)) {
+    if waiting && found.iter().any(|a| accounts::is_stale(harness_of(a), world.accounts.get(&a.key()), now)) {
         // `quota refresh` holds its own role, so overlapping passes start it once.
         ctx.spawn_self(&["quota", "refresh", "--stale"], &ctx.state.join("quota.log"))?;
     }
@@ -108,13 +111,13 @@ fn refresh_stale(ctx: &Ctx, world: &World, found: &[Account]) -> Result<()> {
 }
 
 /// Which queued jobs start now, and where. Pure apart from reading machine gauges.
-fn plan(ctx: &Ctx, world: &World, found: &[Account], held: &mut Held) -> Vec<(String, String)> {
+fn plan(ctx: &Ctx, world: &World, found: &[Home], held: &mut Held) -> Vec<(String, String)> {
     let limits = &ctx.cfg.limits;
-    let now_s = i64::try_from(now_micros() / 1_000_000).unwrap_or(i64::MAX);
-    let mut load: BTreeMap<&str, usize> = BTreeMap::new();
+    let now_s = secs(now_micros());
+    let mut load: BTreeMap<String, usize> = BTreeMap::new();
     let mut total = 0;
     for j in world.jobs.values().filter(|j| j.status == Status::Running) {
-        *load.entry(j.account.as_deref().unwrap_or("")).or_default() += 1;
+        *load.entry(j.account.clone().unwrap_or_default()).or_default() += 1;
         total += 1;
     }
     if let (Some(max), Some(now)) = (limits.max_load, os::load_average())
@@ -136,22 +139,33 @@ fn plan(ctx: &Ctx, world: &World, found: &[Account], held: &mut Held) -> Vec<(St
             held.0.push(format!("{}: free disk below {} GB", j.name, limits.min_free_disk_gb));
             continue;
         }
+        // Every account of every harness the job allows, judged the same way:
+        // on the meters its harness says govern the job's model there.
+        let mut why = Vec::new();
         let pick = found
             .iter()
-            .filter(|a| j.pinned.as_ref().is_none_or(|p| p == &a.label))
-            .filter(|a| load.get(a.label.as_str()).copied().unwrap_or(0) < limits.per_account)
-            .filter(|a| accounts::refusal(world.accounts.get(&a.label), limits.floor, now_s).is_none())
-            .max_by(|a, b| {
-                let s = |x: &Account| accounts::score(&world.accounts[&x.label].windows, now_s);
-                s(a).total_cmp(&s(b))
-            });
-        let Some(a) = pick else {
-            held.0.push(format!("{}: no account has room", j.name));
+            .filter(|a| j.harnesses.is_empty() || j.harnesses.iter().any(|h| h == a.harness))
+            .filter(|a| j.pinned.as_ref().is_none_or(|p| *p == a.key()))
+            .filter(|a| load.get(a.key().as_str()).copied().unwrap_or(0) < limits.per_account)
+            .filter_map(|a| {
+                let model = j.models.get(a.harness).cloned().or_else(|| ctx.cfg.harness(a.harness).model);
+                match accounts::fit(a, world.accounts.get(&a.key()), model.as_deref(), limits.floor, now_s) {
+                    Ok(score) => Some((a, score)),
+                    Err(r) => {
+                        why.push(format!("{} {}", a.key(), r.describe()));
+                        None
+                    }
+                }
+            })
+            .max_by(|(_, x), (_, y)| x.total_cmp(y));
+        let Some((a, _)) = pick else {
+            held.0.push(format!("{}: no account has room ({})", j.name, why.join("; ")));
             continue;
         };
-        *load.entry(a.label.as_str()).or_default() += 1;
+        let key = a.key();
         total += 1;
-        out.push((j.name.clone(), a.label.clone()));
+        out.push((j.name.clone(), key.clone()));
+        *load.entry(key).or_default() += 1;
     }
     out
 }

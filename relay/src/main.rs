@@ -1,5 +1,6 @@
-//! relay: queued coding-agent tasks, run as sandboxed headless Claude Code
-//! sessions on whichever account has room. See README.md.
+//! relay: coding-agent tasks for any harness (claude, omp, puku-cli), run as
+//! sandboxed headless sessions on whichever account has room, or asked
+//! one-shot and read-only. See README.md.
 
 /// `println!` that returns the error instead of panicking, so `relay ... | head` ends quietly.
 macro_rules! out {
@@ -13,11 +14,10 @@ mod accounts;
 mod bus;
 mod config;
 mod ctx;
+mod harness;
 mod os;
 mod sandbox;
-mod stream;
 mod systems;
-mod usage;
 mod world;
 
 use std::path::PathBuf;
@@ -28,7 +28,7 @@ use clap::{Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "Run queued tasks as sandboxed headless Claude Code sessions, spread over accounts by quota"
+    about = "Coding-agent tasks for any harness: queued as sandboxed headless sessions on the account with most room, or asked one-shot"
 )]
 struct Cli {
     /// The project's `relay.toml`. Default: `$RELAY_CONFIG`, else the nearest `relay.toml` upwards.
@@ -64,9 +64,39 @@ enum System {
         #[arg(long)]
         account: Option<String>,
     },
+    /// One-shot, read-only call to a harness, now: relay ask AGENT MODE ... (relay ask --help)
+    Ask {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+fn finish(result: anyhow::Result<()>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe) => {
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("relay: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn main() -> ExitCode {
+    // `ask` takes its arguments raw: its contract treats `--continue` as an
+    // error before `--` and as text after it, which a clap parse would blur.
+    let raw: Vec<String> = std::env::args().collect();
+    if raw.get(1).map(String::as_str) == Some("ask") {
+        return match systems::ask::main(&raw[2..]) {
+            Ok(code) => ExitCode::from(code),
+            Err(e) => {
+                eprintln!("relay ask: {e:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let cli = Cli::parse();
     let result =
         config::Config::load(cli.config.as_deref()).and_then(|(cfg, path)| ctx::Ctx::new(cfg, path)).and_then(|ctx| {
@@ -78,16 +108,8 @@ fn main() -> ExitCode {
                 System::View(c) => systems::view::run(&ctx, c),
                 System::Land(c) => systems::land::run(&ctx, c),
                 System::Probe { account } => systems::probe::run(&ctx, account.as_deref()),
+                System::Ask { .. } => unreachable!("handled before parsing"),
             }
         });
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) if e.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe) => {
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("relay: {e:#}");
-            ExitCode::FAILURE
-        }
-    }
+    finish(result)
 }

@@ -1,6 +1,7 @@
-//! End to end, with a stub agent: quota readings, account choice, a limit
-//! that moves a session (and its transcript) to another account, a build job
-//! that commits on its own branch inside the sandbox, and landing that branch.
+//! End to end, with stub harnesses in a real bubblewrap sandbox: quota
+//! readings, account choice across harnesses, a limit that moves a session
+//! (with its history on the same harness, afresh across harnesses), a build
+//! job committing on its own branch, and landing that branch.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -37,7 +38,8 @@ fn identity() -> [(&'static str, &'static str); 4] {
     ]
 }
 
-fn account(home: &Path, label: &str, usage_pct: u32, limited: bool) {
+/// A claude home whose weekly meter resets in about two months.
+fn claude_account(home: &Path, label: &str, usage_pct: u32, limited: bool) {
     let d = home.join(format!(".claude.{label}"));
     std::fs::create_dir_all(&d).unwrap();
     std::fs::write(d.join(".credentials.json"), r#"{"claudeAiOauth":{"refreshToken":"r"}}"#).unwrap();
@@ -53,24 +55,44 @@ fn account(home: &Path, label: &str, usage_pct: u32, limited: bool) {
     }
 }
 
-fn setup() -> Env {
-    let root = std::env::temp_dir().join(format!("relay-flow-{}", std::process::id()));
+/// omp's default profile, with a `stub` provider whose week resets in two days.
+fn omp_default(home: &Path, usage_pct: u32, limited: bool) {
+    let root = home.join(".omp");
+    std::fs::create_dir_all(root.join("agent")).unwrap();
+    std::fs::write(root.join("agent/agent.db"), "").unwrap();
+    std::fs::write(
+        root.join("usage"),
+        format!("Usage\n\nStub — 1 account\n  ● someone\n      ● 7 days  ██░░  {usage_pct}.0% used · resets in 2d\n"),
+    )
+    .unwrap();
+    if limited {
+        std::fs::write(root.join("limited"), "").unwrap();
+    }
+}
+
+fn setup(tag: &str, omp: bool) -> Env {
+    let root = std::env::temp_dir().join(format!("relay-flow-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let (home, repo) = (root.join("home"), root.join("repo"));
     std::fs::create_dir_all(repo.join(".stub")).unwrap();
-    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/stub-claude.sh"), repo.join(".stub/claude"))
-        .unwrap();
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    std::fs::copy(here.join("tests/stub-claude.sh"), repo.join(".stub/claude")).unwrap();
+    std::fs::copy(here.join("tests/stub-omp.sh"), repo.join(".stub/omp")).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
-    // `a` looks emptier, so it is picked first, but every session there hits its limit.
-    account(&home, "a", 10, true);
-    account(&home, "b", 50, false);
+    let stub = |h: &str| repo.join(".stub").join(h).display().to_string();
+    let omp_conf = if omp {
+        format!("[harness.omp]\nenabled = true\nprogram = \"{}\"\nmodel = \"stub/m1\"\n", stub("omp"))
+    } else {
+        "[harness.omp]\nenabled = false\n".to_owned()
+    };
     std::fs::write(
         repo.join("relay.toml"),
         format!(
-            "name = \"flow\"\n[limits]\nmin_free_disk_gb = 0\n[session]\ncommand = [\"{}\"]\nnice = 0\n",
-            repo.join(".stub/claude").display()
+            "name = \"flow\"\n[limits]\nmin_free_disk_gb = 0\n[session]\nnice = 0\n\
+             [harness.claude]\nprogram = \"{}\"\n{omp_conf}[harness.puku-cli]\nenabled = false\n",
+            stub("claude")
         ),
     )
     .unwrap();
@@ -85,9 +107,19 @@ fn relay(env: &Env, args: &[&str]) -> Output {
         .env("XDG_STATE_HOME", env.root.join("state"))
         .env("XDG_DATA_HOME", env.root.join("data"))
         .env_remove("RELAY_CONFIG")
+        .env_remove("OMP_PROFILE")
         .envs(identity())
         .output()
         .unwrap()
+}
+
+fn ok(out: &Output, what: &str) {
+    assert!(
+        out.status.success(),
+        "{what}:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn job(env: &Env, name: &str) -> serde_json::Value {
@@ -108,44 +140,47 @@ fn wait_for(env: &Env, name: &str) -> serde_json::Value {
     }
 }
 
+fn result(env: &Env, name: &str) -> String {
+    String::from_utf8_lossy(&relay(env, &["view", "result", name]).stdout).into_owned()
+}
+
+fn have_bwrap() -> bool {
+    let ok = Command::new("bwrap").arg("--version").output().is_ok();
+    if !ok {
+        eprintln!("skipped: bwrap is not installed");
+    }
+    ok
+}
+
 #[test]
 fn limited_session_moves_with_its_transcript_and_build_lands() {
-    if Command::new("bwrap").arg("--version").output().is_err() {
-        eprintln!("skipped: bwrap is not installed");
+    if !have_bwrap() {
         return;
     }
-    let env = setup();
+    let env = setup("claude", false);
+    // `a` looks emptier, so it is picked first, but every session there hits its limit.
+    claude_account(&env.home, "a", 10, true);
+    claude_account(&env.home, "b", 50, false);
+    ok(&relay(&env, &["probe", "--account", "claude:b"]), "probe");
 
-    let probe = relay(&env, &["probe", "--account", "b"]);
-    assert!(
-        probe.status.success(),
-        "probe:\n{}{}",
-        String::from_utf8_lossy(&probe.stdout),
-        String::from_utf8_lossy(&probe.stderr)
-    );
-
-    let q = relay(&env, &["queue", "add", "look", "--text", "Look around.", "--readonly"]);
-    assert!(q.status.success(), "{}", String::from_utf8_lossy(&q.stderr));
+    ok(&relay(&env, &["queue", "add", "look", "--text", "Look around.", "--readonly"]), "queue");
     let j = wait_for(&env, "look");
     assert_eq!(j["status"], "done", "{j}");
-    assert_eq!(j["account"], "b");
+    assert_eq!(j["account"], "claude:b");
     assert_eq!(j["attempts"], 2, "first on a, then moved to b");
-    let result = String::from_utf8_lossy(&relay(&env, &["view", "result", "look"]).stdout).to_string();
     // Two transcript turns on b: the one written on a came along.
-    assert!(result.contains("ran on .claude.b with 2 transcript turns"), "{result}");
+    let r = result(&env, "look");
+    assert!(r.contains("ran on .claude.b with 2 transcript turns"), "{r}");
+    let status = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
+    assert!(status.contains("claude:a") && status.contains("limited until"), "{status}");
 
-    let status = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).to_string();
-    assert!(status.contains("limited until"), "{status}");
-
-    let q = relay(&env, &["queue", "add", "build", "--text", "Make a change."]);
-    assert!(q.status.success());
+    ok(&relay(&env, &["queue", "add", "build", "--text", "Make a change."]), "queue");
     let j = wait_for(&env, "build");
     assert_eq!(j["status"], "done", "{j}");
     assert_eq!(j["branch"], "relay/build");
     assert!(!env.repo.join("relay-output.txt").exists(), "the repository itself is untouched");
 
-    let land = relay(&env, &["land", "fetch", "build"]);
-    assert!(land.status.success(), "{}", String::from_utf8_lossy(&land.stderr));
+    ok(&relay(&env, &["land", "fetch", "build"]), "land fetch");
     let log = Command::new("git")
         .arg("-C")
         .arg(&env.repo)
@@ -153,7 +188,63 @@ fn limited_session_moves_with_its_transcript_and_build_lands() {
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "stub work");
-
-    assert!(relay(&env, &["land", "clean", "build"]).status.success());
+    ok(&relay(&env, &["land", "clean", "build"]), "land clean");
     assert!(job(&env, "build").is_null());
+}
+
+#[test]
+fn every_harness_is_scheduled_alike_and_a_job_moves_across_harnesses() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("mixed", true);
+    // omp's stub provider has the most room left per day, so it goes first, and is limited.
+    omp_default(&env.home, 20, true);
+    claude_account(&env.home, "b", 50, false);
+    // The sandbox, for one account of each harness.
+    let probe = relay(&env, &["probe"]);
+    ok(&probe, "probe");
+    let p = String::from_utf8_lossy(&probe.stdout);
+    assert!(p.contains("== claude:b") && p.contains("== omp:default"), "{p}");
+
+    ok(&relay(&env, &["queue", "add", "look", "--text", "Look around.", "--readonly"]), "queue");
+    let j = wait_for(&env, "look");
+    assert_eq!(j["status"], "done", "{j}");
+    assert_eq!(j["account"], "claude:b");
+    assert_eq!(j["attempts"], 2, "first on omp, then on claude");
+    // A fresh session on claude: omp's history cannot be read there.
+    let r = result(&env, "look");
+    assert!(r.contains("ran on .claude.b with 1 transcript turns"), "{r}");
+    let status = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
+    assert!(status.contains("omp:default") && status.contains("limited until"), "{status}");
+
+    // A job held to omp waits for it (limited until its reset): it does not slip onto claude.
+    ok(&relay(&env, &["queue", "add", "omp-only", "--text", "x", "--readonly", "--harness", "omp"]), "queue");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(job(&env, "omp-only")["status"], "queued");
+    ok(&relay(&env, &["queue", "dequeue", "omp-only"]), "dequeue");
+    // A bare model needs exactly one harness to belong to.
+    let out = relay(&env, &["queue", "add", "vague", "--text", "x", "--model", "m2"]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("harness=model"));
+}
+
+#[test]
+fn an_omp_session_runs_and_resumes_in_its_own_store() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("omp", true);
+    omp_default(&env.home, 20, false);
+    ok(&relay(&env, &["queue", "add", "o", "--text", "Look.", "--readonly", "--harness", "omp"]), "queue");
+    let j = wait_for(&env, "o");
+    assert_eq!((j["status"].as_str(), j["account"].as_str()), (Some("done"), Some("omp:default")), "{j}");
+    let first = j["session_id"].as_str().unwrap().to_owned();
+    assert!(first.starts_with("omp-"), "the id omp chose, not relay's: {first}");
+    // Resume: the same omp session, from the job's own session store.
+    ok(&relay(&env, &["queue", "resume", "o", "--message", "And then?"]), "resume");
+    let j = wait_for(&env, "o");
+    assert_eq!(j["status"], "done", "{j}");
+    assert_eq!(j["session_id"].as_str(), Some(first.as_str()));
+    let r = result(&env, "o");
+    assert!(r.contains("ran on omp:default with 2 transcript turns"), "{r}");
 }

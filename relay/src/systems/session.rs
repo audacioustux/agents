@@ -1,6 +1,8 @@
-//! session: runs one dispatched job as a headless Claude session and reports
-//! what happened. Emits: cloned, started, rate, limited, signed-out,
-//! follow-up, ended. One process per running job, started by dispatch.
+//! session: runs one dispatched job on its account's harness and reports
+//! what happened. Emits: cloned, started, identified, rate, limited,
+//! signed-out, follow-up, ended. One process per running job, started by
+//! dispatch. Nothing here names a harness: the account's harness builds the
+//! command and reads the output, and the limits are enforced here for all.
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
@@ -12,13 +14,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 
-use crate::accounts;
-use crate::bus::{Outcome, SessionEvent, now_micros};
+use crate::accounts::{self, harness_of};
+use crate::bus::{Outcome, SessionEvent, now_micros, secs};
 use crate::ctx::Ctx;
+use crate::harness::report::{Ending, Report, Verdict, verdict};
+use crate::harness::{Home, Invocation, Permissions, Reader, Session, Task};
 use crate::sandbox::{self, Mounts};
-use crate::stream::{Ending, Observed, Verdict, verdict};
 use crate::world::Job;
-use harness_bridge::headless::{Headless, Permissions, Start};
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
@@ -27,6 +29,7 @@ pub enum Cmd {
 }
 
 pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
+    Ctx::wait_for_gate();
     let port = ctx.port::<SessionEvent>();
     let job = ctx.world()?.jobs.remove(&name).with_context(|| format!("no job named {name}"))?;
     let mut spend = (0.0, 0);
@@ -38,14 +41,28 @@ pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
 
 type Ended = (Outcome, Option<String>);
 
+fn workspace_note(ctx: &Ctx, job: &Job) -> String {
+    if job.readonly {
+        "The repository is mounted read-only. Report; do not try to change files.".to_owned()
+    } else {
+        let branch = job.branch.clone().unwrap_or_else(|| format!("{}{}", ctx.cfg.session.branch_prefix, job.name));
+        format!(
+            "You are on branch {branch} in a private clone. Commit your work there with explicit pathspecs. Never push."
+        )
+    }
+}
+
 fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     let port = ctx.port::<SessionEvent>();
-    let label = job.account.clone().context("dispatched without an account")?;
+    let key = job.account.clone().context("dispatched without an account")?;
     let found = accounts::discover(&ctx.cfg);
-    let Some(account) = found.iter().find(|a| a.label == label) else {
-        return Ok((Outcome::Retry, Some(format!("account {label} is no longer available"))));
+    let Some(home) = found.iter().find(|h| h.key() == key) else {
+        return Ok((Outcome::Retry, Some(format!("account {key} is no longer available"))));
     };
-    if let Some(reason) = job.model.as_deref().and_then(|m| ctx.cfg.session.banned(m)) {
+    let harness = harness_of(home);
+    let conf = ctx.cfg.harness(harness.id());
+    let model = job.models.get(harness.id()).cloned().or_else(|| conf.model.clone());
+    if let Some(reason) = model.as_deref().and_then(|m| ctx.cfg.session.banned(m)) {
         return Ok((Outcome::Failed, Some(format!("model banned: {reason}"))));
     }
 
@@ -56,68 +73,88 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         workdir = Some(dir);
     }
     let cwd = if job.readonly { ctx.cfg.repo.clone() } else { workdir.clone().unwrap_or_default() };
+    let scratch = ctx.job_scratch(&job.name);
+    std::fs::create_dir_all(&scratch)?;
 
-    let from = job.transcript_account.as_ref().and_then(|l| found.iter().find(|a| &a.label == l));
-    let resumable = job.transcript_account.is_some()
-        && carry_transcript(&job.session_id, from.map(|a| a.dir.as_path()), &account.dir)?;
+    let resumed = resumable(job, &found, home, &scratch);
+    let session_id = resumed.clone().unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
     let brief = std::fs::read_to_string(ctx.job_file(&job.name, "prompt.md")).context("the job's brief is gone")?;
-    let prompt = match (&job.message, resumable) {
-        (Some(m), true) => m.clone(),
-        (None, true) => "Continue where you left off.".into(),
-        (Some(m), false) => format!("{brief}\n\n{m}"),
-        (None, false) => brief,
-    };
-    port.emit(SessionEvent::Started { job: job.name.clone(), account: label.clone() })?;
+    let prompt = opening(brief, job.message.as_deref(), resumed.is_some());
+    port.emit(SessionEvent::Started { job: job.name.clone(), account: key.clone(), session_id: session_id.clone() })?;
 
     let s = &ctx.cfg.session;
-    let workspace = if job.readonly {
-        "The repository is mounted read-only. Report; do not try to change files.".to_owned()
-    } else {
-        format!(
-            "You are on branch {} in a private clone. Commit your work there with explicit pathspecs. Never push.",
-            job.branch.as_deref().map_or_else(|| format!("{}{}", s.branch_prefix, job.name), str::to_owned)
-        )
+    let briefing = s
+        .briefing
+        .replace("{workspace}", &workspace_note(ctx, job))
+        .replace("{branch}", job.branch.as_deref().unwrap_or(""));
+    let name = format!("relay-{}", job.name);
+    let task = Task {
+        prompt: &prompt,
+        model: model.as_deref(),
+        effort: job.effort.as_deref().or(conf.effort.as_deref()),
+        session: if resumed.is_some() { Session::Resume(&session_id) } else { Session::New(&session_id) },
+        permissions: permissions(ctx.cfg.sandbox.enabled, job.readonly),
+        briefing: Some(&briefing),
+        budget_usd: Some(job.budget_usd),
+        name: Some(&name),
+        events: true,
+        lean: true,
+        scratch: &scratch,
     };
-    let briefing =
-        s.briefing.replace("{workspace}", &workspace).replace("{branch}", job.branch.as_deref().unwrap_or(""));
-    let permissions = match (ctx.cfg.sandbox.enabled, job.readonly) {
-        (true, _) => Permissions::Unrestricted,
-        (false, true) => Permissions::ReadOnly,
-        (false, false) => Permissions::EditsOnly,
+    let mut inv = match harness.invocation(home, &task) {
+        Ok(i) => conf.locate(i),
+        Err(refusal) => return Ok((Outcome::Failed, Some(refusal.0))),
     };
-    let headless = Headless {
-        command: &s.command,
-        start: if resumable { Start::Resume(&job.session_id) } else { Start::Fresh(&job.session_id) },
-        model: job.model.as_deref(),
-        effort: job.effort.as_deref(),
-        budget_usd: job.budget_usd,
-        briefing: &briefing,
-        permissions,
-        extra_args: &s.extra_args,
-    };
-    let mut argv: Vec<OsString> = vec!["nice".into(), "-n".into(), s.nice.to_string().into()];
-    argv.extend(headless.argv());
-    let mut cmd = if ctx.cfg.sandbox.enabled {
-        let mounts = Mounts { account_dir: &account.dir, workdir: workdir.as_deref(), cwd: &cwd };
-        let mut c = Command::new("bwrap");
-        c.args(sandbox::args(ctx, &accounts::home(), &mounts, std::env::vars_os())).args(argv);
-        c
-    } else {
-        let mut c = Command::new(&argv[0]);
-        c.args(&argv[1..]).env_clear().envs(sandbox::plain_env(ctx, &account.dir)).current_dir(&cwd);
-        c
-    };
+    inv.args.extend(conf.extra_args.iter().map(OsString::from));
+    inv.write_files().context("writing the prompt file")?;
+    let mut cmd = command(ctx, home, &inv, workdir.as_deref(), &scratch, &cwd);
 
     // An earlier attempt's answer must not pass for this one's.
     let _ = std::fs::remove_file(ctx.job_file(&job.name, "result.md"));
-    let (obs, ending) = drive(ctx, &job.name, &mut cmd, &prompt)?;
-    let answer = obs.answer();
-    if !answer.is_empty() {
-        std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{answer}\n"))?;
+    let (report, ending) = drive(ctx, job, &key, &session_id, &mut cmd, inv.stdin.as_deref(), harness.reader())?;
+    if !report.answer.is_empty() {
+        std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
     }
-    *spend = (obs.cost_usd(), obs.turns());
-    let now_s = i64::try_from(now_micros() / 1_000_000).unwrap_or(i64::MAX);
-    Ok(match verdict(&obs, ending, &s.final_marker, now_s) {
+    *spend = (report.cost_usd, report.turns);
+    conclude(ctx, job, &key, verdict(&report, ending, &s.final_marker, now_s()), now_s())
+}
+
+/// The session to resume, when the job has one its history can follow here:
+/// only on the same harness, which can carry it between its own accounts.
+fn resumable(job: &Job, found: &[Home], home: &Home, scratch: &Path) -> Option<String> {
+    let id = job.session_id.as_ref()?;
+    let from = found.iter().find(|h| Some(h.key()) == job.transcript_account)?;
+    (from.harness == home.harness && harness_of(home).carry(id, Some(from), home, scratch)).then(|| id.clone())
+}
+
+/// What the session is told first: a resumed one already has the brief.
+fn opening(brief: String, message: Option<&str>, resumed: bool) -> String {
+    match (message, resumed) {
+        (Some(m), true) => m.to_owned(),
+        (None, true) => "Continue where you left off.".into(),
+        (Some(m), false) => format!("{brief}\n\n{m}"),
+        (None, false) => brief,
+    }
+}
+
+/// Inside the sandbox the sandbox is the boundary; outside it, the harness's own approvals are.
+fn permissions(sandboxed: bool, readonly: bool) -> Permissions {
+    match (sandboxed, readonly) {
+        (true, _) => Permissions::Unrestricted,
+        (false, true) => Permissions::ReadOnly,
+        (false, false) => Permissions::EditsOnly,
+    }
+}
+
+fn now_s() -> i64 {
+    secs(now_micros())
+}
+
+/// What a verdict means for the job, and what it tells the other systems.
+fn conclude(ctx: &Ctx, job: &Job, key: &str, v: Verdict, now_s: i64) -> Result<Ended> {
+    let port = ctx.port::<SessionEvent>();
+    let s = &ctx.cfg.session;
+    Ok(match v {
         Verdict::Done => (Outcome::Done, None),
         Verdict::FollowUp(message) if job.follow_ups == 0 => {
             port.emit(SessionEvent::FollowUp { job: job.name.clone(), message })?;
@@ -127,12 +164,12 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         Verdict::Limited { until } => {
             // Two minutes after a stated reset; fifteen when none is stated (an overload or bare 429).
             let until = until.map_or(now_s + 15 * 60, |u| u + 120);
-            port.emit(SessionEvent::Limited { account: label.clone(), until })?;
-            (Outcome::Retry, Some(format!("{label} hit its limit; moving on")))
+            port.emit(SessionEvent::Limited { account: key.to_owned(), until })?;
+            (Outcome::Retry, Some(format!("{key} hit its limit; moving on")))
         }
         Verdict::SignedOut => {
-            port.emit(SessionEvent::SignedOut { account: label.clone() })?;
-            (Outcome::Retry, Some(format!("{label} is signed out; moving on")))
+            port.emit(SessionEvent::SignedOut { account: key.to_owned() })?;
+            (Outcome::Retry, Some(format!("{key} is signed out; moving on")))
         }
         Verdict::NoOutput if job.reruns < ctx.cfg.limits.max_retries => {
             (Outcome::Rerun, Some("no output; trying again".into()))
@@ -143,21 +180,48 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     })
 }
 
-/// Runs the agent, feeding the prompt on stdin and teeing its stream to the
-/// job's log. Ends it if it goes silent or runs past its time limit.
-fn drive(ctx: &Ctx, name: &str, cmd: &mut Command, prompt: &str) -> Result<(Observed, Ending)> {
+/// The invocation, niced, inside the sandbox when it is on.
+fn command(ctx: &Ctx, home: &Home, inv: &Invocation, workdir: Option<&Path>, scratch: &Path, cwd: &Path) -> Command {
+    let mut argv: Vec<OsString> = vec!["nice".into(), "-n".into(), ctx.cfg.session.nice.to_string().into()];
+    argv.push(inv.program.clone());
+    argv.extend(inv.args.iter().cloned());
+    let env = sandbox::session_env(ctx, inv);
+    if ctx.cfg.sandbox.enabled {
+        let mounts = Mounts { home, workdir, scratch, cwd };
+        let mut c = Command::new("bwrap");
+        c.args(sandbox::args(ctx, &accounts::home(), &mounts, env)).args(argv);
+        c
+    } else {
+        let mut c = Command::new(&argv[0]);
+        c.args(&argv[1..]).env_clear().envs(env).current_dir(cwd);
+        c
+    }
+}
+
+/// Runs the agent, feeding its stdin and teeing its stream to the job's log.
+/// Ends it if it goes silent, runs past its time limit or spends past its
+/// cap: the same limits for every harness, whatever the CLI enforces itself.
+fn drive(
+    ctx: &Ctx,
+    job: &Job,
+    account: &str,
+    session_id: &str,
+    cmd: &mut Command,
+    stdin: Option<&str>,
+    mut reader: Box<dyn Reader>,
+) -> Result<(Report, Ending)> {
     let port = ctx.port::<SessionEvent>();
-    let mut log = Ctx::append_private(&ctx.job_file(name, "log.ndjson"))?;
+    let mut log = Ctx::append_private(&ctx.job_file(&job.name, "log.ndjson"))?;
     let mut child = cmd
-        .stdin(Stdio::piped())
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
-        .stderr(Ctx::append_private(&ctx.job_file(name, "stderr.log"))?)
+        .stderr(Ctx::append_private(&ctx.job_file(&job.name, "stderr.log"))?)
         .spawn()
         .context("starting the session")?;
-    let mut stdin = child.stdin.take().context("stdin")?;
-    let prompt = prompt.to_owned();
-    // A writer thread, so a full pipe cannot block reading the output.
-    std::thread::spawn(move || stdin.write_all(prompt.as_bytes()));
+    if let (Some(text), Some(mut pipe)) = (stdin.map(str::to_owned), child.stdin.take()) {
+        // A writer thread, so a full pipe cannot block reading the output.
+        std::thread::spawn(move || pipe.write_all(text.as_bytes()));
+    }
     let stdout = child.stdout.take().context("stdout")?;
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -168,32 +232,41 @@ fn drive(ctx: &Ctx, name: &str, cmd: &mut Command, prompt: &str) -> Result<(Obse
         }
     });
 
-    let limits = &ctx.cfg.limits;
-    let silent_after = Duration::from_secs(limits.silent_minutes * 60);
+    let silent_after = Duration::from_secs(ctx.cfg.limits.silent_minutes * 60);
     let deadline = Instant::now() + Duration::from_secs_f64(ctx.cfg.session.max_hours * 3600.0);
-    let account = ctx.world()?.jobs.get(name).and_then(|j| j.account.clone()).unwrap_or_default();
-    let mut obs = Observed::default();
-    let (mut silent, mut timed_out) = (false, false);
+    let mut ending = Ending::default();
+    let mut named = session_id.to_owned();
     loop {
         let wait = silent_after.min(deadline.saturating_duration_since(Instant::now()));
         match rx.recv_timeout(wait) {
             Ok(Ok(line)) => {
                 writeln!(log, "{line}")?;
-                if let Some(w) = obs.line(&line) {
-                    port.emit(SessionEvent::Rate { account: account.clone(), windows: w.clone() })?;
+                if let Some(meters) = reader.line(&line) {
+                    port.emit(SessionEvent::Rate { account: account.to_owned(), meters })?;
+                }
+                let r = reader.report();
+                if let Some(id) = r.session_id.as_deref().filter(|id| *id != named) {
+                    port.emit(SessionEvent::Identified { job: job.name.clone(), session_id: id.to_owned() })?;
+                    id.clone_into(&mut named);
+                }
+                if r.cost_usd > job.budget_usd {
+                    ending.over_budget = true;
+                    let _ = child.kill();
+                    break;
                 }
             }
             Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                (silent, timed_out) = if Instant::now() >= deadline { (false, true) } else { (true, false) };
+                (ending.silent, ending.timed_out) =
+                    if Instant::now() >= deadline { (false, true) } else { (true, false) };
                 // bwrap's --die-with-parent and pid namespace take everything inside with it.
                 let _ = child.kill();
                 break;
             }
         }
     }
-    let status = child.wait()?;
-    Ok((obs, Ending { exit_ok: status.success(), timed_out, silent }))
+    ending.exit_ok = child.wait()?.success();
+    Ok((reader.report().clone(), ending))
 }
 
 /// A private clone that borrows the repository's objects (`--shared`), so it is
@@ -213,63 +286,4 @@ fn clone(ctx: &Ctx, name: &str) -> Result<(PathBuf, String)> {
     ok(Ctx::git(&dir).args(["switch", "--quiet", "-c", &branch]), "git switch")?;
     ok(Ctx::git(&dir).args(["remote", "set-url", "--push", "origin", "relay-jobs-do-not-push"]), "git remote")?;
     Ok((dir, branch))
-}
-
-/// A transcript is `<account>/projects/<cwd key>/<session>.jsonl`, plus a
-/// `<session>/` sidecar dir when present. The cwd is the same path in every
-/// sandbox, so the key is too, and copying the files moves the session.
-/// Returns whether there is a transcript to resume.
-fn carry_transcript(session: &str, from: Option<&Path>, to: &Path) -> Result<bool> {
-    let find = |dir: &Path| -> Option<(PathBuf, PathBuf)> {
-        let projects = dir.join("projects");
-        std::fs::read_dir(&projects).ok()?.flatten().find_map(|e| {
-            let file = e.path().join(format!("{session}.jsonl"));
-            file.is_file().then(|| (e.path(), file))
-        })
-    };
-    // The account that wrote last holds the newest copy.
-    let Some((key_dir, file)) = from.filter(|f| *f != to).and_then(find) else { return Ok(find(to).is_some()) };
-    let dest = to.join("projects").join(key_dir.file_name().context("project key")?);
-    std::fs::create_dir_all(&dest)?;
-    std::fs::copy(&file, dest.join(format!("{session}.jsonl")))?;
-    let sidecar = key_dir.join(session);
-    if sidecar.is_dir() {
-        copy_dir(&sidecar, &dest.join(session))?;
-    }
-    Ok(true)
-}
-
-fn copy_dir(from: &Path, to: &Path) -> Result<()> {
-    std::fs::create_dir_all(to)?;
-    for e in std::fs::read_dir(from)?.flatten() {
-        let target = to.join(e.file_name());
-        if e.file_type()?.is_dir() {
-            copy_dir(&e.path(), &target)?;
-        } else {
-            std::fs::copy(e.path(), target)?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::tempdir::Dir;
-
-    #[test]
-    fn transcript_moves_with_its_sidecar() {
-        let d = Dir::new();
-        let (a, b) = (d.path().join("a"), d.path().join("b"));
-        let key = a.join("projects/-repo");
-        std::fs::create_dir_all(key.join("s1/sub")).unwrap();
-        std::fs::write(key.join("s1.jsonl"), "x").unwrap();
-        std::fs::write(key.join("s1/sub/f"), "y").unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        assert!(!carry_transcript("s2", Some(&a), &b).unwrap());
-        assert!(carry_transcript("s1", Some(&a), &b).unwrap());
-        assert_eq!(std::fs::read_to_string(b.join("projects/-repo/s1.jsonl")).unwrap(), "x");
-        assert_eq!(std::fs::read_to_string(b.join("projects/-repo/s1/sub/f")).unwrap(), "y");
-        assert!(carry_transcript("s1", Some(&b), &b).unwrap(), "already here");
-    }
 }

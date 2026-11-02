@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 
 use anyhow::{Context, Result};
 
@@ -70,6 +70,12 @@ impl Ctx {
         self.jobs.join(format!("{job}.{ext}"))
     }
 
+    /// The job's private directory: its prompt file and, for harnesses that
+    /// keep sessions with the task, its session store. Mounted writable in the sandbox.
+    pub fn job_scratch(&self, job: &str) -> PathBuf {
+        self.jobs.join(format!("{job}.d"))
+    }
+
     /// Opens a log for appending, readable by its owner only.
     pub fn append_private(path: &Path) -> Result<File> {
         std::fs::OpenOptions::new()
@@ -83,25 +89,39 @@ impl Ctx {
     /// This binary, re-run with the same config, as a detached background
     /// process in its own process group, so a closing terminal does not take it.
     pub fn spawn_self(&self, args: &[&str], log: &Path) -> Result<u32> {
-        let exe = std::env::current_exe()?;
+        self.spawn(args, log, Stdio::null()).map(|c| c.id())
+    }
+
+    /// As `spawn_self`, held at a gate: the child's stdin, which it reads to
+    /// its end (`wait_for_gate`) before it starts. Dropping the gate opens it,
+    /// so the spawner can first record what the child will need, its pid included.
+    pub fn spawn_gated(&self, args: &[&str], log: &Path) -> Result<(u32, ChildStdin)> {
+        let mut child = self.spawn(args, log, Stdio::piped())?;
+        Ok((child.id(), child.stdin.take().context("the gate pipe")?))
+    }
+
+    fn spawn(&self, args: &[&str], log: &Path, stdin: Stdio) -> Result<Child> {
         let out = Self::append_private(log)?;
-        let child = std::process::Command::new(exe)
+        Command::new(std::env::current_exe()?)
             .arg("--config")
             .arg(&self.cfg_path)
             .args(args)
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(out.try_clone()?)
             .stderr(out)
             .current_dir(&self.cfg.repo)
             .process_group(0)
             .spawn()
-            .with_context(|| format!("starting relay {}", args.join(" ")))?;
-        Ok(child.id())
+            .with_context(|| format!("starting relay {}", args.join(" ")))
     }
 
     /// Makes sure the dispatcher is awake. If one already runs, the new one
     /// fails to take the lock and exits; the running one hears the change
     /// through its inotify watch.
+    pub fn wait_for_gate() {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+    }
+
     pub fn wake_dispatch(&self) -> Result<()> {
         self.spawn_self(&["dispatch", "serve"], &self.state.join("dispatch.log")).map(drop)
     }

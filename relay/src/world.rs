@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::bus::{DispatchEvent, Event, LandEvent, Outcome, QueueEvent, QuotaEvent, SessionEvent, Stamped, Windows};
+use crate::bus::{DispatchEvent, Event, LandEvent, Meters, Outcome, QueueEvent, QuotaEvent, SessionEvent, Stamped};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -40,13 +40,17 @@ pub struct Job {
     pub task: String,
     pub status: Status,
     pub readonly: bool,
-    pub model: Option<String>,
+    /// Harness ids it may run on; empty means any enabled harness.
+    pub harnesses: Vec<String>,
+    /// Model per harness id.
+    pub models: BTreeMap<String, String>,
     pub effort: Option<String>,
     pub budget_usd: f64,
     pub pinned: Option<String>,
     pub account: Option<String>,
-    pub session_id: String,
-    /// The account whose config dir last held this session's transcript.
+    /// The session the last attempt ran in, once one started.
+    pub session_id: Option<String>,
+    /// The account (`harness:label`) that last wrote this session.
     pub transcript_account: Option<String>,
     pub message: Option<String>,
     pub follow_ups: u32,
@@ -69,16 +73,25 @@ pub struct Job {
 pub struct AccountState {
     pub enabled: bool,
     pub signed_out: bool,
-    pub windows: Windows,
+    pub meters: Meters,
     /// Unix microseconds of the last reading.
     pub read_at: Option<u64>,
+    /// Unix microseconds of the last attempt that read nothing.
+    pub unreadable_at: Option<u64>,
     /// Unix seconds until which the account refuses sessions.
     pub limited_until: Option<i64>,
 }
 
 impl Default for AccountState {
     fn default() -> Self {
-        Self { enabled: true, signed_out: false, windows: Windows::new(), read_at: None, limited_until: None }
+        Self {
+            enabled: true,
+            signed_out: false,
+            meters: Meters::new(),
+            read_at: None,
+            unreadable_at: None,
+            limited_until: None,
+        }
     }
 }
 
@@ -104,7 +117,7 @@ impl World {
     fn apply(&mut self, s: &Stamped) {
         let t = s.t;
         match &s.event {
-            Event::Queue(QueueEvent::Queued { job, task, readonly, model, effort, budget_usd, pinned, session_id }) => {
+            Event::Queue(QueueEvent::Queued { job, task, readonly, harnesses, models, effort, budget_usd, pinned }) => {
                 self.jobs.insert(
                     job.clone(),
                     Job {
@@ -112,12 +125,13 @@ impl World {
                         task: task.clone(),
                         status: Status::Queued,
                         readonly: *readonly,
-                        model: model.clone(),
+                        harnesses: harnesses.clone(),
+                        models: models.clone(),
                         effort: effort.clone(),
                         budget_usd: *budget_usd,
                         pinned: pinned.clone(),
                         account: None,
-                        session_id: session_id.clone(),
+                        session_id: None,
                         transcript_account: None,
                         message: None,
                         follow_ups: 0,
@@ -188,10 +202,13 @@ impl World {
                 a.enabled = *enabled;
                 a.signed_out = false;
             }
-            Event::Quota(QuotaEvent::Reading { account, windows }) => {
+            Event::Quota(QuotaEvent::Reading { account, meters }) => {
                 let a = self.account(account);
-                a.windows.clone_from(windows);
+                a.meters.clone_from(meters);
                 a.read_at = Some(t);
+            }
+            Event::Quota(QuotaEvent::Unreadable { account }) => {
+                self.account(account).unreadable_at = Some(t);
             }
             Event::Land(LandEvent::Forgotten { job }) => {
                 self.jobs.remove(job);
@@ -207,15 +224,21 @@ impl World {
                     j.branch = Some(branch.clone());
                 }
             }
-            SessionEvent::Started { job, account } => {
+            SessionEvent::Started { job, account, session_id } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.transcript_account = Some(account.clone());
+                    j.session_id = Some(session_id.clone());
                     j.message = None;
                 }
             }
-            SessionEvent::Rate { account, windows } => {
+            SessionEvent::Identified { job, session_id } => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    j.session_id = Some(session_id.clone());
+                }
+            }
+            SessionEvent::Rate { account, meters } => {
                 let a = self.account(account);
-                a.windows.clone_from(windows);
+                a.meters.clone_from(meters);
                 a.read_at = Some(t);
             }
             SessionEvent::Limited { account, until } => {
@@ -263,11 +286,11 @@ mod tests {
             job: job.into(),
             task: "t".into(),
             readonly: false,
-            model: None,
+            harnesses: Vec::new(),
+            models: BTreeMap::new(),
             effort: None,
             budget_usd: 1.0,
             pinned: None,
-            session_id: "s".into(),
         })
     }
 
@@ -284,7 +307,10 @@ mod tests {
                     runner_started: 1,
                 }),
             ),
-            st(3, Event::Session(SessionEvent::Started { job: "a".into(), account: "x".into() })),
+            st(
+                3,
+                Event::Session(SessionEvent::Started { job: "a".into(), account: "x".into(), session_id: "s".into() }),
+            ),
             st(4, Event::Session(SessionEvent::Limited { account: "x".into(), until: 100 })),
             st(
                 5,

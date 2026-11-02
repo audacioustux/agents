@@ -1,21 +1,26 @@
-//! harness-bridge AGENT MODE [SUBJECT...] [--resume ID | --fresh] [--model M]
-//!                [--base REF --head REF] [--extra TEXT] [--cwd DIR] [--dry-run]
+//! ask: a one-shot, read-only call to any harness, run now in the caller's
+//! own environment and account, under the safety contract in
+//! [`crate::harness::bridge`]. The quick second opinion; `queue` is for work.
+//! It needs no `relay.toml`.
+//!
+//! relay ask AGENT MODE [SUBJECT...] [--resume ID | --fresh] [--model M]
+//!           [--base REF --head REF] [--extra TEXT] [--cwd DIR] [--dry-run]
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, Stdio};
 
-use harness_bridge::bridge::{Call, session_name};
-use harness_bridge::prompt::{DIFF_LIMIT, Mode, Prompt, Subject, read_subject};
-use harness_bridge::{Agent, Delivery};
+use crate::harness::bridge::{Call, delivery, session_name};
+use crate::harness::prompt::{DIFF_LIMIT, Mode, Prompt, Subject, read_subject};
+use crate::harness::{ALL, Harness, by_id};
 
-const USAGE: &str = "usage: harness-bridge AGENT MODE [SUBJECT...] [--resume ID | --fresh] [--model M] \
+pub const USAGE: &str = "usage: relay ask AGENT MODE [SUBJECT...] [--resume ID | --fresh] [--model M] \
 [--base REF --head REF] [--extra TEXT] [--cwd DIR] [--dry-run]
-agents: claude, puku-cli, omp    modes: ask, plan, adversarial, review";
+modes: ask, plan, adversarial, review";
 
 #[derive(Debug)]
 struct Args {
-    agent: Agent,
+    agent: &'static dyn Harness,
     mode: Mode,
     subject: String,
     resume: Option<String>,
@@ -36,7 +41,7 @@ fn non_empty(s: &str) -> Option<String> {
 fn parse(argv: &[String]) -> Result<Args, String> {
     // `cargo run --` and task runners can leave a leading `--`.
     let argv = argv.strip_prefix(&["--".to_owned()]).unwrap_or(argv);
-    let agent: Agent = argv.first().ok_or("unknown agent: (missing)")?.parse()?;
+    let agent = by_id(argv.first().ok_or("unknown agent: (missing)")?).map_err(|e| e.0)?;
     let mode: Mode = argv.get(1).ok_or("unknown mode: (missing)")?.parse()?;
     let rest = &argv[2..];
     // Checked before anything else: --continue resumes the latest session
@@ -103,7 +108,7 @@ fn git_diff(args: &[&str], cwd: &std::path::Path) -> Result<(String, bool), Stri
             cut -= 1;
         }
         text.truncate(cut);
-        text.push_str("\n[harness-bridge: diff truncated]");
+        text.push_str("\n[relay ask: diff truncated]");
     } else if !out.status.success() {
         return Err(format!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()));
     }
@@ -142,7 +147,7 @@ fn build_prompt(
         let display =
             subj.path.as_ref().map_or_else(|| a.subject.clone(), |p| format!("{} ({})", a.subject, p.display()));
         let text = if subj.truncated {
-            format!("{}\n\n[harness-bridge: target file content truncated]", subj.text)
+            format!("{}\n\n[relay ask: target file content truncated]", subj.text)
         } else {
             subj.text
         };
@@ -178,34 +183,31 @@ fn run(a: &Args) -> Result<u8, String> {
     };
     let (prompt, meta) = build_prompt(a, &cwd)?;
 
-    let new_session_id = if a.resume.is_some() { String::new() } else { uuid::Uuid::new_v4().to_string() };
+    let new_session_id = if a.resume.is_some() { String::new() } else { uuid::Uuid::now_v7().to_string() };
     let stamp = jiff::Timestamp::now().strftime("%Y-%m-%dT%H-%M-%S").to_string();
     let name = session_name(a.agent, a.mode.as_str(), &stamp);
+    // A private dir for a prompt file, removed when the call ends.
+    let scratch = std::env::temp_dir().join(format!("relay-ask-{}-{}", std::process::id(), new_session_id));
     let call = Call {
-        agent: a.agent,
+        harness: a.agent,
         prompt: &prompt,
         model: a.model.as_deref(),
         resume: a.resume.as_deref(),
         new_session_id: &new_session_id,
         name: &name,
+        scratch: &scratch,
     };
-    let built = call.build()?;
+    let built = call.build().map_err(|e| e.0)?;
 
     if a.dry_run {
         let bytes = prompt.len();
-        let mut prompt_info =
-            serde_json::json!({ "redacted": true, "bytes": bytes, "delivery": call.delivery().as_str() });
+        let mut prompt_info = serde_json::json!({ "redacted": true, "bytes": bytes, "delivery": delivery(&built) });
         prompt_info.as_object_mut().expect("object").extend(meta);
-        let command: Vec<String> = std::iter::once(built.bin.to_owned())
-            .chain(
-                built
-                    .args
-                    .iter()
-                    .map(|x| if *x == prompt { format!("[prompt redacted: {bytes} bytes]") } else { x.clone() }),
-            )
-            .collect();
+        // The prompt is never in argv; only the name of its file can be.
+        let command: Vec<String> =
+            std::iter::once(&built.program).chain(&built.args).map(|x| x.to_string_lossy().into_owned()).collect();
         let out = serde_json::json!({
-            "agent": a.agent.name(),
+            "agent": a.agent.id(),
             "model": a.model,
             "resume": a.resume,
             "fresh": a.fresh,
@@ -218,35 +220,36 @@ fn run(a: &Args) -> Result<u8, String> {
     }
 
     if a.resume.is_none() {
-        eprintln!("harness-bridge: new session id = {new_session_id}");
+        eprintln!("relay ask: new session id = {new_session_id}");
     }
-    let mut child = Command::new(built.bin)
+    built.write_files().map_err(|e| format!("writing the prompt file: {e}"))?;
+    let result = spawn_and_wait(&built, &cwd, a.agent.id());
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
+}
+
+fn spawn_and_wait(built: &crate::harness::Invocation, cwd: &std::path::Path, id: &str) -> Result<u8, String> {
+    let mut child = Command::new(&built.program)
         .args(&built.args)
-        .current_dir(&cwd)
-        .stdin(if built.envelope.is_some() { Stdio::piped() } else { Stdio::inherit() })
+        .current_dir(cwd)
+        .stdin(if built.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .spawn()
-        .map_err(|e| format!("starting {}: {e}", built.bin))?;
-    if let (Some(envelope), Some(mut stdin)) = (&built.envelope, child.stdin.take()) {
-        debug_assert_eq!(call.delivery(), Delivery::Stdin);
-        stdin.write_all(envelope.as_bytes()).map_err(|e| format!("writing the prompt: {e}"))?;
+        .map_err(|e| format!("starting {id}: {e}"))?;
+    if let (Some(text), Some(mut stdin)) = (&built.stdin, child.stdin.take()) {
+        stdin.write_all(text.as_bytes()).map_err(|e| format!("writing the prompt: {e}"))?;
     }
     let status = child.wait().map_err(|e| e.to_string())?;
     Ok(status.code().and_then(|c| u8::try_from(c).ok()).unwrap_or(1))
 }
 
-fn main() -> ExitCode {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv.is_empty() || argv.iter().any(|a| a == "--help" || a == "-h") && argv.len() <= 1 {
-        println!("{USAGE}");
-        return ExitCode::SUCCESS;
+/// `argv` is everything after `relay ask`. Returns the child's exit code.
+pub fn main(argv: &[String]) -> anyhow::Result<u8> {
+    if argv.is_empty() || argv.len() == 1 && matches!(argv[0].as_str(), "--help" | "-h" | "help") {
+        let ids: Vec<_> = ALL.iter().map(|h| h.id()).collect();
+        println!("{USAGE}\nagents: {}", ids.join(", "));
+        return Ok(0);
     }
-    match parse(&argv).and_then(|a| run(&a)) {
-        Ok(code) => ExitCode::from(code),
-        Err(e) => {
-            eprintln!("harness-bridge: {e}");
-            ExitCode::FAILURE
-        }
-    }
+    parse(argv).and_then(|a| run(&a)).map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]
@@ -278,7 +281,7 @@ mod tests {
     #[test]
     fn values_and_defaults() {
         let a = args(&["--", "omp", "review", "--model=opus", "--base", "main", "--resume", "  "]).unwrap();
-        assert_eq!((a.agent, a.mode), (Agent::Omp, Mode::Review));
+        assert_eq!((a.agent.id(), a.mode), ("omp", Mode::Review));
         assert_eq!(a.model.as_deref(), Some("opus"));
         assert_eq!((a.base.as_str(), a.head.as_str()), ("main", "HEAD"));
         assert_eq!(a.resume, None, "a blank --resume is no resume");

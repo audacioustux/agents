@@ -18,16 +18,7 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-pub type Windows = BTreeMap<String, Window>;
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Window {
-    #[serde(default)]
-    pub utilization: f64,
-    /// Unix seconds.
-    #[serde(default, rename = "resetsAt", alias = "resets_at")]
-    pub resets_at: Option<i64>,
-}
+pub use crate::harness::Meters;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -36,12 +27,16 @@ pub enum QueueEvent {
         job: String,
         task: String,
         readonly: bool,
-        model: Option<String>,
+        /// Harness ids the job may run on. Empty: any enabled harness.
+        #[serde(default)]
+        harnesses: Vec<String>,
+        /// Model per harness id; a harness not named here uses its configured default.
+        #[serde(default)]
+        models: BTreeMap<String, String>,
         effort: Option<String>,
         budget_usd: f64,
-        /// An account the owner chose. A pinned job never moves.
+        /// An account (`harness:label`) the owner chose. A pinned job never moves.
         pinned: Option<String>,
-        session_id: String,
     },
     Resumed {
         job: String,
@@ -91,13 +86,21 @@ pub enum SessionEvent {
         workdir: PathBuf,
         branch: String,
     },
+    /// An attempt began, on this account, in this session (new or resumed).
     Started {
         job: String,
         account: String,
+        session_id: String,
+    },
+    /// The harness named the session itself (omp chooses its own ids).
+    Identified {
+        job: String,
+        session_id: String,
     },
     Rate {
         account: String,
-        windows: Windows,
+        #[serde(alias = "windows")]
+        meters: Meters,
     },
     Limited {
         account: String,
@@ -127,10 +130,16 @@ pub enum QuotaEvent {
         account: String,
         enabled: bool,
     },
-    /// A reading from `claude -p /usage`, which costs no model call.
+    /// A reading from the harness's quota command, which costs no model call.
     Reading {
         account: String,
-        windows: Windows,
+        #[serde(alias = "windows")]
+        meters: Meters,
+    },
+    /// The quota command gave nothing usable; the account stays unread, and
+    /// is not asked again until a reading would be stale.
+    Unreadable {
+        account: String,
     },
 }
 
@@ -187,6 +196,11 @@ pub struct Stamped {
 
 pub fn now_micros() -> u64 {
     u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_micros()).unwrap_or(u64::MAX)
+}
+
+/// Unix seconds, from bus time (microseconds), as meters name their resets.
+pub fn secs(us: u64) -> i64 {
+    i64::try_from(us / 1_000_000).unwrap_or(i64::MAX)
 }
 
 /// A system's output port. Only the owner of `E` can build one.

@@ -1,6 +1,7 @@
 //! `relay.toml`: everything project-specific lives here, so the binary works
 //! for any repository.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -20,6 +21,9 @@ pub struct Config {
     pub limits: Limits,
     #[serde(default)]
     pub accounts: Accounts,
+    /// Per-harness settings, keyed by harness id (`claude`, `omp`, `puku-cli`).
+    #[serde(default, rename = "harness")]
+    pub harnesses: BTreeMap<String, HarnessConf>,
     #[serde(default)]
     pub session: Session,
     #[serde(default)]
@@ -62,31 +66,42 @@ impl Default for Limits {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Accounts {
-    /// Claude Code config directories in `$HOME` whose names start with this
-    /// prefix are accounts. `.claude` is labelled `default`, `.claude.work` is `work`.
-    pub prefix: String,
-    /// Labels never used, for example accounts that belong to another project.
+    /// Accounts never used, as `harness:label` (`claude:work`, `omp:default`).
     pub exclude: Vec<String>,
 }
 
-impl Default for Accounts {
-    fn default() -> Self {
-        Self { prefix: ".claude".into(), exclude: Vec::new() }
+/// One harness's settings. Every harness takes the same keys.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HarnessConf {
+    /// Default: on for every verified harness that is installed. An unverified
+    /// adapter (one this crate's tests could not check) is used only when set true.
+    pub enabled: Option<bool>,
+    /// The command to run instead of the harness's own name. Tests use a stub.
+    pub program: Option<PathBuf>,
+    /// The model for jobs that name none for this harness.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// Extra arguments for every session of this harness.
+    pub extra_args: Vec<String>,
+}
+
+impl HarnessConf {
+    /// The invocation, run by the configured program when one is set.
+    pub fn locate(&self, mut inv: crate::harness::Invocation) -> crate::harness::Invocation {
+        if let Some(p) = &self.program {
+            inv.program = p.clone().into();
+        }
+        inv
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Session {
-    /// The agent command. Only tests should need to change it.
-    pub command: Vec<String>,
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    /// Extra arguments for every session.
-    pub extra_args: Vec<String>,
     /// Appended to the system prompt. `{branch}` and `{workspace}` are filled in.
     pub briefing: String,
     /// Build jobs work on `<branch_prefix><job>` in a private clone.
@@ -114,10 +129,6 @@ impl Session {
 impl Default for Session {
     fn default() -> Self {
         Self {
-            command: vec!["claude".into()],
-            model: None,
-            effort: None,
-            extra_args: Vec::new(),
             briefing: DEFAULT_BRIEFING.into(),
             branch_prefix: "relay/".into(),
             final_marker: "FINAL".into(),
@@ -169,6 +180,7 @@ impl Default for Sandbox {
                 ".cargo/credentials",
                 ".cargo/credentials.toml",
                 ".local/state",
+                ".omp/ssh-control",
             ]
             .map(PathBuf::from)
             .to_vec(),
@@ -227,7 +239,12 @@ impl Config {
         ensure!(self.limits.max_running >= 1 && self.limits.per_account >= 1, "limits must be at least 1");
         ensure!((0.0..=1.0).contains(&self.limits.floor), "limits.floor is a fraction between 0 and 1");
         ensure!(self.limits.budget_usd > 0.0, "limits.budget_usd must be positive");
-        ensure!(!self.session.command.is_empty(), "session.command is empty");
+        for id in self.harnesses.keys() {
+            crate::harness::by_id(id).map_err(|e| anyhow::anyhow!("[harness.{id}]: {e}"))?;
+        }
+        for key in &self.accounts.exclude {
+            ensure!(key.contains(':'), "accounts.exclude entries are harness:label, not {key:?}");
+        }
         ensure!(self.session.max_hours > 0.0, "session.max_hours must be positive");
         for re in self.session.banned_models.keys() {
             regex::Regex::new(re).with_context(|| format!("session.banned_models key {re:?}"))?;
@@ -239,6 +256,25 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// The harnesses relay may use, in registry order.
+    pub fn harnesses(&self) -> Vec<&'static dyn crate::harness::Harness> {
+        crate::harness::ALL
+            .iter()
+            .copied()
+            .filter(|h| {
+                let conf = self.harnesses.get(h.id());
+                conf.and_then(|c| c.enabled).unwrap_or_else(|| {
+                    h.caps().verified
+                        && (conf.and_then(|c| c.program.as_ref()).is_some() || crate::harness::installed(*h))
+                })
+            })
+            .collect()
+    }
+
+    pub fn harness(&self, id: &str) -> HarnessConf {
+        self.harnesses.get(id).cloned().unwrap_or_default()
     }
 
     /// Directories hidden inside the sandbox.

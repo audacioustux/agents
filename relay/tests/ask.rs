@@ -1,4 +1,4 @@
-//! The binary, end to end, in --dry-run (which never starts the child CLI).
+//! `relay ask`, end to end, in --dry-run (which never starts the child CLI).
 //! The `omp` checks run the installed omp, so a renamed flag in an omp
 //! release fails here instead of in a caller's request. They skip when omp
 //! is not installed.
@@ -6,7 +6,7 @@
 use std::process::Command;
 
 fn bridge(args: &[&str]) -> (i32, serde_json::Value, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_harness-bridge")).args(args).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_relay")).arg("ask").args(args).output().unwrap();
     let json = serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
     (out.status.code().unwrap_or(-1), json, String::from_utf8_lossy(&out.stderr).into_owned())
 }
@@ -23,7 +23,7 @@ fn dry_run_redacts_the_prompt_and_shows_the_contract() {
     assert_eq!(&cmd[..4], ["claude", "-p", "--permission-mode", "plan"]);
     assert!(cmd.contains(&"--session-id"));
     assert!(!cmd.iter().any(|a| a.contains("secret question text")));
-    assert_eq!(j["prompt"]["delivery"], "argv");
+    assert_eq!(j["prompt"]["delivery"], "stdin");
     assert!(j["newSessionId"].is_string());
 }
 
@@ -55,11 +55,58 @@ fn omp_argv_matches_the_installed_omp() {
     let (code, j, err) = bridge(&["omp", "ask", "model smoke, not sent in a dry run", "--model", "opus", "--dry-run"]);
     assert_eq!(code, 0, "{err}");
     let cmd: Vec<&str> = j["command"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-    assert_eq!(&cmd[..4], ["omp", "-p", "--approval-mode", "always-ask"]);
+    assert_eq!(&cmd[..5], ["omp", "-p", "--no-title", "--approval-mode", "always-ask"]);
+    assert_eq!(j["prompt"]["delivery"], "file");
+    assert!(cmd.last().unwrap().starts_with('@'), "the prompt is a file the message names");
     assert_eq!(cmd[cmd.iter().position(|a| *a == "--model").unwrap() + 1], "opus");
     let help = String::from_utf8_lossy(&Command::new("omp").arg("--help").output().unwrap().stdout).into_owned();
     // Every flag the bridge builds, and the escape hatch its resume error names.
-    for flag in ["--print", "--approval-mode", "always-ask", "--model", "--no-session"] {
+    for flag in [
+        "--print",
+        "--no-title",
+        "--approval-mode",
+        "always-ask",
+        "--model",
+        "--no-session",
+        "--mode",
+        "--session-dir",
+        "--resume",
+        "--thinking",
+        "--append-system-prompt",
+        "--auto-approve",
+        "--no-extensions",
+        "--no-skills",
+    ] {
         assert!(help.contains(flag), "omp --help no longer lists {flag}");
+    }
+}
+
+#[test]
+fn claude_argv_matches_the_installed_claude() {
+    if !have("claude") {
+        eprintln!("skipped: claude is not installed");
+        return;
+    }
+    let help = String::from_utf8_lossy(&Command::new("claude").arg("--help").output().unwrap().stdout).into_owned();
+    // Every flag the claude adapter builds, for the bridge and for relay.
+    for flag in [
+        "--print",
+        "--output-format",
+        "--verbose",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "--disable-slash-commands",
+        "--dangerously-skip-permissions",
+        "--permission-mode",
+        "--max-budget-usd",
+        "--append-system-prompt",
+        "--model",
+        "--effort",
+        "--name",
+        "--session-id",
+        "--resume",
+        "--fork-session",
+    ] {
+        assert!(help.contains(flag), "claude --help no longer lists {flag}");
     }
 }

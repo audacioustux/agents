@@ -1,12 +1,22 @@
-//! The bubblewrap command line a session runs under.
+//! What a session can see, as a declarative mount plan, and its bubblewrap
+//! command line. The same for every harness.
 //!
-//! The session sees the machine read-only, minus the configured hidden
-//! directories (by default the repository's siblings), every other account,
-//! relay's own state and other jobs' clones, and credential stores. It may
-//! write only its own clone, its own account dir and the configured caches.
-//! The network stays shared, since the session needs the API.
+//! The machine is read-only underneath. On top, in layers (a later layer
+//! wins; within a layer, parents come before children):
+//!
+//! | layer | what | mount |
+//! | --- | --- | --- |
+//! | 1 | `sandbox.hide` (default: the repository's siblings) | hidden |
+//! | 2 | the repository | read-only |
+//! | 3 | every home of every harness but the session's own; its own home | hidden; writable |
+//! | 4 | `sandbox.writable_home` (build caches) | writable |
+//! | 5 | `sandbox.hide_home` (credential stores) | hidden |
+//! | 6 | relay's own state and clones | hidden |
+//! | 7 | the job's own clone and directory | writable |
+//!
+//! The network stays shared, since the session needs its provider's API.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
@@ -15,88 +25,86 @@ use crate::ctx::Ctx;
 
 #[derive(Debug)]
 pub struct Mounts<'a> {
-    pub account_dir: &'a Path,
+    pub home: &'a crate::harness::Home,
     pub workdir: Option<&'a Path>,
+    /// The job's private directory (prompt file, session store).
+    pub scratch: &'a Path,
     pub cwd: &'a Path,
 }
 
-fn hide(p: &Path, args: &mut Vec<OsString>) {
-    match std::fs::metadata(p) {
-        Ok(m) if m.is_dir() => args.extend(["--tmpfs".into(), p.into()]),
-        Ok(_) => args.extend(["--ro-bind".into(), "/dev/null".into(), p.into()]),
-        Err(_) => {}
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mount {
+    Hidden,
+    ReadOnly,
+    Writable,
 }
 
-fn bind(flag: &str, p: &Path, args: &mut Vec<OsString>) {
-    args.extend([flag.into(), p.into(), p.into()]);
-}
-
-pub fn args(
-    ctx: &Ctx,
-    home: &Path,
-    m: &Mounts<'_>,
-    env: impl IntoIterator<Item = (OsString, OsString)>,
-) -> Vec<OsString> {
+/// The mounts, in the order bubblewrap must apply them.
+pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)> {
     let cfg = &ctx.cfg;
+    let own = crate::accounts::harness_of(m.home);
+    let other_homes = crate::harness::ALL.iter().flat_map(|h| h.home_paths(user_home)).filter(|p| *p != m.home.dir);
+    let in_home = |rels: &[PathBuf], mount| rels.iter().map(|r| (user_home.join(r), mount)).collect::<Vec<_>>();
+    let layers: [Vec<(PathBuf, Mount)>; 7] = [
+        cfg.hidden_dirs().into_iter().map(|d| (d, Mount::Hidden)).collect(),
+        vec![(cfg.repo.clone(), Mount::ReadOnly)],
+        other_homes
+            .map(|p| (p, Mount::Hidden))
+            .chain(own.writable(m.home, user_home).into_iter().map(|p| (p, Mount::Writable)))
+            .collect(),
+        in_home(&cfg.sandbox.writable_home, Mount::Writable),
+        in_home(&cfg.sandbox.hide_home, Mount::Hidden),
+        vec![(ctx.state_root.clone(), Mount::Hidden), (ctx.data_root.clone(), Mount::Hidden)],
+        m.workdir.into_iter().chain([m.scratch]).map(|p| (p.to_path_buf(), Mount::Writable)).collect(),
+    ];
+    layers
+        .into_iter()
+        .flat_map(|mut layer| {
+            layer.sort_by_key(|(p, _)| p.components().count());
+            layer
+        })
+        .filter(|(p, _)| p.exists())
+        .collect()
+}
+
+pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsString)>) -> Vec<OsString> {
     let mut a: Vec<OsString> =
         ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"].map(OsString::from).to_vec();
-    for d in cfg.hidden_dirs() {
-        hide(&d, &mut a);
-    }
-    // Back on top of the hidden dirs, in this order: an inner mount must come after its parent.
-    bind("--ro-bind", &cfg.repo, &mut a);
-    for root in [&ctx.state_root, &ctx.data_root] {
-        hide(root, &mut a);
-    }
-    if let Some(w) = m.workdir {
-        bind("--bind", w, &mut a);
-    }
-    bind("--bind", m.account_dir, &mut a);
-    for rel in &cfg.sandbox.writable_home {
-        let p = home.join(rel);
-        if p.exists() {
-            bind("--bind", &p, &mut a);
-        }
-    }
-    // Hides come after the binds so they also cover secrets inside a bound cache.
-    for p in crate::accounts::account_like_entries(home, &cfg.accounts.prefix) {
-        if p != m.account_dir {
-            hide(&p, &mut a);
-        }
-    }
-    for rel in &cfg.sandbox.hide_home {
-        hide(&home.join(rel), &mut a);
+    for (p, mount) in plan(ctx, user_home, m) {
+        let p = p.as_os_str();
+        let flags: Vec<&OsStr> = match mount {
+            Mount::Hidden if Path::new(p).is_dir() => vec!["--tmpfs".as_ref(), p],
+            Mount::Hidden => vec!["--ro-bind".as_ref(), "/dev/null".as_ref(), p],
+            Mount::ReadOnly => vec!["--ro-bind".as_ref(), p, p],
+            Mount::Writable => vec!["--bind".as_ref(), p, p],
+        };
+        a.extend(flags.into_iter().map(OsString::from));
     }
     a.extend(
         ["--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent", "--new-session", "--clearenv"]
             .map(OsString::from),
     );
-    let deny = Regex::new(&cfg.sandbox.env_deny).expect("validated at load");
-    for (k, v) in env {
-        let name = k.to_string_lossy();
-        if deny.is_match(&name) || matches!(name.as_ref(), "TMPDIR" | "TEMP" | "TMP" | "PWD" | "OLDPWD") {
-            continue;
-        }
+    for (k, v) in env.into_iter().chain([("TMPDIR".into(), "/tmp".into())]) {
         a.extend(["--setenv".into(), k, v]);
     }
-    let set = |a: &mut Vec<OsString>, k: &str, v: OsString| a.extend(["--setenv".into(), k.into(), v]);
-    set(&mut a, "CLAUDE_CONFIG_DIR", m.account_dir.into());
-    set(&mut a, "DISABLE_AUTOUPDATER", "1".into());
-    set(&mut a, "TMPDIR", "/tmp".into());
     a.extend(["--chdir".into(), m.cwd.into()]);
     a
 }
 
-/// The environment outside the sandbox, for when it is turned off: the
-/// account dir is still set, and the same names are still kept out.
-pub fn plain_env(ctx: &Ctx, account_dir: &Path) -> Vec<(OsString, OsString)> {
+/// The environment a session gets: the caller's minus names matching
+/// `sandbox.env_deny`, then the invocation's own variables (which may name
+/// what the filter removes, such as `CLAUDE_CONFIG_DIR`).
+pub fn session_env(ctx: &Ctx, inv: &crate::harness::Invocation) -> Vec<(OsString, OsString)> {
     let deny = Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
-    std::env::vars_os()
-        .filter(|(k, _)| !deny.is_match(&k.to_string_lossy()))
-        .chain([
-            ("CLAUDE_CONFIG_DIR".into(), PathBuf::from(account_dir).into()),
-            ("DISABLE_AUTOUPDATER".into(), "1".into()),
-        ])
-        .collect()
+    let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(k, _)| {
+            let name = k.to_string_lossy();
+            !deny.is_match(&name) && !matches!(name.as_ref(), "TMPDIR" | "TEMP" | "TMP" | "PWD" | "OLDPWD")
+        })
+        .collect();
+    for (k, v) in &inv.env {
+        env.retain(|(name, _)| name != k);
+        env.extend(v.clone().map(|v| (k.clone(), v)));
+    }
+    env
 }

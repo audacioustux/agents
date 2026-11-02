@@ -13,12 +13,12 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 
 use crate::accounts;
-use crate::agent::{Headless, Permissions, Start};
 use crate::bus::{Outcome, SessionEvent, now_micros};
 use crate::ctx::Ctx;
 use crate::sandbox::{self, Mounts};
 use crate::stream::{Ending, Observed, Verdict, verdict};
 use crate::world::Job;
+use harness_bridge::headless::{Headless, Permissions, Start};
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {

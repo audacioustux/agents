@@ -10,7 +10,6 @@ macro_rules! out {
 }
 
 mod accounts;
-mod agent;
 mod bus;
 mod config;
 mod ctx;

@@ -1,12 +1,12 @@
 ---
 name: harness-bridge
-description: 'Use when an agent needs to invoke a sibling agent CLI — currently `claude`, `puku-cli`, or `omp` — under a small safety contract: `--continue/-c` is rejected, `--permission-mode plan` (or its equivalent) is forced, `--fork-session` is forced on resume where the CLI supports it. The bridge is general-purpose (any task the caller would otherwise pass to a CLI), not limited to "second opinion" framing. Adding a new CLI is one entry in the `AGENTS` map if it accepts the same argv shape, or a small per-CLI argv hook if it does not. Not for invoking a CLI without the safety contract (call the CLI directly); not for parsing or scoring session JSONL (the bridge does not read session stores).'
+description: 'Use when an agent needs to invoke a sibling agent CLI — currently `claude`, `puku-cli`, or `omp` — under a small safety contract: `--continue/-c` is rejected, `--permission-mode plan` (or its equivalent) is forced, `--fork-session` is forced on resume where the CLI supports it. The bridge is general-purpose (any task the caller would otherwise pass to a CLI), not limited to "second opinion" framing. Adding a new CLI is one `Agent` variant if it accepts the same argv shape, or a small per-CLI argv builder if it does not. Not for invoking a CLI without the safety contract (call the CLI directly); not for parsing or scoring session JSONL (the bridge does not read session stores).'
 ---
 
 # harness-bridge
 
 Bridge from one agent to a sibling agent CLI under a tight safety contract.
-The wrapper is a small Deno script. Its only job is to make a few unsafe
+The wrapper is a small Rust binary. Its only job is to make a few unsafe
 invocations *physically impossible* — see [Safety contract](#safety-contract).
 The bridge is **general-purpose**: it does not assume the caller's task is a
 "review" or "second opinion." Review-flavoured prompts are one of several
@@ -14,22 +14,25 @@ modes, not the frame.
 
 ## Run it
 
-```bash
-deno task run -- claude ask "challenge this approach"
-deno task run -- puku-cli adversarial docs/plans/migration.md
-deno task run -- omp ask "challenge this approach"
-deno task run -- claude review --base main --head HEAD
-deno task run -- puku-cli ask "is this safe?" --fresh --dry-run
-```
-
-Or call the entry point directly:
+Install it once (from this directory):
 
 ```bash
-deno run -A src/main.ts claude ask "challenge this approach"
+cargo install --path . --locked      # puts `harness-bridge` in ~/.cargo/bin
 ```
 
-The `deno task run --` form passes everything after `--` as the script's argv
-(the `--` itself is consumed by `deno`).
+```bash
+harness-bridge claude ask "challenge this approach"
+harness-bridge puku-cli adversarial docs/plans/migration.md
+harness-bridge omp ask "challenge this approach"
+harness-bridge claude review --base main --head HEAD
+harness-bridge puku-cli ask "is this safe?" --fresh --dry-run
+```
+
+Without installing, `cargo run --quiet --manifest-path <this dir>/Cargo.toml -- claude ask "..."`
+does the same (the `--` is consumed by cargo).
+
+Unknown flags are errors. Text after a bare `--` is part of the subject, so
+`harness-bridge claude ask -- what does --continue do` asks about the flag.
 
 The mode only shapes the **prompt** the sibling CLI receives. The contract is
 the same in every mode.
@@ -94,8 +97,8 @@ automatically. The `--dry-run` JSON output exposes the chosen path as
 `prompt.delivery` (`"argv"` or `"stdin"`) so a caller can verify which
 argv shape will be used without invoking the child.
 
-If the CLI selected for the call has `stdin: false` (or unset) in the
-`AGENTS` map and the prompt exceeds the threshold, the bridge **throws**
+If the CLI selected for the call does not take stdin (`Agent::takes_stdin`
+in `src/lib.rs`) and the prompt exceeds the threshold, the bridge **refuses**
 rather than silently falling back to argv (which would risk `E2BIG`).
 This is the path that rejects large prompts against `omp` today; see
 [Supported CLIs](#supported-clis) for the table and [Contract
@@ -110,24 +113,25 @@ gaps](#contract-gaps) for the per-CLI exception list.
 | `omp` | `--approval-mode always-ask` (approval-gated, not read-only — see [Contract gaps](#contract-gaps)) | **rejected** (no fork primitive) | **rejected** (no stream-json) |
 
 `claude` and `puku-cli` share the same argv shape, so they go through
-the bridge's default builder. `omp` uses a per-CLI argv hook
-(`AGENTS["omp"].build`) that translates the shared contract into omp's
-vocabulary and refuses the contracts omp cannot honor (fork-on-resume,
+the bridge's default builder (`Call::plan_mode` in `src/bridge.rs`). `omp`
+has its own builder (`Call::omp`) that translates the shared contract into
+omp's vocabulary and refuses the contracts omp cannot honor (fork-on-resume,
 stream-json stdin).
 
-Adding a new CLI is one entry in `src/main.ts`'s `AGENTS` map:
+Adding a new CLI is one `Agent` variant in `src/lib.rs` (its `name`,
+`identity` and `takes_stdin`), plus its arm in `Call::build`:
 
-- Same argv shape as `claude`/`puku-cli`: set `bin`, `identity`, `name`,
-  `stdin: true` (after verifying `--input-format stream-json
+- Same argv shape as `claude`/`puku-cli`: route it to `plan_mode`. Claim
+  `takes_stdin` only after verifying `--input-format stream-json
   --replay-user-messages` accepts a single user-message envelope — see
-  [Large prompts](#large-prompts-stdin-pipe-path)). No `build` hook needed.
-- Different argv shape: set the same fields and add a `build` hook. The
-  hook receives the shared contract values and returns the final argv
-  array. It owns its own read-only mode, resume policy, and prompt
-  delivery; if the CLI cannot honor a contract, throw rather than silently
-  bypass. See `AGENTS["omp"].build` for the pattern.
+  [Large prompts](#large-prompts-stdin-pipe-path).
+- Different argv shape: give it its own builder. It owns its own read-only
+  mode, resume policy, and prompt delivery; if the CLI cannot honor a
+  contract, return an error rather than silently bypass. See `Call::omp`
+  for the pattern.
 
-The CLI is considered supported when its `AGENTS` entry pins every
+The compiler makes every `match` on `Agent` name the new variant, so no
+code path can forget it. The CLI is considered supported when its entry pins every
 behavior the caller can observe. Missing shapes mean large reviews (or
 resume, for forks) hard-fail with a clear error rather than silently
 degrading.
@@ -148,7 +152,7 @@ CLI — an entry that was true at the version it was written against says nothin
 about the one on the machine.
 
 A capability that cannot be demonstrated should be refused rather than
-attempted. `omp` already shows the shape: its `build` hook throws on
+attempted. `omp` already shows the shape: its builder refuses
 fork-on-resume and stream-json stdin instead of approximating them. Refusing a
 contract the CLI cannot honour produces one clear error at the bridge; letting
 it through produces a confusing one downstream.
@@ -214,6 +218,21 @@ safety contract, not a workflow.
 ## Verify
 
 ```bash
-deno task verify
-deno task run -- puku-cli ask "dry run?" --dry-run
+cargo fmt --check && cargo clippy --all-targets && cargo test
+harness-bridge puku-cli ask "dry run?" --dry-run
 ```
+
+`cargo test` includes checks against the installed `omp` (its argv shape, and
+that `--help` still lists every flag the bridge builds and the `--no-session`
+escape hatch). They skip when `omp` is not installed.
+
+## The library
+
+The crate is also a library, `harness_bridge`, so tools that start agent
+CLIs share one description of their flags instead of each keeping its own:
+
+- `harness_bridge::bridge` — this skill's read-only contract.
+- `harness_bridge::headless` — an unattended Claude Code session for a runner
+  that provides its own boundary. [relay](../../../relay/README.md) uses it
+  inside bubblewrap. It is *not* this skill's contract: its `Unrestricted`
+  permission exists only for sandboxed sessions.

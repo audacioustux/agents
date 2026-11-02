@@ -220,6 +220,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness-bridge"
+version = "0.2.0"
+dependencies = [
+ "jiff",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -428,6 +437,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "harness-bridge",
  "jiff",
  "regex",
  "rustix",

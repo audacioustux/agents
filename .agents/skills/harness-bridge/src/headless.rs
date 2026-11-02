@@ -1,5 +1,7 @@
-//! How a headless Claude Code session is started. Kept apart so it can move
-//! into the shared agent-CLI library (harness-bridge) unchanged.
+//! An unattended Claude Code session, for a runner that provides its own
+//! boundary. This is not the bridge's contract: [`Permissions::Unrestricted`]
+//! skips the CLI's permission checks and is only for sessions inside a
+//! sandbox, where the mounts are the boundary (relay uses bubblewrap).
 
 use std::ffi::OsString;
 

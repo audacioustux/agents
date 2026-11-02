@@ -826,14 +826,16 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "e85ff0df3f068653ddf3b7c6f750a04d3bd8167ed2ae11d90dd644a2bc5b9144",
+          "sha256": "36e284764ed5f64b59c8119e7c95a8606de0cf3ab45e67549eb05e026f759e21",
           "upstream": {
             "status": "diverged",
             "sha256": "091df1629510af1b92fc4abd6f96732ebedb4cb2c0f3457e8f2740b0504a2438"
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-11-02: added the hand-off line naming weighing-quality-dimensions as owner of the quality-dimension sweep, plus its uses: entry."
+      ],
       "rationale": "core workflow skill",
       "owned": true
     },
@@ -923,7 +925,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "6da33dee073403a487536d08f73f18064dec2df5df17185ccf7a96d8cce9fd36",
+          "sha256": "0c4a46ba1443e19fc86c7e8dc4315b34b12b949aa3815745566ad1d8becc782b",
           "upstream": {
             "status": "diverged",
             "sha256": "d71cc01ba56d2325cf8af5f7c11837819b63ecd57de0bfdb812f7f3ff7751df8"
@@ -942,7 +944,8 @@
         "2026-09-09: adopted the reviewer anchoring guard from cursor/plugins thermos/skills/thermo-nuclear-review/SKILL.md (MIT, author Cursor) at df3fb154fb98. Rewritten, not copied; extended to cover re-review after fixes, which the upstream does not address.",
         "2026-09-10: fixed base-SHA selection. Both sites were wrong — `git rev-parse HEAD~1` truncates any task that landed as more than one commit, and the worked example derived the base by grepping log messages, which breaks on a reword or squash. Both now record the base before the work starts. Sourced from obra/superpowers subagent-driven-development, which states the rule the corpus had lost.",
         "2026-09-10: took three reviewer-dispatch rules from the same upstream — never pre-judge a finding in the prompt, treat a plan-mandated finding as a decision rather than a dismissal, and resolve \"cannot verify from diff\" items yourself. Placed here rather than in subagent-driven-development because this skill owns reviewer dispatch. Also reconciled a contradiction the port exposed: the anchoring rule said never point a re-review at an earlier verdict, while a fix-round re-review must verdict the open findings list. The fix-round case is now stated as the one bounded exception.",
-        "2026-09-10: split the SHA-capture snippet into two fenced blocks. Both assignments sat in one fence, so copy-pasting the block gave BASE==HEAD and an empty review diff - failing open, which is exactly what the prose immediately below it warns against."
+        "2026-09-10: split the SHA-capture snippet into two fenced blocks. Both assignments sat in one fence, so copy-pasting the block gave BASE==HEAD and an empty review diff - failing open, which is exactly what the prose immediately below it warns against.",
+        "2026-11-02: added the hand-off line naming weighing-quality-dimensions as owner of the quality-dimension sweep, plus its uses: entry."
       ],
       "rationale": "hardcodes docs/superpowers/plans",
       "owned": true
@@ -954,11 +957,12 @@
       "note": "2026-09-11: extracted from the tickify-v4 design corpus (30 files, 1.9MB, four review rounds) by four parallel readers against a four-part portability test — vendor-free, falsifiable, non-obvious, not already owned. 74 candidates, 30 survived. Every rule verified verbatim against its source before adoption.",
       "files": {
         "SKILL.md": {
-          "sha256": "e17ad88ef212ee67c0a73271c1a989837530fae369f590815190f1125286639f"
+          "sha256": "238d63e198a968347cc638a13ab757d8ea86603c1cf03d5762681b4d59e8614e"
         }
       },
       "decisions": [
-        "2026-09-21: trimmed SKILL.md (145 → 134 LOC, -11, -8%). The 'Verify the numbers' section had a three-paragraph expansion of one rule — the 'wrong counts are stale' lesson was stated at the top, then justified and re-stated across three paragraphs; collapsed to a single paragraph that keeps the load-bearing provenance rule and the 'a file that states its own length is stale' example. The closing paragraph of 'Separate what was measured' restated the visible-distinctness rule in negative form ('next person reopens it — neither can tell'); collapsed. The closing line of 'Simplification' restated 'record what was cut and why'; merged into the preceding sentence. No content loss; the checklist already carries the trimmed prescriptions."
+        "2026-09-21: trimmed SKILL.md (145 → 134 LOC, -11, -8%). The 'Verify the numbers' section had a three-paragraph expansion of one rule — the 'wrong counts are stale' lesson was stated at the top, then justified and re-stated across three paragraphs; collapsed to a single paragraph that keeps the load-bearing provenance rule and the 'a file that states its own length is stale' example. The closing paragraph of 'Separate what was measured' restated the visible-distinctness rule in negative form ('next person reopens it — neither can tell'); collapsed. The closing line of 'Simplification' restated 'record what was cut and why'; merged into the preceding sentence. No content loss; the checklist already carries the trimmed prescriptions.",
+        "2026-11-02: added the hand-off line naming weighing-quality-dimensions as owner of the quality-dimension sweep, plus its uses: entry."
       ]
     },
     "reviewing-for-bloat": {
@@ -1535,7 +1539,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "c534d441f73f5e12c2142e0dda2c3a2c051f3e96119a87b4657840fefcfe3f6a",
+          "sha256": "a93aa55bfa67b701cf7c4667381899024fb2ced70d68c2f16d6b2286d69b4064",
           "upstream": {
             "status": "diverged",
             "sha256": "48508f44bbfd7d24b029fbf3a314f3cd14c9615599059366e922f47b8dc08cf2"
@@ -1549,7 +1553,8 @@
         }
       },
       "decisions": [
-        "writing-plans-nonselectors-2026-09-21: Added 'Not by themselves reasons to plan' section (18 lines) between Scope Check and File Structure. Adopted the nonSelectors discipline from Spielewoy/autoprompt-skill routes.json (SHA b6516cf52a7891d797621fdd2a8ca0311e1ae0a9) - 9 inputs that MUST NOT escalate the route on their own (file-count, repository-size, max-subs, available-agent-count, security-word-alone, refactor-word-alone, research-word-alone, one-failed-implementation, benchmark-label). Partial adoption: the rest of routes.json (23-input routeFactsSchema, 9-rule precedenceTable, routeAnalyst role, runOwnerDecision role, capabilityRequirements matrix) is rejected as inseparable from the autoprompt packaging model. Audit ledger at docs/audits/autoprompt-skill/."
+        "writing-plans-nonselectors-2026-09-21: Added 'Not by themselves reasons to plan' section (18 lines) between Scope Check and File Structure. Adopted the nonSelectors discipline from Spielewoy/autoprompt-skill routes.json (SHA b6516cf52a7891d797621fdd2a8ca0311e1ae0a9) - 9 inputs that MUST NOT escalate the route on their own (file-count, repository-size, max-subs, available-agent-count, security-word-alone, refactor-word-alone, research-word-alone, one-failed-implementation, benchmark-label). Partial adoption: the rest of routes.json (23-input routeFactsSchema, 9-rule precedenceTable, routeAnalyst role, runOwnerDecision role, capabilityRequirements matrix) is rejected as inseparable from the autoprompt packaging model. Audit ledger at docs/audits/autoprompt-skill/.",
+        "2026-11-02: added the hand-off line naming weighing-quality-dimensions as owner of the quality-dimension sweep, plus its uses: entry."
       ],
       "rationale": "local MISSES upstream Task Right-Sizing section; plus path-declaration change",
       "owned": true
@@ -1605,6 +1610,17 @@
       "files": {
         "SKILL.md": {
           "sha256": "8c258952bdba894e607b1bcb88c8e95cd831a5c3acde6e5ffe56ea1a2969754a"
+        }
+      }
+    },
+    "weighing-quality-dimensions": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "2026-11-02: written test-first from the owner's 26-dimension list (verbatim) and one project's author/reviewer method. RED: five pressure scenarios without the skill; agents dropped real findings when asked for blockers only, closed with a roll call of N/A dimensions, renamed dimensions, and accepted one-off benchmarks in place of gates. GREEN and two refactor rounds verified with nine runs.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "e291e773a6c243b748bb495b0e3687fa1c1aff1fcb3b94f82a4eb74ab20a4db4"
         }
       }
     }

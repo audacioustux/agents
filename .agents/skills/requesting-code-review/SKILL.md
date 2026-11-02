@@ -1,6 +1,9 @@
 ---
 name: requesting-code-review
 description: Use when a task or feature is complete and before merging — dispatches a code-reviewer subagent with purpose-built context, rather than reviewing the work yourself.
+uses:
+  - name: weighing-quality-dimensions
+    source: audacioustux/agents
 ---
 
 # Requesting Code Review
@@ -59,6 +62,8 @@ backoff — put a few lines of pseudocode beside it, stripped of syntax and erro
 handling, so the reviewer can confirm the intent before reading the code. Only
 where the diff is genuinely hard to scan; a straightforward change does not need
 a second description of itself.
+
+**Have the reviewer sweep the quality dimensions.** For a change that makes a technical decision, point the reviewer at the `weighing-quality-dimensions` skill if available, which owns the sweep; otherwise ask it to report each quality the change makes worse without saying so.
 
 **Placeholders:**
 - `{DESCRIPTION}` - Brief summary of what you built

@@ -37,17 +37,18 @@ fn can_refresh(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Shared by every harness whose sessions are Claude Code's (puku-cli).
-pub(crate) fn claude_like_args(i: &mut Invocation, task: &Task<'_>, events: &[&str], unrestricted: &str) {
+fn session_args(i: &mut Invocation, task: &Task<'_>) {
     i.arg("-p");
     if task.events {
-        i.args(["--output-format"]).args(events.iter().copied());
+        // stream-json keeps every result, so a later wake-up cannot overwrite
+        // the report, and it needs --verbose in -p mode.
+        i.args(["--output-format", "stream-json", "--verbose"]);
     }
     if task.lean {
         i.args(["--strict-mcp-config", "--setting-sources", "project,local", "--disable-slash-commands"]);
     }
     match task.permissions {
-        Permissions::Unrestricted => i.arg(unrestricted),
+        Permissions::Unrestricted => i.arg("--dangerously-skip-permissions"),
         Permissions::ReadOnly => i.args(["--permission-mode", "plan"]),
         Permissions::EditsOnly => i.args(["--permission-mode", "acceptEdits"]),
     };
@@ -84,14 +85,7 @@ impl Harness for Claude {
     }
 
     fn caps(&self) -> Caps {
-        Caps {
-            read_only_by_capability: true,
-            fork: true,
-            preset_session_id: true,
-            budget: true,
-            quota: true,
-            verified: true,
-        }
+        Caps { read_only_by_capability: true, fork: true, preset_session_id: true, budget: true, quota: true }
     }
 
     fn identity(&self) -> &'static str {
@@ -165,9 +159,7 @@ impl Harness for Claude {
 
     fn invocation(&self, home: &Home, task: &Task<'_>) -> Result<Invocation, Refusal> {
         let mut i = Invocation::new("claude");
-        // stream-json keeps every result, so a later wake-up cannot overwrite
-        // the report, and it needs --verbose in -p mode.
-        claude_like_args(&mut i, task, &["stream-json", "--verbose"], "--dangerously-skip-permissions");
+        session_args(&mut i, task);
         i.env.push(("CLAUDE_CONFIG_DIR".into(), Some(home.dir.clone().into())));
         i.env.push(("DISABLE_AUTOUPDATER".into(), Some("1".into())));
         Ok(i)

@@ -15,6 +15,8 @@ use crate::world::World;
 #[derive(Debug)]
 pub struct Ctx {
     pub cfg: Config,
+    /// `--json`: commands answer with one JSON value.
+    pub json: bool,
     pub cfg_path: PathBuf,
     /// `$XDG_STATE_HOME/relay/<name>`: the bus, job records, locks.
     pub state: PathBuf,
@@ -50,7 +52,7 @@ fn xdg(var: &str, fallback: &str) -> PathBuf {
 }
 
 impl Ctx {
-    pub fn new(cfg: Config, cfg_path: PathBuf) -> Result<Self> {
+    pub fn new(cfg: Config, cfg_path: PathBuf, json: bool) -> Result<Self> {
         let state_root = xdg("XDG_STATE_HOME", ".local/state").join("relay");
         let data_root = xdg("XDG_DATA_HOME", ".local/share").join("relay");
         let state = state_root.join(&cfg.name);
@@ -66,6 +68,7 @@ impl Ctx {
             data_root,
             cfg,
             cfg_path,
+            json,
         };
         // Briefs, answers and resume messages are private: owner-only from the project directory down.
         for d in [&state, &data] {
@@ -91,6 +94,11 @@ impl Ctx {
     /// a clean racing a resume, a dispatch racing either).
     pub fn jobs_lock(&self) -> Result<Role> {
         Role::take(&self.state.join("jobs.lock"))
+    }
+
+    /// Answers the caller: `value` with `--json`, else `text`.
+    pub fn reply(&self, value: &serde_json::Value, text: &str) -> Result<()> {
+        crate::reply::reply(self.json, value, text)
     }
 
     pub fn port<E: Owned>(&self) -> Port<E> {

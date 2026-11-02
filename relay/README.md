@@ -1,8 +1,8 @@
 # relay
 
 Queue coding-agent tasks for any git repository and let them run unattended:
-each task is a headless session of an agent harness (Claude Code, omp,
-puku-cli) inside a bubblewrap sandbox, on whichever account of whichever
+each task is a headless session of an agent harness (Claude Code or omp)
+inside a bubblewrap sandbox, on whichever account of whichever
 harness has the most quota to spare. When an account runs out mid-task, the
 session moves on: to another account of the same harness with its transcript,
 or afresh to another harness.
@@ -64,13 +64,19 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue add NAME (--prompt FILE \| --text TEXT) [--readonly] [--harness H,...] [--model H=M] [--effort E] [--budget USD] [--account H:L] [--task TITLE]` | Queue a job. `--harness` limits where it may run; `--account` pins it, and it waits for that account |
 | `relay queue resume NAME --message TEXT [--budget USD]` | Continue an ended session, on any account with room |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one |
-| `relay view status [--all] [--json]` | Jobs and accounts. `--json` prints the whole folded state |
+| `relay view status [--all]` | Jobs and accounts. With `--json`, the whole folded state |
 | `relay view result NAME` | Final report, status, cost, branch, log path |
 | `relay view events` | The merged event log |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room, a fresh reading, switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout) / delete its clone and records |
 | `relay probe [--account H:L]` | Sandbox self-test for one account of each harness, with controls |
 | `relay ask AGENT MODE ...` | One-shot read-only call, outside the queue ([the skill](../.agents/skills/relay/SKILL.md)) |
+
+Every command takes `--json`: one JSON value on stdout, and a failure as
+`{"error", "kind"}` on stderr. The exit code says which kind it was, with or
+without `--json`: 2 usage, 3 not found, 4 the job is in the wrong state, 5
+refused by a rule (a banned model, a disabled harness, the `ask` contract), 1
+anything else. An agent driving relay can branch on those, never on wording.
 
 Nothing needs starting by hand. Every command that changes something wakes the
 dispatcher, which exits on its own a minute after the queue empties.
@@ -80,19 +86,18 @@ dispatcher, which exits on its own a minute after the queue empties.
 Every harness is scheduled alike. An adapter in [`src/harness/`](src/harness/)
 says, for its CLI:
 
-| | claude | omp | puku-cli |
-| --- | --- | --- | --- |
-| an account | a `~/.claude*` dir with a refreshable sign-in | `~/.omp` (`default`) or `~/.omp/profiles/<name>` | `~/.puku-cli` |
-| selected by | `CLAUDE_CONFIG_DIR` | `OMP_PROFILE` | its home |
-| quota from | `claude -p /usage`, and each session's rate events | `omp usage`, per provider | not metered |
-| resume across accounts | yes, the transcript is copied | no; it resumes on its own account | no |
+| | claude | omp |
+| --- | --- | --- |
+| an account | a `~/.claude*` dir with a refreshable sign-in | `~/.omp` (`default`) or `~/.omp/profiles/<name>` |
+| selected by | `CLAUDE_CONFIG_DIR` | `OMP_PROFILE` |
+| quota from | `claude -p /usage`, and each session's rate events | `omp usage`, per provider |
+| resume on another account | yes: the transcript is copied | yes: the session lives with the job, not the profile |
 
 An account is named `harness:label` (`claude:work`, `omp:default`). Two claude
 directories signed in as the same person are one account, since they share one
 quota. `[harness.<id>]` in the config sets a harness's `model`, `effort`,
 `extra_args` and `program`, or turns it off; `accounts.exclude` leaves out
-single accounts. puku-cli's adapter is not yet checked against the real CLI,
-so it runs only when enabled explicitly.
+single accounts.
 
 Quota readings cost no model call. One is taken again after 10 minutes, or
 once a reset it names has passed; a reading that fails is not retried for the

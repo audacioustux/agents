@@ -4,11 +4,10 @@
 //! session and emits nothing.
 
 use std::ffi::OsString;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use crate::accounts::{self, harness_of};
 use crate::ctx::Ctx;
@@ -17,36 +16,50 @@ use crate::sandbox::{self, Mount, Mounts};
 
 pub fn run(ctx: &Ctx, account: Option<&str>) -> Result<()> {
     if !ctx.cfg.sandbox.enabled {
-        bail!("the sandbox is off in this config; nothing to probe");
+        fail!(Refused, "the sandbox is off in this config; nothing to probe");
     }
     let found = accounts::discover(&ctx.cfg);
     let homes: Vec<&Home> = if let Some(k) = account {
-        vec![found.iter().find(|a| a.key() == k).with_context(|| format!("unknown account {k}"))?]
+        let Some(home) = found.iter().find(|a| a.key() == k) else { fail!(NotFound, "unknown account {k}") };
+        vec![home]
     } else {
         // The first account of each harness: the checks are the same for all.
-        let mut seen = Vec::new();
-        found
-            .iter()
-            .filter(|a| {
-                !seen.contains(&a.harness) && {
-                    seen.push(a.harness);
-                    true
-                }
-            })
-            .collect()
+        let mut seen = std::collections::BTreeSet::new();
+        found.iter().filter(|a| seen.insert(a.harness)).collect()
     };
     if homes.is_empty() {
-        bail!("no usable account");
+        fail!(NotFound, "no usable account");
     }
-    let mut failed = 0;
+    let mut results = Vec::new();
     for home in homes {
-        let _ = writeln!(std::io::stdout(), "== {}", home.key());
-        failed += Probe::new(ctx, home)?.run()?;
+        results.push((home.key(), Probe::new(ctx, home)?.run()?));
     }
+    let failed = results.iter().flat_map(|(_, r)| r).filter(|r| !r.ok).count();
+    let text: Vec<String> = results
+        .iter()
+        .flat_map(|(key, rs)| std::iter::once(format!("== {key}")).chain(rs.iter().map(Outcome::text)))
+        .collect();
+    let json: Vec<_> = results.iter().map(|(key, rs)| serde_json::json!({ "account": key, "checks": rs })).collect();
+    ctx.reply(&serde_json::json!({ "accounts": json, "failed": failed }), &text.join("\n"))?;
     if failed > 0 {
         bail!("{failed} check(s) failed");
     }
     Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct Outcome {
+    what: String,
+    ok: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    detail: String,
+}
+
+impl Outcome {
+    fn text(&self) -> String {
+        let detail = if self.ok || self.detail.is_empty() { String::new() } else { format!("  {}", self.detail) };
+        format!("{}  {}{detail}", if self.ok { "PASS" } else { "FAIL" }, self.what)
+    }
 }
 
 /// One check: a shell test run inside the sandbox, and optionally one run
@@ -174,7 +187,7 @@ impl<'a> Probe<'a> {
         ]
     }
 
-    fn run(self) -> Result<usize> {
+    fn run(self) -> Result<Vec<Outcome>> {
         let user = accounts::home();
         let inv = self.invocation()?;
         let mounts = Mounts { home: self.home, workdir: Some(&self.clone), scratch: &self.scratch, cwd: &self.clone };
@@ -193,11 +206,10 @@ impl<'a> Probe<'a> {
         let args = sandbox::args(self.ctx, &user, &mounts, sandbox::session_env(self.ctx, &inv));
         let inside =
             |sh: &str| Command::new("bwrap").args(&args).args([OsString::from("sh"), "-c".into(), sh.into()]).output();
-        let mut failed = 0;
+        let mut outcomes = Vec::new();
         let mut report = |ok: bool, what: &str, detail: &str| {
-            failed += usize::from(!ok);
-            let detail = if ok || detail.is_empty() { String::new() } else { format!("  {detail}") };
-            let _ = writeln!(std::io::stdout(), "{}  {what}{detail}", if ok { "PASS" } else { "FAIL" });
+            let detail = if ok { String::new() } else { detail.to_owned() };
+            outcomes.push(Outcome { what: what.to_owned(), ok, detail });
         };
         for c in self.checks(&plan, &inv) {
             if let Some(control) = &c.outside {
@@ -220,7 +232,7 @@ impl<'a> Probe<'a> {
         for m in &markers {
             let _ = std::fs::remove_file(m);
         }
-        Ok(failed)
+        Ok(outcomes)
     }
 }
 

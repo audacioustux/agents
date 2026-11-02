@@ -198,7 +198,6 @@ mod tests {
         assert!(!is_stale(h, Some(&a), now_us));
         a.meters.insert("seven_day".into(), m(1.0, Some(1_950)));
         assert!(is_stale(h, Some(&a), now_us), "read before a reset that has now passed");
-        assert!(!is_stale(crate::harness::by_id("puku-cli").unwrap(), None, now_us), "unmetered never needs reading");
         let failed = AccountState { unreadable_at: Some(now_us - 100 * 1_000_000), ..Default::default() };
         assert!(is_stale(h, Some(&failed), now_us) && !due(h, Some(&failed), now_us), "a failed read backs off");
         let failed = AccountState { unreadable_at: Some(now_us - STALE_MICROS - 1), ..failed };

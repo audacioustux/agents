@@ -4,16 +4,16 @@
 
 use std::process::{Command, Stdio};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::Subcommand;
 
 use crate::accounts::{self, harness_of};
 use crate::bus::{QuotaEvent, now_micros, secs};
 use crate::ctx::Ctx;
-use crate::harness::Home;
+use crate::harness::{Home, Meters};
 use crate::os::Role;
 use crate::sandbox;
-use crate::world::World;
+use crate::world::{Status, World};
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
@@ -41,7 +41,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
 
 fn toggle(ctx: &Ctx, account: String, enabled: bool) -> Result<()> {
     if !accounts::discover(&ctx.cfg).iter().any(|a| a.key() == account) {
-        bail!("unknown account {account}; accounts are harness:label, see: relay quota show");
+        fail!(NotFound, "unknown account {account}; accounts are harness:label, see: relay quota show");
     }
     ctx.port::<QuotaEvent>().emit(QuotaEvent::AccountEnabled { account, enabled })?;
     ctx.wake_dispatch()?;
@@ -50,7 +50,9 @@ fn toggle(ctx: &Ctx, account: String, enabled: bool) -> Result<()> {
 
 fn refresh(ctx: &Ctx, only_stale: bool) -> Result<()> {
     // One reader at a time: overlapping requests from dispatch passes collapse into this one.
-    let Some(_role) = Role::try_take(&ctx.state.join("quota.lock"))? else { return Ok(()) };
+    let Some(_role) = Role::try_take(&ctx.state.join("quota.lock"))? else {
+        return ctx.reply(&serde_json::json!({ "skipped": "a reading is already being taken" }), "");
+    };
     let world = ctx.world()?;
     let now = now_micros();
     let todo: Vec<Home> = accounts::discover(&ctx.cfg)
@@ -65,18 +67,21 @@ fn refresh(ctx: &Ctx, only_stale: bool) -> Result<()> {
         handles.into_iter().filter_map(|h| h.join().ok()).collect()
     });
     let now_s = secs(now);
+    let (mut read, mut unreadable) = (Vec::new(), Vec::new());
     for (home, text) in readings {
         let meters = text.map(|t| harness_of(home).parse_quota(&t, now_s)).unwrap_or_default();
         // An unreadable account stays unread, which is not the same as having room.
         let account = home.key();
         if meters.is_empty() {
-            eprintln!("{account}: no reading");
+            unreadable.push(account.clone());
             port.emit(QuotaEvent::Unreadable { account })?;
         } else {
+            read.push(account.clone());
             port.emit(QuotaEvent::Reading { account, meters })?;
         }
     }
-    Ok(())
+    let text = if unreadable.is_empty() { String::new() } else { format!("no reading: {}", unreadable.join(", ")) };
+    ctx.reply(&serde_json::json!({ "read": read, "unreadable": unreadable }), &text)
 }
 
 fn read(ctx: &Ctx, home: &Home) -> Option<String> {
@@ -95,27 +100,35 @@ fn read(ctx: &Ctx, home: &Home) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// One account, as `show` reports it.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Row<'a> {
+    account: String,
+    state: String,
+    running: usize,
+    meters: Option<&'a Meters>,
+    read_at: Option<u64>,
+}
+
+impl Row<'_> {
+    fn text(&self, now: u64) -> String {
+        let meters = self.meters.into_iter().flatten().map(|(k, m)| {
+            let at = m.resets_at.map_or(String::new(), |r| format!(" (resets {})", fmt_time(r)));
+            format!("{k} {:.0}%{at}", m.utilization * 100.0)
+        });
+        let age = self.read_at.map_or(String::new(), |t| format!("  read {} ago", crate::systems::view::ago(now, t)));
+        let (key, state, running) = (&self.account, &self.state, self.running);
+        format!("  {key:<28} {state:<34} running {running}  {}{age}", meters.collect::<Vec<_>>().join(", "))
+    }
+}
+
 pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
-    let limits = &ctx.cfg.limits;
     let now = now_micros();
-    let now_s = secs(now);
-    let names: Vec<_> = ctx.cfg.harnesses().iter().map(|h| h.id()).collect();
-    out!(
-        "accounts on {} (floor {:.0}%, {} session(s) each)",
-        names.join(", "),
-        limits.floor * 100.0,
-        limits.per_account
-    );
-    for a in accounts::discover(&ctx.cfg) {
-        let key = a.key();
+    let row = |a: &Home| {
+        let (key, h) = (a.key(), harness_of(a));
         let st = world.accounts.get(&key);
-        let h = harness_of(&a);
-        let running = world
-            .jobs
-            .values()
-            .filter(|j| j.status == crate::world::Status::Running && j.account.as_deref() == Some(&key))
-            .count();
-        let state = match accounts::account_refusal(h, st, now_s) {
+        let state = match accounts::account_refusal(h, st, secs(now)) {
             None if !h.caps().quota => "ready (unmetered)".to_owned(),
             None => "ready".to_owned(),
             Some(accounts::Refusal::Limited) => {
@@ -123,24 +136,22 @@ pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
             }
             Some(r) => r.describe(),
         };
-        let meters = st
-            .map(|s| {
-                s.meters
-                    .iter()
-                    .map(|(k, m)| {
-                        let at = m.resets_at.map_or(String::new(), |r| format!(" (resets {})", fmt_time(r)));
-                        format!("{k} {:.0}%{at}", m.utilization * 100.0)
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default();
-        let age = st
-            .and_then(|s| s.read_at)
-            .map_or(String::new(), |t| format!("  read {} ago", crate::systems::view::ago(now, t)));
-        out!("  {key:<28} {state:<34} running {running}  {meters}{age}");
-    }
-    Ok(())
+        let running = world.jobs.values().filter(|j| j.status == Status::Running && j.account.as_ref() == Some(&key));
+        Row {
+            running: running.count(),
+            account: key,
+            state,
+            meters: st.map(|s| &s.meters),
+            read_at: st.and_then(|s| s.read_at),
+        }
+    };
+    let rows: Vec<Row<'_>> = accounts::discover(&ctx.cfg).iter().map(row).collect();
+    let names: Vec<_> = ctx.cfg.harnesses().iter().map(|h| h.id()).collect();
+    let l = &ctx.cfg.limits;
+    let head =
+        format!("accounts on {} (floor {:.0}%, {} session(s) each)", names.join(", "), l.floor * 100.0, l.per_account);
+    let text = std::iter::once(head).chain(rows.iter().map(|r| r.text(now))).collect::<Vec<_>>().join("\n");
+    ctx.reply(&serde_json::json!({ "harnesses": names, "accounts": rows }), &text)
 }
 
 pub fn fmt_time(unix_s: i64) -> String {

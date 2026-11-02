@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
 use crate::bus::QueueEvent;
@@ -78,45 +78,38 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     let job = world.jobs.get(&name);
     // The job, when its status is one the command applies to.
     let when = |ok: fn(Status) -> bool| match job {
-        None => bail!("no job named {name}"),
-        Some(j) if !ok(j.status) => bail!("{name} is {}", j.status.as_str()),
-        Some(j) => Ok(j),
+        None => fail!(NotFound, "no job named {name}"),
+        Some(j) if !ok(j.status) => fail!(Conflict, "{name} is {}", j.status.as_str()),
+        Some(j) => anyhow::Ok(j),
     };
-    let event = match cmd {
+    // The event, and for a stop the runner to signal once it is recorded.
+    let (event, runner) = match cmd {
         Cmd::Add(add) => {
             if job.is_some() {
-                bail!("job {name} exists; pick another name, or: relay land clean {name}");
+                fail!(Conflict, "job {name} exists; pick another name, or: relay land clean {name}");
             }
-            add.queued(ctx)?
+            (add.queued(ctx)?, None)
         }
         Cmd::Resume { message, budget, .. } => {
             when(|s| !s.is_live())?;
-            QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget }
+            (QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget }, None)
         }
         Cmd::Dequeue { .. } => {
             when(|s| s == Status::Queued)?;
-            QueueEvent::Dequeued { job: name.clone() }
+            (QueueEvent::Dequeued { job: name.clone() }, None)
         }
-        Cmd::Stop { .. } => {
-            let j = when(|s| s == Status::Running)?;
-            ctx.port::<QueueEvent>().emit(QueueEvent::StopRequested { job: name.clone() })?;
-            // Only a process that is still the recorded runner is signalled, never a reused pid.
-            if let Some((pid, started)) = j.runner
-                && os::same_process(pid, started)
-            {
-                os::terminate_group(pid)?;
-            }
-            return finish(ctx, &name);
-        }
+        Cmd::Stop { .. } => (QueueEvent::StopRequested { job: name.clone() }, when(|s| s == Status::Running)?.runner),
     };
+    let recorded = serde_json::to_value(&event)?["type"].clone();
     ctx.port::<QueueEvent>().emit(event)?;
-    finish(ctx, &name)
-}
-
-fn finish(ctx: &Ctx, name: &str) -> Result<()> {
+    // Only a process that is still the recorded runner is signalled, never a reused pid.
+    if let Some((pid, started)) = runner
+        && os::same_process(pid, started)
+    {
+        os::terminate_group(pid)?;
+    }
     ctx.wake_dispatch()?;
-    out!("{name}: recorded");
-    Ok(())
+    ctx.reply(&serde_json::json!({ "job": name, "recorded": recorded }), &format!("{name}: recorded"))
 }
 
 impl Add {
@@ -124,7 +117,7 @@ impl Add {
     fn queued(self, ctx: &Ctx) -> Result<QueueEvent> {
         let name = self.name;
         if !valid_name(&name) {
-            bail!("job names are lowercase letters, digits and dashes");
+            fail!(Usage, "job names are lowercase letters, digits and dashes");
         }
         let brief = match (self.prompt, self.text) {
             (Some(p), _) => std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?,
@@ -132,12 +125,12 @@ impl Add {
             (None, None) => unreachable!("clap requires one"),
         };
         if brief.trim().is_empty() {
-            bail!("the brief is empty");
+            fail!(Usage, "the brief is empty");
         }
         let harnesses = allowed_harnesses(ctx, self.harnesses, self.account.as_deref())?;
         let models = parse_models(ctx, &harnesses, &self.models)?;
         if let Some((m, reason)) = models.values().find_map(|m| ctx.cfg.session.banned(m).map(|r| (m, r))) {
-            bail!("model {m} is banned: {reason}");
+            fail!(Refused, "model {m} is banned: {reason}");
         }
         // The brief reaches the session on stdin or as a file, never in argv (/proc/<pid>/cmdline is public).
         std::io::Write::write_all(&mut Ctx::append_private(&ctx.job_file(&name, "prompt.md"))?, brief.as_bytes())?;
@@ -162,15 +155,15 @@ fn allowed_harnesses(ctx: &Ctx, asked: Vec<String>, account: Option<&str>) -> Re
     let enabled: Vec<&str> = ctx.cfg.harnesses().iter().map(|h| h.id()).collect();
     for h in &asked {
         if !enabled.contains(&h.as_str()) {
-            bail!("harness {h} is not enabled here (enabled: {})", enabled.join(", "));
+            fail!(Refused, "harness {h} is not enabled here (enabled: {})", enabled.join(", "));
         }
     }
     let Some(key) = account else { return Ok(asked) };
     let Some(home) = crate::accounts::discover(&ctx.cfg).into_iter().find(|a| a.key() == key) else {
-        bail!("unknown account {key}; accounts are harness:label, see: relay quota show");
+        fail!(NotFound, "unknown account {key}; accounts are harness:label, see: relay quota show");
     };
     if !asked.is_empty() && !asked.iter().any(|h| h == home.harness) {
-        bail!("account {key} is not on any of the harnesses asked for");
+        fail!(Usage, "account {key} is not on any of the harnesses asked for");
     }
     Ok(vec![home.harness.to_owned()])
 }
@@ -187,13 +180,14 @@ fn parse_models(ctx: &Ctx, harnesses: &[String], given: &[String]) -> Result<BTr
         let (h, model) = match m.split_once('=') {
             Some((h, model)) => (h.to_owned(), model.to_owned()),
             None if applicable.len() == 1 => (applicable[0].clone(), m.clone()),
-            None => bail!(
+            None => fail!(
+                Usage,
                 "--model {m}: say which harness it is for (harness=model); this job may run on {}",
                 applicable.join(", ")
             ),
         };
         if !applicable.contains(&h) {
-            bail!("--model {m}: harness {h} is not one this job may run on");
+            fail!(Usage, "--model {m}: harness {h} is not one this job may run on");
         }
         out.insert(h, model);
     }

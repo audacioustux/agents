@@ -1,7 +1,7 @@
 //! The bridge's safety contract, on top of any [`Harness`]:
 //!
 //! - [`Permissions::ReadOnly`]: a removed capability where the harness has
-//!   one (`claude`, `puku-cli`), approval-gated where it does not (`omp`);
+//!   one (`claude`), approval-gated where it does not (`omp`);
 //! - a resume always forks, and a harness that cannot fork is refused;
 //! - a new session gets an id up front where the harness takes one;
 //! - `--continue` is never built (the CLI refuses it at parse time too);
@@ -82,13 +82,11 @@ mod tests {
 
     #[test]
     fn read_only_and_fork_on_resume() {
-        for id in ["claude", "puku-cli"] {
-            let a = argv(&call(id, Some("old")).unwrap());
-            assert!(a.starts_with("-p --permission-mode plan"), "{a}");
-            assert!(a.contains("--resume old --fork-session") && !a.contains("--session-id"));
-            let fresh = argv(&call(id, None).unwrap());
-            assert!(fresh.contains("--session-id new-id") && !fresh.contains("--resume"));
-        }
+        let a = argv(&call("claude", Some("old")).unwrap());
+        assert!(a.starts_with("-p --permission-mode plan"), "{a}");
+        assert!(a.contains("--resume old --fork-session") && !a.contains("--session-id"));
+        let fresh = argv(&call("claude", None).unwrap());
+        assert!(fresh.contains("--session-id new-id") && !fresh.contains("--resume"));
         let omp = argv(&call("omp", None).unwrap());
         assert!(omp.starts_with("-p --no-title --approval-mode always-ask"), "{omp}");
         assert!(call("omp", Some("old")).unwrap_err().0.contains("no --fork-session"));

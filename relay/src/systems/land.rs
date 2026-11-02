@@ -22,9 +22,9 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     let world = ctx.world()?;
     match cmd {
         Cmd::Fetch { name } => {
-            let j = world.jobs.get(&name).with_context(|| format!("no job named {name}"))?;
+            let Some(j) = world.jobs.get(&name) else { fail!(NotFound, "no job named {name}") };
             let (Some(dir), Some(branch)) = (&j.workdir, &j.branch) else {
-                bail!("{name} has no branch (a read-only job?)")
+                fail!(Conflict, "{name} has no branch (a read-only job?)")
             };
             let st = Ctx::git(&ctx.cfg.repo)
                 .args(["fetch", "--quiet"])
@@ -34,12 +34,15 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             if !st.success() {
                 bail!("git fetch failed");
             }
-            Ctx::git(&ctx.cfg.repo).args(["log", "--oneline", &format!("HEAD..{branch}")]).status()?;
+            let log = Ctx::git(&ctx.cfg.repo).args(["log", "--oneline", &format!("HEAD..{branch}")]).output()?;
+            let log = String::from_utf8_lossy(&log.stdout);
+            let commits: Vec<&str> = log.lines().collect();
+            ctx.reply(&serde_json::json!({ "job": name, "branch": branch, "commits": commits }), &log)?;
         }
         Cmd::Clean { name } => {
-            let j = world.jobs.get(&name).with_context(|| format!("no job named {name}"))?;
+            let Some(j) = world.jobs.get(&name) else { fail!(NotFound, "no job named {name}") };
             if j.status.is_live() {
-                bail!("{name} is {}; stop it first", j.status.as_str());
+                fail!(Conflict, "{name} is {}; stop it first", j.status.as_str());
             }
             if let Some(dir) = j.workdir.as_ref().filter(|d| d.exists()) {
                 // Only ever a directory relay made.
@@ -53,7 +56,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             }
             let _ = std::fs::remove_dir_all(ctx.job_scratch(&name));
             ctx.port::<LandEvent>().emit(LandEvent::Forgotten { job: name.clone() })?;
-            out!("{name}: cleaned");
+            ctx.reply(&serde_json::json!({ "job": name, "cleaned": true }), &format!("{name}: cleaned"))?;
         }
     }
     Ok(())

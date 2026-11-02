@@ -91,7 +91,7 @@ fn setup(tag: &str, omp: bool) -> Env {
         repo.join("relay.toml"),
         format!(
             "name = \"flow\"\n[limits]\nmin_free_disk_gb = 0\n[session]\nnice = 0\n\
-             [harness.claude]\nprogram = \"{}\"\n{omp_conf}[harness.puku-cli]\nenabled = false\n",
+             [harness.claude]\nprogram = \"{}\"\n{omp_conf}",
             stub("claude")
         ),
     )

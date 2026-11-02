@@ -21,7 +21,7 @@ pub struct Config {
     pub limits: Limits,
     #[serde(default)]
     pub accounts: Accounts,
-    /// Per-harness settings, keyed by harness id (`claude`, `omp`, `puku-cli`).
+    /// Per-harness settings, keyed by harness id (`claude`, `omp`).
     #[serde(default, rename = "harness")]
     pub harnesses: BTreeMap<String, HarnessConf>,
     #[serde(default)]
@@ -77,8 +77,7 @@ pub struct Accounts {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct HarnessConf {
-    /// Default: on for every verified harness that is installed. An unverified
-    /// adapter (one this crate's tests could not check) is used only when set true.
+    /// Default: on when the harness is installed (or `program` names it).
     pub enabled: Option<bool>,
     /// The command to run instead of the harness's own name. Tests use a stub.
     pub program: Option<PathBuf>,
@@ -272,10 +271,8 @@ impl Config {
             .copied()
             .filter(|h| {
                 let conf = self.harnesses.get(h.id());
-                conf.and_then(|c| c.enabled).unwrap_or_else(|| {
-                    h.caps().verified
-                        && (conf.and_then(|c| c.program.as_ref()).is_some() || crate::harness::installed(*h))
-                })
+                conf.and_then(|c| c.enabled)
+                    .unwrap_or_else(|| conf.and_then(|c| c.program.as_ref()).is_some() || crate::harness::installed(*h))
             })
             .collect()
     }

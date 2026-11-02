@@ -2,106 +2,69 @@
 //! own environment and account, under the safety contract in
 //! [`crate::harness::bridge`]. The quick second opinion; `queue` is for work.
 //! It needs no `relay.toml`.
-//!
-//! relay ask AGENT MODE [SUBJECT...] [--resume ID | --fresh] [--model M]
-//!           [--base REF --head REF] [--extra TEXT] [--cwd DIR] [--dry-run]
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use anyhow::Result;
+
 use crate::harness::bridge::{Call, delivery, session_name};
 use crate::harness::prompt::{DIFF_LIMIT, Mode, Prompt, Subject, read_subject};
-use crate::harness::{ALL, Harness, by_id};
+use crate::harness::{Harness, by_id};
 
-pub const USAGE: &str = "usage: relay ask AGENT MODE [SUBJECT...] [--resume ID | --fresh] [--model M] \
-[--base REF --head REF] [--extra TEXT] [--cwd DIR] [--dry-run]
-modes: ask, plan, adversarial, review";
-
-#[derive(Debug)]
-struct Args {
+#[derive(Debug, clap::Args)]
+#[command(
+    after_help = "Text after `--` is all subject, so `relay ask claude ask -- what does --continue do` asks about the flag."
+)]
+pub struct Args {
+    /// The harness: claude or omp.
+    #[arg(value_parser = harness)]
     agent: &'static dyn Harness,
+    /// How the prompt is framed: ask, plan, adversarial, or review (of `git diff BASE..HEAD`).
+    #[arg(value_parser = clap::value_parser!(Mode))]
     mode: Mode,
-    subject: String,
+    /// The question, a file to read, or a description. Not for review.
+    subject: Vec<String>,
+    /// Fork this session (never extend it).
+    #[arg(long, conflicts_with = "fresh")]
     resume: Option<String>,
+    /// Start a new session (the default; for callers that say so).
+    #[arg(long)]
     fresh: bool,
+    #[arg(long)]
     model: Option<String>,
+    #[arg(long, default_value = "HEAD~1")]
     base: String,
+    #[arg(long, default_value = "HEAD")]
     head: String,
+    /// Further instructions, appended to the prompt.
+    #[arg(long, default_value = "")]
     extra: String,
+    /// Where to run, and what relative subject paths and the diff are read from.
+    #[arg(long)]
     cwd: Option<PathBuf>,
+    /// Print the command (prompt redacted) as JSON; start nothing.
+    #[arg(long)]
     dry_run: bool,
+    /// Refused: it picks the latest session anywhere, not one you named.
+    #[arg(long = "continue", short = 'c', hide = true)]
+    continue_: bool,
 }
 
-fn non_empty(s: &str) -> Option<String> {
-    let t = s.trim();
-    (!t.is_empty()).then(|| t.to_owned())
+fn harness(id: &str) -> Result<&'static dyn Harness, String> {
+    by_id(id).map_err(|e| e.0)
 }
 
-fn parse(argv: &[String]) -> Result<Args, String> {
-    // `cargo run --` and task runners can leave a leading `--`.
-    let argv = argv.strip_prefix(&["--".to_owned()]).unwrap_or(argv);
-    let agent = by_id(argv.first().ok_or("unknown agent: (missing)")?).map_err(|e| e.0)?;
-    let mode: Mode = argv.get(1).ok_or("unknown mode: (missing)")?.parse()?;
-    let rest = &argv[2..];
-    // Checked before anything else: --continue resumes the latest session
-    // anywhere, not one the caller named. After `--` it is only text.
-    if rest.iter().take_while(|a| *a != "--").any(|a| a == "--continue" || a == "-c") {
-        return Err("--continue/-c resumes the most recent session globally. Use --resume <id>.".into());
+impl Args {
+    fn subject(&self) -> String {
+        self.subject.join(" ").trim().to_owned()
     }
-    let mut a = Args {
-        agent,
-        mode,
-        subject: String::new(),
-        resume: None,
-        fresh: false,
-        model: None,
-        base: "HEAD~1".into(),
-        head: "HEAD".into(),
-        extra: String::new(),
-        cwd: None,
-        dry_run: false,
-    };
-    let mut words = Vec::new();
-    let mut it = rest.iter().peekable();
-    while let Some(arg) = it.next() {
-        if arg == "--" {
-            words.extend(it.by_ref().cloned());
-            break;
-        }
-        let Some(flag) = arg.strip_prefix("--") else {
-            words.push(arg.clone());
-            continue;
-        };
-        let (key, inline) = match flag.split_once('=') {
-            Some((k, v)) => (k, Some(v.to_owned())),
-            None => (flag, None),
-        };
-        // A value that looks like a flag is a missing value, not text: `--extra --dry-run`
-        // must not start the CLI. A value starting with `-` goes inline: `--extra=-x`.
-        let mut value = || {
-            inline
-                .clone()
-                .or_else(|| it.next_if(|v| !v.starts_with('-')).cloned())
-                .ok_or(format!("--{key} needs a value (for one starting with '-': --{key}=VALUE)"))
-        };
-        match key {
-            "fresh" => a.fresh = true,
-            "dry-run" => a.dry_run = true,
-            "resume" => a.resume = non_empty(&value()?),
-            "model" => a.model = non_empty(&value()?),
-            "base" => a.base = non_empty(&value()?).unwrap_or_else(|| "HEAD~1".into()),
-            "head" => a.head = non_empty(&value()?).unwrap_or_else(|| "HEAD".into()),
-            "extra" => a.extra = value()?,
-            "cwd" => a.cwd = non_empty(&value()?).map(PathBuf::from),
-            _ => return Err(format!("unknown flag: --{key}")),
-        }
+
+    /// A blank `--resume` is no resume.
+    fn resume(&self) -> Option<&str> {
+        self.resume.as_deref().map(str::trim).filter(|r| !r.is_empty())
     }
-    if a.resume.is_some() && a.fresh {
-        return Err("--resume and --fresh are mutually exclusive".into());
-    }
-    words.join(" ").trim().clone_into(&mut a.subject);
-    Ok(a)
 }
 
 /// `git <args>` output, cut at [`DIFF_LIMIT`] with the cut marked.
@@ -150,9 +113,9 @@ fn build_prompt(
         .render()
     } else {
         // A dry run reads nothing, so it cannot leak a file into its output.
-        let subj = if a.dry_run { Subject::default() } else { read_subject(&a.subject, cwd) };
-        let display =
-            subj.path.as_ref().map_or_else(|| a.subject.clone(), |p| format!("{} ({})", a.subject, p.display()));
+        let subject = a.subject();
+        let subj = if a.dry_run { Subject::default() } else { read_subject(&subject, cwd) };
+        let display = subj.path.as_ref().map_or_else(|| subject.clone(), |p| format!("{subject} ({})", p.display()));
         let text = if subj.truncated {
             format!("{}\n\n[relay ask: target file content truncated]", subj.text)
         } else {
@@ -177,20 +140,24 @@ fn build_prompt(
     Ok((prompt, meta))
 }
 
-fn run(a: &Args) -> Result<u8, String> {
-    if a.mode == Mode::Review && !a.subject.is_empty() {
-        return Err("review mode does not take a positional subject; use --base/--head".into());
+/// Runs the call and returns the harness's exit code.
+pub fn run(a: &Args, json: bool) -> Result<u8> {
+    if a.continue_ {
+        fail!(Refused, "--continue/-c resumes the most recent session globally. Use --resume <id>.");
     }
-    if a.mode != Mode::Review && a.subject.is_empty() {
-        return Err(format!("{} mode requires a question, file path, or description", a.mode));
+    match (a.mode, a.subject().is_empty()) {
+        (Mode::Review, false) => fail!(Usage, "review mode does not take a positional subject; use --base/--head"),
+        (Mode::Review, true) | (_, false) => {}
+        (_, true) => fail!(Usage, "{} mode requires a question, file path, or description", a.mode),
     }
     let cwd = match &a.cwd {
         Some(c) => c.clone(),
-        None => std::env::current_dir().map_err(|e| e.to_string())?,
+        None => std::env::current_dir()?,
     };
-    let (prompt, meta) = build_prompt(a, &cwd)?;
+    let (prompt, meta) = build_prompt(a, &cwd).map_err(anyhow::Error::msg)?;
 
-    let new_session_id = if a.resume.is_some() { String::new() } else { uuid::Uuid::now_v7().to_string() };
+    let resume = a.resume();
+    let new_session_id = if resume.is_some() { String::new() } else { uuid::Uuid::now_v7().to_string() };
     let stamp = jiff::Timestamp::now().strftime("%Y-%m-%dT%H-%M-%S").to_string();
     let name = session_name(a.agent, a.mode.as_str(), &stamp);
     // A private dir for a prompt file, removed when the call ends.
@@ -199,16 +166,19 @@ fn run(a: &Args) -> Result<u8, String> {
         harness: a.agent,
         prompt: &prompt,
         model: a.model.as_deref(),
-        resume: a.resume.as_deref(),
+        resume,
         new_session_id: &new_session_id,
         name: &name,
         scratch: &scratch,
     };
-    let built = call.build().map_err(|e| e.0)?;
+    let built = match call.build() {
+        Ok(b) => b,
+        Err(refusal) => fail!(Refused, "{}", refusal.0),
+    };
 
     if a.dry_run {
-        let bytes = prompt.len();
-        let mut prompt_info = serde_json::json!({ "redacted": true, "bytes": bytes, "delivery": delivery(&built) });
+        let mut prompt_info =
+            serde_json::json!({ "redacted": true, "bytes": prompt.len(), "delivery": delivery(&built) });
         prompt_info.as_object_mut().expect("object").extend(meta);
         // The prompt is never in argv; only the name of its file can be.
         let command: Vec<String> =
@@ -216,23 +186,24 @@ fn run(a: &Args) -> Result<u8, String> {
         let out = serde_json::json!({
             "agent": a.agent.id(),
             "model": a.model,
-            "resume": a.resume,
+            "resume": resume,
             "fresh": a.fresh,
-            "newSessionId": if a.resume.is_some() { None } else { Some(&new_session_id) },
+            "newSessionId": if resume.is_some() { None } else { Some(&new_session_id) },
             "prompt": prompt_info,
             "command": command,
         });
-        println!("{}", serde_json::to_string_pretty(&out).expect("json"));
+        crate::reply::reply(true, &out, "")?;
         return Ok(0);
     }
 
-    if a.resume.is_none() {
-        eprintln!("relay ask: new session id = {new_session_id}");
+    if resume.is_none() {
+        let note = serde_json::json!({ "newSessionId": new_session_id });
+        if json { eprintln!("{note}") } else { eprintln!("relay ask: new session id = {new_session_id}") }
     }
-    built.write_files().map_err(|e| format!("writing the prompt file: {e}"))?;
+    built.write_files().map_err(|e| anyhow::anyhow!("writing the prompt file: {e}"))?;
     let result = spawn_and_wait(&built, &cwd, a.agent.id());
     let _ = std::fs::remove_dir_all(&scratch);
-    result
+    result.map_err(anyhow::Error::msg)
 }
 
 fn spawn_and_wait(built: &crate::harness::Invocation, cwd: &std::path::Path, id: &str) -> Result<u8, String> {
@@ -249,51 +220,52 @@ fn spawn_and_wait(built: &crate::harness::Invocation, cwd: &std::path::Path, id:
     Ok(status.code().and_then(|c| u8::try_from(c).ok()).unwrap_or(1))
 }
 
-/// `argv` is everything after `relay ask`. Returns the child's exit code.
-pub fn main(argv: &[String]) -> anyhow::Result<u8> {
-    if argv.is_empty() || argv.len() == 1 && matches!(argv[0].as_str(), "--help" | "-h" | "help") {
-        let ids: Vec<_> = ALL.iter().map(|h| h.id()).collect();
-        println!("{USAGE}\nagents: {}", ids.join(", "));
-        return Ok(0);
-    }
-    parse(argv).and_then(|a| run(&a)).map_err(anyhow::Error::msg)
-}
-
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
 
-    fn args(s: &[&str]) -> Result<Args, String> {
-        parse(&s.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>())
+    #[derive(Debug, Parser)]
+    struct Cli {
+        #[command(flatten)]
+        a: Args,
+    }
+
+    fn args(s: &[&str]) -> Result<Args, clap::Error> {
+        Cli::try_parse_from(std::iter::once("ask").chain(s.iter().copied())).map(|c| c.a)
+    }
+
+    fn refusal(s: &[&str]) -> String {
+        run(&args(s).unwrap(), false).unwrap_err().to_string()
     }
 
     #[test]
     fn continue_is_refused_but_allowed_as_text_after_double_dash() {
-        assert!(args(&["claude", "ask", "x", "--continue"]).unwrap_err().contains("--resume <id>"));
-        assert!(args(&["claude", "ask", "-c", "x"]).is_err());
-        assert_eq!(
-            args(&["claude", "ask", "--", "what", "does", "--continue", "do"]).unwrap().subject,
-            "what does --continue do"
-        );
+        assert!(refusal(&["claude", "ask", "x", "--continue"]).contains("--resume <id>"));
+        assert!(refusal(&["claude", "ask", "-c", "x"]).contains("--resume <id>"));
+        let a = args(&["claude", "ask", "--", "what", "does", "--continue", "do"]).unwrap();
+        assert_eq!((a.subject(), a.continue_), ("what does --continue do".into(), false));
     }
 
     #[test]
     fn bad_combinations() {
-        assert!(args(&["claude", "ask", "x", "--resume", "a", "--fresh"]).unwrap_err().contains("mutually exclusive"));
-        assert!(args(&["codex", "ask", "x"]).unwrap_err().contains("unknown agent"));
-        assert!(args(&["claude", "nope", "x"]).unwrap_err().contains("unknown mode"));
-        assert!(args(&["claude", "ask", "x", "--yolo"]).unwrap_err().contains("unknown flag"));
+        assert!(args(&["claude", "ask", "x", "--resume", "a", "--fresh"]).is_err());
+        assert!(args(&["codex", "ask", "x"]).unwrap_err().to_string().contains("Supported: claude, omp"));
+        assert!(args(&["claude", "nope", "x"]).unwrap_err().to_string().contains("unknown mode"));
+        assert!(args(&["claude", "ask", "x", "--yolo"]).is_err());
         // A flag is never taken as the value before it.
-        assert!(args(&["claude", "ask", "x", "--extra", "--dry-run"]).unwrap_err().contains("needs a value"));
+        assert!(args(&["claude", "ask", "x", "--extra", "--dry-run"]).is_err());
         assert_eq!(args(&["claude", "ask", "x", "--extra=--dry-run"]).unwrap().extra, "--dry-run");
+        assert!(refusal(&["claude", "review", "x"]).contains("does not take a positional subject"));
     }
 
     #[test]
     fn values_and_defaults() {
-        let a = args(&["--", "omp", "review", "--model=opus", "--base", "main", "--resume", "  "]).unwrap();
+        let a = args(&["omp", "review", "--model=opus", "--base", "main", "--resume", "  "]).unwrap();
         assert_eq!((a.agent.id(), a.mode), ("omp", Mode::Review));
         assert_eq!(a.model.as_deref(), Some("opus"));
         assert_eq!((a.base.as_str(), a.head.as_str()), ("main", "HEAD"));
-        assert_eq!(a.resume, None, "a blank --resume is no resume");
+        assert_eq!(a.resume(), None, "a blank --resume is no resume");
     }
 }

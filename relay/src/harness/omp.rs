@@ -38,14 +38,7 @@ impl Harness for Omp {
     }
 
     fn caps(&self) -> Caps {
-        Caps {
-            read_only_by_capability: false,
-            fork: false,
-            preset_session_id: false,
-            budget: false,
-            quota: true,
-            verified: true,
-        }
+        Caps { read_only_by_capability: false, fork: false, preset_session_id: false, budget: false, quota: true }
     }
 
     fn identity(&self) -> &'static str {

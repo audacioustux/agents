@@ -29,7 +29,7 @@ fn dry_run_redacts_the_prompt_and_shows_the_contract() {
 
 #[test]
 fn resume_forks() {
-    let (code, j, _) = bridge(&["puku-cli", "plan", "docs/plan.md", "--resume", "abc", "--dry-run"]);
+    let (code, j, _) = bridge(&["claude", "plan", "docs/plan.md", "--resume", "abc", "--dry-run"]);
     assert_eq!(code, 0);
     let cmd = j["command"].to_string();
     assert!(cmd.contains(r#""--resume","abc","--fork-session""#), "{cmd}");
@@ -37,13 +37,19 @@ fn resume_forks() {
 }
 
 #[test]
-fn refusals_exit_nonzero_with_a_reason() {
+fn refusals_exit_with_their_kind_and_a_reason() {
     let (code, _, err) = bridge(&["claude", "ask", "x", "--continue", "--dry-run"]);
-    assert_eq!(code, 1);
+    assert_eq!(code, 5, "refused by the contract");
     assert!(err.contains("Use --resume <id>"));
     let (code, _, err) = bridge(&["omp", "ask", "x", "--resume", "abc", "--dry-run"]);
-    assert_eq!(code, 1);
+    assert_eq!(code, 5);
     assert!(err.contains("omp has no --fork-session"));
+    let (code, _, err) = bridge(&["--json", "claude", "review", "x", "--dry-run"]);
+    assert_eq!(code, 2, "a usage error");
+    let e: serde_json::Value = serde_json::from_str(err.trim()).unwrap();
+    assert_eq!(e["kind"], "usage");
+    let (code, _, _) = bridge(&["codex", "ask", "x"]);
+    assert_eq!(code, 2, "clap's usage errors share the code");
 }
 
 #[test]

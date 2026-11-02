@@ -16,7 +16,6 @@ pub mod bridge;
 pub mod claude;
 pub mod omp;
 pub mod prompt;
-pub mod puku;
 pub mod report;
 
 use std::collections::BTreeMap;
@@ -161,8 +160,6 @@ pub struct Caps {
     pub budget: bool,
     /// The harness can report its quota without a model call.
     pub quota: bool,
-    /// Checked against the installed CLI by this crate's tests.
-    pub verified: bool,
 }
 
 /// Turns a harness's output, line by line, into a [`report::Report`].
@@ -215,7 +212,7 @@ pub trait Harness: Sync + fmt::Debug {
 }
 
 /// Every harness this crate knows, in a fixed order.
-pub static ALL: [&dyn Harness; 3] = [&claude::Claude, &omp::Omp, &puku::PukuCli];
+pub static ALL: [&dyn Harness; 2] = [&claude::Claude, &omp::Omp];
 
 pub fn by_id(id: &str) -> Result<&'static dyn Harness, Refusal> {
     ALL.iter().copied().find(|h| h.id() == id).ok_or_else(|| {
@@ -274,7 +271,7 @@ mod tests {
     #[test]
     fn registry() {
         assert_eq!(by_id("omp").unwrap().id(), "omp");
-        assert!(by_id("codex").unwrap_err().0.contains("Supported: claude, omp, puku-cli"));
+        assert!(by_id("codex").unwrap_err().0.contains("Supported: claude, omp"));
         let ids: Vec<_> = ALL.iter().map(|h| h.id()).collect();
         let mut sorted = ids.clone();
         sorted.dedup();

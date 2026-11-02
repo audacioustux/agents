@@ -1,6 +1,6 @@
 //! view: read-only. Who is working on what, and what each session said.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Subcommand;
 
 use crate::bus::now_micros;
@@ -8,14 +8,11 @@ use crate::ctx::Ctx;
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
-    /// Jobs and accounts.
+    /// Jobs and accounts. With `--json`, the whole folded state.
     Status {
         /// Include jobs that ended more than a day ago.
         #[arg(long)]
         all: bool,
-        /// Machine-readable: the folded world as JSON.
-        #[arg(long)]
-        json: bool,
     },
     /// A job's final answer, branch, spend and log.
     Result { name: String },
@@ -25,7 +22,7 @@ pub enum Cmd {
 
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Status { all, json } => status(ctx, all, json),
+        Cmd::Status { all } => status(ctx, all),
         Cmd::Result { name } => result(ctx, &name),
         Cmd::Events => {
             for e in ctx.events()? {
@@ -45,9 +42,9 @@ pub fn ago(now_us: u64, then_us: u64) -> String {
     }
 }
 
-fn status(ctx: &Ctx, all: bool, json: bool) -> Result<()> {
+fn status(ctx: &Ctx, all: bool) -> Result<()> {
     let world = ctx.world()?;
-    if json {
+    if ctx.json {
         out!("{}", serde_json::to_string_pretty(&world)?);
         return Ok(());
     }
@@ -82,7 +79,15 @@ fn status(ctx: &Ctx, all: bool, json: bool) -> Result<()> {
 
 fn result(ctx: &Ctx, name: &str) -> Result<()> {
     let world = ctx.world()?;
-    let j = world.jobs.get(name).with_context(|| format!("no job named {name}"))?;
+    let Some(j) = world.jobs.get(name) else { fail!(NotFound, "no job named {name}") };
+    let answer = std::fs::read_to_string(ctx.job_file(name, "result.md")).ok();
+    let log = ctx.job_file(name, "log.ndjson");
+    if ctx.json {
+        let mut v = serde_json::to_value(j)?;
+        v["answer"] = answer.as_deref().map(str::trim_end).into();
+        v["log"] = log.display().to_string().into();
+        return ctx.reply(&v, "");
+    }
     out!(
         "{}: {}{} on {}, ${:.2}, {} turns, {} attempt(s)",
         j.name,
@@ -96,8 +101,7 @@ fn result(ctx: &Ctx, name: &str) -> Result<()> {
     if let (Some(b), Some(w)) = (&j.branch, &j.workdir) {
         out!("branch {b} in {}   bring it here: relay land fetch {name}", w.display());
     }
-    out!("log {}\n", ctx.job_file(name, "log.ndjson").display());
-    let text = std::fs::read_to_string(ctx.job_file(name, "result.md"));
-    out!("{}", text.as_deref().map_or("(no result yet)", str::trim_end));
+    out!("log {}\n", log.display());
+    out!("{}", answer.as_deref().map_or("(no result yet)", str::trim_end));
     Ok(())
 }

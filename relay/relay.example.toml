@@ -24,7 +24,7 @@ max_retries = 1          # automatic retries for a session that died with no out
 exclude = []
 
 # One table per harness, all with the same keys. A harness is enabled by
-# default when it is verified and installed; `enabled` overrides that.
+# default when it is installed; `enabled` overrides that.
 # [harness.claude]
 # enabled = true
 # program = "/path/to/claude"   # a different command; tests use a stub
@@ -34,9 +34,6 @@ exclude = []
 #
 # [harness.omp]
 # model = "openai-codex/gpt-5.2"  # omp meters quota per provider, so its model must name one
-#
-# [harness.puku-cli]
-# enabled = true                # unverified adapter: used only when switched on
 
 [session]
 branch_prefix = "relay/"

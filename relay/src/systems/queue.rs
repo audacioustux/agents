@@ -145,15 +145,10 @@ impl Add {
         if let Some((m, reason)) = models.values().find_map(|m| ctx.cfg.session.banned(m).map(|r| (m, r))) {
             fail!(Refused, "model {m} is banned: {reason}");
         }
-        let reuse_key = if self.readonly {
-            reuse_key(&brief, &harnesses, &models, self.effort.as_deref(), head(&ctx.cfg.repo).as_ref())
-        } else {
-            None
-        };
-        if let Some(key) = &reuse_key
-            && !self.again
-        {
-            refuse_repeat(jobs, key, |job| {
+        let commit = if self.readonly { Ctx::clean_head(&ctx.cfg.repo) } else { None };
+        let reuse_key = commit.as_deref().map(|c| reuse_key(&brief, &harnesses, &models, self.effort.as_deref(), c));
+        if let (Some(key), Some(commit), false) = (&reuse_key, &commit, self.again) {
+            refuse_repeat(jobs, key, commit, |job| {
                 std::fs::metadata(ctx.job_file(job, "result.md")).is_ok_and(|m| m.len() > 0)
             })?;
         }
@@ -220,45 +215,41 @@ fn parse_models(ctx: &Ctx, harnesses: &[String], given: &[String]) -> Result<BTr
     Ok(out)
 }
 
-/// The repository's `HEAD` commit, and whether its working tree is clean.
-/// None when it cannot be read.
-fn head(repo: &std::path::Path) -> Option<(String, bool)> {
-    let out = |args: &[&str]| {
-        let o = Ctx::git(repo).args(args).stderr(std::process::Stdio::null()).output().ok()?;
-        o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
-    };
-    let commit = out(&["rev-parse", "HEAD"])?.trim().to_owned();
-    let clean = out(&["status", "--porcelain"])?.trim().is_empty();
-    Some((commit, clean))
-}
-
 /// What names a read-only question: the brief, where and how it may run, and
-/// the commit it reads. A dirty tree, or no commit, gets no key: its content
-/// is not named by a commit.
+/// the clean commit it reads (a dirty tree gets no key: no commit names it).
 fn reuse_key(
     brief: &str,
     harnesses: &[String],
     models: &BTreeMap<String, String>,
     effort: Option<&str>,
-    head: Option<&(String, bool)>,
-) -> Option<String> {
+    commit: &str,
+) -> String {
     use sha2::{Digest, Sha256};
-    let (commit, true) = head? else { return None };
     let mut harnesses = harnesses.to_vec();
     harnesses.sort();
     harnesses.dedup();
     // A JSON array is an unambiguous encoding; the leading 1 versions it.
     let fields = serde_json::json!([1, brief, harnesses, models, effort, commit]).to_string();
-    Some(Sha256::digest(fields).iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().concat())
+    Sha256::digest(fields).iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().concat()
 }
 
-/// Refuses a question another job has answered, or is answering.
-fn refuse_repeat(jobs: &BTreeMap<String, Job>, key: &str, has_result: impl Fn(&str) -> bool) -> Result<()> {
+/// Refuses a question another job has answered at `commit`, or is answering.
+/// An answer counts only if its session read that commit: the job may have
+/// waited for quota while the tree moved on.
+fn refuse_repeat(
+    jobs: &BTreeMap<String, Job>,
+    key: &str,
+    commit: &str,
+    has_result: impl Fn(&str) -> bool,
+) -> Result<()> {
     let same = || jobs.values().filter(|j| j.reuse_key.as_deref() == Some(key));
     if let Some(j) = same().find(|j| j.status.is_live()) {
         fail!(Conflict, "already being answered by {} ({}); to ask again anyway: --again", j.name, j.status.as_str());
     }
-    if let Some(j) = same().filter(|j| j.status == Status::Done && has_result(&j.name)).max_by_key(|j| j.created_at) {
+    if let Some(j) = same()
+        .filter(|j| j.status == Status::Done && j.ran_at.as_deref() == Some(commit) && has_result(&j.name))
+        .max_by_key(|j| j.created_at)
+    {
         fail!(
             Conflict,
             "{} already answered this at this commit; read it with: relay view result {}; to ask again anyway: --again",
@@ -275,20 +266,19 @@ mod tests {
     use crate::bus::{Event, Stamped};
     use crate::world::World;
 
-    fn key(brief: &str, models: &[(&str, &str)], head: (&str, bool)) -> Option<String> {
+    fn key(brief: &str, models: &[(&str, &str)], commit: &str) -> String {
         let models = models.iter().map(|(h, m)| ((*h).to_owned(), (*m).to_owned())).collect();
-        reuse_key(brief, &["claude".to_owned()], &models, Some("high"), Some(&(head.0.to_owned(), head.1)))
+        reuse_key(brief, &["claude".to_owned()], &models, Some("high"), commit)
     }
 
     #[test]
     fn key_names_the_question() {
-        let base = key("review x", &[("claude", "opus")], ("abc", true));
-        assert!(base.is_some());
-        assert_eq!(base, key("review x", &[("claude", "opus")], ("abc", true)));
-        assert_ne!(base, key("review y", &[("claude", "opus")], ("abc", true)));
-        assert_ne!(base, key("review x", &[("claude", "sonnet")], ("abc", true)));
-        assert_ne!(base, key("review x", &[("claude", "opus")], ("abd", true)));
-        assert_ne!(base, reuse_key("review x", &[], &BTreeMap::new(), Some("high"), Some(&("abc".into(), true))));
+        let base = key("review x", &[("claude", "opus")], "abc");
+        assert_eq!(base, key("review x", &[("claude", "opus")], "abc"));
+        assert_ne!(base, key("review y", &[("claude", "opus")], "abc"));
+        assert_ne!(base, key("review x", &[("claude", "sonnet")], "abc"));
+        assert_ne!(base, key("review x", &[("claude", "opus")], "abd"));
+        assert_ne!(base, reuse_key("review x", &[], &BTreeMap::new(), Some("high"), "abc"));
         assert_ne!(
             base,
             reuse_key(
@@ -296,22 +286,20 @@ mod tests {
                 &["claude".to_owned()],
                 &[("claude".to_owned(), "opus".to_owned())].into(),
                 None,
-                Some(&("abc".into(), true))
+                "abc"
             )
         );
-        assert_eq!(key("review x", &[("claude", "opus")], ("abc", false)), None);
-        assert_eq!(reuse_key("review x", &[], &BTreeMap::new(), None, None), None);
     }
 
     #[test]
     fn key_is_stable() {
         // Pinned, so a change to the encoding (or the hash) is a deliberate one.
         assert_eq!(
-            reuse_key("b", &[], &BTreeMap::new(), None, Some(&("c".into(), true))).as_deref(),
-            Some("64fbefd3a17fb06003b60075168536c4b6fc46e497de0bfb58c1582c4e4ce878")
+            reuse_key("b", &[], &BTreeMap::new(), None, "c"),
+            "64fbefd3a17fb06003b60075168536c4b6fc46e497de0bfb58c1582c4e4ce878"
         );
-        let a = reuse_key("b", &["x".into(), "y".into()], &BTreeMap::new(), None, Some(&("c".into(), true)));
-        let b = reuse_key("b", &["y".into(), "x".into()], &BTreeMap::new(), None, Some(&("c".into(), true)));
+        let a = reuse_key("b", &["x".into(), "y".into()], &BTreeMap::new(), None, "c");
+        let b = reuse_key("b", &["y".into(), "x".into()], &BTreeMap::new(), None, "c");
         assert_eq!(a, b);
     }
 
@@ -334,6 +322,16 @@ mod tests {
                 }),
             });
             if let Some(outcome) = outcome {
+                events.push(Stamped {
+                    t,
+                    from: None,
+                    event: Event::Session(crate::bus::SessionEvent::Started {
+                        job: (*name).into(),
+                        account: "claude:a".into(),
+                        session_id: "s".into(),
+                        commit: Some("c".into()),
+                    }),
+                });
                 events.push(Stamped {
                     t,
                     from: None,
@@ -360,18 +358,19 @@ mod tests {
     fn a_done_answer_is_not_bought_twice() {
         use crate::bus::Outcome;
         let js = jobs(&[("old", Some("k"), Some(Outcome::Done)), ("other", Some("j"), Some(Outcome::Done))]);
-        let msg = refusal(refuse_repeat(&js, "k", |_| true));
+        let msg = refusal(refuse_repeat(&js, "k", "c", |_| true));
         assert!(msg.contains("relay view result old"), "{msg}");
-        // No result file, a failed run, or another key: ask.
-        refuse_repeat(&js, "k", |_| false).unwrap();
-        refuse_repeat(&jobs(&[("old", Some("k"), Some(Outcome::Failed))]), "k", |_| true).unwrap();
-        refuse_repeat(&js, "z", |_| true).unwrap();
-        refuse_repeat(&jobs(&[("old", None, Some(Outcome::Done))]), "k", |_| true).unwrap();
+        // No result file, a failed run, another key, or an answer read at another commit: ask.
+        refuse_repeat(&js, "k", "c", |_| false).unwrap();
+        refuse_repeat(&jobs(&[("old", Some("k"), Some(Outcome::Failed))]), "k", "c", |_| true).unwrap();
+        refuse_repeat(&js, "z", "c", |_| true).unwrap();
+        refuse_repeat(&jobs(&[("old", None, Some(Outcome::Done))]), "k", "c", |_| true).unwrap();
+        refuse_repeat(&js, "k", "d", |_| true).unwrap();
     }
 
     #[test]
     fn a_question_being_answered_is_not_asked_again() {
-        let msg = refusal(refuse_repeat(&jobs(&[("busy", Some("k"), None)]), "k", |_| false));
+        let msg = refusal(refuse_repeat(&jobs(&[("busy", Some("k"), None)]), "k", "c", |_| false));
         assert!(msg.contains("already being answered by busy"), "{msg}");
     }
 }

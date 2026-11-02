@@ -57,7 +57,9 @@ A read-only job cannot change the repository, so the same brief, for the same
 harnesses, models and effort, at the same clean `HEAD` commit, asks the same
 question. `queue add` refuses it (exit 4, conflict) while another job is
 answering it, or once one has answered it, naming that job (`relay view result
-NAME`); `--again` asks anyway. A dirty working tree is never matched.
+NAME`); `--again` asks anyway. A dirty working tree is never matched, and an
+answer counts only if its session read that commit: a job that waited for
+quota while the tree moved on answered a different question.
 
 The session is told to end with a short `FINAL` section: a `status` line
 (done, partial or blocked), then `commits`, `checked` (each command and pass
@@ -204,10 +206,11 @@ own process, and owns one output port:
   capability only that system's module can make, so a second writer cannot
   be built. A line that is not its file's type is dropped on read.
 - **One writer per attempt:** each attempt at a job is a session system of its
-  own, writing `bus/session/<job>.<attempt>.ndjson`. The fold hears a session
-  event only from the job's current attempt, about that job, so a runner that
-  outlived its attempt writes where nobody listens. `land clean` deletes a
-  job's attempt files.
+  own, writing `bus/session/<job>.<created>.<attempt>.ndjson`. The fold hears
+  a session event only from the job's current attempt of its current
+  incarnation (a name cleaned and queued again is a new one), about that job,
+  so a runner that outlived its attempt writes where nobody listens. The files
+  are kept: they also hold account facts (limits, sign-outs) the record needs.
 - **State:** everything is derived by folding the bus. The fold is kept as a
   checkpoint (`world.json`, with how far each file was read), so a command
   reads only what is new; any doubt (a new version, a replaced file, an event

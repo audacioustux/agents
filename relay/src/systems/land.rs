@@ -65,7 +65,6 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 let _ = std::fs::remove_file(ctx.job_file(&name, ext));
             }
             let _ = std::fs::remove_dir_all(ctx.job_scratch(&name));
-            crate::bus::forget_sessions(&ctx.bus, &name);
             ctx.port(&Source(())).emit(LandEvent::Forgotten { job: name.clone() })?;
             ctx.reply(&serde_json::json!({ "job": name, "cleaned": true }), &format!("{name}: cleaned"))?;
         }

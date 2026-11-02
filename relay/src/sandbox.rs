@@ -139,10 +139,14 @@ pub fn session_env(ctx: &Ctx, inv: &crate::harness::Invocation) -> Vec<(OsString
         .collect();
     // Signing keys are hidden, so git inside cannot sign: say so up front
     // rather than let every session find out by a failed commit.
-    let git = [("GIT_CONFIG_COUNT", "2"), ("GIT_CONFIG_KEY_0", "commit.gpgsign"), ("GIT_CONFIG_VALUE_0", "false")]
-        .into_iter()
-        .chain([("GIT_CONFIG_KEY_1", "tag.gpgsign"), ("GIT_CONFIG_VALUE_1", "false")])
-        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+    let git = [
+        ("GIT_CONFIG_COUNT", "2"),
+        ("GIT_CONFIG_KEY_0", "commit.gpgsign"),
+        ("GIT_CONFIG_VALUE_0", "false"),
+        ("GIT_CONFIG_KEY_1", "tag.gpgsign"),
+        ("GIT_CONFIG_VALUE_1", "false"),
+    ]
+    .map(|(k, v)| (OsString::from(k), OsString::from(v)));
     env.retain(|(name, _)| !name.to_string_lossy().starts_with("GIT_CONFIG_"));
     env.extend(git);
     for (k, v) in &inv.env {

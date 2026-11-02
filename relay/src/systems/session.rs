@@ -32,18 +32,19 @@ pub enum Cmd {
 #[derive(Debug)]
 pub struct Source {
     job: String,
+    created: u64,
     attempt: u32,
 }
 
 impl crate::bus::Source for Source {
     fn file(&self) -> PathBuf {
-        crate::bus::session_file(&self.job, self.attempt)
+        crate::bus::session_file(&self.job, self.created, self.attempt)
     }
 }
 
 /// This attempt's port: the runner is the only writer of its attempt's file.
 fn port(ctx: &Ctx, job: &Job) -> crate::bus::Port<SessionEvent> {
-    ctx.port(&Source { job: job.name.clone(), attempt: job.attempts })
+    ctx.port(&Source { job: job.name.clone(), created: job.created_at, attempt: job.attempts })
 }
 
 pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
@@ -98,7 +99,14 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     let session_id = resumed.clone().unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
     let brief = std::fs::read_to_string(ctx.job_file(&job.name, "prompt.md")).context("the job's brief is gone")?;
     let prompt = opening(brief, job.message.as_deref(), resumed.is_some());
-    port.emit(SessionEvent::Started { job: job.name.clone(), account: key.clone(), session_id: session_id.clone() })?;
+    // What a read-only job reads is the live repository, so its commit is taken now, not when queued.
+    let commit = if job.readonly { Ctx::clean_head(&ctx.cfg.repo) } else { None };
+    port.emit(SessionEvent::Started {
+        job: job.name.clone(),
+        account: key.clone(),
+        session_id: session_id.clone(),
+        commit,
+    })?;
 
     let s = &ctx.cfg.session;
     let briefing = s

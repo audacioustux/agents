@@ -190,6 +190,16 @@ impl Ctx {
         self.spawn_self(&["dispatch", "serve"], &self.state.join("dispatch.log")).map(drop)
     }
 
+    /// The repository's `HEAD` commit when its working tree is clean: then
+    /// the commit names exactly what a read-only session reads.
+    pub fn clean_head(repo: &Path) -> Option<String> {
+        let out = |args: &[&str]| {
+            let o = Self::git(repo).args(args).stderr(Stdio::null()).output().ok()?;
+            o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        };
+        out(&["status", "--porcelain"])?.is_empty().then(|| out(&["rev-parse", "HEAD"])).flatten()
+    }
+
     pub fn git(dir: &Path) -> Command {
         let mut c = Command::new("git");
         c.arg("-C").arg(dir);

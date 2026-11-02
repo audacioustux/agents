@@ -1,7 +1,7 @@
 //! The event bus. Each system owns its output port: an append-only file,
 //! `bus/<system>.ndjson`, holding only that system's event type. A session
 //! runner is a system of its own for one attempt at one job, so it writes
-//! `bus/session/<job>.<attempt>.ndjson`, and nothing else writes there.
+//! `bus/session/<job>.<created>.<attempt>.ndjson`, and nothing else writes there.
 //!
 //! Ownership is enforced three times. A [`Port`] is built only from its
 //! system's [`Owned::Source`], a capability whose constructor is private to
@@ -102,6 +102,9 @@ pub enum SessionEvent {
         job: String,
         account: String,
         session_id: String,
+        /// For a read-only job, the clean commit it reads; absent when the tree is dirty.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
     },
     /// The harness named the session itself (omp chooses its own ids).
     Identified {
@@ -204,14 +207,30 @@ pub fn system_file(system: &str) -> PathBuf {
     PathBuf::from(format!("{system}.ndjson"))
 }
 
-/// One attempt's session file, and back.
-pub fn session_file(job: &str, attempt: u32) -> PathBuf {
-    PathBuf::from(format!("session/{job}.{attempt}.ndjson"))
+/// Which session file an event came from: one attempt at one incarnation of
+/// a job (a name cleaned and queued again is a new incarnation, told apart by
+/// its `created_at`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    pub job: String,
+    /// Absent in files named before incarnations were.
+    pub created: Option<u64>,
+    pub attempt: u32,
 }
 
-fn parse_session_file(name: &str) -> Option<(String, u32)> {
-    let (job, attempt) = name.strip_suffix(".ndjson")?.rsplit_once('.')?;
-    Some((job.to_owned(), attempt.parse().ok()?))
+/// One attempt's session file. Job names have no dots, so the name parses back.
+pub fn session_file(job: &str, created: u64, attempt: u32) -> PathBuf {
+    PathBuf::from(format!("session/{job}.{created}.{attempt}.ndjson"))
+}
+
+fn parse_session_file(name: &str) -> Option<Origin> {
+    let parts: Vec<&str> = name.strip_suffix(".ndjson")?.split('.').collect();
+    let (job, created, attempt) = match parts[..] {
+        [job, attempt] => (job, None, attempt),
+        [job, created, attempt] => (job, Some(created.parse().ok()?), attempt),
+        _ => return None,
+    };
+    Some(Origin { job: job.to_owned(), created, attempt: attempt.parse().ok()? })
 }
 
 impl SessionEvent {
@@ -240,8 +259,8 @@ struct Line<E> {
 pub struct Stamped {
     pub t: u64,
     pub event: Event,
-    /// For a session event, the job and attempt whose file it came from.
-    pub from: Option<(String, u32)>,
+    /// For a session event, the file it came from.
+    pub from: Option<Origin>,
 }
 
 impl Stamped {
@@ -318,12 +337,7 @@ pub struct Mark {
 /// left for the next read. `None` when the file is not the one read before
 /// (shorter, or another inode), so what was read no longer describes it.
 /// A missing file reads as empty. A line that is not `E` is skipped.
-fn read_file<E: Owned>(
-    file: &Path,
-    seen: Mark,
-    from: Option<&(String, u32)>,
-    out: &mut Vec<(u64, usize, Stamped)>,
-) -> Result<Option<Mark>> {
+fn read_file<E: Owned>(file: &Path, from: Option<&Origin>, seen: Mark, out: &mut Vec<Stamped>) -> Result<Option<Mark>> {
     use std::os::unix::fs::MetadataExt;
     let mut f = match File::open(file) {
         Ok(f) => f,
@@ -341,9 +355,9 @@ fn read_file<E: Owned>(
         .with_context(|| format!("reading {}", file.display()))?;
     let complete = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     let text = String::from_utf8_lossy(&bytes[..complete]);
-    out.extend(text.lines().enumerate().filter_map(|(i, l)| {
+    out.extend(text.lines().filter_map(|l| {
         let line = serde_json::from_str::<Line<E>>(l).ok()?;
-        Some((line.t, i, Stamped { t: line.t, event: line.event.wrap(), from: from.cloned() }))
+        Some(Stamped { t: line.t, event: line.event.wrap(), from: from.cloned() })
     }));
     Ok(Some(Mark { ino: meta.ino(), len: offset + complete as u64 }))
 }
@@ -354,56 +368,41 @@ pub fn read_all(bus: &Path) -> Result<Vec<Stamped>> {
 }
 
 /// The events written since `offsets` were taken, oldest first, with the
-/// offsets to read from next time. A session file no longer there is dropped
-/// (`land clean` forgets them); `None` if any other file is shorter than its
-/// offset, when only a full read from empty offsets makes sense.
+/// offsets to read from next time. `None` if a file is not the one read
+/// before, when only a full read from empty offsets makes sense.
 pub fn read_since(bus: &Path, offsets: &Offsets) -> Result<Option<(Vec<Stamped>, Offsets)>> {
-    fn one<E: Owned>(
-        bus: &Path,
-        rel: PathBuf,
-        from: Option<&(String, u32)>,
-        offsets: &Offsets,
-        next: &mut Offsets,
-        all: &mut Vec<(u64, usize, Stamped)>,
-    ) -> Result<bool> {
-        let Some(end) = read_file::<E>(&bus.join(&rel), offsets.get(&rel).copied().unwrap_or_default(), from, all)?
-        else {
-            return Ok(false);
-        };
-        next.insert(rel, end);
-        Ok(true)
-    }
-    let mut all = Vec::new();
-    let mut next = Offsets::new();
-    let mut ok = one::<QueueEvent>(bus, system_file("queue"), None, offsets, &mut next, &mut all)?
-        && one::<DispatchEvent>(bus, system_file("dispatch"), None, offsets, &mut next, &mut all)?
-        && one::<QuotaEvent>(bus, system_file("quota"), None, offsets, &mut next, &mut all)?
-        && one::<LandEvent>(bus, system_file("land"), None, offsets, &mut next, &mut all)?
+    type Read = fn(&Path, Option<&Origin>, Mark, &mut Vec<Stamped>) -> Result<Option<Mark>>;
+    let systems: [(&str, Read); 5] = [
+        ("queue", read_file::<QueueEvent>),
+        ("dispatch", read_file::<DispatchEvent>),
+        ("quota", read_file::<QuotaEvent>),
+        ("land", read_file::<LandEvent>),
         // Before sessions had a file per attempt, they shared one; read it as is.
-        && one::<SessionEvent>(bus, system_file("session"), None, offsets, &mut next, &mut all)?;
-    for e in std::fs::read_dir(bus.join("session")).into_iter().flatten().flatten() {
-        if !ok {
-            break;
-        }
-        let name = e.file_name().to_string_lossy().into_owned();
-        if let Some(from) = parse_session_file(&name) {
-            ok = one::<SessionEvent>(bus, Path::new("session").join(name), Some(&from), offsets, &mut next, &mut all)?;
-        }
+        ("session", read_file::<SessionEvent>),
+    ];
+    let mut sessions: Vec<(PathBuf, Origin)> = std::fs::read_dir(bus.join("session"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            parse_session_file(&name).map(|o| (Path::new("session").join(name), o))
+        })
+        .collect();
+    // A fixed file order, so a stable sort by time breaks ties the same way in every read.
+    sessions.sort_by(|a, b| a.0.cmp(&b.0));
+    let files = systems
+        .into_iter()
+        .map(|(sys, read)| (system_file(sys), None, read))
+        .chain(sessions.into_iter().map(|(rel, o)| (rel, Some(o), read_file::<SessionEvent> as Read)));
+    let (mut all, mut next) = (Vec::new(), Offsets::new());
+    for (rel, origin, read) in files {
+        let seen = offsets.get(&rel).copied().unwrap_or_default();
+        let Some(mark) = read(&bus.join(&rel), origin.as_ref(), seen, &mut all)? else { return Ok(None) };
+        next.insert(rel, mark);
     }
-    if !ok {
-        return Ok(None);
-    }
-    all.sort_by_key(|(t, i, _)| (*t, *i));
-    Ok(Some((all.into_iter().map(|(_, _, s)| s).collect(), next)))
-}
-
-/// Forgets a job's session history: its attempts' files.
-pub fn forget_sessions(bus: &Path, job: &str) {
-    for e in std::fs::read_dir(bus.join("session")).into_iter().flatten().flatten() {
-        if parse_session_file(&e.file_name().to_string_lossy()).is_some_and(|(j, _)| j == job) {
-            let _ = std::fs::remove_file(e.path());
-        }
-    }
+    all.sort_by_key(|s| s.t);
+    Ok(Some((all, next)))
 }
 
 #[cfg(test)]
@@ -441,15 +440,13 @@ mod tests {
     }
 
     #[test]
-    fn session_files_say_their_job_and_attempt() {
+    fn session_files_say_their_job_incarnation_and_attempt() {
         let d = Dir::new();
-        emit(d.path(), session_file("my-job.v2", 3), SessionEvent::SignedOut { account: "w".into() });
-        emit(d.path(), session_file("my-job.v2", 4), SessionEvent::SignedOut { account: "w".into() });
-        let evs = read_all(d.path()).unwrap();
-        assert_eq!(evs[0].from, Some(("my-job.v2".into(), 3)));
-        assert_eq!(evs[1].from, Some(("my-job.v2".into(), 4)));
-        forget_sessions(d.path(), "my-job.v2");
-        assert_eq!(read_all(d.path()).unwrap(), Vec::new());
+        emit(d.path(), session_file("my-job", 17, 3), SessionEvent::SignedOut { account: "w".into() });
+        emit(d.path(), PathBuf::from("session/my-job.4.ndjson"), SessionEvent::SignedOut { account: "w".into() });
+        let from: Vec<_> = read_all(d.path()).unwrap().into_iter().map(|e| e.from.unwrap()).collect();
+        assert_eq!(from[0], Origin { job: "my-job".into(), created: Some(17), attempt: 3 });
+        assert_eq!(from[1], Origin { job: "my-job".into(), created: None, attempt: 4 }, "named before incarnations");
     }
 
     #[test]

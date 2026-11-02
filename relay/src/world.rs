@@ -55,6 +55,9 @@ pub struct Job {
     pub pinned: Option<String>,
     /// See `QueueEvent::Queued`.
     pub reuse_key: Option<String>,
+    /// The clean commit the last attempt of a read-only job read.
+    #[serde(default)]
+    pub ran_at: Option<String>,
     pub account: Option<String>,
     /// The session the last attempt ran in, once one started.
     pub session_id: Option<String>,
@@ -111,7 +114,7 @@ pub struct World {
 
 /// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
 /// holds, how a mark is kept), so checkpoints folded the old way are discarded.
-const FOLD_VERSION: u32 = 2;
+const FOLD_VERSION: u32 = 3;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -201,8 +204,12 @@ impl World {
     /// Whether a session event comes from its job's current attempt, the only
     /// writer the fold listens to. Events from before files were per attempt have no source.
     fn current(&self, s: &Stamped, e: &SessionEvent) -> bool {
-        let Some((job, attempt)) = &s.from else { return true };
-        e.job().is_none_or(|j| j == job) && self.jobs.get(job).is_some_and(|j| j.attempts == *attempt)
+        let Some(o) = &s.from else { return true };
+        e.job().is_none_or(|j| j == o.job)
+            && self
+                .jobs
+                .get(&o.job)
+                .is_some_and(|j| j.attempts == o.attempt && o.created.is_none_or(|c| c == j.created_at))
     }
 
     fn apply(&mut self, s: &Stamped) {
@@ -310,8 +317,9 @@ impl World {
                     j.branch = Some(branch.clone());
                 }
             }
-            SessionEvent::Started { job, account, session_id } => {
+            SessionEvent::Started { job, account, session_id, commit } => {
                 if let Some(j) = self.jobs.get_mut(job) {
+                    j.ran_at.clone_from(commit);
                     j.transcript_account = Some(account.clone());
                     j.session_id = Some(session_id.clone());
                     j.message = None;
@@ -396,7 +404,12 @@ mod tests {
             ),
             st(
                 3,
-                Event::Session(SessionEvent::Started { job: "a".into(), account: "x".into(), session_id: "s".into() }),
+                Event::Session(SessionEvent::Started {
+                    job: "a".into(),
+                    account: "x".into(),
+                    session_id: "s".into(),
+                    commit: None,
+                }),
             ),
             st(4, Event::Session(SessionEvent::Limited { account: "x".into(), until: 100 })),
             st(
@@ -463,7 +476,7 @@ mod tests {
                 turns: 1,
                 reason: None,
             }),
-            from: Some(("a".into(), attempt)),
+            from: Some(crate::bus::Origin { job: "a".into(), created: Some(1), attempt }),
         };
         // Attempt 1's runner outlived its attempt and reports after attempt 2 started: not heard.
         let w = World::fold(&[st(1, queued("a")), dispatched(2), dispatched(3), ended(4, 1)]);
@@ -472,7 +485,7 @@ mod tests {
         assert_eq!(w.jobs["a"].status, Status::Done);
         // A file speaks only for its own job.
         let mut other = ended(4, 2);
-        other.from = Some(("b".into(), 2));
+        other.from = Some(crate::bus::Origin { job: "b".into(), created: Some(1), attempt: 2 });
         assert_eq!(
             World::fold(&[st(1, queued("a")), dispatched(2), dispatched(3), other]).jobs["a"].status,
             Status::Running
@@ -668,7 +681,7 @@ mod tests {
 
         #[test]
         fn a_file_replaced_under_its_name_folds_in_full() {
-            // A job cleaned and queued again writes a new session/<job>.1 at least as long as the old one.
+            // A file replaced under its name, longer than the one read before.
             let b = Fixture::new();
             b.append("queue.ndjson", &queued(1, "a"));
             b.append("dispatch.ndjson", &dispatched(2, "a"));

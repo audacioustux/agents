@@ -228,6 +228,16 @@ pub enum QuotaEvent {
         account: String,
         #[serde(alias = "windows")]
         meters: Meters,
+        /// The home's sign-in (`Identity::stamp`) when it was read, so a new one is read again.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sign_in: Option<String>,
+    },
+    /// The quota command's output says the session is expired, unauthorised or
+    /// not signed in. A later reading that succeeds, or enabling the account, clears it.
+    SignedOut {
+        account: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sign_in: Option<String>,
     },
     /// The quota command gave nothing usable; the account stays unread, and
     /// is not asked again until a reading would be stale.

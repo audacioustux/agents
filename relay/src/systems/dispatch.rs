@@ -118,6 +118,7 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     world.hear_accounts(&neighbours);
     let elsewhere = seats_taken(&neighbours);
     let found = accounts::discover(&ctx.cfg);
+    accounts::settle(&mut world, &found);
     refresh_stale(ctx, &world, &found)?;
     let mut held = Held::default();
     let plan = plan(ctx, &world, &elsewhere, &found, now_micros(), &mut held);
@@ -234,10 +235,16 @@ fn plan(
     for p in world.jobs.values().filter(|j| j.status.has_runner()).filter_map(|j| j.profile.as_deref()) {
         *running.entry(p).or_default() += 1;
     }
-    let mut load = elsewhere.clone();
+    // Homes signed in as one account share a seat budget, held under the first one's key.
+    let twins = accounts::twins(found);
+    let seat = |key: &str| accounts::seat(&twins, key).to_owned();
+    let mut load: BTreeMap<String, usize> = BTreeMap::new();
+    for (key, n) in elsewhere {
+        *load.entry(seat(key)).or_default() += n;
+    }
     let mut total = 0;
     for j in world.jobs.values().filter(|j| j.status == Status::Running) {
-        *load.entry(j.account.clone().unwrap_or_default()).or_default() += 1;
+        *load.entry(seat(j.account.as_deref().unwrap_or_default())).or_default() += 1;
         total += 1;
     }
     if let (Some(max), Some(now)) = (limits.max_load, os::load_average())
@@ -287,7 +294,7 @@ fn plan(
         let fits: Vec<(&Home, f64)> = found
             .iter()
             .filter(|a| may_use(j, a))
-            .filter(|a| load.get(a.key().as_str()).copied().unwrap_or(0) < limits.per_account)
+            .filter(|a| load.get(&seat(&a.key())).copied().unwrap_or(0) < limits.per_account)
             .filter_map(|a| {
                 let model = model_for(&ctx.cfg, j, a.harness);
                 match accounts::fit(a, world.accounts.get(&a.key()), model.as_deref(), limits.floor, now_us) {
@@ -310,7 +317,7 @@ fn plan(
             starts.entry(n.to_owned()).or_default().push(now_us);
         }
         out.push((j.name.clone(), key.clone()));
-        *load.entry(key).or_default() += 1;
+        *load.entry(seat(&key)).or_default() += 1;
     }
     out
 }

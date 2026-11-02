@@ -2,12 +2,13 @@
 //! An account is a harness's home (`claude:work`, `omp:default`). Its
 //! directory is found on disk each time and never written to the bus.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::bus::secs;
 use crate::config::Config;
-use crate::harness::{Harness, Home, Meter, Meters};
-use crate::world::AccountState;
+use crate::harness::{Harness, Home, Identity, Meter, Meters, SignIn};
+use crate::world::{AccountState, World};
 
 /// A reading older than this is refreshed before it is trusted.
 pub const STALE_MICROS: u64 = 10 * 60 * 1_000_000;
@@ -28,6 +29,67 @@ pub fn discover(cfg: &Config) -> Vec<Home> {
 
 pub fn harness_of(home: &Home) -> &'static dyn Harness {
     crate::harness::by_id(home.harness).expect("homes come from the registry")
+}
+
+/// Who a home is signed in as, from its own files.
+pub fn sign_in(home: &Home) -> SignIn {
+    harness_of(home).sign_in(home)
+}
+
+/// The homes that are one account, by sign-in: each home that shares its
+/// harness and account with an earlier one, mapped to the first of them.
+/// Such homes share one quota and one seat budget.
+pub fn twins(found: &[Home]) -> BTreeMap<String, String> {
+    let mut first: BTreeMap<(&str, String), String> = BTreeMap::new();
+    let mut twins = BTreeMap::new();
+    for home in found {
+        let SignIn::As(Identity { id, .. }) = sign_in(home) else { continue };
+        match first.entry((home.harness, id)) {
+            std::collections::btree_map::Entry::Occupied(e) => {
+                twins.insert(home.key(), e.get().clone());
+            }
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(home.key());
+            }
+        }
+    }
+    twins
+}
+
+/// The seat an account takes: its own, or its first twin's.
+pub fn seat<'a>(twins: &'a BTreeMap<String, String>, account: &'a str) -> &'a str {
+    twins.get(account).map_or(account, String::as_str)
+}
+
+/// Brings what `world` knows of each home in line with what the home's files
+/// say now (call it after `hear_accounts`). A home with no sign-in is marked
+/// so; one whose sign-in changed since it was last read is read again, and is
+/// no longer taken for signed out. Twins share the newest reading and the
+/// longest limit, so a reading or a limit on one is a reading or a limit on both.
+pub fn settle(world: &mut World, found: &[Home]) {
+    for home in found {
+        let key = home.key();
+        let current = sign_in(home);
+        let a = world.accounts.entry(key).or_default();
+        a.unsigned = current == SignIn::Out;
+        if let SignIn::As(id) = &current
+            && a.sign_in.as_ref().is_some_and(|s| *s != id.stamp)
+        {
+            (a.read_at, a.unreadable_at, a.signed_out) = (None, None, false);
+        }
+    }
+    for (twin, first) in twins(found) {
+        let (Some(a), Some(b)) = (world.accounts.get(&twin), world.accounts.get(&first)) else { continue };
+        let newer = if a.read_at > b.read_at { a } else { b };
+        let (meters, read_at) = (newer.meters.clone(), newer.read_at);
+        let limited_until = a.limited_until.max(b.limited_until);
+        for key in [&twin, &first] {
+            if let Some(s) = world.accounts.get_mut(key) {
+                s.meters.clone_from(&meters);
+                (s.read_at, s.limited_until) = (read_at, limited_until);
+            }
+        }
+    }
 }
 
 /// Of the `governing` meters (a subset of `meters`), the one closest to its
@@ -65,6 +127,8 @@ pub fn score(meters: &[&Meter], now_s: i64) -> f64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     Disabled,
+    /// The home holds no signed-in account.
+    NotSignedIn,
     SignedOut,
     Limited,
     /// The governing meter closest to its limit is at the floor; it names that meter.
@@ -83,6 +147,7 @@ impl Refusal {
     pub fn describe(&self) -> String {
         match self {
             Self::Disabled => "disabled".into(),
+            Self::NotSignedIn => "not signed in (sign in, then: relay quota refresh)".into(),
             Self::SignedOut => "signed out (sign in, then: relay quota enable)".into(),
             Self::Limited => "limited".into(),
             Self::AtFloor(meter) => format!("at floor: {meter}"),
@@ -99,6 +164,8 @@ fn account_refusal(harness: &dyn Harness, state: Option<&AccountState>, now_s: i
     let a = state.cloned().unwrap_or_default();
     if !a.enabled {
         Some(Refusal::Disabled)
+    } else if a.unsigned {
+        Some(Refusal::NotSignedIn)
     } else if a.signed_out {
         Some(Refusal::SignedOut)
     } else if a.limited_until.is_some_and(|u| u > now_s) {
@@ -193,6 +260,54 @@ mod tests {
         assert!(fit(&claude("a"), Some(&full), None, 0.9, now_us).is_ok(), "a meter past its reset no longer counts");
         let limited = AccountState { limited_until: Some(now + 1), ..read.clone() };
         assert_eq!(fit(&claude("a"), Some(&limited), None, 0.9, now_us), Err(Refusal::Limited));
+    }
+
+    /// A claude home under `root` signed in as `uuid` on `plan`; `None` leaves no `.claude.json`.
+    fn signed_in(root: &std::path::Path, label: &str, account: Option<(&str, &str)>) -> Home {
+        let dir = root.join(label);
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some((uuid, plan)) = account {
+            let json = format!(r#"{{"oauthAccount":{{"accountUuid":"{uuid}","planDisplayName":"{plan}"}}}}"#);
+            std::fs::write(dir.join(".claude.json"), json).unwrap();
+        }
+        Home { harness: "claude", label: label.into(), dir }
+    }
+
+    #[test]
+    fn settle_shares_twins_marks_unsigned_homes_and_rereads_a_new_sign_in() {
+        let d = crate::config::tempdir::Dir::new();
+        let (one, two, three) = ("uuid-one", "uuid-two", "uuid-three");
+        let found = [
+            signed_in(d.path(), "a", Some((one, "Ultra"))),
+            signed_in(d.path(), "b", Some((one, "Ultra"))),
+            signed_in(d.path(), "c", Some((two, "Pro"))),
+            signed_in(d.path(), "d", None),
+        ];
+        assert_eq!(twins(&found), BTreeMap::from([("claude:b".to_owned(), "claude:a".to_owned())]));
+        let mut w = World::default();
+        let read = AccountState { read_at: Some(5), limited_until: Some(9), ..Default::default() };
+        w.accounts.insert("claude:a".into(), read);
+        settle(&mut w, &found);
+        assert_eq!((w.accounts["claude:b"].read_at, w.accounts["claude:b"].limited_until), (Some(5), Some(9)));
+        assert!(w.accounts["claude:d"].unsigned && !w.accounts["claude:c"].unsigned);
+
+        let SignIn::As(id) = sign_in(&found[2]) else { panic!("signed in") };
+        let out = AccountState { read_at: Some(5), signed_out: true, sign_in: Some(id.stamp), ..Default::default() };
+        w.accounts.insert("claude:c".into(), out);
+        settle(&mut w, &found);
+        assert!(w.accounts["claude:c"].signed_out, "the sign-in is the one it was found signed out under");
+        let again = signed_in(d.path(), "c", Some((three, "Pro")));
+        settle(&mut w, &[again]);
+        let c = &w.accounts["claude:c"];
+        assert!(!c.signed_out && c.read_at.is_none(), "a new sign-in is read again and no longer taken for lapsed");
+    }
+
+    #[test]
+    fn a_home_with_no_sign_in_is_never_a_fit() {
+        let mut st = AccountState { read_at: Some(1_000_000), ..Default::default() };
+        assert!(fit(&claude("a"), Some(&st), None, 0.9, 2_000_000).is_ok());
+        st.unsigned = true;
+        assert_eq!(fit(&claude("a"), Some(&st), None, 0.9, 2_000_000), Err(Refusal::NotSignedIn));
     }
 
     #[test]

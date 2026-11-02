@@ -12,7 +12,7 @@ use crate::accounts::{self, harness_of};
 use crate::bus::{QuotaEvent, now_micros, secs};
 use crate::config::Config;
 use crate::ctx::Ctx;
-use crate::harness::{Home, Meter, Meters};
+use crate::harness::{Home, Identity, Meter, Meters, SignIn};
 use crate::os::Role;
 use crate::sandbox;
 use crate::systems::dispatch::{may_use, model_for, seats_taken};
@@ -72,13 +72,22 @@ fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
     // A reading another project took recently is as good as one of ours.
     let mut world = ctx.world()?;
     world.hear_accounts(&ctx.neighbours());
+    let found = accounts::discover(&ctx.cfg);
+    accounts::settle(&mut world, &found);
     let now = now_micros();
-    let todo: Vec<Home> = accounts::discover(&ctx.cfg)
-        .into_iter()
-        .filter(|a| harness_of(a).caps().quota)
-        .filter(|a| !only_stale || accounts::due(harness_of(a), world.accounts.get(&a.key()), now))
+    let state = |a: &Home| world.accounts.get(&a.key());
+    let mut todo: Vec<Home> = found
+        .iter()
+        .filter(|a| harness_of(a).caps().quota && !state(a).is_some_and(|s| s.unsigned))
+        .filter(|a| !only_stale || accounts::due(harness_of(a), state(a), now))
         .filter(|a| !only_wanted || wanted(&world, a))
+        .cloned()
         .collect();
+    // Homes signed in as one account share a reading: one of them is read, preferring one not known signed out.
+    todo.sort_by_key(|a| state(a).is_some_and(|s| s.signed_out));
+    let twins = accounts::twins(&found);
+    let mut seen = BTreeSet::new();
+    todo.retain(|a| seen.insert(accounts::seat(&twins, &a.key()).to_owned()));
     let port = ctx.port(&Source(()));
     // In parallel: one reading can take a minute and a half.
     let readings: Vec<_> = std::thread::scope(|s| {
@@ -86,21 +95,35 @@ fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
         handles.into_iter().filter_map(|h| h.join().ok()).collect()
     });
     let now_s = secs(now);
-    let (mut read, mut unreadable) = (Vec::new(), Vec::new());
+    let (mut read, mut unreadable, mut signed_out) = (Vec::new(), Vec::new(), Vec::new());
     for (home, text) in readings {
-        let meters = text.map(|t| harness_of(home).parse_quota(&t, now_s)).unwrap_or_default();
-        // An unreadable account stays unread, which is not the same as having room.
+        let h = harness_of(home);
+        let meters = text.as_deref().map(|t| h.parse_quota(t, now_s)).unwrap_or_default();
         let account = home.key();
-        if meters.is_empty() {
+        let sign_in = match accounts::sign_in(home) {
+            SignIn::As(id) => Some(id.stamp),
+            _ => None,
+        };
+        if !meters.is_empty() {
+            read.push(account.clone());
+            port.emit(QuotaEvent::Reading { account, meters, sign_in })?;
+        } else if text.as_deref().is_some_and(|t| h.lapsed(t)) {
+            signed_out.push(account.clone());
+            port.emit(QuotaEvent::SignedOut { account, sign_in })?;
+        } else {
+            // An unreadable account stays unread, which is not the same as having room.
             unreadable.push(account.clone());
             port.emit(QuotaEvent::Unreadable { account })?;
-        } else {
-            read.push(account.clone());
-            port.emit(QuotaEvent::Reading { account, meters })?;
         }
     }
-    let text = if unreadable.is_empty() { String::new() } else { format!("no reading: {}", unreadable.join(", ")) };
-    ctx.reply(&serde_json::json!({ "read": read, "unreadable": unreadable }), &text)
+    let mut text = Vec::new();
+    if !unreadable.is_empty() {
+        text.push(format!("no reading: {}", unreadable.join(", ")));
+    }
+    if !signed_out.is_empty() {
+        text.push(format!("signed out: {}", signed_out.join(", ")));
+    }
+    ctx.reply(&serde_json::json!({ "read": read, "unreadable": unreadable, "signedOut": signed_out }), &text.join("\n"))
 }
 
 fn read(ctx: &Ctx, home: &Home) -> Option<String> {
@@ -124,6 +147,12 @@ fn read(ctx: &Ctx, home: &Home) -> Option<String> {
 #[serde(rename_all = "camelCase")]
 struct Row<'a> {
     account: String,
+    /// Who the home is signed in as: a plan and a short hash, never an email address or uuid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<Identity>,
+    /// The first home signed in as the same account, when this one is not the first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    same_as: Option<String>,
     state: String,
     running: usize,
     meters: Option<&'a Meters>,
@@ -156,9 +185,17 @@ impl Row<'_> {
     fn cells(&self) -> impl Iterator<Item = (Vec<String>, bool)> {
         let line = |t: Option<(&str, &Meter)>| t.map_or(String::new(), |(k, m)| accounts::meter_line(k, m));
         let running = if self.running > 0 { format!("{} running", self.running) } else { String::new() };
-        let own = vec![self.account.clone(), self.state.clone(), running, line(self.tightest)];
+        let who = self.identity.as_ref().map(Identity::label).unwrap_or_default();
+        let state = match &self.same_as {
+            Some(first) => format!("{}, same sign-in as {first}", self.state),
+            None => self.state.clone(),
+        };
+        let own = vec![self.account.clone(), who, state, running, line(self.tightest)];
         let others = self.by_model.iter().map(move |j| {
-            (vec![format!("  for {}", j.model), j.state.clone(), String::new(), line(j.tightest)], j.ready)
+            (
+                vec![format!("  for {}", j.model), String::new(), j.state.clone(), String::new(), line(j.tightest)],
+                j.ready,
+            )
         });
         std::iter::once((own, self.ready)).chain(others)
     }
@@ -178,6 +215,9 @@ fn judge<'w>(
     let state = match fit {
         Ok(_) if !h.caps().quota => "ready (unmetered)".to_owned(),
         Ok(_) => "ready".to_owned(),
+        Err(accounts::Refusal::SignedOut) => {
+            format!("signed out since {}", accounts::fmt_time(secs(st.and_then(|s| s.signed_at).unwrap_or(0))))
+        }
         Err(accounts::Refusal::Limited) => {
             format!("limited until {}", accounts::fmt_time(st.and_then(|s| s.limited_until).unwrap_or(0)))
         }
@@ -225,13 +265,16 @@ pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
     let neighbours = ctx.neighbours();
     let mut world = world.clone();
     world.hear_accounts(&neighbours);
-    view(&ctx.cfg, &accounts::discover(&ctx.cfg), &world, &seats_taken(&neighbours), now_micros())
+    let found = accounts::discover(&ctx.cfg);
+    accounts::settle(&mut world, &found);
+    view(&ctx.cfg, &found, &world, &seats_taken(&neighbours), now_micros())
 }
 
 /// The view of `found` in `world` (which has heard its neighbours), with the
 /// seats other projects hold (`elsewhere`), at `now` (bus time).
 fn view(cfg: &Config, found: &[Home], world: &World, elsewhere: &BTreeMap<String, usize>, now: u64) -> AccountsView {
     let floor = cfg.limits.floor;
+    let twins = accounts::twins(found);
     let row = |a: &Home| {
         let key = a.key();
         let st = world.accounts.get(&key);
@@ -256,9 +299,19 @@ fn view(cfg: &Config, found: &[Home], world: &World, elsewhere: &BTreeMap<String
                 Judged { model: m, state, tightest, ready }
             })
             .collect();
-        let running = world.jobs.values().filter(|j| j.status == Status::Running && j.account.as_ref() == Some(&key));
+        // Twins share their seats: a session on either is a session on both.
+        let seat = accounts::seat(&twins, &key);
+        let here = |k: &str| accounts::seat(&twins, k) == seat;
+        let running =
+            world.jobs.values().filter(|j| j.status == Status::Running && j.account.as_deref().is_some_and(here));
+        let identity = match accounts::sign_in(a) {
+            SignIn::As(id) => Some(id),
+            SignIn::Out | SignIn::Unknown => None,
+        };
         Row {
-            running: running.count() + elsewhere.get(&key).copied().unwrap_or(0),
+            running: running.count() + elsewhere.iter().filter(|(k, _)| here(k)).map(|(_, n)| n).sum::<usize>(),
+            same_as: twins.get(&key).cloned(),
+            identity,
             account: key,
             state,
             meters: st.map(|s| &s.meters),
@@ -362,11 +415,43 @@ mod tests {
     }
 
     #[test]
+    fn the_board_shows_who_each_home_is_and_which_are_one_account() {
+        let (dir, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
+        let home = |label: &str, uuid: &str| {
+            let dir = dir.path().join(label);
+            std::fs::create_dir_all(&dir).unwrap();
+            let json = format!(
+                r#"{{"oauthAccount":{{"accountUuid":"{uuid}","emailAddress":"me@secret.invalid","planDisplayName":"Ultra"}}}}"#
+            );
+            std::fs::write(dir.join(".claude.json"), json).unwrap();
+            Home { harness: "claude", label: label.into(), dir }
+        };
+        let found = [home("a", "u-1"), home("b", "u-1"), home("c", "u-2")];
+        let mut w = World::default();
+        for h in &found {
+            w.accounts.insert(h.key(), AccountState { read_at: Some(NOW - 1), ..Default::default() });
+        }
+        w.accounts.get_mut("claude:c").unwrap().signed_out = true;
+        w.accounts.get_mut("claude:c").unwrap().signed_at = Some(NOW);
+        let v = view(&cfg, &found, &w, &BTreeMap::new(), NOW);
+        let table = v.text();
+        let (first, third) = (v.json["accounts"][0]["identity"]["id"].as_str().unwrap(), &v.json["accounts"][2]);
+        assert!(table.contains(&format!("claude:a  Ultra #{first}  ready")), "{table}");
+        assert!(table.contains(&format!("claude:b  Ultra #{first}  ready, same sign-in as claude:a")), "{table}");
+        assert!(table.contains("signed out since "), "{table}");
+        assert_eq!(v.json["accounts"][1]["sameAs"], "claude:a");
+        assert!(third.get("sameAs").is_none());
+        for secret in ["me@secret.invalid", "u-1", "u-2"] {
+            assert!(!table.contains(secret) && !v.json.to_string().contains(secret), "{secret}");
+        }
+    }
+
+    #[test]
     fn the_state_cell_does_not_repeat_the_meter() {
         let (_d, cfg) = cfg("openai-codex/gpt-6.1-sol");
         let v = view(&cfg, &[omp()], &world(&[]), &BTreeMap::new(), NOW);
         let resets = accounts::fmt_time(secs(NOW) + 3_600);
-        assert_eq!(v.cells[0][1], "at floor");
-        assert_eq!(v.cells[0][3], format!("100% openai-codex/5 hours, resets {resets}"));
+        assert_eq!(v.cells[0][2], "at floor");
+        assert_eq!(v.cells[0][4], format!("100% openai-codex/5 hours, resets {resets}"));
     }
 }

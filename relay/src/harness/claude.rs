@@ -3,16 +3,17 @@
 //! and from `rate_limit_event`s; transcripts live in the home, under
 //! `projects/<cwd key>/<session>.jsonl`.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::harness::report::{Report, parse_reset};
 use crate::harness::{
-    Caps, Harness, Home, Invocation, Meter, Meters, Permissions, Reader, Refusal, Session, Task, read_json,
+    Caps, Harness, Home, Identity, Invocation, Meter, Meters, Permissions, Reader, Refusal, Session, SignIn, Task,
+    read_json,
 };
 
 const PREFIX: &str = ".claude";
@@ -108,12 +109,7 @@ impl Harness for Claude {
             .filter(|(_, d)| d.is_dir() && can_refresh(d))
             .collect();
         entries.sort();
-        let mut seen = BTreeSet::new();
-        entries
-            .into_iter()
-            .map(|(label, dir)| Home { harness: "claude", label, dir })
-            .filter(|h| self.identity_of(h).is_none_or(|id| seen.insert(id)))
-            .collect()
+        entries.into_iter().map(|(label, dir)| Home { harness: "claude", label, dir }).collect()
     }
 
     fn home_paths(&self, user_home: &Path) -> Vec<PathBuf> {
@@ -155,12 +151,31 @@ impl Harness for Claude {
         CONFIG.iter().map(|c| home.dir.join(c)).chain(scripts.map(|e| e.path())).collect()
     }
 
-    fn identity_of(&self, home: &Home) -> Option<String> {
-        read_json(&home.dir.join(".claude.json"))?
-            .pointer("/oauthAccount/emailAddress")?
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(str::to_lowercase)
+    fn sign_in(&self, home: &Home) -> SignIn {
+        let file = read_json(&home.dir.join(".claude.json"));
+        let account = file.as_ref().and_then(|v| v.get("oauthAccount"));
+        let field = |k: &str| account.and_then(|a| a.get(k)).and_then(Value::as_str).filter(|s| !s.is_empty());
+        let Some(uuid) = field("accountUuid") else { return SignIn::Out };
+        let digest = |text: &str| {
+            Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().concat()
+        };
+        let plan = field("planDisplayName").or(field("billingType")).unwrap_or_default().to_owned();
+        let fetched = account.and_then(|a| a.get("profileFetchedAt")).map(Value::to_string).unwrap_or_default();
+        let stamp = digest(
+            &[uuid, field("organizationUuid").unwrap_or(""), &plan, field("billingType").unwrap_or(""), &fetched]
+                .join("\n"),
+        );
+        SignIn::As(Identity { plan, id: digest(uuid)[..6].to_owned(), stamp: stamp[..12].to_owned() })
+    }
+
+    fn lapsed(&self, text: &str) -> bool {
+        static WORDS: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r"(?i)not logged in|please run /login|(session|token|login|sign-?in|credentials?)[^\n]{0,40}expired|expired[^\n]{0,40}(session|token|login)|unauthori[sz]ed|authentication_error|invalid (api key|authentication)|failed to authenticate",
+            )
+            .expect("regex")
+        });
+        WORDS.is_match(&strip_ansi(text))
     }
 
     fn invocation(&self, home: &Home, task: &Task<'_>) -> Result<Invocation, Refusal> {
@@ -376,6 +391,48 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert!((m["seven_day"].utilization - 0.24).abs() < 1e-9);
         assert_eq!(m["five_hour"].resets_at, Some(1_793_631_600 + 4 * 3600));
+    }
+
+    #[test]
+    fn sign_in_is_read_from_the_home_and_never_carries_the_email_or_uuid() {
+        let d = std::env::temp_dir().join(format!("hb-signin-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let h = Home { dir: d.clone(), ..home("claude", "w") };
+        assert_eq!(Claude.sign_in(&h), SignIn::Out, "no .claude.json");
+        std::fs::write(d.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"x@y.invalid"}}"#).unwrap();
+        assert_eq!(Claude.sign_in(&h), SignIn::Out, "no accountUuid");
+        let file = |uuid: &str, plan: &str| {
+            format!(
+                r#"{{"oauthAccount":{{"accountUuid":"{uuid}","emailAddress":"x@y.invalid","planDisplayName":"{plan}","profileFetchedAt":7}}}}"#
+            )
+        };
+        std::fs::write(d.join(".claude.json"), file("76de9d00-aaaa-4bbb-8ccc-000000000001", "Ultra")).unwrap();
+        let SignIn::As(id) = Claude.sign_in(&h) else { panic!("signed in") };
+        assert_eq!((id.plan.as_str(), id.id.len()), ("Ultra", 6));
+        assert!(id.id.chars().all(|c| c.is_ascii_hexdigit()));
+        let shown = format!("{id:?} {}", id.label());
+        assert!(!shown.contains("x@y.invalid") && !shown.contains("76de9d00-aaaa"), "{shown}");
+        std::fs::write(d.join(".claude.json"), file("76de9d00-aaaa-4bbb-8ccc-000000000001", "Max")).unwrap();
+        let SignIn::As(later) = Claude.sign_in(&h) else { panic!("signed in") };
+        assert_eq!(later.id, id.id);
+        assert_ne!(later.stamp, id.stamp, "a changed plan is a changed sign-in");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn expired_sessions_are_recognised_in_a_usage_output() {
+        for text in [
+            "Not logged in · Please run /login",
+            "\x1b[31mYour session has expired. Please run /login\x1b[0m",
+            "OAuth token has expired",
+            "API Error: 401 {\"type\":\"authentication_error\"}",
+            "Failed to authenticate",
+        ] {
+            assert!(Claude.lapsed(text), "{text}");
+        }
+        for text in ["Current week (all models): 24% used · resets Nov 8, 3pm (UTC)\n", "Total cost: $0.0000\n", ""] {
+            assert!(!Claude.lapsed(text), "{text}");
+        }
     }
 
     #[test]

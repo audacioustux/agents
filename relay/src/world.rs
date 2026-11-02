@@ -121,6 +121,14 @@ pub struct AccountState {
     pub unreadable_at: Option<u64>,
     /// Unix seconds until which the account refuses sessions.
     pub limited_until: Option<i64>,
+    /// The home's sign-in (`Identity::stamp`) when it was last read or found
+    /// signed out. A different one on disk means someone signed in again.
+    #[serde(default)]
+    pub sign_in: Option<String>,
+    /// The home holds no signed-in account. Learned from its files on every
+    /// pass (`accounts::settle`), never from the bus.
+    #[serde(skip)]
+    pub unsigned: bool,
 }
 
 impl Default for AccountState {
@@ -133,6 +141,8 @@ impl Default for AccountState {
             read_at: None,
             unreadable_at: None,
             limited_until: None,
+            sign_in: None,
+            unsigned: false,
         }
     }
 }
@@ -211,11 +221,8 @@ impl Checkpoint {
 /// failed read, the later end of a limit, and signed out if either saw it.
 /// Whether relay may use it at all (`enabled`) is each project's own switch.
 pub fn merge_account(ours: &AccountState, theirs: &AccountState) -> AccountState {
-    let (meters, read_at) = if theirs.read_at > ours.read_at {
-        (theirs.meters.clone(), theirs.read_at)
-    } else {
-        (ours.meters.clone(), ours.read_at)
-    };
+    let newer = if theirs.read_at > ours.read_at { theirs } else { ours };
+    let (meters, read_at, sign_in) = (newer.meters.clone(), newer.read_at, newer.sign_in.clone());
     // A sign-out stands until someone enables the account again, in any project.
     let latest = if theirs.signed_at > ours.signed_at { theirs } else { ours };
     AccountState {
@@ -226,6 +233,8 @@ pub fn merge_account(ours: &AccountState, theirs: &AccountState) -> AccountState
         read_at,
         unreadable_at: ours.unreadable_at.max(theirs.unreadable_at),
         limited_until: ours.limited_until.max(theirs.limited_until),
+        sign_in,
+        unsigned: ours.unsigned,
     }
 }
 
@@ -464,11 +473,25 @@ impl World {
             QuotaEvent::AccountEnabled { account, enabled } => {
                 let a = self.account(account);
                 (a.enabled, a.signed_out, a.signed_at) = (*enabled, false, Some(t));
+                // Enabling is the owner saying it is signed in: read it now, not after a back-off.
+                a.unreadable_at = None;
             }
-            QuotaEvent::Reading { account, meters } => {
+            QuotaEvent::Reading { account, meters, sign_in } => {
                 let a = self.account(account);
                 a.meters.clone_from(meters);
                 a.read_at = Some(t);
+                a.sign_in.clone_from(sign_in);
+                // A reading that works is a session that works.
+                if a.signed_out {
+                    (a.signed_out, a.signed_at) = (false, Some(t));
+                }
+            }
+            QuotaEvent::SignedOut { account, sign_in } => {
+                let a = self.account(account);
+                (a.signed_out, a.signed_at) = (true, Some(t));
+                // Asked again after a reading's worth of time, not on every pass.
+                a.unreadable_at = Some(t);
+                a.sign_in.clone_from(sign_in);
             }
             QuotaEvent::Unreadable { account } => self.account(account).unreadable_at = Some(t),
         }
@@ -784,6 +807,19 @@ mod tests {
         assert_eq!(j.attempts, 1);
         assert!((j.cost_usd - 0.5).abs() < 1e-9);
         assert_eq!(w.accounts["x"].limited_until, Some(100));
+    }
+
+    #[test]
+    fn a_lapsed_reading_signs_an_account_out_and_a_good_one_signs_it_back_in() {
+        let ev = |t, e| st(t, Event::Quota(e));
+        let out = QuotaEvent::SignedOut { account: "x".into(), sign_in: Some("s1".into()) };
+        let good = QuotaEvent::Reading { account: "x".into(), meters: Meters::new(), sign_in: Some("s2".into()) };
+        let w = World::fold(&[ev(3, out.clone())]);
+        let a = &w.accounts["x"];
+        assert_eq!((a.signed_out, a.signed_at, a.unreadable_at), (true, Some(3), Some(3)));
+        let w = World::fold(&[ev(3, out), ev(5, good)]);
+        let a = &w.accounts["x"];
+        assert_eq!((a.signed_out, a.signed_at, a.sign_in.as_deref()), (false, Some(5), Some("s2")));
     }
 
     #[test]

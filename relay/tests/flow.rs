@@ -63,8 +63,7 @@ fn claude_account(home: &Path, label: &str, usage_pct: u32, limited: bool) {
     let d = home.join(format!(".claude.{label}"));
     std::fs::create_dir_all(&d).unwrap();
     std::fs::write(d.join(".credentials.json"), r#"{"claudeAiOauth":{"refreshToken":"r"}}"#).unwrap();
-    std::fs::write(d.join(".claude.json"), format!(r#"{{"oauthAccount":{{"emailAddress":"{label}@test.invalid"}}}}"#))
-        .unwrap();
+    sign_in(&d, label, &format!("{label}0000-0000-4000-8000-000000000000"));
     std::fs::write(
         d.join("usage"),
         format!("Current week (all models): {usage_pct}% used · resets Jan 1, 12am (UTC)\n"),
@@ -73,6 +72,21 @@ fn claude_account(home: &Path, label: &str, usage_pct: u32, limited: bool) {
     if limited {
         std::fs::write(d.join("limited"), "").unwrap();
     }
+}
+
+/// What a fixture home's `.claude.json` says it is signed in as. Both strings
+/// must never appear in anything relay prints.
+const SECRET_EMAIL: &str = "owner.secret@test.invalid";
+
+/// Signs the home `dir` in as the account `uuid`.
+fn sign_in(dir: &Path, label: &str, uuid: &str) {
+    std::fs::write(
+        dir.join(".claude.json"),
+        format!(
+            r#"{{"oauthAccount":{{"accountUuid":"{uuid}","emailAddress":"{SECRET_EMAIL}","displayName":"{label}","organizationUuid":"org-{label}","planDisplayName":"Ultra","billingType":"stripe_subscription","profileFetchedAt":1}}}}"#
+        ),
+    )
+    .unwrap();
 }
 
 /// omp's default profile, with a `stub` provider whose week resets in two days.
@@ -625,4 +639,81 @@ fn a_resumed_job_keeps_its_profile() {
     ok(&relay(&env, &["queue", "resume", "m1", "--message", "Go on."]), "resume");
     assert_eq!(job(&env, "m1")["profile"], "mechanical");
     assert_eq!(wait_for(&env, "m1")["profile"], "mechanical");
+}
+
+#[test]
+fn two_homes_signed_in_as_one_account_share_a_seat_and_the_board_says_so() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("twins", false);
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 10, false);
+    let uuid = "76de9d00-1111-4222-8333-444455556666";
+    sign_in(&env.home.join(".claude.a"), "a", uuid);
+    sign_in(&env.home.join(".claude.b"), "b", uuid);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    std::fs::write(env.home.join(".claude.b/hold"), "").unwrap();
+    ok(&relay(&env, &["queue", "add", "first", "--text", "One.", "--readonly"]), "queue first");
+    until(&env, "first", "running");
+    ok(&relay(&env, &["queue", "add", "second", "--text", "Two.", "--readonly"]), "queue second");
+    std::thread::sleep(Duration::from_secs(2));
+    let second = job(&env, "second");
+    assert_eq!(second["status"], "queued", "the twin has no seat while its other half runs: {second}");
+
+    let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
+    let json = String::from_utf8_lossy(&relay(&env, &["quota", "show", "--json"]).stdout).into_owned();
+    assert!(table.contains("same sign-in as claude:a") && table.contains("Ultra #"), "{table}");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["accounts"][1]["sameAs"], "claude:a", "{json}");
+    assert_eq!(v["accounts"][0]["identity"]["plan"], "Ultra");
+    assert_eq!(v["accounts"][0]["identity"]["id"], v["accounts"][1]["identity"]["id"]);
+    for secret in [SECRET_EMAIL, uuid, "76de9d00"] {
+        assert!(!table.contains(secret) && !json.contains(secret), "{secret} leaked:\n{table}\n{json}");
+    }
+    std::fs::remove_file(env.home.join(".claude.b/hold")).unwrap();
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(wait_for(&env, "first")["status"], "done");
+    assert_eq!(wait_for(&env, "second")["status"], "done");
+}
+
+#[test]
+fn a_session_that_lapsed_is_signed_out_until_a_reading_succeeds() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("lapsed", false);
+    claude_account(&env.home, "a", 10, false);
+    let usage = env.home.join(".claude.a/usage");
+    let good = std::fs::read_to_string(&usage).unwrap();
+    std::fs::write(&usage, "Your session has expired · Please run /login\n").unwrap();
+    ok(&relay(&env, &["quota", "refresh"]), "refresh");
+    let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
+    assert!(table.contains("signed out since"), "{table}");
+    ok(&relay(&env, &["queue", "add", "look", "--text", "Look.", "--readonly"]), "queue");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(job(&env, "look")["status"], "queued", "a signed-out account is never chosen");
+
+    std::fs::write(&usage, good).unwrap();
+    ok(&relay(&env, &["quota", "refresh"]), "refresh again");
+    let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
+    assert!(!table.contains("signed out") && table.contains("ready"), "{table}");
+    assert_eq!(wait_for(&env, "look")["status"], "done");
+}
+
+#[test]
+fn a_home_with_no_sign_in_is_never_chosen() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("unsigned", false);
+    claude_account(&env.home, "a", 0, false);
+    claude_account(&env.home, "b", 50, false);
+    std::fs::remove_file(env.home.join(".claude.a/.claude.json")).unwrap();
+    ok(&relay(&env, &["queue", "add", "look", "--text", "Look.", "--readonly"]), "queue");
+    let j = wait_for(&env, "look");
+    assert_eq!(j["account"], "claude:b", "a has more room but is not signed in: {j}");
+    let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
+    assert!(table.contains("claude:a") && table.contains("not signed in"), "{table}");
 }

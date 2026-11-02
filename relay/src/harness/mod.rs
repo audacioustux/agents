@@ -39,6 +39,36 @@ impl Home {
     }
 }
 
+/// Who a home is signed in as, in a form safe to print: a short hash of the
+/// account's uuid and the plan. Neither an email address nor the uuid is kept.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Identity {
+    pub plan: String,
+    /// The first six hex characters of the sha256 of the account's uuid.
+    pub id: String,
+    /// Changes when the home's sign-in does (a new login, a new plan), so a
+    /// reading taken under another one is taken again. Not shown.
+    #[serde(skip)]
+    pub stamp: String,
+}
+
+impl Identity {
+    /// `Ultra #76de9d`.
+    pub fn label(&self) -> String {
+        if self.plan.is_empty() { format!("#{}", self.id) } else { format!("{} #{}", self.plan, self.id) }
+    }
+}
+
+/// What a home's own files say about its sign-in, read with no call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignIn {
+    /// The harness keeps no identity this crate can read.
+    Unknown,
+    /// No account is signed in.
+    Out,
+    As(Identity),
+}
+
 /// One quota window. `utilization` is a fraction; `resets_at` is unix seconds.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Meter {
@@ -194,9 +224,14 @@ pub trait Harness: Sync + fmt::Debug {
     fn protected(&self, _home: &Home) -> Vec<PathBuf> {
         Vec::new()
     }
-    /// Who the home is signed in as, to merge homes that share one quota. Never printed.
-    fn identity_of(&self, _home: &Home) -> Option<String> {
-        None
+    /// Who the home is signed in as, so homes that share one account share its quota.
+    fn sign_in(&self, _home: &Home) -> SignIn {
+        SignIn::Unknown
+    }
+    /// Whether the quota command's output says the session is expired,
+    /// unauthorised or not signed in.
+    fn lapsed(&self, _text: &str) -> bool {
+        false
     }
     /// The command for `task` on `home`.
     fn invocation(&self, home: &Home, task: &Task<'_>) -> Result<Invocation, Refusal>;

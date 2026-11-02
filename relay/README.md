@@ -178,11 +178,19 @@ says, for its CLI:
 | quota from | `claude -p /usage`, and each session's rate events | `omp usage`, per provider |
 | resume on another account | yes: the transcript is copied | yes: the session lives with the job, not the profile |
 
-An account is named `harness:label` (`claude:work`, `omp:default`). Two claude
-directories signed in as the same person are one account, since they share one
-quota. `[harness.<id>]` in the config sets a harness's `model`, `effort`,
+An account is named `harness:label` (`claude:work`, `omp:default`).
+`[harness.<id>]` in the config sets a harness's `model`, `effort`,
 `extra_args` and `program`, or turns it off; `accounts.exclude` leaves out
 single accounts.
+
+Who a claude directory is signed in as comes from its `.claude.json`
+(`oauthAccount`), read locally, never by a call. relay shows only the plan and
+the first 6 hex characters of a hash of the account id (`Ultra #76de9d`), and
+stores and prints no email, name or raw id. A directory with no account is `not
+signed in` and is never chosen. Two directories signed in as one account are
+shown as `same sign-in as claude:first`; they share one quota (one reading,
+the newest) and one seat budget, so a session on either counts against both.
+omp keeps no identity relay can read, so it shows none.
 
 Quota readings cost no model call. One is taken again after 10 minutes, or
 once a reset it names has passed; a reading that fails is not retried for the
@@ -213,8 +221,12 @@ Whether an account is used at all (`relay quota enable` and `disable`) and
 
 When a session hits a limit, its account is closed until two minutes after the
 stated reset (or for 15 minutes if none is stated), and the job goes back in
-the queue. A session whose sign-in has expired marks its account signed out
-until you sign it in again and run `relay quota enable H:L`. A session that
+the queue. A session whose sign-in has expired, or a `/usage` reading whose output
+says the session is expired, unauthorised or not signed in, marks its account
+signed out (`signed out since <time>` on the board; no extra call is made, and
+it is asked again only when a reading would be stale). It is used again once a
+later reading succeeds, when its sign-in changes on disk (a new login), or
+with `relay quota enable H:L`. A session that
 dies with no output is retried `limits.max_retries` times. A session that
 reaches its spend cap is not resumed automatically unless you opt in to
 checkpoints (below), because spending more is your call. Budget, wall clock and
@@ -342,7 +354,7 @@ own process, and owns one output port:
 | queue | takes work in (under a profile, if asked), withdraws it, stops it, releases it from its `--after` jobs | queued, released, resumed, dequeued, stop-requested |
 | dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
 | session | runs one job, checks its progress at a spend cap, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, checking, checked, ended |
-| quota | account readings and switches | reading, unreadable, account-enabled |
+| quota | account readings and switches | reading, unreadable, signed-out, account-enabled |
 | land | brings branches back; cleans up | forgotten |
 | view, probe | read-only | — |
 

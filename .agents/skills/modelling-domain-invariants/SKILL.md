@@ -4,6 +4,8 @@ description: Use when designing or reviewing a database schema, a domain model, 
 uses:
   - name: allocating-finite-inventory
     source: audacioustux/agents
+  - name: modelling-domains-and-events
+    source: audacioustux/agents
 ---
 
 # Modelling Domain Invariants
@@ -11,6 +13,12 @@ uses:
 A schema is the set of facts that future code cannot get wrong. Everything else
 is a convention, and conventions are broken by the next person, the migration
 script, the fixture, and the raw-SQL escape hatch someone adds under deadline.
+
+This skill owns what the store enforces inside one model. Which modules exist,
+which tables each owns, and how a rule spanning two of them is reached belong to
+domain modelling: use `modelling-domains-and-events` if installed; otherwise
+decide those first, and never hold an invariant across two modules' tables in
+one transaction.
 
 ## Put the invariant where it cannot be bypassed
 

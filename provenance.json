@@ -94,7 +94,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "00d326a392dc0a48c83248bb2807a72916cbd47c3d0d453cf3bbdbae1c7d4153",
+          "sha256": "bcf55a4e617cf023816b3d2f936226e07b9a6e6a0535a392d00ce335c5d145d6",
           "upstream": {
             "status": "diverged",
             "sha256": "74edf03ea6d24ef53db48677b93558d14a979bdf052ca3f57ecdca0c66791608"
@@ -333,7 +333,7 @@
       "note": "2026-09-11: extracted from the tickify-v4 design corpus (30 files, 1.9MB, four review rounds) by four parallel readers against a four-part portability test — vendor-free, falsifiable, non-obvious, not already owned. 74 candidates, 30 survived. Every rule verified verbatim against its source before adoption.",
       "files": {
         "SKILL.md": {
-          "sha256": "286b48152f22491aa91cb3323f86539e2360983781adf8728f2fc45432a4db13"
+          "sha256": "b6636f79643c285fea6a82a744d5828057254ed99521431067138ddbff831a98"
         }
       }
     },
@@ -405,7 +405,7 @@
       "note": "2026-09-11: written after surveying affaan-m/ecc (291 distinct skills). Its contract-first skill was the only one of the 291 covering a gap in this corpus — all five of its core rules probed as unowned here. Not adopted directly: it carries five references to sibling skills this corpus does not have, the same dangling-router defect fixed earlier in firecrawl. Rules rewritten in this corpus's voice.",
       "files": {
         "SKILL.md": {
-          "sha256": "0fa51898ae04c00fb6270fbccc85845c75e615a600b2493e7f313f54dea34bd3"
+          "sha256": "21e113b46cd2fecec7eded104a775f391c9cd739370b17ff59bd33a30eb4250e"
         }
       }
     },
@@ -741,7 +741,18 @@
       "note": "2026-09-11: extracted from the tickify-v4 design corpus (30 files, 1.9MB, four review rounds) by four parallel readers against a four-part portability test — vendor-free, falsifiable, non-obvious, not already owned. 74 candidates, 30 survived. Every rule verified verbatim against its source before adoption.",
       "files": {
         "SKILL.md": {
-          "sha256": "caef8aec14a4c7bc7e9eaead91f96965959a7d147f6ac2430118de672b8a6d8f"
+          "sha256": "449b3600de9a0c6c69791a0aa0846a6bdf3498840378dd177492acd2fa7b8fc4"
+        }
+      }
+    },
+    "modelling-domains-and-events": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "2026-11-02: written test-first from an experienced engineer's advice (DDD, modulith, event-driven architecture, systems model). RED: three baseline scenarios; GREEN and two REFACTOR re-tests with subagents.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "a92c198f482f5442eb53c1fca01fe778e68e49cba2a5c152445791c385651daf"
         }
       }
     },

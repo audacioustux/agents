@@ -6,6 +6,8 @@ uses:
     source: audacioustux/agents
   - name: migrating-live-data
     source: audacioustux/agents
+  - name: modelling-domains-and-events
+    source: audacioustux/agents
 ---
 
 # Evolving Shared Contracts
@@ -13,6 +15,11 @@ uses:
 A contract is any shape two parties agree on and change independently. The
 defining property is not the format — it is that you cannot deploy both sides at
 once, so every change has a window where old and new are both live.
+
+This skill owns changing a shape once it is shared. Deciding which module owns an
+event or a query, and what crosses a module boundary at all, is domain modelling:
+use `modelling-domains-and-events` if installed; otherwise give each event one
+emitting module and a type and version from its first release.
 
 ## Change the contract first, then the implementations
 

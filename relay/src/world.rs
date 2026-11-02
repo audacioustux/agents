@@ -109,8 +109,8 @@ pub struct World {
 }
 
 /// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
-/// holds), so checkpoints folded the old way are discarded.
-const FOLD_VERSION: u32 = 1;
+/// holds, how a mark is kept), so checkpoints folded the old way are discarded.
+const FOLD_VERSION: u32 = 2;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -625,7 +625,7 @@ mod tests {
             assert_eq!(w, full);
             assert_eq!(w.jobs["a"].status, Status::Done);
             assert_eq!(w.jobs["b"].status, Status::Running);
-            assert_eq!(b.checkpoint()["offsets"]["session/b.1.ndjson"], limited(7, 50).len());
+            assert_eq!(b.checkpoint()["offsets"]["session/b.1.ndjson"]["len"], limited(7, 50).len());
             // Nothing new: the checkpoint is not rewritten.
             let before = std::fs::metadata(&b.file).unwrap().modified().unwrap();
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -649,7 +649,7 @@ mod tests {
             let (head, tail) = line.split_at(20);
             b.append("dispatch.ndjson", head);
             assert_eq!(b.load().jobs["a"].status, Status::Queued);
-            assert_eq!(b.checkpoint()["offsets"]["dispatch.ndjson"], 0);
+            assert_eq!(b.checkpoint()["offsets"]["dispatch.ndjson"]["len"], 0);
             b.append("dispatch.ndjson", tail);
             let w = b.load();
             assert!(w.accounts.contains_key("planted"));
@@ -682,6 +682,23 @@ mod tests {
             let w = b.load();
             assert_eq!(w, b.full());
             assert_eq!(w.jobs.keys().collect::<Vec<_>>(), ["c"]);
+        }
+
+        #[test]
+        fn a_file_replaced_under_its_name_folds_in_full() {
+            // A job cleaned and queued again writes a new session/<job>.1 at least as long as the old one.
+            let b = Fixture::new();
+            b.append("queue.ndjson", &queued(1, "a"));
+            b.append("dispatch.ndjson", &dispatched(2, "a"));
+            b.append("session/a.1.ndjson", &limited(3, 50));
+            b.load();
+            b.plant();
+            let replacement = b.bus.join("session/a.1.ndjson.new");
+            std::fs::write(&replacement, limited(4, 60) + &limited(5, 70)).unwrap();
+            std::fs::rename(&replacement, b.bus.join("session/a.1.ndjson")).unwrap();
+            let w = b.load();
+            assert_eq!(w, b.full());
+            assert!(!w.accounts.contains_key("planted"), "folded in full, not from the stale mark");
         }
 
         #[test]

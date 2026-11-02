@@ -303,28 +303,38 @@ impl<E: Owned> Port<E> {
 }
 
 /// For each bus file (relative to the bus), how many bytes of it have been read.
-pub type Offsets = BTreeMap<PathBuf, u64>;
+pub type Offsets = BTreeMap<PathBuf, Mark>;
+
+/// How far a file has been folded, and which file that was: a file replaced
+/// under the same name (a job cleaned and queued again) has a new inode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mark {
+    pub ino: u64,
+    pub len: u64,
+}
 
 /// Reads `file`'s complete lines past `offset` into `out`, and returns the
-/// offset just past the last `\n`: a torn last line (a writer mid-append) is
-/// left for the next read. `None` when the file is shorter than `offset`
-/// (truncated or replaced), so what was read before no longer describes it.
+/// mark just past the last `\n`: a torn last line (a writer mid-append) is
+/// left for the next read. `None` when the file is not the one read before
+/// (shorter, or another inode), so what was read no longer describes it.
 /// A missing file reads as empty. A line that is not `E` is skipped.
 fn read_file<E: Owned>(
     file: &Path,
-    offset: u64,
+    seen: Mark,
     from: Option<&(String, u32)>,
     out: &mut Vec<(u64, usize, Stamped)>,
-) -> Result<Option<u64>> {
+) -> Result<Option<Mark>> {
+    use std::os::unix::fs::MetadataExt;
     let mut f = match File::open(file) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((offset == 0).then_some(0)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((seen.len == 0).then_some(Mark::default())),
         Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
     };
-    let len = f.metadata().with_context(|| format!("reading {}", file.display()))?.len();
-    if len < offset {
+    let meta = f.metadata().with_context(|| format!("reading {}", file.display()))?;
+    if seen.len > 0 && (meta.ino() != seen.ino || meta.len() < seen.len) {
         return Ok(None);
     }
+    let offset = seen.len;
     let mut bytes = Vec::new();
     f.seek(SeekFrom::Start(offset))
         .and_then(|_| f.read_to_end(&mut bytes))
@@ -335,7 +345,7 @@ fn read_file<E: Owned>(
         let line = serde_json::from_str::<Line<E>>(l).ok()?;
         Some((line.t, i, Stamped { t: line.t, event: line.event.wrap(), from: from.cloned() }))
     }));
-    Ok(Some(offset + complete as u64))
+    Ok(Some(Mark { ino: meta.ino(), len: offset + complete as u64 }))
 }
 
 /// Every event on the bus, oldest first.
@@ -356,7 +366,8 @@ pub fn read_since(bus: &Path, offsets: &Offsets) -> Result<Option<(Vec<Stamped>,
         next: &mut Offsets,
         all: &mut Vec<(u64, usize, Stamped)>,
     ) -> Result<bool> {
-        let Some(end) = read_file::<E>(&bus.join(&rel), offsets.get(&rel).copied().unwrap_or(0), from, all)? else {
+        let Some(end) = read_file::<E>(&bus.join(&rel), offsets.get(&rel).copied().unwrap_or_default(), from, all)?
+        else {
             return Ok(false);
         };
         next.insert(rel, end);

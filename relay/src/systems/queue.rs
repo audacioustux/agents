@@ -244,32 +244,12 @@ fn reuse_key(
 ) -> Option<String> {
     use sha2::{Digest, Sha256};
     let (commit, true) = head? else { return None };
-    let mut h = Sha256::new();
-    // Each field is length-prefixed, so no two different inputs run together alike.
-    let mut field = |tag: &str, value: &str| {
-        for part in [tag, value] {
-            h.update((part.len() as u64).to_le_bytes());
-            h.update(part.as_bytes());
-        }
-    };
-    field("v", "1");
-    field("brief", brief);
-    let mut sorted = harnesses.to_vec();
-    sorted.sort();
-    sorted.dedup();
-    for harness in &sorted {
-        field("harness", harness);
-    }
-    for (harness, model) in models {
-        field("model", &format!("{harness}={model}"));
-    }
-    field("effort", effort.unwrap_or_default());
-    field("commit", commit);
-    Some(h.finalize().iter().fold(String::with_capacity(64), |mut hex, b| {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{b:02x}");
-        hex
-    }))
+    let mut harnesses = harnesses.to_vec();
+    harnesses.sort();
+    harnesses.dedup();
+    // A JSON array is an unambiguous encoding; the leading 1 versions it.
+    let fields = serde_json::json!([1, brief, harnesses, models, effort, commit]).to_string();
+    Some(Sha256::digest(fields).iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().concat())
 }
 
 /// Refuses a question another job has answered, or is answering.
@@ -328,7 +308,7 @@ mod tests {
         // Pinned, so a change to the encoding (or the hash) is a deliberate one.
         assert_eq!(
             reuse_key("b", &[], &BTreeMap::new(), None, Some(&("c".into(), true))).as_deref(),
-            Some("1d02817d8612ab393aac8d499b0d6ecd7ff2399d8160c2fdd5b5f16ce0e1d8b6")
+            Some("64fbefd3a17fb06003b60075168536c4b6fc46e497de0bfb58c1582c4e4ce878")
         );
         let a = reuse_key("b", &["x".into(), "y".into()], &BTreeMap::new(), None, Some(&("c".into(), true)));
         let b = reuse_key("b", &["y".into(), "x".into()], &BTreeMap::new(), None, Some(&("c".into(), true)));

@@ -57,7 +57,8 @@ pub enum Verdict {
     SignedOut,
     /// Nothing usable came out. Worth one more attempt.
     NoOutput,
-    /// Ended at its spend cap. Never retried on its own: spending more is the owner's call.
+    /// Ended at its spend cap. Retried on its own only past a progress check, when the
+    /// owner allowed the budget to grow (`limits.budget_growth`): spending more is their call.
     Budget,
     Failed(String),
 }

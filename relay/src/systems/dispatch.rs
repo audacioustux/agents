@@ -106,7 +106,7 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     let _seats = Role::take(&ctx.state_root.join("seats.lock"))?;
     let port = ctx.port(&Source(()));
     let mut world = ctx.world()?;
-    for j in world.jobs.values_mut().filter(|j| j.status == Status::Running) {
+    for j in world.jobs.values_mut().filter(|j| j.status.has_runner()) {
         if !j.runner.is_some_and(|(pid, started)| os::same_process(pid, started)) {
             port.emit(DispatchEvent::Reaped { job: j.name.clone() })?;
             j.status = Status::Failed;

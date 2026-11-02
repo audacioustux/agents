@@ -3,6 +3,10 @@
 # It reads per-account switches from files in $CLAUDE_CONFIG_DIR:
 #   usage    printed for `-p /usage`
 #   limited  every session there hits its weekly limit
+#   cost     what each session costs, in USD (default 0.02)
+#   verdict  the progress check's answer (default continue)
+#   checks   appended to by every progress check run there
+# A brief containing [idle] makes no commit.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
 case " $* " in
@@ -18,7 +22,8 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-cat >/dev/null # the prompt
+prompt=$(cat)
+cost=$(cat "$acct/cost" 2>/dev/null || echo 0.02)
 key=$(pwd | sed 's/[^A-Za-z0-9]/-/g')
 transcript="$acct/projects/$key/$sid.jsonl"
 if [ -n "$resume" ] && [ ! -f "$transcript" ]; then
@@ -34,11 +39,21 @@ if [ -f "$acct/limited" ]; then
   exit 1
 fi
 echo '{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"seven_day":{"utilization":0.3,"resetsAt":4102444800}}}}'
+turns=$(wc -l <"$transcript" | tr -d ' ')
+case "$prompt" in
+*"relay's progress check"*)
+  echo check >>"$acct/checks"
+  verdict=$(cat "$acct/verdict" 2>/dev/null || echo continue)
+  printf '{"type":"result","subtype":"success","is_error":false,"result":"{\\"verdict\\": \\"%s\\", \\"why\\": \\"stub judged\\", \\"message\\": \\"run the formatter\\"}","num_turns":1,"total_cost_usd":0.01}\n' "$verdict"
+  exit 0
+  ;;
+esac
+case "$prompt" in *"[idle]"*) ;; *)
 if [ -w . ] && [ -e .git ]; then
-  echo work >relay-output.txt
+  echo "work $sid $turns" >relay-output.txt
   git add relay-output.txt
   git commit -q -m "stub work"
-fi
-turns=$(wc -l <"$transcript" | tr -d ' ')
+fi ;;
+esac
 # printf, not echo: dash's echo turns \n into a real newline and splits the JSON line.
-printf '{"type":"result","subtype":"success","is_error":false,"result":"ran on %s with %s transcript turns\\nFINAL ok","num_turns":1,"total_cost_usd":0.02}\n' "$(basename "$acct")" "$turns"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"ran on %s with %s transcript turns\\nFINAL ok","num_turns":1,"total_cost_usd":%s}\n' "$(basename "$acct")" "$turns" "$cost"

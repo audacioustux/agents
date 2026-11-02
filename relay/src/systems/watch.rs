@@ -117,6 +117,7 @@ fn status_style(s: Status) -> Style {
     match s {
         Status::Running => Style::new().fg(Color::Green),
         Status::Queued => Style::new().fg(Color::Yellow),
+        Status::Checking => Style::new().fg(Color::Cyan),
         Status::Failed => Style::new().fg(Color::Red),
         Status::Stopped => Style::new().add_modifier(Modifier::DIM),
         Status::Done => Style::new(),

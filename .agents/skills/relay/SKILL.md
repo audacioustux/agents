@@ -69,6 +69,14 @@ relay view result fix-parser --wait --json   # blocks until it ends: no polling
 relay land fetch fix-parser
 ```
 
+A job that reaches its spend cap stops (`failed`) unless `limits.budget_growth`
+is set: then it is `checking` while a read-only progress check on another
+account judges the work since the last checkpoint, and it resumes with a larger
+cap on `continue` or `redirect`, or waits for you on `stop`. No new commit
+means `stop` with no model asked; `limits.job_ceiling_usd` bounds the total.
+`relay queue resume NAME --message M --budget X` still works; `--budget` caps
+that run alone.
+
 The brief is the session's only context. See
 [relay/README.md](../../../relay/README.md) for accounts, quota, the sandbox
 and moving sessions between accounts.

@@ -109,18 +109,19 @@ pub fn listed(world: &crate::world::World, all: bool) -> Vec<&crate::world::Job>
 /// A job's cells: name, status, account, since when, spend, and its task with any reason.
 pub fn job_cells(j: &crate::world::Job, now: u64) -> Vec<String> {
     let since = match j.status {
-        crate::world::Status::Running => j.started_at,
+        crate::world::Status::Running | crate::world::Status::Checking => j.started_at,
         crate::world::Status::Queued => j.ended_at.or(Some(j.created_at)),
         _ => j.ended_at,
     };
     let reason = j.reason.as_deref().map_or(String::new(), |r| format!("  [{r}]"));
+    let check = j.checkpoints.last().map_or(String::new(), |c| format!("  {}", c.summary()));
     vec![
         j.name.clone(),
         j.status.as_str().to_owned(),
         j.account.as_deref().or(j.pinned.as_deref()).unwrap_or("-").to_owned(),
         since.map_or_else(|| "-".into(), |t| ago(now, t)),
         if j.cost_usd > 0.0 { format!("${:.2}", j.cost_usd) } else { String::new() },
-        format!("{}{reason}", j.task),
+        format!("{}{reason}{check}", j.task),
     ]
 }
 
@@ -204,6 +205,12 @@ fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
         j.turns,
         j.attempts
     );
+    if let Some(c) = j.checkpoints.last() {
+        out!("{}", c.summary());
+        if c.next_cap_usd.is_some() && !c.why.is_empty() {
+            out!("  why: {}", c.why);
+        }
+    }
     if let (Some(b), Some(w)) = (&j.branch, &j.workdir) {
         out!("branch {b} in {}   bring it here: relay land fetch {name}", w.display());
     }

@@ -292,3 +292,47 @@ fn projects_on_one_machine_share_what_they_read_of_an_account() {
     // It took no reading of its own.
     assert!(!env.root.join("state/relay/other/bus/quota.ndjson").exists());
 }
+
+#[test]
+fn a_spend_cap_is_a_checkpoint_while_progress_is_real() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("checkpoint", false);
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    let limits =
+        "[limits]\nbudget_growth = 2.0\njob_ceiling_usd = 1.0\nchecker = { harness = \"claude\", budget_usd = 0.5 }\n";
+    std::fs::write(env.repo.join("relay.toml"), conf.replace("[limits]\n", limits)).unwrap();
+    // `a` is emptier, so it does the work; the check runs on `b`, so no worker grades itself.
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 50, false);
+    let checks =
+        |label: &str| std::fs::read_to_string(env.home.join(format!(".claude.{label}/checks"))).unwrap_or_default();
+
+    // Each run costs $0.02: over the $0.015 cap, with a commit, so it is checked and goes on at twice the cap.
+    ok(&relay(&env, &["queue", "add", "grow", "--text", "Make a change.", "--budget", "0.015"]), "queue");
+    let j = wait_for(&env, "grow");
+    assert_eq!(j["status"], "done", "{j}");
+    assert_eq!(j["attempts"], 2, "{j}");
+    assert_eq!(j["budget_usd"], 0.03, "{j}");
+    let c = &j["checkpoints"][0];
+    assert_eq!((c["checkpoint"].as_u64(), c["verdict"].as_str()), (Some(1), Some("continue")), "{j}");
+    assert_eq!((c["checker"].as_str(), j["account"].as_str()), (Some("claude:b"), Some("claude:a")), "{j}");
+    assert_eq!(j["checkpoints"].as_array().map(Vec::len), Some(1));
+    assert_eq!((checks("a").lines().count(), checks("b").lines().count()), (0, 1));
+    assert!(result(&env, "grow").contains("checkpoint 1: continue → $0.03"));
+
+    // Nothing committed or changed since the fork: a stop, and no model is asked.
+    ok(&relay(&env, &["queue", "add", "idle", "--text", "[idle] Make a change.", "--budget", "0.015"]), "queue");
+    let j = wait_for(&env, "idle");
+    assert_eq!(j["status"], "failed", "{j}");
+    let c = &j["checkpoints"][0];
+    assert_eq!(c["verdict"], "stop", "{j}");
+    assert!(c["checker"].is_null(), "{j}");
+    assert_eq!(checks("b").lines().count(), 1, "no new check ran");
+    let board = String::from_utf8_lossy(&relay(&env, &["view", "status"]).stdout).into_owned();
+    assert!(board.contains("checkpoint 1: stop — no new commit"), "{board}");
+    // The manual path still works from there.
+    ok(&relay(&env, &["queue", "resume", "idle", "--message", "Go on.", "--budget", "0.05"]), "resume");
+    assert_eq!(wait_for(&env, "idle")["status"], "done");
+}

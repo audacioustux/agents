@@ -77,7 +77,7 @@ prepend it to your briefs, or have each brief point to it.
 | Command | |
 | --- | --- |
 | `relay queue add NAME (--prompt FILE \| --text TEXT) [--readonly] [--harness H,...] [--model H=M] [--effort E] [--budget USD] [--account H:L] [--task TITLE] [--again]` | Queue a job. `--harness` limits where it may run; `--account` pins it, and it waits for that account |
-| `relay queue resume NAME --message TEXT [--budget USD]` | Continue an ended session, on any account with room |
+| `relay queue resume NAME --message TEXT [--budget USD]` | Continue an ended or checking session, on any account with room. `--budget` caps that run alone, not the job's total |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one |
 | `relay view status [--all]` | Jobs and accounts. With `--json`, the whole folded state |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends |
@@ -147,9 +147,36 @@ stated reset (or for 15 minutes if none is stated), and the job goes back in
 the queue. A session whose sign-in has expired marks its account signed out
 until you sign it in again and run `relay quota enable H:L`. A session that
 dies with no output is retried `limits.max_retries` times. A session that
-reaches its spend cap is never resumed automatically, because spending more is
-your call. Budget, wall clock and silence limits are enforced by relay, the
-same for every harness.
+reaches its spend cap is not resumed automatically unless you opt in to
+checkpoints (below), because spending more is your call. Budget, wall clock and
+silence limits are enforced by relay, the same for every harness.
+
+### Checkpoints
+
+A spend cap can be a checkpoint instead of a stop. With `limits.budget_growth`
+above 1, a build job that reaches its cap goes to `checking`, and relay runs a
+short read-only progress check on `limits.checker`, on another account than
+the worker's where one is free:
+
+```toml
+[limits]
+budget_growth = 2.0      # the next run's cap is the last one times this
+job_ceiling_usd = 120.0  # all runs and checks of one job; absent: unbounded
+checker = { harness = "claude", model = "sonnet", budget_usd = 1.0 }
+```
+
+The check reads the brief, every earlier verdict, `git log --stat` since the
+last checkpoint (with the diff when it is small) and the worker's last message,
+and answers `continue`, `redirect` (with a correction the worker reads next) or
+`stop`. On `continue` or `redirect` the same session resumes with the cap
+times the growth; on `stop` the job is left `failed` for you. No new commit and
+no changed file since the last checkpoint is a `stop` that asks no model, and a
+next cap that would take the job past `job_ceiling_usd` always waits for you.
+Read-only jobs, and any job without growth, stop at their cap as before.
+`relay view status` and `view result` show the latest checkpoint
+(`checkpoint 2: continue → $30.00`); `--json` has all of them under
+`checkpoints`. `relay queue resume NAME --budget X --message M` works from
+`checking` or `failed` as ever.
 
 ## The sandbox
 
@@ -245,7 +272,7 @@ own process, and owns one output port:
 | --- | --- | --- |
 | queue | takes work in, withdraws it, stops it | queued, resumed, dequeued, stop-requested |
 | dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
-| session | runs one job and reports what happened | cloned, started, rate, limited, signed-out, follow-up, ended |
+| session | runs one job, checks its progress at a spend cap, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, checking, checked, ended |
 | quota | account readings and switches | reading, unreadable, account-enabled |
 | land | brings branches back; cleans up | forgotten |
 | view, probe | read-only | — |

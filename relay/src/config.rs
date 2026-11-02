@@ -49,6 +49,29 @@ pub struct Limits {
     pub min_free_disk_gb: f64,
     /// Automatic retries of one job for empty or silent deaths, before it is left failed.
     pub max_retries: u32,
+    /// At a spend cap, the next run's cap is the last one times this, after a
+    /// progress check. `1.0` (the default) never resumes on its own.
+    pub budget_growth: f64,
+    /// The most a job may spend over all its runs and checks. Absent: no bound but the checks.
+    pub job_ceiling_usd: Option<f64>,
+    /// What judges progress at a spend cap.
+    pub checker: Checker,
+}
+
+/// The progress check's harness, model and spend cap.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Checker {
+    pub harness: String,
+    /// Default: the harness's configured model.
+    pub model: Option<String>,
+    pub budget_usd: f64,
+}
+
+impl Default for Checker {
+    fn default() -> Self {
+        Self { harness: "claude".into(), model: None, budget_usd: 1.0 }
+    }
 }
 
 impl Default for Limits {
@@ -62,6 +85,9 @@ impl Default for Limits {
             max_load: None,
             min_free_disk_gb: 10.0,
             max_retries: 1,
+            budget_growth: 1.0,
+            job_ceiling_usd: None,
+            checker: Checker::default(),
         }
     }
 }
@@ -264,6 +290,14 @@ impl Config {
         ensure!(self.limits.max_running >= 1 && self.limits.per_account >= 1, "limits must be at least 1");
         ensure!((0.0..=1.0).contains(&self.limits.floor), "limits.floor is a fraction between 0 and 1");
         ensure!(positive(self.limits.budget_usd), "limits.budget_usd must be a positive number");
+        ensure!(
+            self.limits.budget_growth.is_finite() && self.limits.budget_growth >= 1.0,
+            "limits.budget_growth must be at least 1"
+        );
+        ensure!(self.limits.job_ceiling_usd.is_none_or(positive), "limits.job_ceiling_usd must be a positive number");
+        ensure!(positive(self.limits.checker.budget_usd), "limits.checker.budget_usd must be a positive number");
+        crate::harness::by_id(&self.limits.checker.harness)
+            .map_err(|e| anyhow::anyhow!("limits.checker.harness: {e}"))?;
         for id in self.harnesses.keys() {
             crate::harness::by_id(id).map_err(|e| anyhow::anyhow!("[harness.{id}]: {e}"))?;
         }

@@ -1,6 +1,7 @@
 //! The systems. Each owns one responsibility and emits only its own events.
 
 pub mod ask;
+pub mod checkpoint;
 pub mod dispatch;
 pub mod land;
 pub mod probe;

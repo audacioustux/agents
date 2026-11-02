@@ -27,11 +27,12 @@ impl crate::bus::Source for Source {
 pub enum Cmd {
     /// Queue a task. The brief is the only context the session gets.
     Add(Add),
-    /// Continue an ended session with a new instruction.
+    /// Continue an ended or checking session with a new instruction.
     Resume {
         name: String,
         #[arg(long)]
         message: String,
+        /// Spend cap for this run alone, in USD; not the job's total, which `limits.job_ceiling_usd` bounds.
         #[arg(long, value_parser = usd)]
         budget: Option<f64>,
     },
@@ -106,7 +107,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             (add.queued(ctx, &world.jobs)?, None)
         }
         Cmd::Resume { message, budget, .. } => {
-            when(|s| !s.is_live())?;
+            when(|s| !s.is_live() || s == Status::Checking)?;
             (QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget }, None)
         }
         Cmd::Dequeue { .. } => {

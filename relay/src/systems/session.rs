@@ -1,6 +1,6 @@
 //! session: runs one dispatched job on its account's harness and reports
 //! what happened. Emits: cloned, started, identified, rate, limited,
-//! signed-out, follow-up, ended. One process per running job, started by
+//! signed-out, follow-up, checking, checked, ended. One process per running job, started by
 //! dispatch. Nothing here names a harness: the account's harness builds the
 //! command and reads the output, and the limits are enforced here for all.
 
@@ -15,12 +15,13 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 
 use crate::accounts::{self, harness_of};
-use crate::bus::{Outcome, SessionEvent, now_micros, secs};
+use crate::bus::{Check, CheckVerdict, Outcome, SessionEvent, now_micros, secs};
 use crate::ctx::Ctx;
 use crate::harness::report::{Ending, Report, Verdict, verdict};
 use crate::harness::{Home, Invocation, Permissions, Reader, Session, Task};
 use crate::sandbox::{self, Mounts};
-use crate::world::Job;
+use crate::systems::checkpoint::{self, Next};
+use crate::world::{Job, Status};
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
@@ -136,7 +137,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     let resumed = resumable(job, &found, home, &scratch);
     let session_id = resumed.clone().unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
     let brief = std::fs::read_to_string(ctx.job_file(&job.name, "prompt.md")).context("the job's brief is gone")?;
-    let prompt = opening(brief, job.message.as_deref(), resumed.is_some());
+    let prompt = opening(brief.clone(), job.message.as_deref(), resumed.is_some());
     // What a read-only job reads is the live repository, so its commit is taken now, not when queued.
     let commit = if job.readonly { Ctx::clean_head(&ctx.cfg.repo) } else { None };
     port.emit(SessionEvent::Started {
@@ -179,12 +180,152 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
 
     // An earlier attempt's answer must not pass for this one's.
     let _ = std::fs::remove_file(ctx.job_file(&job.name, "result.md"));
-    let (report, ending) = drive(ctx, job, &key, &session_id, &mut cmd, inv.stdin.as_deref(), harness.reader())?;
+    let run =
+        Run { session_id: Some(&session_id), budget_usd: job.budget_usd, log: "log.ndjson", stderr: "stderr.log" };
+    let (report, ending) = drive(ctx, job, &key, &run, &mut cmd, inv.stdin.as_deref(), harness.reader())?;
     if !report.answer.is_empty() {
         std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
     }
     *spend = (report.cost_usd, report.turns);
-    conclude(ctx, job, &key, verdict(&report, ending, &s.final_marker, job.readonly, now_s()), now_s())
+    match verdict(&report, ending, &s.final_marker, job.readonly, now_s()) {
+        Verdict::Budget => at_cap(ctx, job, &report, workdir.as_deref(), &scratch, &brief),
+        v => conclude(ctx, job, &key, v, now_s()),
+    }
+}
+
+/// A run at its cap: the owner decides, or its progress is checked and it
+/// goes on with a larger cap. No change since the last checkpoint is a stop
+/// that asks no model.
+fn at_cap(ctx: &Ctx, job: &Job, report: &Report, dir: Option<&Path>, scratch: &Path, brief: &str) -> Result<Ended> {
+    let cap = match checkpoint::next(&ctx.cfg.limits, job.readonly, job.budget_usd, job.cost_usd + report.cost_usd) {
+        Next::Manual => {
+            return Ok((Outcome::Failed, Some("reached its spend cap; resume with --budget to go on".into())));
+        }
+        Next::Ceiling { cap, ceiling } => {
+            return Ok((
+                Outcome::Failed,
+                Some(format!(
+                    "reached its spend cap; another ${cap:.2} would pass the job's ceiling of ${ceiling:.2}; \
+                     resume with --budget to go on"
+                )),
+            ));
+        }
+        Next::Check { cap } => cap,
+    };
+    let dir = dir.context("a build job without its clone")?;
+    let port = port(ctx, job);
+    let n = u32::try_from(job.checkpoints.len()).unwrap_or(u32::MAX).saturating_add(1);
+    let from = checkpoint::base(dir, &job.checkpoints);
+    let now = checkpoint::point(dir, &scratch.join("checkpoint.index"));
+    let mut check = Check {
+        checkpoint: n,
+        verdict: CheckVerdict::Stop,
+        why: "no new commit and no changed file since the last checkpoint".into(),
+        message: String::new(),
+        next_cap_usd: None,
+        head: now.head.clone(),
+        tree: now.tree.clone(),
+        checker: None,
+        cost_usd: 0.0,
+    };
+    if checkpoint::progressed(&from, &now) {
+        port.emit(SessionEvent::Checking { job: job.name.clone(), checkpoint: n })?;
+        let prompt =
+            checkpoint::prompt(brief, &job.checkpoints, &checkpoint::evidence(dir, &from, &now), &report.answer);
+        let (checker, cost, answer) = judge(ctx, job, &prompt);
+        (check.checker, check.cost_usd) = (checker, cost);
+        match answer {
+            Ok(a) => {
+                if a.verdict != CheckVerdict::Stop {
+                    check.message = checkpoint::resume_message(n, cap, &a);
+                    check.next_cap_usd = Some(cap);
+                }
+                (check.verdict, check.why) = (a.verdict, a.why);
+            }
+            Err(why) => check.why = why,
+        }
+    }
+    let waits = check.next_cap_usd.is_none();
+    port.emit(SessionEvent::Checked { job: job.name.clone(), check })?;
+    Ok(if waits {
+        (Outcome::Failed, Some("waits for a human at its checkpoint; resume with --budget to go on".into()))
+    } else {
+        (Outcome::Retry, None)
+    })
+}
+
+/// The progress check on the checker's harness, read-only: the account it
+/// ran on, what it cost, and its answer or why there is none.
+fn judge(ctx: &Ctx, job: &Job, prompt: &str) -> (Option<String>, f64, Result<checkpoint::Answer, String>) {
+    let c = &ctx.cfg.limits.checker;
+    let Some(home) = checker_home(ctx, job) else {
+        return (None, 0.0, Err(format!("no {} account is free for the progress check", c.harness)));
+    };
+    let run = || -> Result<(Report, Ending)> {
+        let harness = harness_of(&home);
+        let conf = ctx.cfg.harness(harness.id());
+        let scratch = ctx.job_scratch(&job.name).join("check");
+        std::fs::create_dir_all(&scratch)?;
+        let id = uuid::Uuid::now_v7().to_string();
+        let name = format!("relay-{}-check", job.name);
+        let task = Task {
+            prompt,
+            model: c.model.as_deref().or(conf.model.as_deref()),
+            effort: None,
+            session: Session::New(&id),
+            permissions: permissions(ctx.cfg.sandbox.enabled, true),
+            briefing: Some("The repository is mounted read-only. Report; do not try to change files."),
+            budget_usd: Some(c.budget_usd),
+            name: Some(&name),
+            events: true,
+            lean: true,
+            scratch: &scratch,
+        };
+        let mut inv = conf.locate(harness.invocation(&home, &task).map_err(|r| anyhow::anyhow!(r.0))?);
+        inv.args.extend(conf.extra_args.iter().map(OsString::from));
+        inv.write_files().context("writing the prompt file")?;
+        let mut cmd = command(ctx, &home, &inv, None, &scratch, &ctx.cfg.repo);
+        let run = Run { session_id: None, budget_usd: c.budget_usd, log: "check.ndjson", stderr: "check-stderr.log" };
+        drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader())
+    };
+    let (report, ending) = match run() {
+        Ok(r) => r,
+        Err(e) => return (Some(home.key()), 0.0, Err(format!("the progress check did not run: {e:#}"))),
+    };
+    let answer = match verdict(&report, ending, "", true, now_s()) {
+        Verdict::Done => checkpoint::parse(&report.answer).ok_or_else(|| "the progress check gave no verdict".into()),
+        v => Err(format!("the progress check did not finish: {v:?}")),
+    };
+    (Some(home.key()), report.cost_usd, answer)
+}
+
+/// An account of the checker's harness that may take a session: another
+/// than the worker's and idle where there is one, so no worker grades itself.
+fn checker_home(ctx: &Ctx, job: &Job) -> Option<Home> {
+    let harness = &ctx.cfg.limits.checker.harness;
+    let world = ctx.world().ok()?;
+    let now = now_s();
+    let found = accounts::discover(&ctx.cfg);
+    let usable: Vec<&Home> = found
+        .iter()
+        .filter(|h| h.harness == harness.as_str())
+        .filter(|h| {
+            world
+                .accounts
+                .get(&h.key())
+                .is_none_or(|a| a.enabled && !a.signed_out && a.limited_until.is_none_or(|u| u <= now))
+        })
+        .collect();
+    let worker = |h: &&&Home| job.account.as_deref() == Some(h.key().as_str());
+    let busy = |h: &&&Home| {
+        world.jobs.values().any(|j| j.status == Status::Running && j.account.as_deref() == Some(h.key().as_str()))
+    };
+    usable
+        .iter()
+        .find(|h| !worker(h) && !busy(h))
+        .or_else(|| usable.iter().find(worker))
+        .or_else(|| usable.first())
+        .map(|h| (*h).clone())
 }
 
 /// The session to resume, when the job has one its history can follow here:
@@ -266,6 +407,16 @@ fn command(ctx: &Ctx, home: &Home, inv: &Invocation, workdir: Option<&Path>, scr
     }
 }
 
+/// One run's own limits and files.
+struct Run<'a> {
+    /// The session whose renaming the harness reports, for the worker; none for a check.
+    session_id: Option<&'a str>,
+    budget_usd: f64,
+    /// The job's files its stream and its stderr go to.
+    log: &'a str,
+    stderr: &'a str,
+}
+
 /// Runs the agent, feeding its stdin and teeing its stream to the job's log.
 /// Ends it if it goes silent, runs past its time limit or spends past its
 /// cap: the same limits for every harness, whatever the CLI enforces itself.
@@ -273,17 +424,17 @@ fn drive(
     ctx: &Ctx,
     job: &Job,
     account: &str,
-    session_id: &str,
+    run: &Run<'_>,
     cmd: &mut Command,
     stdin: Option<&str>,
     mut reader: Box<dyn Reader>,
 ) -> Result<(Report, Ending)> {
     let port = port(ctx, job);
-    let mut log = Ctx::append_private(&ctx.job_file(&job.name, "log.ndjson"))?;
+    let mut log = Ctx::append_private(&ctx.job_file(&job.name, run.log))?;
     let mut child = cmd
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
-        .stderr(Ctx::append_private(&ctx.job_file(&job.name, "stderr.log"))?)
+        .stderr(Ctx::append_private(&ctx.job_file(&job.name, run.stderr))?)
         .spawn()
         .context("starting the session")?;
     if let (Some(text), Some(mut pipe)) = (stdin.map(str::to_owned), child.stdin.take()) {
@@ -303,7 +454,7 @@ fn drive(
     let silent_after = Duration::from_secs(ctx.cfg.limits.silent_minutes * 60);
     let deadline = Instant::now() + Duration::from_secs_f64(ctx.cfg.session.max_hours * 3600.0);
     let mut ending = Ending::default();
-    let mut named = session_id.to_owned();
+    let mut named = run.session_id.map(str::to_owned);
     loop {
         let wait = silent_after.min(deadline.saturating_duration_since(Instant::now()));
         match rx.recv_timeout(wait) {
@@ -315,11 +466,13 @@ fn drive(
                     port.emit(SessionEvent::Rate { account: account.to_owned(), meters })?;
                 }
                 let r = reader.report();
-                if let Some(id) = r.session_id.as_deref().filter(|id| *id != named) {
+                if let (Some(named), Some(id)) = (named.as_mut(), r.session_id.as_deref())
+                    && id != named
+                {
                     port.emit(SessionEvent::Identified { job: job.name.clone(), session_id: id.to_owned() })?;
-                    id.clone_into(&mut named);
+                    id.clone_into(named);
                 }
-                if r.cost_usd > job.budget_usd {
+                if r.cost_usd > run.budget_usd {
                     ending.over_budget = true;
                     let _ = child.kill();
                     break;

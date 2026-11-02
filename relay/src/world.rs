@@ -19,6 +19,8 @@ pub enum Status {
     #[default]
     Queued,
     Running,
+    /// Stopped at its spend cap while its progress is checked.
+    Checking,
     Done,
     Failed,
     Stopped,
@@ -26,13 +28,19 @@ pub enum Status {
 
 impl Status {
     pub fn is_live(self) -> bool {
-        matches!(self, Self::Queued | Self::Running)
+        matches!(self, Self::Queued | Self::Running | Self::Checking)
+    }
+
+    /// A runner process holds the job: it is running or being checked.
+    pub fn has_runner(self) -> bool {
+        matches!(self, Self::Running | Self::Checking)
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::Checking => "checking",
             Self::Done => "done",
             Self::Failed => "failed",
             Self::Stopped => "stopped",
@@ -78,6 +86,17 @@ pub struct Job {
     pub turns: u32,
     pub reason: Option<String>,
     pub stop_requested: bool,
+    /// Every checkpoint at a spend cap, oldest first.
+    #[serde(default)]
+    pub checkpoints: Vec<bus::Check>,
+}
+
+impl Job {
+    /// Resumed by hand during its check: what its runner still says changes
+    /// only what was spent, and the owner's instruction stands.
+    fn let_go(&self) -> bool {
+        self.status == Status::Queued && self.runner.is_none() && self.attempts > 0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -119,7 +138,7 @@ pub struct World {
 
 /// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
 /// holds, how a mark is kept), so checkpoints folded the old way are discarded.
-const FOLD_VERSION: u32 = 4;
+const FOLD_VERSION: u32 = 5;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -294,6 +313,10 @@ impl World {
             }
             QueueEvent::Resumed { job, message, budget_usd } => {
                 if let Some(j) = self.jobs.get_mut(job) {
+                    // Resumed by hand during its check: the checking runner no longer speaks for it.
+                    if j.status == Status::Checking {
+                        j.runner = None;
+                    }
                     j.status = Status::Queued;
                     j.message = Some(message.clone());
                     j.reason = None;
@@ -330,7 +353,7 @@ impl World {
             }
             DispatchEvent::Reaped { job } => {
                 // A runner can report and exit between dispatch's snapshot and its liveness check.
-                if let Some(j) = self.jobs.get_mut(job).filter(|j| j.status == Status::Running) {
+                if let Some(j) = self.jobs.get_mut(job).filter(|j| j.status.has_runner()) {
                     // A stop kills the runner, so its silent death is the stop.
                     (j.status, j.reason) = if j.stop_requested {
                         (Status::Stopped, Some("stopped by request".into()))
@@ -398,10 +421,32 @@ impl World {
                     j.follow_ups += 1;
                 }
             }
+            SessionEvent::Checking { job, .. } => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    j.status = Status::Checking;
+                }
+            }
+            SessionEvent::Checked { job, check } => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    j.cost_usd += check.cost_usd;
+                    if j.let_go() {
+                        return;
+                    }
+                    if let Some(cap) = check.next_cap_usd {
+                        j.budget_usd = cap;
+                        j.message = Some(check.message.clone());
+                        (j.follow_ups, j.reruns) = (0, 0);
+                    }
+                    j.checkpoints.push(check.clone());
+                }
+            }
             SessionEvent::Ended { job, outcome, cost_usd, turns, reason } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.cost_usd += cost_usd;
                     j.turns += turns;
+                    if j.let_go() {
+                        return;
+                    }
                     j.reason.clone_from(reason);
                     j.ended_at = Some(t);
                     j.status = match outcome {
@@ -562,6 +607,56 @@ mod tests {
         let reaped = Event::Dispatch(DispatchEvent::Reaped { job: "a".into() });
         let w = World::fold(&[st(1, queued("a")), st(2, dispatched), st(3, done), st(4, reaped)]);
         assert_eq!(w.jobs["a"].status, Status::Done);
+    }
+
+    #[test]
+    fn a_checkpoint_raises_the_cap_and_a_hand_resume_during_it_stands() {
+        let dispatched = || {
+            Event::Dispatch(DispatchEvent::Dispatched {
+                job: "a".into(),
+                account: "x".into(),
+                runner_pid: 9,
+                runner_started: 1,
+            })
+        };
+        let session = |e| Event::Session(e);
+        let checking = session(SessionEvent::Checking { job: "a".into(), checkpoint: 1 });
+        let check = bus::Check {
+            checkpoint: 1,
+            verdict: bus::CheckVerdict::Continue,
+            why: "on track".into(),
+            message: "Checkpoint 1".into(),
+            next_cap_usd: Some(2.0),
+            head: None,
+            tree: None,
+            checker: Some("y".into()),
+            cost_usd: 0.5,
+        };
+        let checked = session(SessionEvent::Checked { job: "a".into(), check });
+        let retry = session(SessionEvent::Ended {
+            job: "a".into(),
+            outcome: Outcome::Retry,
+            cost_usd: 1.0,
+            turns: 1,
+            reason: None,
+        });
+        let at_check = [st(1, queued("a")), st(2, dispatched()), st(3, checking.clone())];
+        assert_eq!(World::fold(&at_check).jobs["a"].status, Status::Checking);
+        let w = World::fold(&[at_check.to_vec(), vec![st(4, checked), st(5, retry.clone())]].concat());
+        let j = &w.jobs["a"];
+        assert_eq!((j.status, j.budget_usd, j.cost_usd), (Status::Queued, 2.0, 1.5));
+        assert_eq!((j.message.as_deref(), j.checkpoints.len()), (Some("Checkpoint 1"), 1));
+
+        let by_hand = Event::Queue(QueueEvent::Resumed { job: "a".into(), message: "mine".into(), budget_usd: None });
+        let failed = session(SessionEvent::Ended {
+            job: "a".into(),
+            outcome: Outcome::Failed,
+            cost_usd: 0.0,
+            turns: 0,
+            reason: Some("waits".into()),
+        });
+        let w = World::fold(&[at_check.to_vec(), vec![st(4, by_hand), st(5, failed)]].concat());
+        assert_eq!((w.jobs["a"].status, w.jobs["a"].message.as_deref()), (Status::Queued, Some("mine")));
     }
 
     #[test]

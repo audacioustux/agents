@@ -61,7 +61,9 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 }
                 std::fs::remove_dir_all(dir).with_context(|| format!("removing {}", dir.display()))?;
             }
-            for ext in ["prompt.md", "log.ndjson", "stderr.log", "result.md", "runner.log"] {
+            for ext in
+                ["prompt.md", "log.ndjson", "stderr.log", "result.md", "runner.log", "check.ndjson", "check-stderr.log"]
+            {
                 let _ = std::fs::remove_file(ctx.job_file(&name, ext));
             }
             let _ = std::fs::remove_dir_all(ctx.job_scratch(&name));

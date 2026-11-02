@@ -128,6 +128,16 @@ pub enum SessionEvent {
         job: String,
         message: String,
     },
+    /// The run reached its cap and its progress is being checked before more is spent.
+    Checking {
+        job: String,
+        checkpoint: u32,
+    },
+    /// A checkpoint's judgement, from the progress check or the zero-progress rule.
+    Checked {
+        job: String,
+        check: Check,
+    },
     Ended {
         job: String,
         outcome: Outcome,
@@ -135,6 +145,60 @@ pub enum SessionEvent {
         turns: u32,
         reason: Option<String>,
     },
+}
+
+/// What a progress check decided at a spend cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CheckVerdict {
+    /// On track: resume with a larger cap.
+    Continue,
+    /// Useful but off course: resume with a larger cap and the check's correction.
+    Redirect,
+    /// Not worth more: wait for a human.
+    Stop,
+}
+
+impl CheckVerdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Continue => "continue",
+            Self::Redirect => "redirect",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+/// One checkpoint of a job: where its branch stood, and what was decided there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Check {
+    /// Counts from 1 over the job's whole life.
+    pub checkpoint: u32,
+    pub verdict: CheckVerdict,
+    pub why: String,
+    /// What the resumed session is told; empty on a stop.
+    #[serde(default)]
+    pub message: String,
+    /// The next run's cap, when the job goes on.
+    pub next_cap_usd: Option<f64>,
+    /// The branch's commit at this checkpoint.
+    pub head: Option<String>,
+    /// The working tree at this checkpoint, committed or not, as a git tree id.
+    pub tree: Option<String>,
+    /// The account that judged; absent when no model was asked.
+    pub checker: Option<String>,
+    #[serde(default)]
+    pub cost_usd: f64,
+}
+
+impl Check {
+    /// One line for the board: `checkpoint 2: continue → $30.00`.
+    pub fn summary(&self) -> String {
+        match self.next_cap_usd {
+            Some(cap) => format!("checkpoint {}: {} → ${cap:.2}", self.checkpoint, self.verdict.as_str()),
+            None => format!("checkpoint {}: {} — {}", self.checkpoint, self.verdict.as_str(), self.why),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,6 +305,8 @@ impl SessionEvent {
             | Self::Started { job, .. }
             | Self::Identified { job, .. }
             | Self::FollowUp { job, .. }
+            | Self::Checking { job, .. }
+            | Self::Checked { job, .. }
             | Self::Ended { job, .. } => Some(job),
             Self::Rate { .. } | Self::Limited { .. } | Self::SignedOut { .. } => None,
         }

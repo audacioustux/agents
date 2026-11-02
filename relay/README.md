@@ -208,7 +208,11 @@ own process, and owns one output port:
   event only from the job's current attempt, about that job, so a runner that
   outlived its attempt writes where nobody listens. `land clean` deletes a
   job's attempt files.
-- **State:** everything is derived by folding the bus. Nothing else is stored.
+- **State:** everything is derived by folding the bus. The fold is kept as a
+  checkpoint (`world.json`, with how far each file was read), so a command
+  reads only what is new; any doubt (a new version, a replaced file, an event
+  stamped earlier than one already folded) means a full fold. The checkpoint
+  is a cache, never the record.
 - **Wake-ups:** the files are the lossless record, and an inotify watch is
   only a doorbell. A runner's exit rings it too. Otherwise the dispatcher
   sleeps until the next moment the plan could change by itself (a limit

@@ -717,3 +717,248 @@ fn a_home_with_no_sign_in_is_never_chosen() {
     let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
     assert!(table.contains("claude:a") && table.contains("not signed in"), "{table}");
 }
+
+/// Adds `limits` under `[limits]` and appends `extra` to the project's config.
+fn configure(env: &Env, limits: &str, extra: &str) {
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    let conf = conf.replace("[limits]\n", &format!("[limits]\n{limits}"));
+    std::fs::write(env.repo.join("relay.toml"), format!("{conf}{extra}")).unwrap();
+}
+
+/// The job's decisions, oldest first.
+fn decisions(env: &Env, name: &str) -> Vec<serde_json::Value> {
+    let out = relay(env, &["view", "status", "--json"]);
+    let world: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mut ds: Vec<serde_json::Value> = world["decisions"]
+        .as_object()
+        .map(|m| m.values().filter(|d| d["job"] == name).cloned().collect())
+        .unwrap_or_default();
+    ds.sort_by_key(|d| d["requested_at"].as_u64());
+    ds
+}
+
+fn lines(path: &Path) -> usize {
+    std::fs::read_to_string(path).unwrap_or_default().lines().count()
+}
+
+fn commits(dir: &serde_json::Value) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir.as_str().unwrap())
+        .args(["log", "--format=%s"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn a_run_end_is_decided_by_the_rule_or_an_agent_that_queues_a_follow_up() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("ended", false);
+    configure(
+        &env,
+        "",
+        "[hooks]\nended = [\"rule\", \"agent:triage\"]\n[profiles.triage]\nharness = \"claude\"\nbudget = 0.5\n\
+         [profiles.cheap]\nharness = \"claude\"\nmodel = \"claude-haiku-5-5\"\nbudget = 0.5\n",
+    );
+    claude_account(&env.home, "a", 10, false);
+    let asked = || lines(&env.home.join(".claude.a/decisions"));
+
+    // A clean done: the rule accepts it, and no agent is asked.
+    ok(&relay(&env, &["queue", "add", "clean", "--text", "[status-done] Make a change."]), "queue");
+    assert_eq!(wait_for(&env, "clean")["status"], "done");
+    let d = &decisions(&env, "clean")[0];
+    assert_eq!(
+        (d["steps"][0]["handler"].as_str(), d["action"]["action"].as_str()),
+        (Some("rule"), Some("accept")),
+        "{d}"
+    );
+    assert_eq!(asked(), 0);
+
+    // No `status: done` in the report: the agent queues a follow-up after it, under its profile.
+    let answer =
+        r#"{"action": "follow-up", "brief": "[status-done] Check the change.", "profile": "cheap", "why": "check it"}"#;
+    std::fs::write(env.home.join(".claude.a/decision"), answer).unwrap();
+    ok(&relay(&env, &["queue", "add", "work", "--text", "Make a change."]), "queue");
+    let j = wait_for(&env, "work");
+    assert_eq!(j["status"], "done", "{j}");
+    assert!(j["reason"].as_str().unwrap_or_default().contains("follow-up work-next queued"), "{j}");
+    let d = &decisions(&env, "work")[0];
+    let steps: Vec<&str> = d["steps"].as_array().unwrap().iter().filter_map(|s| s["handler"].as_str()).collect();
+    assert_eq!(steps, ["rule", "agent:triage"], "{d}");
+    assert!(j["cost_usd"].as_f64().unwrap() > 0.025, "the agent's spend counts: {j}");
+    let n = wait_for(&env, "work-next");
+    assert_eq!(n["status"], "done", "{n}");
+    assert_eq!((n["profile"].as_str(), n["after"].clone()), (Some("cheap"), serde_json::json!(["work"])), "{n}");
+    assert_eq!(n["models"]["claude"], "claude-haiku-5-5");
+    assert_eq!(asked(), 1, "the follow-up's clean done needed no agent");
+}
+
+#[test]
+fn the_orchestrator_answers_a_parked_decision_and_its_silence_falls_through() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("orchestrator", false);
+    configure(&env, "", "[hooks]\nended = [\"orchestrator\", \"rule\"]\norchestrator_timeout_minutes = 1.0\n");
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "park", "--text", "Make a change."]), "queue");
+    let mut cmd = Command::new("timeout");
+    cmd.args(["60", env!("CARGO_BIN_EXE_relay"), "decide", "list", "--wait", "--timeout", "50", "--json"]);
+    let out = relay_cmd(&env, &mut cmd);
+    ok(&out, "decide list --wait");
+    let listed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let p = &listed["pending"][0];
+    assert_eq!((p["job"].as_str(), p["point"].as_str()), (Some("park"), Some("ended")), "{listed}");
+    assert!(p["request"]["allowed"].as_array().unwrap().contains(&"accept".into()), "{listed}");
+    let id = p["id"].as_str().unwrap();
+    let b = board(&env);
+    assert!(b.contains("decisions waiting") && b.contains(id), "{b}");
+    assert_eq!(job(&env, "park")["status"], "checking", "a parked run holds no seat");
+
+    // Only the point's actions, within policy, are carried out.
+    let bad = relay(&env, &["decide", "answer", id, "--action", "continue"]);
+    assert_eq!(bad.status.code(), Some(5), "{}", stderr(&bad));
+    ok(&relay(&env, &["decide", "answer", id, "--action", "stop", "--why", "not what I asked"]), "answer");
+    let j = wait_for(&env, "park");
+    assert_eq!((j["status"].as_str(), j["reason"].as_str()), (Some("failed"), Some("not what I asked")), "{j}");
+    assert_eq!(relay(&env, &["decide", "answer", id, "--action", "accept"]).status.code(), Some(4));
+
+    // Unanswered past the timeout: the next handler decides.
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    let conf = conf.replace("orchestrator_timeout_minutes = 1.0", "orchestrator_timeout_minutes = 0.05");
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+    ok(&relay(&env, &["queue", "add", "quiet", "--text", "[status-done] Make a change."]), "queue");
+    assert_eq!(wait_for(&env, "quiet")["status"], "done");
+    let d = &decisions(&env, "quiet")[0];
+    let steps: Vec<(&str, &str)> = d["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["handler"].as_str().unwrap(), s["action"]["action"].as_str().unwrap()))
+        .collect();
+    assert_eq!(steps, [("orchestrator", "defer"), ("rule", "accept")], "{d}");
+}
+
+#[test]
+fn a_command_decides_at_a_cap_and_a_bad_or_refused_answer_defers() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("command", false);
+    let script = env.root.join("decide.sh");
+    std::fs::write(&script, "#!/bin/sh\ncat >/dev/null\ncat \"$1\"\n").unwrap();
+    Command::new("chmod").arg("755").arg(&script).status().unwrap();
+    let answer = env.root.join("answer.json");
+    let chain = format!("[hooks]\ncap = [\"rule\", \"command:{} {}\"]\n", script.display(), answer.display());
+    configure(&env, "job_ceiling_usd = 1.0\n", &chain);
+    claude_account(&env.home, "a", 10, false);
+
+    std::fs::write(&answer, r#"{"action": "continue", "budget": 0.03, "why": "the script says go"}"#).unwrap();
+    ok(&relay(&env, &["queue", "add", "go", "--text", "Make a change.", "--budget", "0.015"]), "queue");
+    let j = wait_for(&env, "go");
+    assert_eq!((j["status"].as_str(), j["budget_usd"].as_f64()), (Some("done"), Some(0.03)), "{j}");
+    let c = &j["checkpoints"][0];
+    assert_eq!(c["verdict"], "continue", "{j}");
+    assert!(c["checker"].as_str().unwrap().starts_with("command:"), "{j}");
+
+    std::fs::write(&answer, "not json").unwrap();
+    ok(&relay(&env, &["queue", "add", "garbled", "--text", "Make a change.", "--budget", "0.015"]), "queue");
+    let j = wait_for(&env, "garbled");
+    assert_eq!((j["status"].as_str(), j["checkpoints"][0]["verdict"].as_str()), (Some("failed"), Some("stop")), "{j}");
+    assert!(j["checkpoints"][0]["why"].as_str().unwrap().contains("malformed"), "{j}");
+
+    std::fs::write(&answer, r#"{"action": "continue", "budget": 100}"#).unwrap();
+    ok(&relay(&env, &["queue", "add", "greedy", "--text", "Make a change.", "--budget", "0.015"]), "queue");
+    let j = wait_for(&env, "greedy");
+    assert_eq!(j["status"], "failed", "{j}");
+    assert!(j["checkpoints"][0]["why"].as_str().unwrap().contains("ceiling"), "{j}");
+    let d = &decisions(&env, "greedy")[0];
+    assert!(d["steps"][1]["refused"].as_str().unwrap().contains("ceiling"), "recorded as refused: {d}");
+}
+
+#[test]
+fn a_fork_resumes_its_parents_session_on_its_account_from_its_branch() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("fork", false);
+    claude_account(&env.home, "a", 10, false);
+    // `b` is emptier, so only the fork's preference keeps the child on `a`.
+    claude_account(&env.home, "b", 5, false);
+    ok(&relay(&env, &["queue", "add", "base", "--text", "Make a change.", "--account", "claude:a"]), "queue");
+    let parent = wait_for(&env, "base");
+    assert_eq!(parent["status"], "done", "{parent}");
+    ok(&relay(&env, &["queue", "add", "child", "--text", "Go on.", "--fork", "base", "--after", "base"]), "fork");
+    let child = wait_for(&env, "child");
+    assert_eq!((child["status"].as_str(), child["account"].as_str()), (Some("done"), Some("claude:a")), "{child}");
+    let sid = parent["session_id"].as_str().unwrap();
+    let argv = std::fs::read_to_string(env.home.join(".claude.a/argv")).unwrap();
+    assert!(argv.contains(&format!("--resume {sid} --fork-session")), "{argv}");
+    assert_ne!(child["session_id"].as_str(), Some(sid), "a session of its own: {child}");
+    assert!(result(&env, "child").contains("with 2 transcript turns"), "{}", result(&env, "child"));
+    assert_eq!(commits(&child["workdir"]).lines().count(), 3, "init, base's work, its own");
+
+    let none = relay(&env, &["queue", "add", "orphan", "--text", "x", "--fork", "nobody"]);
+    assert_eq!(none.status.code(), Some(3));
+}
+
+#[test]
+fn a_build_after_a_build_starts_from_its_branch_and_diverging_bases_fail() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("base", false);
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "one", "--text", "Make a change."]), "queue");
+    assert_eq!(wait_for(&env, "one")["status"], "done");
+    ok(&relay(&env, &["queue", "add", "two", "--text", "Another.", "--after", "one"]), "queue");
+    let two = wait_for(&env, "two");
+    assert_eq!(two["status"], "done", "{two}");
+    assert_eq!(commits(&two["workdir"]).lines().count(), 3, "it holds one's work: {}", commits(&two["workdir"]));
+
+    ok(&relay(&env, &["queue", "add", "other", "--text", "Elsewhere."]), "queue");
+    assert_eq!(wait_for(&env, "other")["status"], "done");
+    ok(&relay(&env, &["queue", "add", "three", "--text", "Both.", "--after", "one,other"]), "queue");
+    let three = wait_for(&env, "three");
+    assert_eq!(three["status"], "failed", "{three}");
+    assert!(three["reason"].as_str().unwrap().contains("diverge"), "{three}");
+}
+
+#[test]
+fn a_job_held_too_long_is_decided_and_forced_where_policy_allows() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("held", false);
+    let script = env.root.join("decide.sh");
+    std::fs::write(&script, "#!/bin/sh\ncat >/dev/null\necho '{\"action\": \"force\", \"why\": \"urgent\"}'\n")
+        .unwrap();
+    Command::new("chmod").arg("755").arg(&script).status().unwrap();
+    let hooks = format!(
+        "[hooks]\nheld = [\"rule\", \"command:{}\"]\nheld_after_minutes = 0.0\nallow_force = true\n\
+         [profiles.solo]\nharness = \"claude\"\nmax_running = 1\n",
+        script.display()
+    );
+    configure(&env, "", &hooks);
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 10, false);
+    let holds = [env.home.join(".claude.a/hold"), env.home.join(".claude.b/hold")];
+    for h in &holds {
+        std::fs::write(h, "").unwrap();
+    }
+    ok(&relay(&env, &["queue", "add", "s1", "--text", "One.", "--readonly", "--profile", "solo"]), "queue s1");
+    until(&env, "s1", "running");
+    ok(&relay(&env, &["queue", "add", "s2", "--text", "Two.", "--readonly", "--profile", "solo"]), "queue s2");
+    until(&env, "s2", "running");
+    let d = &decisions(&env, "s2")[0];
+    assert_eq!((d["point"].as_str(), d["action"]["action"].as_str()), (Some("held"), Some("force")), "{d}");
+    for h in &holds {
+        std::fs::remove_file(h).unwrap();
+    }
+    assert_eq!(wait_for(&env, "s1")["status"], "done");
+    assert_eq!(wait_for(&env, "s2")["status"], "done");
+}

@@ -2,6 +2,7 @@
 
 pub mod ask;
 pub mod checkpoint;
+pub mod decide;
 pub mod dispatch;
 pub mod land;
 pub mod probe;

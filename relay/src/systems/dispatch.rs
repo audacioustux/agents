@@ -54,9 +54,10 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     }
 }
 
-/// Why nothing more starts this pass, for the log; printed only when it changes.
+/// Why nothing more starts this pass, for the log (printed only when it
+/// changes); when that could change; and the jobs a limit holds.
 #[derive(Debug, Default, PartialEq)]
-struct Held(Vec<String>, Option<u64>);
+struct Held(Vec<String>, Option<u64>, Vec<String>);
 
 fn serve(ctx: &Ctx) -> Result<()> {
     let Some(role) = Role::try_take(&ctx.state.join("dispatch.lock"))? else { return Ok(()) };
@@ -130,12 +131,40 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
         drop(gate);
     }
     // A job blocked on a dependency that ended badly waits for the operator, not for the dispatcher.
+    let held_due = ask_held(ctx, &world, &held)?;
     let busy =
         world.jobs.values().any(|j| j.status == Status::Running || j.status == Status::Queued && !world.blocked(j));
     let waiting = world.jobs.values().any(|j| world.startable(j));
     let states: Vec<_> = found.iter().map(|a| (harness_of(a), world.accounts.get(&a.key()))).collect();
     let due = next_due(&states, waiting, now_micros());
-    Ok((busy, Held(held.0, None), [due, held.1].into_iter().flatten().min()))
+    Ok((busy, Held(held.0, None, Vec::new()), [due, held.1, held_due].into_iter().flatten().min()))
+}
+
+/// Starts the `held` chain for each job in `held` that has waited past
+/// `hooks.held_after_minutes` and was not asked about since it was queued;
+/// returns when (bus time) the next one will have waited that long.
+fn ask_held(ctx: &Ctx, world: &World, held: &Held) -> Result<Option<u64>> {
+    if ctx.cfg.hooks.held.is_none() {
+        return Ok(None);
+    }
+    let after = Duration::from_secs_f64(ctx.cfg.hooks.held_after_minutes * 60.0);
+    let after = u64::try_from(after.as_micros()).unwrap_or(u64::MAX);
+    let now = now_micros();
+    let mut next = None;
+    for j in held.2.iter().filter_map(|n| world.jobs.get(n)) {
+        if crate::systems::decide::asked_while_held(world, j) {
+            continue;
+        }
+        let at = j.queued_at.saturating_add(after);
+        if at <= now {
+            let prefix = format!("{}: ", j.name);
+            let why = held.0.iter().find_map(|l| l.strip_prefix(&prefix)).unwrap_or("a limit holds it");
+            ctx.spawn_self(&["decide", "held", &j.name, "--why", why], &ctx.job_file(&j.name, "decide.log"))?;
+        } else {
+            next = [next, Some(at)].into_iter().flatten().min();
+        }
+    }
+    Ok(next)
 }
 
 /// The next moment (bus time, after `now_us`) at which the plan could change
@@ -271,7 +300,7 @@ fn plan(
             continue;
         }
         let profile = j.profile.as_deref().and_then(|n| ctx.cfg.profiles.get(n).map(|p| (n, p)));
-        if let Some((n, p)) = profile
+        if let Some((n, p)) = profile.filter(|_| !j.forced)
             && let Some((why, until)) = profile_hold(
                 n,
                 p,
@@ -282,10 +311,12 @@ fn plan(
         {
             held.0.push(format!("{}: {why}", j.name));
             held.1 = [held.1, until].into_iter().flatten().min();
+            held.2.push(j.name.clone());
             continue;
         }
         if !j.readonly && !disk_ok {
             held.0.push(format!("{}: free disk below {} GB", j.name, limits.min_free_disk_gb));
+            held.2.push(j.name.clone());
             continue;
         }
         // Every account of every harness the job allows, judged the same way:
@@ -308,6 +339,7 @@ fn plan(
             .collect();
         let Some(a) = choose(j, &fits) else {
             held.0.push(format!("{}: no account has room ({})", j.name, why.join("; ")));
+            held.2.push(j.name.clone());
             continue;
         };
         let key = a.key();
@@ -336,12 +368,11 @@ pub fn model_for(cfg: &Config, job: &Job, harness: &str) -> Option<String> {
 /// Of the accounts that fit, the one a resumable session already ran on, so
 /// the provider's prompt cache still holds its transcript (moving it means
 /// re-reading all of it at full price); otherwise the best-scoring one.
+/// A fork that has no session of its own yet prefers the account of the session it forks.
 fn choose<'a>(job: &Job, fits: &[(&'a Home, f64)]) -> Option<&'a Home> {
-    let home = job
-        .session_id
-        .as_ref()
-        .and(job.transcript_account.as_deref())
-        .and_then(|last| fits.iter().find(|(a, _)| a.key() == last));
+    let fork = job.fork.as_ref().filter(|f| job.session_id.as_deref().is_none_or(|s| s == f.session_id));
+    let own = job.session_id.as_ref().and(job.transcript_account.as_deref());
+    let home = fork.map(|f| f.account.as_str()).or(own).and_then(|last| fits.iter().find(|(a, _)| a.key() == last));
     home.or_else(|| fits.iter().max_by(|(_, x), (_, y)| x.total_cmp(y))).map(|&(a, _)| a)
 }
 

@@ -5,8 +5,6 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use serde::Deserialize;
-
 use crate::bus::{Check, CheckVerdict};
 use crate::config::Limits;
 use crate::ctx::Ctx;
@@ -19,7 +17,7 @@ const MAX_LOG: usize = 8 * 1024;
 /// What a run at its cap leads to, before anything is judged.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Next {
-    /// No growth configured, or a read-only job: the owner decides, as without checkpoints.
+    /// No growth and no `cap` hooks configured, or a read-only job: the owner decides, as without checkpoints.
     Manual,
     /// The next cap would take the job's total past its ceiling.
     Ceiling { cap: f64, ceiling: f64 },
@@ -27,9 +25,10 @@ pub enum Next {
     Check { cap: f64 },
 }
 
-/// The next step for a job whose run hit `cap`, having spent `spent` in all.
-pub fn next(limits: &Limits, readonly: bool, cap: f64, spent: f64) -> Next {
-    if readonly || limits.budget_growth <= 1.0 {
+/// The next step for a job whose run hit `cap`, having spent `spent` in all;
+/// `hooked` when `hooks.cap` names who decides.
+pub fn next(limits: &Limits, readonly: bool, hooked: bool, cap: f64, spent: f64) -> Next {
+    if readonly || (limits.budget_growth <= 1.0 && !hooked) {
         return Next::Manual;
     }
     let cap = cap * limits.budget_growth;
@@ -110,17 +109,18 @@ pub fn evidence(dir: &Path, from: &Point, now: &Point) -> String {
     bounded(&out, MAX_LOG + MAX_DIFF + 256)
 }
 
-/// The progress check's prompt.
-pub fn prompt(brief: &str, earlier: &[Check], evidence: &str, report: &str) -> String {
+/// The progress check's prompt; `earlier` has one line per earlier checkpoint.
+pub fn prompt(brief: &str, earlier: &[String], evidence: &str, report: &str) -> String {
     let mut p = String::from(
         "You are relay's progress check. An unattended coding job reached its spend cap. Decide whether \
          spending more on it is worthwhile: is it making the right kind of progress toward its brief? \
          Change nothing.\n\nAnswer with one JSON object and nothing else:\n\
-         {\"verdict\": \"continue\" | \"redirect\" | \"stop\", \"why\": \"...\", \"message\": \"...\"}\n\
+         {\"action\": \"continue\" | \"redirect\" | \"stop\" | \"defer\", \"why\": \"...\", \"message\": \"...\"}\n\
          - continue: on track; spend more.\n\
          - redirect: worth more, but off course; `message` is the correction the worker reads next, \
          such as a step it skipped or a part of the brief it is ignoring.\n\
          - stop: not worth more without a human.\n\
+         - defer: leave the judgment to the next handler.\n\
          `why` is one short line for the job board.\n\n# The brief\n\n",
     );
     p.push_str(brief.trim_end());
@@ -128,8 +128,8 @@ pub fn prompt(brief: &str, earlier: &[Check], evidence: &str, report: &str) -> S
     if earlier.is_empty() {
         p.push_str("(none)\n");
     }
-    for c in earlier {
-        let _ = writeln!(p, "- {}: {}", c.summary(), c.why);
+    for line in earlier {
+        let _ = writeln!(p, "- {line}");
     }
     let _ = write!(p, "\n# Since the last checkpoint\n\n{}\n\n# The worker's last message\n\n", evidence.trim_end());
     p.push_str(&if report.trim().is_empty() { "(none)".to_owned() } else { bounded(report.trim(), 4096) });
@@ -137,28 +137,12 @@ pub fn prompt(brief: &str, earlier: &[Check], evidence: &str, report: &str) -> S
     p
 }
 
-/// The check's answer.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Answer {
-    pub verdict: CheckVerdict,
-    #[serde(default)]
-    pub why: String,
-    #[serde(default)]
-    pub message: String,
-}
-
-/// The JSON object in the check's final message.
-pub fn parse(answer: &str) -> Option<Answer> {
-    let (from, to) = (answer.find('{')?, answer.rfind('}')?);
-    serde_json::from_str(answer.get(from..=to)?).ok()
-}
-
 /// What the worker is told when it goes on after checkpoint `n`.
-pub fn resume_message(n: u32, cap: f64, a: &Answer) -> String {
+pub fn resume_message(n: u32, cap: f64, verdict: CheckVerdict, message: &str) -> String {
     let head = format!("Checkpoint {n}: your spend cap for this run is now ${cap:.2}.");
-    match a.verdict {
-        CheckVerdict::Redirect if !a.message.trim().is_empty() => {
-            format!("{head} A review of your progress so far says: {}", a.message.trim())
+    match verdict {
+        CheckVerdict::Redirect if !message.trim().is_empty() => {
+            format!("{head} A review of your progress so far says: {}", message.trim())
         }
         _ => format!("{head} Your progress was checked; continue where you left off."),
     }
@@ -174,15 +158,19 @@ mod tests {
 
     #[test]
     fn without_growth_the_owner_decides() {
-        assert_eq!(next(&Limits::default(), false, 10.0, 10.0), Next::Manual);
-        assert_eq!(next(&limits(2.0, None), true, 10.0, 10.0), Next::Manual, "read-only jobs have no branch");
+        assert_eq!(next(&Limits::default(), false, false, 10.0, 10.0), Next::Manual);
+        assert_eq!(next(&limits(2.0, None), true, false, 10.0, 10.0), Next::Manual, "read-only jobs have no branch");
+        assert_eq!(next(&Limits::default(), false, true, 10.0, 10.0), Next::Check { cap: 10.0 }, "hooks decide");
     }
 
     #[test]
     fn the_cap_grows_under_the_ceiling() {
-        assert_eq!(next(&limits(2.0, None), false, 10.0, 10.0), Next::Check { cap: 20.0 });
-        assert_eq!(next(&limits(2.0, Some(30.0)), false, 10.0, 10.0), Next::Check { cap: 20.0 });
-        assert_eq!(next(&limits(2.0, Some(29.0)), false, 10.0, 10.0), Next::Ceiling { cap: 20.0, ceiling: 29.0 });
+        assert_eq!(next(&limits(2.0, None), false, false, 10.0, 10.0), Next::Check { cap: 20.0 });
+        assert_eq!(next(&limits(2.0, Some(30.0)), false, false, 10.0, 10.0), Next::Check { cap: 20.0 });
+        assert_eq!(
+            next(&limits(2.0, Some(29.0)), false, false, 10.0, 10.0),
+            Next::Ceiling { cap: 20.0, ceiling: 29.0 }
+        );
     }
 
     #[test]
@@ -195,15 +183,9 @@ mod tests {
     }
 
     #[test]
-    fn the_answer_is_the_json_in_the_message() {
-        let a =
-            parse("Here it is:\n```json\n{\"verdict\": \"redirect\", \"why\": \"w\", \"message\": \"run fmt\"}\n```")
-                .unwrap();
-        assert_eq!((a.verdict, a.message.as_str()), (CheckVerdict::Redirect, "run fmt"));
-        assert!(parse("{\"verdict\": \"maybe\"}").is_none());
-        assert!(parse("no json").is_none());
-        assert!(
-            resume_message(2, 30.0, &a).contains("Checkpoint 2") && resume_message(2, 30.0, &a).ends_with("run fmt")
-        );
+    fn a_redirect_is_passed_on() {
+        let m = resume_message(2, 30.0, CheckVerdict::Redirect, "run fmt");
+        assert!(m.contains("Checkpoint 2") && m.ends_with("run fmt"), "{m}");
+        assert!(resume_message(2, 30.0, CheckVerdict::Continue, "x").ends_with("continue where you left off."));
     }
 }

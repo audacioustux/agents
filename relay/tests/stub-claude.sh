@@ -8,19 +8,25 @@
 #   checks   appended to by every progress check run there
 #   hold     sessions wait, after starting, until the file is removed
 #   fail     every session there ends in an error
-# A brief containing [idle] makes no commit.
+#   decision a decision hook's answer, one line of JSON (default defer)
+#   decisions appended to by every decision hook run there
+#   argv     appended to with every session's arguments
+# A brief containing [idle] makes no commit; one containing [status-done] reports status: done.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
 case " $* " in
 *" /usage "*) cat "$acct/usage" 2>/dev/null || true; exit 0 ;;
 *" --version "*) echo "stub 1.0"; exit 0 ;;
 esac
+echo "$*" >>"$acct/argv"
 sid=""
 resume=""
+fork=""
 while [ $# -gt 0 ]; do
   case "$1" in
   --session-id) sid=$2; shift ;;
   --resume) sid=$2; resume=1; shift ;;
+  --fork-session) fork=1 ;;
   esac
   shift
 done
@@ -31,6 +37,11 @@ transcript="$acct/projects/$key/$sid.jsonl"
 if [ -n "$resume" ] && [ ! -f "$transcript" ]; then
   echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"No conversation found"}'
   exit 1
+fi
+if [ -n "$fork" ]; then
+  sid="$sid-fork$$"
+  cp "$transcript" "$acct/projects/$key/$sid.jsonl"
+  transcript="$acct/projects/$key/$sid.jsonl"
 fi
 mkdir -p "$(dirname "$transcript")"
 echo '{"turn":1}' >>"$transcript"
@@ -54,7 +65,16 @@ case "$prompt" in
   printf '{"type":"result","subtype":"success","is_error":false,"result":"{\\"verdict\\": \\"%s\\", \\"why\\": \\"stub judged\\", \\"message\\": \\"run the formatter\\"}","num_turns":1,"total_cost_usd":0.01}\n' "$verdict"
   exit 0
   ;;
+*"relay's decision hook"*)
+  echo decide >>"$acct/decisions"
+  answer=$(cat "$acct/decision" 2>/dev/null || echo '{"action": "defer"}')
+  esc=$(printf '%s' "$answer" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  printf '{"type":"result","subtype":"success","is_error":false,"result":"%s","num_turns":1,"total_cost_usd":0.01}\n' "$esc"
+  exit 0
+  ;;
 esac
+final="FINAL ok"
+case "$prompt" in *"[status-done]"*) final="FINAL\\nstatus: done" ;; esac
 case "$prompt" in *"[idle]"*) ;; *)
 if [ -w . ] && [ -e .git ]; then
   echo "work $sid $turns" >relay-output.txt
@@ -63,4 +83,4 @@ if [ -w . ] && [ -e .git ]; then
 fi ;;
 esac
 # printf, not echo: dash's echo turns \n into a real newline and splits the JSON line.
-printf '{"type":"result","subtype":"success","is_error":false,"result":"ran on %s with %s transcript turns\\nFINAL ok","num_turns":1,"total_cost_usd":%s}\n' "$(basename "$acct")" "$turns" "$cost"
+printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"ran on %s with %s transcript turns\\n%s","num_turns":1,"total_cost_usd":%s}\n' "$sid" "$(basename "$acct")" "$turns" "$final" "$cost"

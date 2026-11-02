@@ -65,6 +65,9 @@ enum System {
     /// Bring branches back; clean up.
     #[command(subcommand)]
     Land(systems::land::Cmd),
+    /// Decisions at relay's hook points: list those waiting for the orchestrator, answer one.
+    #[command(subcommand)]
+    Decide(systems::decide::Cmd),
     /// The job profiles: what `queue add --profile` fills in, each with its note.
     Profiles,
     /// The merged policy and project config, and where each part came from.
@@ -99,6 +102,7 @@ fn run(config: Option<&std::path::Path>, json: bool, system: System) -> anyhow::
         System::Quota(c) => systems::quota::run(&ctx, c),
         System::View(c) => systems::view::run(&ctx, c),
         System::Land(c) => systems::land::run(&ctx, c),
+        System::Decide(c) => systems::decide::run(&ctx, c),
         System::Profiles => systems::profiles::list(&ctx),
         System::Config(c) => systems::profiles::run(&ctx, c),
         System::Probe { account } => systems::probe::run(&ctx, account.as_deref()),

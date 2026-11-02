@@ -1,5 +1,5 @@
 //! queue: takes work in and lets it be withdrawn.
-//! Emits: queued, released, resumed, dequeued, stop-requested.
+//! Emits: queued, released, resumed, rerouted, forced, dequeued, stop-requested.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
-use crate::bus::QueueEvent;
+use crate::bus::{Fork, QueueEvent};
 use crate::config::{Profile, valid_name};
 use crate::ctx::Ctx;
 use crate::os;
@@ -94,6 +94,10 @@ pub struct Add {
     /// Start only once these jobs are done (repeat, or comma-separate). Archived jobs count; landing is a later step.
     #[arg(long = "after", value_delimiter = ',')]
     after: Vec<String>,
+    /// Start as a fork of this job's session (`--resume ID --fork-session`), on a harness that can
+    /// fork; a build job also starts from its branch. Never fork a builder for its review.
+    #[arg(long)]
+    fork: Option<String>,
 }
 
 fn usd(s: &str) -> Result<f64, String> {
@@ -184,7 +188,14 @@ impl Add {
             fail!(Usage, "the brief is empty");
         }
         let after = dependencies(&name, self.after, jobs)?;
-        let harnesses = allowed_harnesses(ctx, fill.harnesses.clone(), self.account.as_deref())?;
+        let fork = self.fork.as_deref().map(|f| fork_of(f, jobs)).transpose()?;
+        let mut harnesses = allowed_harnesses(ctx, fill.harnesses.clone(), self.account.as_deref())?;
+        if let Some((_, h)) = &fork {
+            if !harnesses.is_empty() && !harnesses.contains(h) {
+                fail!(Usage, "--fork: the session to fork is on {h}, which this job may not use");
+            }
+            harnesses = vec![h.clone()];
+        }
         let models = parse_models(ctx, &harnesses, &fill.models(&harnesses))?;
         if let Some((m, reason)) = models.values().find_map(|m| ctx.cfg.session.banned(m).map(|r| (m, r))) {
             fail!(Refused, "model {m} is banned: {reason}");
@@ -212,8 +223,86 @@ impl Add {
             reuse_key,
             after,
             profile: self.profile,
+            fork: fork.map(|(f, _)| Box::new(f)),
         })
     }
+}
+
+/// The session `name` has to fork, and its harness, which must be able to fork.
+fn fork_of(name: &str, jobs: &BTreeMap<String, Job>) -> Result<(Fork, String)> {
+    let Some(j) = jobs.get(name) else { fail!(NotFound, "--fork {name}: no job named {name}") };
+    let (Some(session_id), Some(account)) = (&j.session_id, &j.transcript_account) else {
+        fail!(Conflict, "--fork {name}: {name} has no session yet");
+    };
+    let harness = account.split(':').next().unwrap_or_default().to_owned();
+    if !crate::harness::by_id(&harness).is_ok_and(|h| h.caps().fork) {
+        fail!(Refused, "--fork {name}: {harness} cannot fork a session");
+    }
+    Ok((Fork { job: name.to_owned(), session_id: session_id.clone(), account: account.clone() }, harness))
+}
+
+/// A job a decision queues after another.
+#[derive(Debug, Clone)]
+pub struct FollowUp {
+    /// Default: `<parent>-next`, numbered when taken.
+    pub name: Option<String>,
+    pub brief: String,
+    pub profile: Option<String>,
+    /// Wait for the parent to be done.
+    pub after: bool,
+    /// Start as a fork of the parent's session.
+    pub fork: bool,
+}
+
+/// Queues `f` as `queue add` would, and returns its name.
+pub fn follow_up(ctx: &Ctx, parent: &Job, f: FollowUp) -> Result<String> {
+    let _lock = ctx.jobs_lock()?;
+    let world = ctx.world()?;
+    let base = f.name.unwrap_or_else(|| format!("{}-next", parent.name));
+    let name = (1..1000)
+        .map(|i| if i == 1 { base.clone() } else { format!("{base}-{i}") })
+        .find(|n| !world.jobs.contains_key(n))
+        .unwrap_or(base);
+    let add = Add {
+        name: name.clone(),
+        prompt: None,
+        text: Some(f.brief),
+        task: None,
+        profile: f.profile,
+        readonly: false,
+        no_readonly: false,
+        harnesses: Vec::new(),
+        account: None,
+        models: Vec::new(),
+        effort: None,
+        budget: None,
+        again: true,
+        after: if f.after { vec![parent.name.clone()] } else { Vec::new() },
+        fork: f.fork.then(|| parent.name.clone()),
+    };
+    let event = add.queued(ctx, &world.jobs)?;
+    ctx.port(&Source(())).emit(event)?;
+    ctx.wake_dispatch()?;
+    Ok(name)
+}
+
+/// Sends a queued job to another harness, model or profile, as a `held` decision said.
+pub fn reroute(ctx: &Ctx, job: &Job, harness: Option<&str>, model: Option<&str>, profile: Option<&str>) -> Result<()> {
+    let p = profile.map(|p| ctx.cfg.profile(p)).transpose()?;
+    let harness = harness.map(str::to_owned).or_else(|| p.and_then(|p| p.harness.clone()));
+    let harnesses = harness.map_or_else(|| job.harnesses.clone(), |h| vec![h]);
+    let mut models: BTreeMap<String, String> =
+        job.models.clone().into_iter().filter(|(h, _)| harnesses.is_empty() || harnesses.contains(h)).collect();
+    if let Some(m) = model.map(str::to_owned).or_else(|| p.and_then(|p| p.model.clone())) {
+        models.extend(parse_models(ctx, &harnesses, &[m])?);
+    }
+    let profile = profile.map(str::to_owned).or_else(|| job.profile.clone());
+    ctx.port(&Source(())).emit(QueueEvent::Rerouted { job: job.name.clone(), harnesses, models, profile })
+}
+
+/// Lets a queued job past its profile's limits, as a `held` decision said.
+pub fn force(ctx: &Ctx, job: &str) -> Result<()> {
+    ctx.port(&Source(())).emit(QueueEvent::Forced { job: job.to_owned() })
 }
 
 /// The command line's settings with a profile's under them: each field the line sets
@@ -432,6 +521,7 @@ mod tests {
                     reuse_key: key.map(Into::into),
                     after: Vec::new(),
                     profile: None,
+                    fork: None,
                 }),
             });
             if let Some(outcome) = outcome {

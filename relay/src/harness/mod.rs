@@ -249,6 +249,11 @@ pub trait Harness: Sync + fmt::Debug {
     /// Makes `session`, last written on `from`, resumable on `to`. Returns
     /// whether it can be resumed there; if not, the caller starts afresh.
     fn carry(&self, session: &str, from: Option<&Home>, to: &Home, scratch: &Path) -> bool;
+    /// Makes `session`, last written on `from`, forkable on `to` by a session
+    /// working in `cwd`. Returns whether it can be forked there.
+    fn carry_fork(&self, _session: &str, _from: Option<&Home>, _to: &Home, _cwd: &Path) -> bool {
+        false
+    }
 }
 
 /// Every harness this crate knows, in a fixed order.

@@ -54,6 +54,21 @@ pub enum QueueEvent {
         /// The profile the job was queued under; it stays with the job across resumes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
+        /// The session the job starts as a fork of.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fork: Option<Box<Fork>>,
+    },
+    /// A held job sent elsewhere by a decision: where it may run from now on.
+    Rerouted {
+        job: String,
+        harnesses: Vec<String>,
+        models: BTreeMap<String, String>,
+        #[serde(default)]
+        profile: Option<String>,
+    },
+    /// A held job let past its profile's limits by a decision.
+    Forced {
+        job: String,
     },
     /// The job no longer waits for these jobs (empty: for any of them).
     Released {
@@ -75,6 +90,15 @@ pub enum QueueEvent {
     StopRequested {
         job: String,
     },
+}
+
+/// Where a forked job's session comes from: another job's, as it stood when the fork was queued.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fork {
+    pub job: String,
+    pub session_id: String,
+    /// The account (`harness:label`) that last wrote that session.
+    pub account: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -142,6 +166,18 @@ pub enum SessionEvent {
     FollowUp {
         job: String,
         message: String,
+        /// The next run's cap, when a decision set one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget_usd: Option<f64>,
+    },
+    /// A decision sent the job back to the queue under another profile, to start afresh.
+    Requeued {
+        job: String,
+        profile: String,
+        harnesses: Vec<String>,
+        models: BTreeMap<String, String>,
+        effort: Option<String>,
+        budget_usd: f64,
     },
     /// The run reached its cap and its progress is being checked before more is spent.
     Checking {
@@ -204,6 +240,9 @@ pub struct Check {
     pub checker: Option<String>,
     #[serde(default)]
     pub cost_usd: f64,
+    /// The decision this checkpoint carried out, whose `decided` events count its cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
 }
 
 impl Check {
@@ -246,6 +285,138 @@ pub enum QuotaEvent {
     },
 }
 
+/// A moment at which relay asks its hooks what to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Point {
+    /// A run reached its spend cap.
+    Cap,
+    /// A run ended done or failed.
+    Ended,
+    /// A queued job has been held by a limit for a while.
+    Held,
+}
+
+impl Point {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cap => "cap",
+            Self::Ended => "ended",
+            Self::Held => "held",
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// What a handler may answer: one of a closed set, which relay validates before acting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "kebab-case")]
+pub enum Action {
+    /// `cap`: go on in the same session; `budget` is the next run's cap.
+    Continue {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget: Option<f64>,
+    },
+    /// `cap`: go on, and tell the worker `message` first.
+    Redirect {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget: Option<f64>,
+    },
+    /// `cap`, `ended`: leave the job failed, for a human.
+    Stop {
+        #[serde(default)]
+        why: String,
+    },
+    /// `ended`: the run ends as relay concluded.
+    Accept,
+    /// `ended`: one more run in the same session, told `message`.
+    Resume {
+        #[serde(default)]
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget: Option<f64>,
+    },
+    /// `ended`: start the job afresh under another profile.
+    Requeue { profile: String },
+    /// `ended`: queue a new job with `brief`, by default after this one, optionally as a fork of its session.
+    FollowUp {
+        brief: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+        #[serde(default = "yes")]
+        after: bool,
+        #[serde(default)]
+        fork: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// `held`: keep waiting.
+    Wait,
+    /// `held`: let the job run elsewhere.
+    Reroute {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        harness: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+    },
+    /// `held`: start it past its profile's limits, where policy allows.
+    Force,
+    /// No decision: the next handler decides.
+    Defer,
+}
+
+impl Action {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Continue { .. } => "continue",
+            Self::Redirect { .. } => "redirect",
+            Self::Stop { .. } => "stop",
+            Self::Accept => "accept",
+            Self::Resume { .. } => "resume",
+            Self::Requeue { .. } => "requeue",
+            Self::FollowUp { .. } => "follow-up",
+            Self::Wait => "wait",
+            Self::Reroute { .. } => "reroute",
+            Self::Force => "force",
+            Self::Defer => "defer",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum DecideEvent {
+    /// A decision point was reached for the job's attempt `attempt`; its handlers are asked in order.
+    DecisionRequested {
+        id: String,
+        job: String,
+        point: Point,
+        /// The job's incarnation (`created_at`).
+        created: u64,
+        attempt: u32,
+    },
+    /// The chain reached `orchestrator`: the request waits for `relay decide answer` until `until` (bus time).
+    Parked { id: String, until: u64 },
+    /// One handler's answer. A `defer`, or an action refused by policy (`refused`), passes to the next.
+    Decided {
+        id: String,
+        handler: String,
+        action: Action,
+        #[serde(default)]
+        why: String,
+        #[serde(default)]
+        cost_usd: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refused: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum LandEvent {
@@ -259,6 +430,7 @@ pub enum Event {
     Session(SessionEvent),
     Quota(QuotaEvent),
     Land(LandEvent),
+    Decide(DecideEvent),
 }
 
 /// Ties an event enum to the system that owns it and its file.
@@ -290,6 +462,7 @@ owned!(DispatchEvent, "dispatch", Dispatch, crate::systems::dispatch::Source);
 owned!(SessionEvent, "session", Session, crate::systems::session::Source);
 owned!(QuotaEvent, "quota", Quota, crate::systems::quota::Source);
 owned!(LandEvent, "land", Land, crate::systems::land::Source);
+owned!(DecideEvent, "decide", Decide, crate::systems::decide::Source);
 
 /// The one file a whole-system port writes.
 pub fn system_file(system: &str) -> PathBuf {
@@ -330,6 +503,7 @@ impl SessionEvent {
             | Self::Started { job, .. }
             | Self::Identified { job, .. }
             | Self::FollowUp { job, .. }
+            | Self::Requeued { job, .. }
             | Self::Checking { job, .. }
             | Self::Checked { job, .. }
             | Self::Ended { job, .. } => Some(job),
@@ -371,6 +545,7 @@ impl Stamped {
             Event::Session(e) => line(self.t, e),
             Event::Quota(e) => line(self.t, e),
             Event::Land(e) => line(self.t, e),
+            Event::Decide(e) => line(self.t, e),
         }
     }
 }
@@ -463,11 +638,12 @@ pub fn read_all(bus: &Path) -> Result<Vec<Stamped>> {
 /// before, when only a full read from empty offsets makes sense.
 pub fn read_since(bus: &Path, offsets: &Offsets) -> Result<Option<(Vec<Stamped>, Offsets)>> {
     type Read = fn(&Path, Option<&Origin>, Mark, &mut Vec<Stamped>) -> Result<Option<Mark>>;
-    let systems: [(&str, Read); 5] = [
+    let systems: [(&str, Read); 6] = [
         ("queue", read_file::<QueueEvent>),
         ("dispatch", read_file::<DispatchEvent>),
         ("quota", read_file::<QuotaEvent>),
         ("land", read_file::<LandEvent>),
+        ("decide", read_file::<DecideEvent>),
         // Before sessions had a file per attempt, they shared one; read it as is.
         ("session", read_file::<SessionEvent>),
     ];

@@ -10,7 +10,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::bus::{
-    self, DispatchEvent, Event, LandEvent, Meters, Offsets, Outcome, QueueEvent, QuotaEvent, SessionEvent, Stamped,
+    self, Action, DecideEvent, DispatchEvent, Event, Fork, LandEvent, Meters, Offsets, Outcome, Point, QueueEvent,
+    QuotaEvent, SessionEvent, Stamped,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +97,15 @@ pub struct Job {
     /// Every checkpoint at a spend cap, oldest first.
     #[serde(default)]
     pub checkpoints: Vec<bus::Check>,
+    /// The session it starts as a fork of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<Fork>,
+    /// When it last went into the queue (bus time): queued, resumed, or back from a run.
+    #[serde(default)]
+    pub queued_at: u64,
+    /// A decision let it past its profile's limits.
+    #[serde(default)]
+    pub forced: bool,
 }
 
 impl Job {
@@ -155,6 +165,45 @@ pub struct World {
     /// of the latest start. Kept apart from the jobs, which can be cleaned away.
     #[serde(default)]
     pub profile_starts: BTreeMap<String, Vec<u64>>,
+    /// Decisions by id, while their job is kept.
+    #[serde(default)]
+    pub decisions: BTreeMap<String, Decision>,
+}
+
+/// One decision point reached, and what its handlers answered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Decision {
+    pub id: String,
+    pub job: String,
+    pub point: Point,
+    pub created: u64,
+    pub attempt: u32,
+    pub requested_at: u64,
+    /// Set while it waits for `relay decide answer`: until when (bus time).
+    pub parked_until: Option<u64>,
+    /// The orchestrator's answer, the first one recorded.
+    pub answer: Option<Action>,
+    /// Each handler's answer, in order.
+    pub steps: Vec<Step>,
+    /// The action carried out, once a handler gave one that passed.
+    pub action: Option<Action>,
+}
+
+/// One handler's answer to a decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Step {
+    pub handler: String,
+    pub action: Action,
+    pub why: String,
+    pub cost_usd: f64,
+    pub refused: Option<String>,
+}
+
+impl Decision {
+    /// Waiting for the orchestrator.
+    pub fn pending(&self) -> bool {
+        self.parked_until.is_some() && self.answer.is_none() && self.action.is_none()
+    }
 }
 
 /// The window a profile's `max_per_day` counts over.
@@ -162,7 +211,7 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 
 /// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
 /// holds, how a mark is kept), so checkpoints folded the old way are discarded.
-const FOLD_VERSION: u32 = 7;
+const FOLD_VERSION: u32 = 8;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -361,7 +410,9 @@ impl World {
             Event::Session(e) if self.current(s, e) => self.apply_session(s.t, e),
             Event::Session(_) => {}
             Event::Quota(e) => self.apply_quota(s.t, e),
+            Event::Decide(e) => self.apply_decide(s.t, e),
             Event::Land(LandEvent::Forgotten { job }) => {
+                self.decisions.retain(|_, d| d.job != *job);
                 // A job cleaned away after it finished has been waited for.
                 if self.jobs.remove(job).is_some_and(|j| j.status == Status::Done) {
                     self.jobs.values_mut().for_each(|j| j.after.retain(|a| a != job));
@@ -384,6 +435,7 @@ impl World {
                 reuse_key,
                 after,
                 profile,
+                fork,
             } => {
                 let j = Job {
                     name: job.clone(),
@@ -397,7 +449,9 @@ impl World {
                     reuse_key: reuse_key.clone(),
                     after: after.clone(),
                     profile: profile.clone(),
+                    fork: fork.as_deref().cloned(),
                     created_at: t,
+                    queued_at: t,
                     ..Job::default()
                 };
                 self.jobs.insert(job.clone(), j);
@@ -414,6 +468,7 @@ impl World {
                         j.runner = None;
                     }
                     j.status = Status::Queued;
+                    j.queued_at = t;
                     j.message = Some(message.clone());
                     j.reason = None;
                     j.stop_requested = false;
@@ -421,6 +476,19 @@ impl World {
                     j.reruns = 0;
                     j.budget_usd = budget_usd.unwrap_or(j.budget_usd);
                     j.models.extend(models.clone());
+                }
+            }
+            QueueEvent::Rerouted { job, harnesses, models, profile } => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    j.harnesses.clone_from(harnesses);
+                    j.models.clone_from(models);
+                    j.profile.clone_from(profile);
+                    j.queued_at = t;
+                }
+            }
+            QueueEvent::Forced { job } => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    j.forced = true;
                 }
             }
             QueueEvent::Dequeued { job } => {
@@ -451,6 +519,7 @@ impl World {
                     j.started_at = Some(t);
                     j.attempts += 1;
                     j.reason = None;
+                    j.forced = false;
                 }
             }
             DispatchEvent::Reaped { job } => {
@@ -531,10 +600,22 @@ impl World {
                 let a = self.account(account);
                 (a.signed_out, a.signed_at) = (true, Some(t));
             }
-            SessionEvent::FollowUp { job, message } => {
+            SessionEvent::FollowUp { job, message, budget_usd } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.message = Some(message.clone());
                     j.follow_ups += 1;
+                    j.budget_usd = budget_usd.unwrap_or(j.budget_usd);
+                }
+            }
+            SessionEvent::Requeued { job, profile, harnesses, models, effort, budget_usd } => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    j.profile = Some(profile.clone());
+                    j.harnesses.clone_from(harnesses);
+                    j.models.clone_from(models);
+                    j.effort.clone_from(effort);
+                    j.budget_usd = *budget_usd;
+                    (j.session_id, j.transcript_account, j.message, j.fork) = (None, None, None, None);
+                    (j.follow_ups, j.reruns) = (0, 0);
                 }
             }
             SessionEvent::Checking { job, .. } => {
@@ -544,7 +625,10 @@ impl World {
             }
             SessionEvent::Checked { job, check } => {
                 if let Some(j) = self.jobs.get_mut(job) {
-                    j.cost_usd += check.cost_usd;
+                    // A decision's cost is counted from its `decided` events.
+                    if check.decision.is_none() {
+                        j.cost_usd += check.cost_usd;
+                    }
                     if j.let_go() {
                         return;
                     }
@@ -571,10 +655,69 @@ impl World {
                         Outcome::Stopped => Status::Stopped,
                         Outcome::Retry | Outcome::Rerun => Status::Queued,
                     };
+                    if j.status == Status::Queued {
+                        j.queued_at = t;
+                    }
                     if *outcome == Outcome::Rerun {
                         j.reruns += 1;
                     }
                 }
+            }
+        }
+    }
+
+    fn apply_decide(&mut self, t: u64, e: &DecideEvent) {
+        match e {
+            DecideEvent::DecisionRequested { id, job, point, created, attempt } => {
+                // A runner waiting on its decision holds no seat on its account.
+                if let Some(j) = self.jobs.get_mut(job).filter(|j| j.created_at == *created && j.attempts == *attempt)
+                    && j.status == Status::Running
+                    && *point != Point::Held
+                {
+                    j.status = Status::Checking;
+                }
+                self.decisions.insert(
+                    id.clone(),
+                    Decision {
+                        id: id.clone(),
+                        job: job.clone(),
+                        point: *point,
+                        created: *created,
+                        attempt: *attempt,
+                        requested_at: t,
+                        parked_until: None,
+                        answer: None,
+                        steps: Vec::new(),
+                        action: None,
+                    },
+                );
+            }
+            DecideEvent::Parked { id, until } => {
+                if let Some(d) = self.decisions.get_mut(id).filter(|d| d.action.is_none()) {
+                    d.parked_until = Some(*until);
+                }
+            }
+            DecideEvent::Decided { id, handler, action, why, cost_usd, refused } => {
+                let Some(d) = self.decisions.get_mut(id) else { return };
+                if let Some(j) = self.jobs.get_mut(&d.job).filter(|j| j.created_at == d.created) {
+                    j.cost_usd += cost_usd;
+                }
+                if handler == "orchestrator" {
+                    d.parked_until = None;
+                    if d.answer.is_none() {
+                        d.answer = Some(action.clone());
+                    }
+                }
+                if d.action.is_none() && refused.is_none() && *action != Action::Defer {
+                    d.action = Some(action.clone());
+                }
+                d.steps.push(Step {
+                    handler: handler.clone(),
+                    action: action.clone(),
+                    why: why.clone(),
+                    cost_usd: *cost_usd,
+                    refused: refused.clone(),
+                });
             }
         }
     }
@@ -601,6 +744,7 @@ mod tests {
             reuse_key: None,
             after: Vec::new(),
             profile: None,
+            fork: None,
         })
     }
 
@@ -633,6 +777,7 @@ mod tests {
             reuse_key,
             after: after.iter().map(|a| (*a).to_owned()).collect(),
             profile,
+            fork: None,
         })
     }
 
@@ -925,6 +1070,7 @@ mod tests {
             tree: None,
             checker: Some("y".into()),
             cost_usd: 0.5,
+            decision: None,
         };
         let checked = session(SessionEvent::Checked { job: "a".into(), check });
         let retry = session(SessionEvent::Ended {

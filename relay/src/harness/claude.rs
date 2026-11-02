@@ -222,6 +222,10 @@ impl Harness for Claude {
     fn carry(&self, session: &str, from: Option<&Home>, to: &Home, _scratch: &Path) -> bool {
         carry_transcript(session, from.map(|h| h.dir.as_path()), &to.dir).unwrap_or(false)
     }
+
+    fn carry_fork(&self, session: &str, from: Option<&Home>, to: &Home, cwd: &Path) -> bool {
+        from.is_some_and(|f| fork_transcript(session, &f.dir, &to.dir, cwd).unwrap_or(false))
+    }
 }
 
 pub(crate) fn strip_ansi(text: &str) -> std::borrow::Cow<'_, str> {
@@ -247,6 +251,29 @@ fn carry_transcript(session: &str, from: Option<&Path>, to: &Path) -> std::io::R
     let sidecar = key_dir.join(session);
     if sidecar.is_dir() {
         copy_dir(&sidecar, &dest.join(session))?;
+    }
+    Ok(true)
+}
+
+/// The transcript, copied to where a session working in `cwd` finds it on
+/// `to` (claude keys a project by its path, every other character a dash).
+fn fork_transcript(session: &str, from: &Path, to: &Path, cwd: &Path) -> std::io::Result<bool> {
+    let Some(src) = std::fs::read_dir(from.join("projects"))?
+        .flatten()
+        .map(|e| e.path())
+        .find(|d| d.join(format!("{session}.jsonl")).is_file())
+    else {
+        return Ok(false);
+    };
+    let key: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let dest = to.join("projects").join(key);
+    if dest == src {
+        return Ok(true);
+    }
+    std::fs::create_dir_all(&dest)?;
+    std::fs::copy(src.join(format!("{session}.jsonl")), dest.join(format!("{session}.jsonl")))?;
+    if src.join(session).is_dir() {
+        copy_dir(&src.join(session), &dest.join(session))?;
     }
     Ok(true)
 }

@@ -1,6 +1,6 @@
 //! session: runs one dispatched job on its account's harness and reports
 //! what happened. Emits: cloned, started, identified, rate, limited,
-//! signed-out, follow-up, checking, checked, ended. One process per running job, started by
+//! signed-out, follow-up, requeued, checking, checked, ended. One process per running job, started by
 //! dispatch. Nothing here names a harness: the account's harness builds the
 //! command and reads the output, and the limits are enforced here for all.
 
@@ -15,13 +15,14 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 
 use crate::accounts::{self, harness_of};
-use crate::bus::{Check, CheckVerdict, Outcome, SessionEvent, now_micros, secs};
+use crate::bus::{Action, Check, CheckVerdict, Outcome, Point, SessionEvent, now_micros, secs};
 use crate::ctx::Ctx;
 use crate::harness::report::{Ending, Report, Verdict, verdict};
 use crate::harness::{Home, Invocation, Permissions, Reader, Session, Task};
 use crate::sandbox::{self, Mounts};
 use crate::systems::checkpoint::{self, Next};
-use crate::world::{Job, Status};
+use crate::systems::decide::{self, Request};
+use crate::world::{Job, Status, World};
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
@@ -126,7 +127,11 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
 
     let mut workdir = job.workdir.clone();
     if !job.readonly && workdir.is_none() {
-        let (dir, branch) = clone(ctx, &job.name)?;
+        let bases = bases(&ctx.world()?, job);
+        let (dir, branch) = match clone(ctx, &job.name, &bases) {
+            Ok(made) => made,
+            Err(e) => return Ok((Outcome::Failed, Some(format!("{e:#}")))),
+        };
         port.emit(SessionEvent::Cloned { job: job.name.clone(), workdir: dir.clone(), branch })?;
         workdir = Some(dir);
     }
@@ -134,9 +139,19 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     let scratch = ctx.job_scratch(&job.name);
     std::fs::create_dir_all(&scratch)?;
 
-    let resumed = resumable(job, &found, home, &scratch);
-    let session_id = resumed.clone().unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    // A fork that never named a session of its own forks again.
+    let fork = job.fork.as_ref().filter(|f| job.session_id.as_deref().is_none_or(|s| s == f.session_id));
+    if let Some(f) = fork {
+        let from = found.iter().find(|h| h.key() == f.account);
+        if !(from.is_some_and(|h| h.harness == home.harness) && harness.carry_fork(&f.session_id, from, home, &cwd)) {
+            return Ok((Outcome::Failed, Some(format!("{}'s session {} cannot be forked here", f.job, f.session_id))));
+        }
+    }
+    let resumed = if fork.is_some() { None } else { resumable(job, &found, home, &scratch) };
+    let session_id =
+        fork.map(|f| f.session_id.clone()).or(resumed.clone()).unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
     let brief = std::fs::read_to_string(ctx.job_file(&job.name, "prompt.md")).context("the job's brief is gone")?;
+    // A fork has its parent's context but not its own task: it is told its brief.
     let prompt = opening(brief.clone(), job.message.as_deref(), resumed.is_some());
     // What a read-only job reads is the live repository, so its commit is taken now, not when queued.
     let commit = if job.readonly { Ctx::clean_head(&ctx.cfg.repo) } else { None };
@@ -157,7 +172,11 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         prompt: &prompt,
         model: model.as_deref(),
         effort: job.effort.as_deref().or(conf.effort.as_deref()),
-        session: if resumed.is_some() { Session::Resume(&session_id) } else { Session::New(&session_id) },
+        session: match (fork, &resumed) {
+            (Some(f), _) => Session::Fork(&f.session_id),
+            (None, Some(_)) => Session::Resume(&session_id),
+            (None, None) => Session::New(&session_id),
+        },
         permissions: permissions(ctx.cfg.sandbox.enabled, job.readonly),
         briefing: Some(&briefing),
         budget_usd: Some(job.budget_usd),
@@ -187,17 +206,46 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
     }
     *spend = (report.cost_usd, report.turns);
+    let run = Ran { report: &report, dir: workdir.as_deref(), scratch: &scratch, brief: &brief };
     match verdict(&report, ending, &s.final_marker, job.readonly, now_s()) {
-        Verdict::Budget => at_cap(ctx, job, &report, workdir.as_deref(), &scratch, &brief),
-        v => conclude(ctx, job, &key, v, now_s()),
+        Verdict::Budget => at_cap(ctx, job, &run),
+        v => {
+            let silent = ending.silent;
+            let ended = conclude(ctx, job, &key, v, now_s())?;
+            at_end(ctx, job, &run, ended, silent)
+        }
     }
 }
 
-/// A run at its cap: the owner decides, or its progress is checked and it
+/// What a finished run left, for the decision that follows it.
+struct Ran<'a> {
+    report: &'a Report,
+    dir: Option<&'a Path>,
+    scratch: &'a Path,
+    brief: &'a str,
+}
+
+/// The request at `point`, with the brief, the earlier decisions and what was spent.
+fn request(ctx: &Ctx, job: &Job, run: &Ran<'_>, point: Point) -> Result<(Request, World)> {
+    let world = ctx.world()?;
+    let mut req = Request::new(job, point);
+    run.brief.clone_into(&mut req.brief);
+    req.report.clone_from(&run.report.answer);
+    req.spent_usd = job.cost_usd + run.report.cost_usd;
+    req.cap_usd = job.budget_usd;
+    req.next_cap_usd = job.budget_usd;
+    req.ceiling_usd = ctx.cfg.limits.job_ceiling_usd;
+    req.earlier = decide::earlier(&world, job);
+    Ok((req, world))
+}
+
+/// A run at its cap: the owner decides, or the `cap` chain does, and the job
 /// goes on with a larger cap. No change since the last checkpoint is a stop
-/// that asks no model.
-fn at_cap(ctx: &Ctx, job: &Job, report: &Report, dir: Option<&Path>, scratch: &Path, brief: &str) -> Result<Ended> {
-    let cap = match checkpoint::next(&ctx.cfg.limits, job.readonly, job.budget_usd, job.cost_usd + report.cost_usd) {
+/// that asks no model, by the `rule` handler.
+fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
+    let hooked = ctx.cfg.hooks.cap.is_some();
+    let spent = job.cost_usd + run.report.cost_usd;
+    let cap = match checkpoint::next(&ctx.cfg.limits, job.readonly, hooked, job.budget_usd, spent) {
         Next::Manual => {
             return Ok((Outcome::Failed, Some("reached its spend cap; resume with --budget to go on".into())));
         }
@@ -212,54 +260,152 @@ fn at_cap(ctx: &Ctx, job: &Job, report: &Report, dir: Option<&Path>, scratch: &P
         }
         Next::Check { cap } => cap,
     };
-    let dir = dir.context("a build job without its clone")?;
+    let dir = run.dir.context("a build job without its clone")?;
     let port = port(ctx, job);
     let n = u32::try_from(job.checkpoints.len()).unwrap_or(u32::MAX).saturating_add(1);
     let from = checkpoint::base(dir, &job.checkpoints);
-    let now = checkpoint::point(dir, &scratch.join("checkpoint.index"));
-    let mut check = Check {
+    let now = checkpoint::point(dir, &run.scratch.join("checkpoint.index"));
+    let progressed = checkpoint::progressed(&from, &now);
+    let (mut req, _) = request(ctx, job, run, Point::Cap)?;
+    req.next_cap_usd = cap;
+    req.situation = format!("The run reached its spend cap of ${:.2} (checkpoint {n}).", job.budget_usd);
+    req.earlier = job.checkpoints.iter().map(|c| format!("{}: {}", c.summary(), c.why)).collect();
+    if progressed {
+        port.emit(SessionEvent::Checking { job: job.name.clone(), checkpoint: n })?;
+        req.evidence = checkpoint::evidence(dir, &from, &now);
+    }
+    let rule = || {
+        (!progressed).then(|| {
+            (Action::Stop { why: String::new() }, "no new commit and no changed file since the last checkpoint".into())
+        })
+    };
+    let handlers = decide::chain(&ctx.cfg, Point::Cap).unwrap_or_default();
+    let d = decide::decide(ctx, job, &req, &handlers, &rule, Action::Stop { why: String::new() })?;
+    let (verdict, next, message) = match d.action.clone() {
+        Action::Continue { budget } => (CheckVerdict::Continue, Some(budget.unwrap_or(cap)), String::new()),
+        Action::Redirect { message, budget } => (CheckVerdict::Redirect, Some(budget.unwrap_or(cap)), message),
+        _ => (CheckVerdict::Stop, None, String::new()),
+    };
+    let checker = match d.handler.as_deref() {
+        Some("rule") | None => d.account.clone(),
+        Some(h) => d.account.clone().or_else(|| Some(h.to_owned())),
+    };
+    let check = Check {
         checkpoint: n,
-        verdict: CheckVerdict::Stop,
-        why: "no new commit and no changed file since the last checkpoint".into(),
-        message: String::new(),
-        next_cap_usd: None,
+        verdict,
+        why: match (&d.action, d.why.is_empty()) {
+            (Action::Stop { why }, true) if !why.is_empty() => why.clone(),
+            _ => d.why.clone(),
+        },
+        message: next.map(|cap| checkpoint::resume_message(n, cap, verdict, &message)).unwrap_or_default(),
+        next_cap_usd: next,
         head: now.head.clone(),
         tree: now.tree.clone(),
-        checker: None,
-        cost_usd: 0.0,
+        checker,
+        cost_usd: d.cost_usd,
+        decision: Some(d.id),
     };
-    if checkpoint::progressed(&from, &now) {
-        port.emit(SessionEvent::Checking { job: job.name.clone(), checkpoint: n })?;
-        let prompt =
-            checkpoint::prompt(brief, &job.checkpoints, &checkpoint::evidence(dir, &from, &now), &report.answer);
-        let (checker, cost, answer) = judge(ctx, job, &prompt);
-        (check.checker, check.cost_usd) = (checker, cost);
-        match answer {
-            Ok(a) => {
-                if a.verdict != CheckVerdict::Stop {
-                    check.message = checkpoint::resume_message(n, cap, &a);
-                    check.next_cap_usd = Some(cap);
-                }
-                (check.verdict, check.why) = (a.verdict, a.why);
-            }
-            Err(why) => check.why = why,
-        }
-    }
-    let waits = check.next_cap_usd.is_none();
     port.emit(SessionEvent::Checked { job: job.name.clone(), check })?;
-    Ok(if waits {
+    Ok(if next.is_none() {
         (Outcome::Failed, Some("waits for a human at its checkpoint; resume with --budget to go on".into()))
     } else {
         (Outcome::Retry, None)
     })
 }
 
-/// The progress check on the checker's harness, read-only: the account it
+/// A run that ended done or failed, when `hooks.ended` is set: the chain may
+/// accept it, resume it, start it afresh under another profile, queue a
+/// follow-up, or stop it. Limits, sign-outs and the first missing report stay
+/// relay's own.
+fn at_end(ctx: &Ctx, job: &Job, run: &Ran<'_>, ended: Ended, silent: bool) -> Result<Ended> {
+    let Some(handlers) = decide::chain(&ctx.cfg, Point::Ended) else { return Ok(ended) };
+    if !matches!(ended.0, Outcome::Done | Outcome::Failed) {
+        return Ok(ended);
+    }
+    let (mut req, _) = request(ctx, job, run, Point::Ended)?;
+    let how = if ended.0 == Outcome::Done { "done" } else { "failed" };
+    req.situation = format!("The run ended {how}{}.", ended.1.as_deref().map(|r| format!(": {r}")).unwrap_or_default());
+    if let Some(dir) = run.dir {
+        let now = checkpoint::point(dir, &run.scratch.join("checkpoint.index"));
+        req.evidence = checkpoint::evidence(dir, &checkpoint::base(dir, &[]), &now);
+    }
+    let final_done = final_status_done(&run.report.answer, &ctx.cfg.session.final_marker);
+    let rule = || ended_rule(ended.0, final_done, silent, job.follow_ups);
+    let d = decide::decide(ctx, job, &req, &handlers, &rule, Action::Accept)?;
+    let port = port(ctx, job);
+    Ok(match d.action {
+        Action::Stop { why } => (Outcome::Failed, Some(if why.is_empty() { d.why } else { why })),
+        Action::Resume { message, budget } => {
+            let message = if message.trim().is_empty() { "Continue where you left off.".into() } else { message };
+            port.emit(SessionEvent::FollowUp { job: job.name.clone(), message, budget_usd: budget })?;
+            (Outcome::Retry, Some(format!("resumed by decision {}", d.id)))
+        }
+        Action::Requeue { profile } => {
+            let p = ctx.cfg.profile(&profile)?;
+            let harnesses: Vec<String> = p.harness.iter().cloned().collect();
+            let models = match (&p.harness, &p.model) {
+                (Some(h), Some(m)) => [(h.clone(), m.clone())].into(),
+                _ => std::collections::BTreeMap::new(),
+            };
+            port.emit(SessionEvent::Requeued {
+                job: job.name.clone(),
+                profile: profile.clone(),
+                harnesses,
+                models,
+                effort: p.effort.clone(),
+                budget_usd: p.budget.unwrap_or(job.budget_usd),
+            })?;
+            (Outcome::Retry, Some(format!("requeued under profile {profile}")))
+        }
+        Action::FollowUp { brief, profile, after, fork, name } => {
+            let spec = crate::systems::queue::FollowUp { name, brief, profile, after, fork };
+            let queued = crate::systems::queue::follow_up(ctx, job, spec)?;
+            (
+                ended.0,
+                Some(ended.1.map_or_else(
+                    || format!("follow-up {queued} queued"),
+                    |r| format!("{r}; follow-up {queued} queued"),
+                )),
+            )
+        }
+        _ => ended,
+    })
+}
+
+/// The `rule` handler when a run ends: a clean done is accepted, and a
+/// first silence resumes the same session; anything else is deferred.
+fn ended_rule(outcome: Outcome, final_done: bool, silent: bool, follow_ups: u32) -> Option<(Action, String)> {
+    match outcome {
+        Outcome::Done if final_done => Some((Action::Accept, "done, and its report says status: done".into())),
+        Outcome::Failed if silent && follow_ups == 0 => {
+            let message = "Continue where you left off.".to_owned();
+            Some((Action::Resume { message, budget: None }, "went silent once; resumed in the same session".into()))
+        }
+        _ => None,
+    }
+}
+
+/// Whether the report's final section says `status: done`.
+fn final_status_done(answer: &str, marker: &str) -> bool {
+    let tail = if marker.is_empty() { Some(answer) } else { answer.rfind(marker).map(|i| &answer[i..]) };
+    tail.is_some_and(|t| {
+        t.lines().any(|l| {
+            let l = l.trim().to_ascii_lowercase();
+            l.strip_prefix("status:").is_some_and(|v| v.trim().starts_with("done"))
+        })
+    })
+}
+
+/// A read-only session for a decision on `agent`'s harness: the account it
 /// ran on, what it cost, and its answer or why there is none.
-fn judge(ctx: &Ctx, job: &Job, prompt: &str) -> (Option<String>, f64, Result<checkpoint::Answer, String>) {
-    let c = &ctx.cfg.limits.checker;
-    let Some(home) = checker_home(ctx, job) else {
-        return (None, 0.0, Err(format!("no {} account is free for the progress check", c.harness)));
+pub fn consult(
+    ctx: &Ctx,
+    job: &Job,
+    agent: &decide::Agent,
+    prompt: &str,
+) -> (Option<String>, f64, Result<String, String>) {
+    let Some(home) = checker_home(ctx, job, &agent.harness, agent.model.as_deref()) else {
+        return (None, 0.0, Err(format!("no {} account is free for agent:{}", agent.harness, agent.label)));
     };
     let run = || -> Result<(Report, Ending)> {
         let harness = harness_of(&home);
@@ -270,12 +416,12 @@ fn judge(ctx: &Ctx, job: &Job, prompt: &str) -> (Option<String>, f64, Result<che
         let name = format!("relay-{}-check", job.name);
         let task = Task {
             prompt,
-            model: c.model.as_deref().or(conf.model.as_deref()),
+            model: agent.model.as_deref().or(conf.model.as_deref()),
             effort: None,
             session: Session::New(&id),
             permissions: permissions(ctx.cfg.sandbox.enabled, true),
             briefing: Some("The repository is mounted read-only. Report; do not try to change files."),
-            budget_usd: Some(c.budget_usd),
+            budget_usd: Some(agent.budget_usd),
             name: Some(&name),
             events: true,
             lean: true,
@@ -285,25 +431,25 @@ fn judge(ctx: &Ctx, job: &Job, prompt: &str) -> (Option<String>, f64, Result<che
         inv.args.extend(conf.extra_args.iter().map(OsString::from));
         inv.write_files().context("writing the prompt file")?;
         let mut cmd = command(ctx, &home, &inv, None, &scratch, &ctx.cfg.repo);
-        let run = Run { session_id: None, budget_usd: c.budget_usd, log: "check.ndjson", stderr: "check-stderr.log" };
+        let run =
+            Run { session_id: None, budget_usd: agent.budget_usd, log: "check.ndjson", stderr: "check-stderr.log" };
         drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader())
     };
     let (report, ending) = match run() {
         Ok(r) => r,
-        Err(e) => return (Some(home.key()), 0.0, Err(format!("the progress check did not run: {e:#}"))),
+        Err(e) => return (Some(home.key()), 0.0, Err(format!("agent:{} did not run: {e:#}", agent.label))),
     };
     let answer = match verdict(&report, ending, "", true, now_s()) {
-        Verdict::Done => checkpoint::parse(&report.answer).ok_or_else(|| "the progress check gave no verdict".into()),
-        v => Err(format!("the progress check did not finish: {v:?}")),
+        Verdict::Done => Ok(report.answer.clone()),
+        v => Err(format!("agent:{} did not finish: {v:?}", agent.label)),
     };
     (Some(home.key()), report.cost_usd, answer)
 }
 
-/// An account of the checker's harness that may take a session: another
+/// An account of `harness` that may take a session for `model`: another
 /// than the worker's and idle where there is one, so no worker grades itself.
-fn checker_home(ctx: &Ctx, job: &Job) -> Option<Home> {
-    let c = &ctx.cfg.limits.checker;
-    let model = c.model.clone().or_else(|| ctx.cfg.harness(&c.harness).model);
+fn checker_home(ctx: &Ctx, job: &Job, harness: &str, model: Option<&str>) -> Option<Home> {
+    let model = model.map(str::to_owned).or_else(|| ctx.cfg.harness(harness).model);
     let world = ctx.world().ok()?;
     let now = now_micros();
     let found = accounts::discover(&ctx.cfg);
@@ -311,7 +457,7 @@ fn checker_home(ctx: &Ctx, job: &Job) -> Option<Home> {
     // account's floor or on a reading it cannot trust.
     let usable: Vec<&Home> = found
         .iter()
-        .filter(|h| h.harness == c.harness.as_str())
+        .filter(|h| h.harness == harness)
         .filter(|h| accounts::fit(h, world.accounts.get(&h.key()), model.as_deref(), ctx.cfg.limits.floor, now).is_ok())
         .collect();
     let worker = |h: &&&Home| job.account.as_deref() == Some(h.key().as_str());
@@ -361,7 +507,7 @@ fn conclude(ctx: &Ctx, job: &Job, key: &str, v: Verdict, now_s: i64) -> Result<E
     Ok(match v {
         Verdict::Done => (Outcome::Done, None),
         Verdict::FollowUp(message) if job.follow_ups == 0 => {
-            port.emit(SessionEvent::FollowUp { job: job.name.clone(), message })?;
+            port.emit(SessionEvent::FollowUp { job: job.name.clone(), message, budget_usd: None })?;
             (Outcome::Retry, Some("ended without its final report; asked once more".into()))
         }
         Verdict::FollowUp(_) => (Outcome::Done, Some(format!("no {} section after a follow-up", s.final_marker))),
@@ -487,9 +633,48 @@ fn drive(
     Ok((reader.report().clone(), ending))
 }
 
+/// The build jobs whose branches a build job starts from: those it waits
+/// for and the one it forks, each with its clone and branch.
+pub fn bases(world: &World, job: &Job) -> Vec<(String, PathBuf, String)> {
+    let mut names: Vec<&String> = job.after.iter().collect();
+    names.extend(job.fork.as_ref().map(|f| &f.job));
+    let mut out: Vec<(String, PathBuf, String)> = Vec::new();
+    for n in names {
+        if let Some(j) = world.jobs.get(n).filter(|j| !j.readonly)
+            && let (Some(dir), Some(branch)) = (&j.workdir, &j.branch)
+            && !out.iter().any(|(m, ..)| m == n)
+        {
+            out.push((n.clone(), dir.clone(), branch.clone()));
+        }
+    }
+    out
+}
+
+/// Of the base branches' tips, the one every other is an ancestor of, or why
+/// there is none. `None` with no bases: the repository's `HEAD`.
+pub fn pick_base(
+    tips: &[(String, String)],
+    is_ancestor: impl Fn(&str, &str) -> bool,
+) -> Result<Option<String>, String> {
+    let Some(top) = tips.iter().find(|(_, t)| tips.iter().all(|(_, o)| o == t || is_ancestor(o, t))) else {
+        let names: Vec<&str> = tips.iter().map(|(n, _)| n.as_str()).collect();
+        return if tips.is_empty() {
+            Ok(None)
+        } else {
+            Err(format!(
+                "the branches of {} diverge, so no one of them holds all their work; land one into another, \
+                 or queue this job after one of them",
+                names.join(" and ")
+            ))
+        };
+    };
+    Ok(Some(top.1.clone()))
+}
+
 /// A private clone that borrows the repository's objects (`--shared`), so it is
 /// small and works across filesystems, on its own branch, unable to push.
-fn clone(ctx: &Ctx, name: &str) -> Result<(PathBuf, String)> {
+/// A build job with `bases` starts from the newest of their branch tips (`pick_base`).
+fn clone(ctx: &Ctx, name: &str, bases: &[(String, PathBuf, String)]) -> Result<(PathBuf, String)> {
     let dir = ctx.clones.join(name);
     let branch = format!("{}{name}", ctx.cfg.session.branch_prefix);
     std::fs::create_dir_all(&ctx.clones)?;
@@ -504,13 +689,69 @@ fn clone(ctx: &Ctx, name: &str) -> Result<(PathBuf, String)> {
     let _ = std::fs::remove_dir_all(&dir);
     let made = (|| {
         ok(Command::new("git").args(["clone", "--quiet", "--shared"]).arg(&ctx.cfg.repo).arg(&dir), "git clone")?;
-        ok(Ctx::git(&dir).args(["switch", "--quiet", "-c", &branch]), "git switch")?;
+        let mut tips = Vec::new();
+        for (job, from, b) in bases {
+            let what = format!("fetching {job}'s branch {b}");
+            ok(Ctx::git(&dir).arg("fetch").arg("--quiet").arg(from).arg(format!("{b}:refs/relay/base/{job}")), &what)?;
+            let tip = checkpoint_rev(&dir, &format!("refs/relay/base/{job}")).with_context(|| what.clone())?;
+            tips.push((job.clone(), tip));
+        }
+        let ancestor = |a: &str, b: &str| {
+            Ctx::git(&dir).args(["merge-base", "--is-ancestor", a, b]).status().is_ok_and(|s| s.success())
+        };
+        let start = pick_base(&tips, ancestor).map_err(|e| anyhow::anyhow!(e))?;
+        let mut switch = Ctx::git(&dir);
+        switch.args(["switch", "--quiet", "-c", &branch]).args(start.as_deref());
+        ok(&mut switch, "git switch")?;
         ok(Ctx::git(&dir).args(["remote", "set-url", "--push", "origin", "relay-jobs-do-not-push"]), "git remote")
     })();
     if made.is_err() {
         let _ = std::fs::remove_dir_all(&dir);
     }
     made.map(|()| (dir, branch))
+}
+
+/// The commit `rev` names in `dir`.
+fn checkpoint_rev(dir: &Path, rev: &str) -> Option<String> {
+    let out = Ctx::git(dir).args(["rev-parse", "--verify", rev]).output().ok().filter(|o| o.status.success())?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+#[cfg(test)]
+mod base_tests {
+    use super::pick_base;
+
+    #[test]
+    fn a_build_starts_from_the_newest_of_its_bases_or_fails_when_they_diverge() {
+        let tips = |ts: &[&str]| ts.iter().map(|t| ((*t).to_uppercase(), (*t).to_owned())).collect::<Vec<_>>();
+        // a ← b on one line; c off on its own.
+        let anc = |x: &str, y: &str| matches!((x, y), ("a", "b"));
+        assert_eq!(pick_base(&[], anc), Ok(None), "no build dependency: HEAD");
+        assert_eq!(pick_base(&tips(&["a"]), anc), Ok(Some("a".into())));
+        assert_eq!(pick_base(&tips(&["a", "b"]), anc), Ok(Some("b".into())));
+        assert_eq!(pick_base(&tips(&["b", "a"]), anc), Ok(Some("b".into())));
+        assert_eq!(pick_base(&tips(&["a", "a"]), anc), Ok(Some("a".into())), "the same tip twice");
+        let e = pick_base(&tips(&["b", "c"]), anc).unwrap_err();
+        assert!(e.contains("B and C diverge"), "{e}");
+    }
+
+    #[test]
+    fn the_end_rule_accepts_a_clean_done_and_resumes_one_silence() {
+        use super::{Action, Outcome, ended_rule};
+        assert_eq!(ended_rule(Outcome::Done, true, false, 0).map(|r| r.0), Some(Action::Accept));
+        assert_eq!(ended_rule(Outcome::Done, false, false, 0), None, "no status: done, so another handler judges");
+        let resumed = ended_rule(Outcome::Failed, false, true, 0).map(|r| r.0);
+        assert!(matches!(resumed, Some(Action::Resume { .. })), "{resumed:?}");
+        assert_eq!(ended_rule(Outcome::Failed, false, true, 1), None, "silent twice");
+        assert_eq!(ended_rule(Outcome::Failed, false, false, 0), None, "an error is judged elsewhere");
+    }
+
+    #[test]
+    fn a_report_saying_done_is_recognised() {
+        assert!(super::final_status_done("work\nFINAL\nstatus: done\ncommits: x", "FINAL"));
+        assert!(!super::final_status_done("FINAL\nstatus: partial", "FINAL"));
+        assert!(!super::final_status_done("status: done\nno marker", "FINAL"));
+    }
 }
 
 #[cfg(test)]

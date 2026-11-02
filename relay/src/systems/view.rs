@@ -159,6 +159,19 @@ fn board(ctx: &Ctx, world: &crate::world::World, all: bool) -> String {
     if jobs.is_empty() {
         lines.push("  (none)".into());
     }
+    let waiting = crate::systems::decide::pending(world);
+    if !waiting.is_empty() {
+        lines.push(String::new());
+        lines.push("decisions waiting (relay decide answer ID --action ...)".into());
+        let rows: Vec<Vec<String>> = waiting
+            .iter()
+            .map(|d| {
+                let until = format!("until {}", crate::systems::decide::clock(d.parked_until.unwrap_or(0)));
+                vec![d.id.clone(), d.job.clone(), d.point.as_str().to_owned(), until]
+            })
+            .collect();
+        lines.extend(table(&rows).into_iter().map(|r| format!("  {r}")));
+    }
     lines.push(String::new());
     lines.push(crate::systems::quota::accounts_view(ctx, world).text());
     lines.join("\n")

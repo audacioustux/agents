@@ -31,6 +31,9 @@ pub struct Config {
     /// Named job profiles, merged from the owner's policy file and this project's config.
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
+    /// Who decides at each decision point, in order.
+    #[serde(default)]
+    pub hooks: Hooks,
     /// The policy file this was merged with, when one was read.
     #[serde(skip)]
     pub policy_path: Option<PathBuf>,
@@ -188,6 +191,40 @@ pub struct Limits {
     pub job_ceiling_usd: Option<f64>,
     /// What judges progress at a spend cap.
     pub checker: Checker,
+}
+
+/// The handler chains at relay's decision points, and their bounds. A chain
+/// left unset keeps relay's fixed behaviour at that point.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Hooks {
+    /// At a spend cap. Unset: `["rule", "agent:<limits.checker>"]` when the budget may grow.
+    pub cap: Option<Vec<String>>,
+    /// When a run ends done or failed.
+    pub ended: Option<Vec<String>>,
+    /// When a queued job has been held by a limit for `held_after_minutes`.
+    pub held: Option<Vec<String>>,
+    pub held_after_minutes: f64,
+    /// How long an `orchestrator` handler waits for `relay decide answer` before the next handler.
+    pub orchestrator_timeout_minutes: f64,
+    /// How long a `command:` handler may run.
+    pub command_timeout_seconds: u64,
+    /// Whether a `held` decision may `force` a job past its profile's limits.
+    pub allow_force: bool,
+}
+
+impl Default for Hooks {
+    fn default() -> Self {
+        Self {
+            cap: None,
+            ended: None,
+            held: None,
+            held_after_minutes: 60.0,
+            orchestrator_timeout_minutes: 20.0,
+            command_timeout_seconds: 120,
+            allow_force: false,
+        }
+    }
 }
 
 /// The progress check's harness, model and spend cap.
@@ -510,6 +547,15 @@ impl Config {
         for (name, p) in &self.profiles {
             p.validate(name)?;
         }
+        let h = &self.hooks;
+        for (point, chain) in [("cap", &h.cap), ("ended", &h.ended), ("held", &h.held)] {
+            for handler in chain.iter().flatten() {
+                crate::systems::decide::Handler::parse(handler, self)
+                    .map_err(|e| anyhow::anyhow!("hooks.{point}: {e}"))?;
+            }
+        }
+        ensure!(h.held_after_minutes >= 0.0, "hooks.held_after_minutes must not be negative");
+        ensure!(h.orchestrator_timeout_minutes >= 0.0, "hooks.orchestrator_timeout_minutes must not be negative");
         regex::Regex::new(&self.sandbox.env_deny).context("sandbox.env_deny")?;
         for p in self.sandbox.hide_home.iter().chain(&self.sandbox.caches) {
             if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
@@ -606,6 +652,7 @@ mod tests {
         assert_eq!(cfg.sandbox.hide_home, defaults.sandbox.hide_home);
         assert_eq!(cfg.sandbox.caches, defaults.sandbox.caches);
         assert_eq!(cfg.session.max_hours, defaults.session.max_hours);
+        assert_eq!(format!("{:?}", cfg.hooks), format!("{:?}", defaults.hooks));
     }
 
     const POLICY: &str = r#"

@@ -131,6 +131,14 @@ because quota still unused at a reset is lost. A session that already ran
 stays on its account while that account is usable, since moving it loses the
 provider's prompt cache and its whole transcript is read again at full price.
 
+Accounts belong to the machine, not the project, so every project on it
+shares what it knows of them: each listens to the others' state (never
+writing it) and uses the latest reading, the later limit, and a sign-out any
+of them saw, so a reading one project took is not taken again. Seats are
+shared too: `limits.per_account` counts the sessions every project runs on
+the account. Whether an account is used at all (`relay quota enable` and
+`disable`) and `limits.max_running` stay per project.
+
 When a session hits a limit, its account is closed until two minutes after the
 stated reset (or for 15 minutes if none is stated), and the job goes back in
 the queue. A session whose sign-in has expired marks its account signed out

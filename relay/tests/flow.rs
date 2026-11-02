@@ -257,3 +257,27 @@ fn an_omp_session_runs_and_resumes_in_its_own_store() {
     let r = result(&env, "o");
     assert!(r.contains("ran on omp:default with 2 transcript turns"), "{r}");
 }
+
+#[test]
+fn projects_on_one_machine_share_what_they_read_of_an_account() {
+    let env = setup("shared", false);
+    claude_account(&env.home, "solo", 40, false);
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(env.repo.join("other.toml"), conf.replace("name = \"flow\"", "name = \"other\"")).unwrap();
+    let other = |args: &[&str]| relay(&env, &[&["--config", "other.toml", "--json"], args].concat());
+    // Before anyone has read it, the other project has nothing to go on.
+    let shown: serde_json::Value = serde_json::from_slice(&other(&["quota", "show"]).stdout).unwrap();
+    assert!(shown["accounts"][0]["readAt"].is_null(), "{shown}");
+    ok(&relay(&env, &["quota", "refresh"]), "flow reads the account");
+    // The other project takes that reading as its own, and does not read again.
+    let refreshed = other(&["quota", "refresh", "--stale"]);
+    ok(&refreshed, "other refreshes stale readings");
+    let refreshed: serde_json::Value = serde_json::from_slice(&refreshed.stdout).unwrap();
+    assert_eq!(refreshed["read"], serde_json::json!([]), "{refreshed}");
+    let shown: serde_json::Value = serde_json::from_slice(&other(&["quota", "show"]).stdout).unwrap();
+    let account = &shown["accounts"][0];
+    assert!(account["readAt"].is_u64(), "{shown}");
+    assert_eq!(account["state"], "ready", "{shown}");
+    // It took no reading of its own.
+    assert!(!env.root.join("state/relay/other/bus/quota.ndjson").exists());
+}

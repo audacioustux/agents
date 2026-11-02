@@ -132,6 +132,22 @@ struct Checkpoint {
 }
 
 impl Checkpoint {
+    /// The checkpoint at `file` brought up to date with `bus` (or a full fold
+    /// when it is unusable), with the bytes `file` held.
+    fn current(bus: &Path, file: &Path) -> Result<(Self, Vec<u8>)> {
+        let old = std::fs::read(file).unwrap_or_default();
+        let cached = serde_json::from_slice::<Self>(&old).ok().filter(|c| c.version == fold_version());
+        let cp = match cached {
+            Some(c) => c.advance(bus)?,
+            None => None,
+        };
+        let cp = match cp {
+            Some(c) => c,
+            None => Self::full(bus)?,
+        };
+        Ok((cp, old))
+    }
+
     fn full(bus: &Path) -> Result<Self> {
         let (events, offsets) = bus::read_since(bus, &Offsets::new())?.unwrap_or_default();
         let last = events.iter().map(|e| e.t).max().unwrap_or(0);
@@ -153,6 +169,25 @@ impl Checkpoint {
     }
 }
 
+/// One account as two projects know it together: the later reading, the later
+/// failed read, the later end of a limit, and signed out if either saw it.
+/// Whether relay may use it at all (`enabled`) is each project's own switch.
+pub fn merge_account(ours: &AccountState, theirs: &AccountState) -> AccountState {
+    let (meters, read_at) = if theirs.read_at > ours.read_at {
+        (theirs.meters.clone(), theirs.read_at)
+    } else {
+        (ours.meters.clone(), ours.read_at)
+    };
+    AccountState {
+        enabled: ours.enabled,
+        signed_out: ours.signed_out || theirs.signed_out,
+        meters,
+        read_at,
+        unreadable_at: ours.unreadable_at.max(theirs.unreadable_at),
+        limited_until: ours.limited_until.max(theirs.limited_until),
+    }
+}
+
 /// Writes `bytes` to `path` whole or not at all, readable by its owner only.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
@@ -171,22 +206,28 @@ impl World {
     /// checkpoint is a cache of a deterministic fold, replaced atomically, and
     /// rewritten only when it changed. A failure to write it costs only time.
     pub fn load(bus: &Path, file: &Path) -> Result<Self> {
-        let old = std::fs::read(file).unwrap_or_default();
-        let cached = serde_json::from_slice::<Checkpoint>(&old).ok().filter(|c| c.version == fold_version());
-        let cp = match cached {
-            Some(c) => c.advance(bus)?,
-            None => None,
-        };
-        let cp = match cp {
-            Some(c) => c,
-            None => Checkpoint::full(bus)?,
-        };
+        let (cp, old) = Checkpoint::current(bus, file)?;
         if let Ok(bytes) = serde_json::to_vec(&cp)
             && bytes != old
         {
             let _ = write_atomic(file, &bytes);
         }
         Ok(cp.world)
+    }
+
+    /// As `load`, for a bus this process only listens to: the checkpoint at
+    /// `file` is its owner's cache, so it is read but never written.
+    pub fn peek(bus: &Path, file: &Path) -> Result<Self> {
+        Checkpoint::current(bus, file).map(|(cp, _)| cp.world)
+    }
+
+    /// Takes in what other projects on this machine know about the accounts
+    /// they share with this one (`merge_account`); their jobs stay theirs.
+    pub fn hear_accounts(&mut self, others: &[World]) {
+        for (key, theirs) in others.iter().flat_map(|w| &w.accounts) {
+            let ours = self.accounts.entry(key.clone()).or_default();
+            *ours = merge_account(ours, theirs);
+        }
     }
 
     pub fn fold(events: &[Stamped]) -> Self {
@@ -530,6 +571,81 @@ mod tests {
         assert!(w.jobs.is_empty());
     }
 
+    mod merge {
+        use super::super::*;
+        use crate::harness::Meter;
+
+        fn read(at: u64, utilization: f64) -> AccountState {
+            let mut a = AccountState { read_at: Some(at), ..AccountState::default() };
+            a.meters.insert("five_hour".into(), Meter { utilization, resets_at: None });
+            a
+        }
+
+        #[test]
+        fn the_later_reading_wins_whole() {
+            let (old, new) = (read(10, 0.9), read(20, 0.1));
+            for (ours, theirs) in [(&old, &new), (&new, &old)] {
+                let m = merge_account(ours, theirs);
+                assert_eq!((m.read_at, &m.meters), (Some(20), &new.meters));
+            }
+            let unread = AccountState::default();
+            assert_eq!(merge_account(&unread, &old).read_at, Some(10), "a reading beats none");
+            assert_eq!(merge_account(&old, &unread).meters, old.meters);
+        }
+
+        #[test]
+        fn the_later_failed_read_wins() {
+            let at = |t| AccountState { unreadable_at: t, ..AccountState::default() };
+            assert_eq!(merge_account(&at(Some(5)), &at(Some(9))).unreadable_at, Some(9));
+            assert_eq!(merge_account(&at(Some(9)), &at(Some(5))).unreadable_at, Some(9));
+            assert_eq!(merge_account(&at(None), &at(Some(5))).unreadable_at, Some(5));
+        }
+
+        #[test]
+        fn the_later_limit_wins() {
+            let until = |u| AccountState { limited_until: u, ..AccountState::default() };
+            assert_eq!(merge_account(&until(Some(100)), &until(Some(200))).limited_until, Some(200));
+            assert_eq!(merge_account(&until(Some(200)), &until(Some(100))).limited_until, Some(200));
+            assert_eq!(merge_account(&until(Some(100)), &until(None)).limited_until, Some(100));
+        }
+
+        #[test]
+        fn a_sign_out_anywhere_counts() {
+            let out = AccountState { signed_out: true, ..AccountState::default() };
+            let fine = AccountState::default();
+            assert!(merge_account(&fine, &out).signed_out);
+            assert!(merge_account(&out, &fine).signed_out);
+            assert!(!merge_account(&fine, &fine).signed_out);
+        }
+
+        #[test]
+        fn enabled_stays_ours() {
+            let off = AccountState { enabled: false, ..AccountState::default() };
+            let on = AccountState::default();
+            assert!(!merge_account(&off, &on).enabled);
+            assert!(merge_account(&on, &off).enabled);
+        }
+
+        #[test]
+        fn hearing_adds_accounts_and_leaves_jobs() {
+            let mut ours = World::default();
+            ours.accounts.insert("c:a".into(), read(10, 0.5));
+            let mut theirs = World::default();
+            theirs.accounts.insert("c:a".into(), read(20, 0.2));
+            theirs.accounts.insert("c:b".into(), AccountState { enabled: false, signed_out: true, ..read(5, 0.0) });
+            theirs.jobs.insert("j".into(), Job::default());
+            let mut other = World::default();
+            other.accounts.insert("c:a".into(), AccountState { limited_until: Some(99), ..read(15, 0.9) });
+            ours.hear_accounts(&[theirs, other]);
+            assert!(ours.jobs.is_empty());
+            let a = &ours.accounts["c:a"];
+            assert_eq!((a.read_at, a.limited_until), (Some(20), Some(99)));
+            let b = &ours.accounts["c:b"];
+            assert!(b.enabled && b.signed_out, "an account only they know is enabled here");
+            assert_eq!(b.read_at, Some(5));
+        }
+    }
+
     mod checkpoint {
         use super::super::*;
         use crate::config::tempdir::Dir;
@@ -632,6 +748,22 @@ mod tests {
             let w = b.load();
             assert!(w.accounts.contains_key("planted") && !w.jobs.contains_key("b"));
             assert!(b.checkpoint()["offsets"].get("session/b.1.ndjson").is_none());
+        }
+
+        #[test]
+        fn a_peek_never_writes() {
+            let b = Fixture::new();
+            b.append("queue.ndjson", &queued(1, "a"));
+            assert_eq!(World::peek(&b.bus, &b.file).unwrap(), b.full());
+            assert!(!b.file.exists(), "no checkpoint is made");
+            b.load();
+            b.plant();
+            let planted = std::fs::read(&b.file).unwrap();
+            b.append("dispatch.ndjson", &dispatched(2, "a"));
+            let w = World::peek(&b.bus, &b.file).unwrap();
+            assert!(w.accounts.contains_key("planted"), "the checkpoint is used");
+            assert_eq!(w.jobs["a"].status, Status::Running);
+            assert_eq!(std::fs::read(&b.file).unwrap(), planted, "nor brought up to date");
         }
 
         #[test]

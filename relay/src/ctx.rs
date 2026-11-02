@@ -113,6 +113,19 @@ impl Ctx {
         World::load(&self.bus, &self.state.join("world.json"))
     }
 
+    /// The other projects on this machine, as their own folds say: every
+    /// directory under `state_root` with a bus, other than ours. Their
+    /// checkpoints are theirs, so they are read, never written; one that
+    /// cannot be read is left out.
+    pub fn neighbours(&self) -> Vec<World> {
+        let Ok(dirs) = std::fs::read_dir(&self.state_root) else { return Vec::new() };
+        dirs.flatten()
+            .map(|e| e.path())
+            .filter(|d| *d != self.state && d.join("bus").is_dir())
+            .filter_map(|d| World::peek(&d.join("bus"), &d.join("world.json")).ok())
+            .collect()
+    }
+
     pub fn job_file(&self, job: &str, ext: &str) -> PathBuf {
         self.jobs.join(format!("{job}.{ext}"))
     }

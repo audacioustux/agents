@@ -112,10 +112,15 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
             j.status = Status::Failed;
         }
     }
+    // Accounts belong to the machine: what other projects learned of them, and
+    // the seats their sessions hold, count here too. Their jobs stay theirs.
+    let neighbours = ctx.neighbours();
+    world.hear_accounts(&neighbours);
+    let elsewhere = seats_taken(&neighbours);
     let found = accounts::discover(&ctx.cfg);
     refresh_stale(ctx, &world, &found)?;
     let mut held = Held::default();
-    let plan = plan(ctx, &world, &found, &mut held);
+    let plan = plan(ctx, &world, &elsewhere, &found, &mut held);
     for (job, account) in plan {
         let (pid, gate) = ctx.spawn_gated(&["session", "run", &job], &ctx.job_file(&job, "runner.log"))?;
         let started = os::start_time(pid).unwrap_or(0);
@@ -150,6 +155,21 @@ fn next_due(accounts: &[(&dyn Harness, Option<&AccountState>)], waiting: bool, n
     times.into_iter().filter(|&t| t > now_us).min()
 }
 
+/// Sessions running on each account in `worlds`, counting only jobs their
+/// fold says run and whose runner is still alive.
+pub fn seats_taken(worlds: &[World]) -> BTreeMap<String, usize> {
+    let mut seats = BTreeMap::new();
+    for j in worlds.iter().flat_map(|w| w.jobs.values()) {
+        if j.status == Status::Running
+            && let (Some(account), Some((pid, started))) = (&j.account, j.runner)
+            && os::same_process(pid, started)
+        {
+            *seats.entry(account.clone()).or_default() += 1;
+        }
+    }
+    seats
+}
+
 /// Starts a quota reading for accounts whose reading is old, when some job waits.
 fn refresh_stale(ctx: &Ctx, world: &World, found: &[Home]) -> Result<()> {
     let waiting = world.jobs.values().any(|j| j.status == Status::Queued);
@@ -161,11 +181,19 @@ fn refresh_stale(ctx: &Ctx, world: &World, found: &[Home]) -> Result<()> {
     Ok(())
 }
 
-/// Which queued jobs start now, and where. Pure apart from reading machine gauges.
-fn plan(ctx: &Ctx, world: &World, found: &[Home], held: &mut Held) -> Vec<(String, String)> {
+/// Which queued jobs start now, and where. Pure apart from reading machine
+/// gauges. `elsewhere` is the seats other projects hold: they count against
+/// `limits.per_account`, but not against this project's `max_running`.
+fn plan(
+    ctx: &Ctx,
+    world: &World,
+    elsewhere: &BTreeMap<String, usize>,
+    found: &[Home],
+    held: &mut Held,
+) -> Vec<(String, String)> {
     let limits = &ctx.cfg.limits;
     let now_us = now_micros();
-    let mut load: BTreeMap<String, usize> = BTreeMap::new();
+    let mut load = elsewhere.clone();
     let mut total = 0;
     for j in world.jobs.values().filter(|j| j.status == Status::Running) {
         *load.entry(j.account.clone().unwrap_or_default()).or_default() += 1;
@@ -265,6 +293,32 @@ mod tests {
         let only_b = [(&b, 0.9)];
         assert_eq!(key(choose(&job(Some("s"), Some("claude:a")), &only_b)), Some("claude:b".into()), "a does not fit");
         assert_eq!(choose(&job(Some("s"), Some("claude:a")), &[]).map(Home::key), None);
+    }
+
+    #[test]
+    fn only_live_runners_hold_seats() {
+        let me = std::process::id();
+        let started = os::start_time(me).unwrap();
+        let running = |name: &str, account: &str, runner| Job {
+            name: name.into(),
+            status: Status::Running,
+            account: Some(account.into()),
+            runner,
+            ..Job::default()
+        };
+        let mut one = World::default();
+        for j in [
+            running("a", "c:x", Some((me, started))),
+            running("b", "c:x", Some((me, started + 1))),
+            running("c", "c:y", None),
+            Job { status: Status::Done, ..running("d", "c:y", Some((me, started))) },
+        ] {
+            one.jobs.insert(j.name.clone(), j);
+        }
+        let mut two = World::default();
+        two.jobs.insert("a".into(), running("a", "c:x", Some((me, started))));
+        let seats = seats_taken(&[one, two]);
+        assert_eq!(seats, BTreeMap::from([("c:x".to_owned(), 2)]), "a dead runner or a finished job holds none");
     }
 
     #[test]

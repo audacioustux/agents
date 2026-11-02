@@ -13,6 +13,7 @@ use crate::ctx::Ctx;
 use crate::harness::{Home, Meters};
 use crate::os::Role;
 use crate::sandbox;
+use crate::systems::dispatch::seats_taken;
 use crate::world::{Status, World};
 
 /// The capability to write quota's port; only this module can make one.
@@ -63,7 +64,9 @@ fn refresh(ctx: &Ctx, only_stale: bool) -> Result<()> {
     let Some(_role) = Role::try_take(&ctx.state.join("quota.lock"))? else {
         return ctx.reply(&serde_json::json!({ "skipped": "a reading is already being taken" }), "");
     };
-    let world = ctx.world()?;
+    // A reading another project took recently is as good as one of ours.
+    let mut world = ctx.world()?;
+    world.hear_accounts(&ctx.neighbours());
     let now = now_micros();
     let todo: Vec<Home> = accounts::discover(&ctx.cfg)
         .into_iter()
@@ -138,9 +141,14 @@ pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
     ctx.reply(&value, &text)
 }
 
-/// Every account's room, as JSON and as text.
+/// Every account's room, as JSON and as text: as every project on this
+/// machine knows it, with the sessions all of them run there.
 pub fn accounts_view(ctx: &Ctx, world: &World) -> (serde_json::Value, String) {
     let now = now_micros();
+    let neighbours = ctx.neighbours();
+    let mut world = world.clone();
+    world.hear_accounts(&neighbours);
+    let elsewhere = seats_taken(&neighbours);
     let row = |a: &Home| {
         let (key, h) = (a.key(), harness_of(a));
         let st = world.accounts.get(&key);
@@ -154,7 +162,7 @@ pub fn accounts_view(ctx: &Ctx, world: &World) -> (serde_json::Value, String) {
         };
         let running = world.jobs.values().filter(|j| j.status == Status::Running && j.account.as_ref() == Some(&key));
         Row {
-            running: running.count(),
+            running: running.count() + elsewhere.get(&key).copied().unwrap_or(0),
             account: key,
             state,
             meters: st.map(|s| &s.meters),

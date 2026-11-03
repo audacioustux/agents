@@ -65,7 +65,11 @@ pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
     let mut spend = (0.0, 0);
     let (outcome, reason) =
         attempt(ctx, &job, &mut spend).unwrap_or_else(|e| (Outcome::Failed, Some(format!("{e:#}"))));
-    port.emit(SessionEvent::Ended { job: name, outcome, cost_usd: spend.0, turns: spend.1, reason })?;
+    port.emit(SessionEvent::Ended { job: name.clone(), outcome, cost_usd: spend.0, turns: spend.1, reason })?;
+    // A reviewed job that answered a reject is judged again, on its new tip.
+    if outcome == Outcome::Done {
+        let _ = review::rereview(ctx, &name);
+    }
     ctx.wake_dispatch()
 }
 
@@ -140,11 +144,13 @@ struct Seat<'a> {
     model: Option<String>,
 }
 
-/// The job's workspace: its clone (a build job), where the session stands, and its scratch directory.
+/// The job's workspace: its clone (a build job), where the session stands, its scratch directory,
+/// and its `/tmp` (on disk).
 struct Workspace {
     clone: Option<PathBuf>,
     cwd: PathBuf,
     scratch: PathBuf,
+    tmp: PathBuf,
 }
 
 /// A session ready to run.
@@ -185,7 +191,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         budget_usd: job.budget_usd,
         log: "log.ndjson",
         stderr: "stderr.log",
-        clone: work.clone.as_deref(),
+        measure: work.clone.iter().chain([&work.tmp]).map(PathBuf::as_path).collect(),
     };
     let (report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader())?;
@@ -246,7 +252,9 @@ fn workspace(ctx: &Ctx, job: &Job) -> Result<Step<Workspace>> {
     let cwd = if job.readonly() { ctx.cfg.repo.clone() } else { clone_dir.clone().unwrap_or_default() };
     let scratch = ctx.job_scratch(&job.name);
     std::fs::create_dir_all(&scratch)?;
-    Ok(ControlFlow::Continue(Workspace { clone: clone_dir, cwd, scratch }))
+    let tmp = ctx.job_tmp(&job.name);
+    std::fs::create_dir_all(&tmp)?;
+    Ok(ControlFlow::Continue(Workspace { clone: clone_dir, cwd, scratch, tmp }))
 }
 
 /// Chooses the session (new, resumed or forked), records that it started, and builds its command.
@@ -288,6 +296,7 @@ fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home
         home: seat.home,
         workdir: work.clone.as_deref(),
         scratch: &work.scratch,
+        tmp: &work.tmp,
         cwd: &work.cwd,
         account: true,
     };
@@ -473,14 +482,17 @@ pub fn consult(
         let mut inv = conf.locate(harness.invocation(&home, &task).map_err(|r| anyhow::anyhow!(r.0))?);
         inv.args.extend(conf.extra_args.iter().map(OsString::from));
         inv.write_files().context("writing the prompt file")?;
-        let mounts = Mounts { home: &home, workdir: None, scratch: &scratch, cwd: &ctx.cfg.repo, account: true };
+        let tmp = ctx.job_tmp(&job.name).join("check");
+        std::fs::create_dir_all(&tmp)?;
+        let mounts =
+            Mounts { home: &home, workdir: None, scratch: &scratch, tmp: &tmp, cwd: &ctx.cfg.repo, account: true };
         let mut cmd = command(ctx, &inv, &mounts);
         let run = Run {
             session_id: None,
             budget_usd: agent.budget_usd,
             log: "check.ndjson",
             stderr: "check-stderr.log",
-            clone: None,
+            measure: Vec::new(),
         };
         drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader())
             .map(|(report, ending, _)| (report, ending))
@@ -607,8 +619,8 @@ struct Run<'a> {
     /// The job's files its stream and its stderr go to.
     log: &'a str,
     stderr: &'a str,
-    /// The clone to measure while it runs, for a build job's worker.
-    clone: Option<&'a Path>,
+    /// What to measure while it runs, for a job's worker: its clone (a build job) and its `/tmp`.
+    measure: Vec<&'a Path>,
 }
 
 /// What the runner hears while it drives a session: a line of output, the
@@ -710,11 +722,12 @@ fn drive(
     });
     // Measures the clone now and every `limits.disk_sample_minutes`, until `_stop` is dropped.
     let (_stop, stopped) = mpsc::channel::<()>();
-    if let Some(dir) = run.clone.map(Path::to_path_buf) {
+    if !run.measure.is_empty() {
+        let dirs: Vec<PathBuf> = run.measure.iter().map(|p| (*p).to_path_buf()).collect();
         let every = Duration::from_secs_f64(ctx.cfg.limits.disk_sample_minutes * 60.0);
         std::thread::spawn(move || {
             loop {
-                if tx.send(Heard::Disk(os::dir_size(&dir, DISK_WALK).0)).is_err() {
+                if tx.send(Heard::Disk(os::dirs_size(&dirs, DISK_WALK))).is_err() {
                     return;
                 }
                 if !matches!(stopped.recv_timeout(every), Err(mpsc::RecvTimeoutError::Timeout)) {

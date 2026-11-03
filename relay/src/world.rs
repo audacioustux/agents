@@ -503,7 +503,10 @@ impl World {
                     if what == "clone" {
                         j.workdir = None;
                     }
-                    j.collected = Some(what.clone());
+                    // The scratch directory is a temporary directory, not the clone: it says nothing about it.
+                    if what != "scratch" {
+                        j.collected = Some(what.clone());
+                    }
                 }
             }
         }

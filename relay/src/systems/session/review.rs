@@ -167,6 +167,34 @@ pub(super) fn carry_out(
     })
 }
 
+/// After a reviewed job's run ended done: resumes each reviewer whose latest verdict on it was a reject,
+/// so the board's verdict is for the new tip. The reviewer's ref is fetched again when it starts, and its
+/// preamble names the new commit. Bounded as the builder's own resume is. Returns who was resumed.
+pub(super) fn rereview(ctx: &Ctx, builder: &str) -> Result<Vec<String>> {
+    let world = ctx.world()?;
+    let Some(b) = world.jobs.get(builder) else { return Ok(Vec::new()) };
+    let rejecting: Vec<&str> = world
+        .jobs
+        .values()
+        .filter(|r| r.review_of() == Some(builder))
+        .filter(|r| {
+            b.verdicts.iter().rev().find(|v| v.reviewer == r.name).is_some_and(|v| v.verdict == Verdict::Reject)
+        })
+        .map(|r| r.name.as_str())
+        .collect();
+    let mut resumed = Vec::new();
+    for reviewer in rejecting {
+        let message = format!(
+            "{builder} has answered your findings and ended its run. Judge its branch again, now at the commit \
+             named above, and end with your FINAL section and a verdict."
+        );
+        if crate::systems::queue::resume_reviewer(ctx, reviewer, builder, message)?.is_none() {
+            resumed.push(reviewer.to_owned());
+        }
+    }
+    Ok(resumed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

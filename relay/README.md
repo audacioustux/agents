@@ -405,13 +405,19 @@ coded reason: `test-failure`, `behavior-mismatch`, `insufficient-evidence`,
 `stale-head` or `other`; an accept carries none. relay records `reviewed {job, of,
 commit, verdict, reason, family}`; the fold keeps `verdicts` on the reviewed job, each
 with the reviewer, the commit it judged and its reason, and `view status` shows the
-latest (`review by rev: reject: test-failure`).
+verdicts for the latest reviewed commit only (`review by rev: reject: test-failure`),
+so an earlier commit's reject is history, not the state.
 
 - **A reject resumes the builder's session** with the reviewer's findings, as `queue
   resume` would, while the builder is not working, no more than `hooks.max_decisions`
   reviews have rejected it (later rejects are recorded, and say they resumed nothing),
-  and another run keeps it under `limits.job_ceiling_usd`. It is up to you (or the
-  orchestrator) to queue the next review once the builder is done again.
+  and another run keeps it under `limits.job_ceiling_usd`.
+- **A builder that answers a reject is judged again.** When that run ends `done`, relay
+  resumes the reviewer whose latest verdict was the reject, on the new tip: its ref is
+  fetched again and the preamble names the new commit, so the board does not keep a
+  stale verdict. The same bounds apply (the reviewer's `hooks.max_decisions` and the
+  job's ceiling, and a banned model), and a builder that fails is not re-reviewed.
+  A reviewer that cannot be resumed is left as it was; queue another review.
 - **Independence.** relay records the reviewer's model family (`anthropic`, `openai`,
   `google`, ...; a model it does not know is its provider). A review is refused on the
   builder's family only when the reviewed job's profile declares `independent =
@@ -504,6 +510,9 @@ a totals line, and a `collected` event per clone removed or emptied:
   and that no queued job waits for (`--after`) or forks, once it has ended
   `outputs_after_hours` ago. The source and the branch stay, so `queue resume`
   works and only rebuilds.
+- **Scratch directories** (a job's `/tmp`, `<data dir>/<project>/scratch/<job>`) on the
+  same rule as build outputs, for read-only jobs too, and any whose job no longer
+  exists. A live job's, or one a queued job waits for, is never touched.
 - **Whole clones** of `done` jobs after `clones_after_days`, landed or not; of
   failed or stopped jobs after `waiting_retain_days`, since those may be resumed.
   Every commit of the job's branch must be in the repository first (`land fetch`
@@ -530,7 +539,8 @@ stops cleanly at `pass_seconds` and the next goes on; only one runs at a time.
 
 **A ceiling for running jobs.** The runner measures a build job's clone when it
 starts and every `disk_sample_minutes` (a recursive stat walk, bounded in time,
-not following links). The size is on the board (`12G`) and in `--json`
+not following links), together with the job's scratch directory (`/tmp`), which a
+read-only job has too. The size is on the board (`12G`) and in `--json`
 (`disk_bytes`). When a clone passes `job_disk_gb`, or free disk falls under
 `min_free_disk_gb` while it is the largest clone running, the `disk` [hook](#hooks)
 point is reached. With no `disk` chain, or every handler deferring, the job is
@@ -663,7 +673,8 @@ action's `budget`, else the same cap again).
 
 Each session runs under `bwrap`. It sees the machine read-only, except for:
 
-- **Hidden** (shown empty): `sandbox.hide`, by default your repository's
+- **Hidden** (shown empty, and read-only, so a write to one fails at once instead of
+  filling RAM): `sandbox.hide`, by default your repository's
   siblings; every account of every harness but its own; relay's own state and
   other jobs' clones; the credential stores in `sandbox.hide_home`; and host
   sockets (`/run/user/<uid>`, sockets under `/run`), since a read-only mount
@@ -672,6 +683,13 @@ Each session runs under `bwrap`. It sees the machine read-only, except for:
   what in it the host later runs or obeys (claude's settings, hooks, plugins,
   skills and scripts; omp's config, agents, extensions and natives), which is
   mounted back read-only.
+- **`/tmp`**: a directory on disk, never RAM. Each job gets its own scratch
+  directory, `<data dir>/<project>/scratch/<job>`, bound at `/tmp` (`TMPDIR` stays
+  `/tmp`), created when the job starts. A read-only job (a review) cannot write its
+  repository, so this is where it builds, with `CARGO_TARGET_DIR=/tmp/...` for one.
+  It counts in the job's disk use (`limits.job_disk_gb`, the board's size column) and
+  gc removes it with the clone's build outputs ([disk](#disk)). Nothing in the
+  sandbox is a RAM tmpfs that holds data.
 - **Caches** (`sandbox.caches`, default `~/.cache` and cargo's registry and
   git checkouts): writable, but relay's own directory for the project, shared
   by its sessions and never the host's. A session that could write the host's
@@ -707,7 +725,8 @@ and build jobs its edits-only mode.
 
 `relay probe` checks the plan from the inside, for one account of each
 harness: every hidden path is empty and no socket, with a control proving it
-exists outside; every writable one is writable and every read-only one is not;
+exists outside, and no hidden directory is writable; every writable one is writable
+and every read-only one is not; `/tmp` is relay's directory on disk;
 and every cache shows relay's directory, not the host's.
 
 relay's state directory is owner-only, since it holds briefs, answers and

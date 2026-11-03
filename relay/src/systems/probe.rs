@@ -89,6 +89,7 @@ struct Probe<'a> {
     clone: PathBuf,
     neighbour: PathBuf,
     scratch: PathBuf,
+    tmp: PathBuf,
 }
 
 impl<'a> Probe<'a> {
@@ -100,8 +101,9 @@ impl<'a> Probe<'a> {
             clone: ctx.clones.join(format!("probe-{id}")),
             neighbour: ctx.clones.join(format!("probe-other-{id}")),
             scratch: ctx.job_scratch(&format!("probe-{id}")),
+            tmp: ctx.job_scratch(&format!("probe-{id}")).join("tmp"),
         };
-        for d in [&p.clone, &p.neighbour, &p.scratch] {
+        for d in [&p.clone, &p.neighbour, &p.scratch, &p.tmp] {
             std::fs::create_dir_all(d)?;
         }
         std::fs::write(p.neighbour.join("secret"), "x")?;
@@ -163,6 +165,19 @@ impl<'a> Probe<'a> {
                 inside: all(read_only),
                 outside: None,
             },
+            Check {
+                what: "/tmp is relay's directory on disk (not RAM) and writable".into(),
+                inside: format!("test -w /tmp && test -e /tmp/{}", cache_marker()),
+                outside: None,
+            },
+            Check {
+                what: "hidden directories are not writable".into(),
+                inside: all(plan
+                    .iter()
+                    .filter(|(p, k)| *k == Mount::Hidden && p.is_dir())
+                    .map(|(p, _)| format!("! test -w {}", q(p)))),
+                outside: None,
+            },
             Check { what: "caches are relay's own, not the host's".into(), inside: all(caches), outside: None },
             Check {
                 what: "the repository is readable, not writable".into(),
@@ -194,6 +209,7 @@ impl<'a> Probe<'a> {
             home: self.home,
             workdir: Some(&self.clone),
             scratch: &self.scratch,
+            tmp: &self.tmp,
             cwd: &self.clone,
             account: true,
         };
@@ -205,6 +221,7 @@ impl<'a> Probe<'a> {
                 _ => None,
             })
             .collect();
+        std::fs::write(self.tmp.join(cache_marker()), "")?;
         for m in &markers {
             std::fs::create_dir_all(m.parent().unwrap_or(m))?;
             std::fs::write(m, "")?;
@@ -244,7 +261,7 @@ impl<'a> Probe<'a> {
 
 impl Drop for Probe<'_> {
     fn drop(&mut self) {
-        for d in [&self.clone, &self.neighbour, &self.scratch] {
+        for d in [&self.clone, &self.neighbour, &self.scratch, &self.tmp] {
             let _ = std::fs::remove_dir_all(d);
         }
     }

@@ -148,12 +148,15 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, scratch: &Path) -> R
         layer_env(ctx, &mut inv, &ctx.cfg.repo)?;
         let out = scratch.join("check.out");
         let file = std::fs::File::create(&out)?;
-        let mounts = Mounts { home, workdir: None, scratch, cwd: tree, account: false };
+        let tmp = scratch.join("check-tmp");
+        std::fs::create_dir_all(&tmp)?;
+        let mounts = Mounts { home, workdir: None, scratch, tmp: &tmp, cwd: tree, account: false };
         let mut c = self::command(ctx, &inv, &mounts);
         c.stdin(Stdio::null()).stdout(file.try_clone()?).stderr(file);
         let status = c.status().context("running the acceptance check")?;
         let text = tail_text(&out, 2 * TAIL as u64);
         let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_dir_all(&tmp);
         let code = status.code();
         Ok(Ran { said: said(code), code: code.unwrap_or(-1), text })
     };

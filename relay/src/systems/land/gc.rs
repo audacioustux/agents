@@ -6,6 +6,8 @@
 //! - a job that is not live, and that no queued job waits for or forks, loses
 //!   the paths in `build_outputs` from its clone after `outputs_after_hours`;
 //!   the source and the branch stay, so a resume only rebuilds;
+//! - the same job's scratch directory (its `/tmp`, on disk) goes whole, and so does one whose job is gone;
+//!   a read-only job has no clone but has this;
 //! - a `done` job's whole clone goes after `clones_after_days`, a failed or
 //!   stopped one's after `waiting_retain_days`, once every commit of its
 //!   branch is in the repository (else rescued into `refs/relay/rescue/<job>`);
@@ -36,6 +38,8 @@ pub enum Kind {
     Outputs,
     /// A whole clone.
     Clone,
+    /// A job's scratch directory (its `/tmp`), removed whole.
+    Scratch,
     /// A log, gzipped.
     Log,
     /// The ref in the repository a review read its branch by, deleted.
@@ -78,6 +82,37 @@ pub fn due(world: &World, j: &Job, gc: &Gc, now_us: u64) -> Due {
     let age = now_us.saturating_sub(ended);
     let keep = if j.status == crate::world::Status::Done { gc.clones_after_days } else { gc.waiting_retain_days };
     Due { outputs: age >= micros(gc.outputs_after_hours * 3600.0), clone: age >= micros(keep * 86_400.0) }
+}
+
+/// Whether `j`'s scratch directory is due to go: it has ended `outputs_after_hours` ago and nothing
+/// holds it or waits for it. Unlike a clone's outputs, a read-only job has one too.
+fn scratch_due(world: &World, j: &Job, gc: &Gc, now_us: u64) -> bool {
+    j.ended_at.is_some_and(|ended| {
+        !j.status.is_live()
+            && !waited_for(world, &j.name)
+            && now_us.saturating_sub(ended) >= micros(gc.outputs_after_hours * 3600.0)
+    })
+}
+
+/// The scratch directories gc may act on: real directories directly inside relay's own, of a job that is
+/// due (see `scratch_due`) or no longer exists.
+fn scratches(ctx: &Ctx, world: &World, gc: &Gc, now_us: u64) -> Vec<Item> {
+    let mut items = Vec::new();
+    for e in std::fs::read_dir(&ctx.scratch).into_iter().flatten().flatten() {
+        let Ok(name) = e.file_name().into_string() else { continue };
+        if !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let go = match world.jobs.get(&name) {
+            Some(j) => !runner_alive(j) && scratch_due(world, j, gc, now_us),
+            None => true,
+        };
+        if go {
+            items.push(Item { job: name, kind: Kind::Scratch, path: e.path() });
+        }
+    }
+    items.sort_by(|a, b| a.job.cmp(&b.job));
+    items
 }
 
 /// `rel` under `base`, when it exists and no part of it is a symlink.
@@ -138,6 +173,7 @@ pub fn plan(ctx: &Ctx, world: &World, now_us: u64) -> Vec<Item> {
             }
         }
     }
+    items.extend(scratches(ctx, world, gc, now_us));
     items.extend(review_refs(ctx, world, gc, now_us));
     items
 }
@@ -369,9 +405,13 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
         anyhow::ensure!(out.status.success(), "could not delete {name}");
         return Ok(());
     }
+    if item.kind == Kind::Scratch {
+        std::fs::remove_dir_all(&item.path).with_context(|| format!("removing {}", item.path.display()))?;
+        return collected(ctx, &item.job, "scratch", a.bytes);
+    }
     let j = world.jobs.get(&item.job).context("the job is gone")?;
     match item.kind {
-        Kind::ReviewRef => unreachable!("handled above"),
+        Kind::ReviewRef | Kind::Scratch => unreachable!("handled above"),
         Kind::Log => gzip_log(&item.path),
         Kind::Outputs => {
             let meta = item.path.symlink_metadata()?;
@@ -459,6 +499,17 @@ mod tests {
             assert_eq!(due_of(n), Due::default(), "{n}");
         }
         assert_eq!(due_of("free"), Due { outputs: true, clone: true });
+    }
+
+    #[test]
+    fn a_scratch_directory_is_due_by_the_age_of_the_end_even_for_a_read_only_job() {
+        let gc = Gc::default();
+        let look = Job { kind: crate::bus::Kind::Read, ..job("look", Status::Done, Some(1_000)) };
+        let w = world(vec![look.clone(), job("run", Status::Running, Some(1_000)), job("fresh", Status::Done, None)]);
+        assert!(!scratch_due(&w, &look, &gc, 1_000 + 6 * HOUR - 1), "under six hours");
+        assert!(scratch_due(&w, &look, &gc, 1_000 + 6 * HOUR), "a read-only job has no clone, but has a /tmp");
+        assert!(!scratch_due(&w, &w.jobs["run"], &gc, 10 * DAY), "a live job keeps it");
+        assert!(!scratch_due(&w, &w.jobs["fresh"], &gc, 10 * DAY), "so does one that has not ended");
     }
 
     #[test]

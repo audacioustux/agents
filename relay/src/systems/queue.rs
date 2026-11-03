@@ -325,11 +325,31 @@ pub fn resume_reviewed(ctx: &Ctx, builder: &str, message: String) -> Result<Opti
     let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
     let Some(j) = world.jobs.get(builder) else { return Ok(Some(format!("{builder} is gone"))) };
+    // This reject is already among the verdicts: `hooks.max_decisions` of them resume the builder.
+    let rejected = j.verdicts.iter().filter(|v| v.verdict == crate::bus::Verdict::Reject).count();
+    resume_by_review(ctx, j, rejected, message)
+}
+
+/// Resumes the reviewer `reviewer` of a branch whose builder has answered its reject, so its verdict is
+/// for the new tip. Held to the same bounds as the builder's resume: at most `hooks.max_decisions` rejects
+/// by this reviewer already, the job's ceiling, and a banned model. `None` when resumed, else why not.
+pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String) -> Result<Option<String>> {
+    let _lock = ctx.jobs_lock()?;
+    let world = ctx.world()?;
+    let Some(j) = world.jobs.get(reviewer) else { return Ok(Some(format!("{reviewer} is gone"))) };
+    let rejected = world.jobs.get(builder).map_or(0, |b| {
+        b.verdicts.iter().filter(|v| v.reviewer == reviewer && v.verdict == crate::bus::Verdict::Reject).count()
+    });
+    resume_by_review(ctx, j, rejected, message)
+}
+
+/// The shared bounds of a resume that a review causes: `j` is not live, `rejected` is within
+/// `hooks.max_decisions`, another run fits its ceiling, and its model is not banned.
+fn resume_by_review(ctx: &Ctx, j: &crate::world::Job, rejected: usize, message: String) -> Result<Option<String>> {
+    let builder = j.name.as_str();
     if j.status.is_live() {
         return Ok(Some(format!("{builder} is {}", j.status.as_str())));
     }
-    // This reject is already among the verdicts: `hooks.max_decisions` of them resume the builder.
-    let rejected = j.verdicts.iter().filter(|v| v.verdict == crate::bus::Verdict::Reject).count();
     let max = usize::try_from(ctx.cfg.hooks.max_decisions).unwrap_or(usize::MAX);
     if rejected > max {
         return Ok(Some(format!("{max} reviews have resumed it already (hooks.max_decisions)")));

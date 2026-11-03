@@ -122,6 +122,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 let _ = std::fs::remove_file(ctx.job_file(&name, ext));
             }
             let _ = std::fs::remove_dir_all(ctx.job_scratch(&name));
+            let _ = std::fs::remove_dir_all(ctx.job_tmp(&name));
             // The ref a review read its branch by is the review's own, and goes with it.
             let _ = Ctx::git(&ctx.cfg.repo).args(["update-ref", "-d", &format!("refs/relay/review/{name}")]).output();
             ctx.port(&Source(())).emit(LandEvent::Forgotten { job: name.clone() })?;

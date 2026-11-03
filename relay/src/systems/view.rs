@@ -2,6 +2,7 @@
 
 mod stats;
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -169,7 +170,14 @@ pub fn job_cells(cfg: &Config, world: &World, j: &Job, now: u64) -> Vec<String> 
 /// The latest acceptance check and the latest review of a job, for its board row.
 fn declared(j: &Job) -> String {
     let bar = j.bars.last().map_or(String::new(), |b| format!("  check {}", b.result.as_str()));
-    let review = j.verdicts.last().map_or(String::new(), |v| format!("  review by {}: {}", v.reviewer, v.summary()));
+    // Only the latest reviewed commit's verdicts: an earlier commit's reject is history, not the state.
+    let latest = j.verdicts.last().map(|l| &l.commit);
+    let mut review = String::new();
+    for (i, v) in j.verdicts.iter().enumerate() {
+        if Some(&v.commit) == latest && !j.verdicts[i + 1..].iter().any(|n| n.reviewer == v.reviewer) {
+            let _ = write!(review, "  review by {}: {}", v.reviewer, v.summary());
+        }
+    }
     let of = j.review_of().map_or(String::new(), |b| format!("  reviews {b}"));
     format!("{of}{bar}{review}")
 }

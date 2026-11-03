@@ -15,6 +15,10 @@
 //! | 7 | relay's own state and clones | hidden |
 //! | 8 | the job's own clone and directory | writable |
 //!
+//! `/tmp` is not a layer: it is the job's scratch directory on disk (`Ctx::job_tmp`), bound there,
+//! never a RAM tmpfs. A hidden directory is an empty tmpfs made read-only once everything inside it
+//! has been mounted, so a write to it fails instead of filling RAM.
+//!
 //! A read-only mount does not stop a process connecting to a Unix socket in
 //! it, so sockets are hidden, not just read-only. The network stays shared,
 //! since the session needs its provider's API, and with it abstract sockets.
@@ -33,6 +37,8 @@ pub struct Mounts<'a> {
     pub workdir: Option<&'a Path>,
     /// The job's private directory (prompt file, session store).
     pub scratch: &'a Path,
+    /// A directory on disk, bound at `/tmp` (and named by `TMPDIR`); never RAM.
+    pub tmp: &'a Path,
     pub cwd: &'a Path,
     /// Whether the session's own account is mounted. A check run on its work is not the session: it
     /// gets no sign-in to read and nothing of the account to write.
@@ -102,10 +108,17 @@ fn host_sockets() -> Vec<PathBuf> {
 
 pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsString)>) -> Vec<OsString> {
     let mut a: Vec<OsString> =
-        ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"].map(OsString::from).to_vec();
+        ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--bind"].map(OsString::from).to_vec();
+    a.extend([m.tmp.as_os_str().to_owned(), "/tmp".into()]);
+    // A hidden directory is an empty tmpfs, made read-only once every mount has been made inside it:
+    // a write fails loudly instead of filling RAM.
+    let mut sealed = Vec::new();
     for (p, mount) in plan(ctx, user_home, m) {
         let (flag, src) = match &mount {
-            Mount::Hidden if p.is_dir() => ("--tmpfs", None),
+            Mount::Hidden if p.is_dir() => {
+                sealed.push(p.clone());
+                ("--tmpfs", None)
+            }
             Mount::Hidden => ("--ro-bind", Some(Path::new("/dev/null"))),
             Mount::ReadOnly => ("--ro-bind", Some(p.as_path())),
             Mount::Writable => ("--bind", Some(p.as_path())),
@@ -117,6 +130,9 @@ pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsS
         a.push(flag.into());
         a.extend(src.map(OsString::from));
         a.push(p.into());
+    }
+    for p in sealed {
+        a.extend(["--remount-ro".into(), p.into()]);
     }
     a.extend(
         ["--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent", "--new-session", "--clearenv"]

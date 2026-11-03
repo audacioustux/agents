@@ -26,6 +26,8 @@ pub struct Ctx {
     pub clones: PathBuf,
     /// `$XDG_DATA_HOME/relay/<name>/caches`: the sessions' own `sandbox.caches`.
     pub caches: PathBuf,
+    /// `$XDG_DATA_HOME/relay/<name>/scratch`: one directory per job, on disk, that is its `/tmp`.
+    pub scratch: PathBuf,
     /// Everything relay keeps for every project, hidden from sessions.
     pub state_root: PathBuf,
     pub data_root: PathBuf,
@@ -62,6 +64,7 @@ impl Ctx {
             jobs: state.join("jobs"),
             clones: data.join("clones"),
             caches: data.join("caches"),
+            scratch: data.join("scratch"),
             git_dirs: git_dirs(&cfg.repo),
             state: state.clone(),
             state_root,
@@ -173,6 +176,12 @@ impl Ctx {
     /// keep sessions with the task, its session store. Mounted writable in the sandbox.
     pub fn job_scratch(&self, job: &str) -> PathBuf {
         self.jobs.join(format!("{job}.d"))
+    }
+
+    /// The job's `/tmp`: a directory on disk (never RAM), bound there in its sandbox. It is counted in
+    /// the job's disk use and emptied by gc with the clone's build outputs.
+    pub fn job_tmp(&self, job: &str) -> PathBuf {
+        self.scratch.join(job)
     }
 
     /// Opens a log for appending, readable by its owner only.

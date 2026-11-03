@@ -1056,7 +1056,10 @@ fn gc_empties_the_clones_of_ended_jobs_nothing_holds_and_only_those() {
     ok(&pass, "gc");
     let report: serde_json::Value = serde_json::from_slice(&pass.stdout).unwrap();
     let acted: Vec<&str> = report["actions"].as_array().unwrap().iter().filter_map(|a| a["job"].as_str()).collect();
-    assert_eq!(acted, ["old"], "{report}");
+    assert_eq!(acted, ["old", "old"], "its build outputs, and its /tmp: {report}");
+    let scratch = |n: &str| env.root.join("data/relay/flow/scratch").join(n);
+    assert!(!scratch("old").exists(), "its scratch directory goes with the outputs");
+    assert!(scratch("waited").exists() && scratch("busy").exists(), "a queued job waits for it, a running one is live");
     assert!(report["freed_bytes"].as_u64().unwrap() >= 50_000, "{report}");
     let old = workdir(&env, "old");
     assert!(!old.join("target").exists(), "its build outputs are gone");
@@ -1535,48 +1538,38 @@ fn a_review_sees_the_builders_branch_and_a_reject_resumes_the_builder_with_the_f
     );
     let told = prompts(&env, "a");
     assert!(told.contains("rejected it (test-failure)") && told.contains("parse panics on empty input"), "{told}");
-    assert!(job(&env, "rev")["reason"].as_str().unwrap_or_default().contains("build resumed"), "{}", job(&env, "rev"));
-    assert!(board(&env).contains("review by rev: reject: test-failure"), "{}", board(&env));
-
-    // Landing is never blocked, but the note says the tip has no accepting verdict.
-    let out = relay(&env, &["land", "fetch", "build"]);
-    ok(&out, "land");
-    assert!(out_of(&out).contains("note: no review has accepted"), "{}", out_of(&out));
     let new_tip = rev_parse(&workdir(&env, "build"), "HEAD");
     assert_ne!(new_tip, tip);
 
-    // An accept at the new tip clears it, with no independence declared and the same family allowed.
-    ok(
-        &relay(
-            &env,
-            &[
-                "queue",
-                "add",
-                "rev2",
-                "--review-of",
-                "build",
-                "--text",
-                "[verdict-accept] Review the change.",
-                "--model",
-                "claude=claude-opus-5-5",
-            ],
-        ),
-        "queue",
-    );
-    wait_for(&env, "rev2");
-    let b = job(&env, "build");
+    // The builder answered, so the reviewer judges the new tip (more of that in its own test).
+    let b = wait_verdicts(&env, "build", 2);
+    assert_eq!(wait_for(&env, "rev")["attempts"], 2, "the reviewer was resumed");
+    let v = &b["verdicts"][1];
     assert_eq!(
-        (b["verdicts"][1]["verdict"].as_str(), b["verdicts"][1]["commit"].as_str(), b["attempts"].as_u64()),
-        (Some("accept"), Some(new_tip.as_str()), Some(2)),
-        "an accept resumes nothing: {b}"
+        (v["reviewer"].as_str(), v["verdict"].as_str(), v["commit"].as_str()),
+        (Some("rev"), Some("accept"), Some(new_tip.as_str())),
+        "{b}"
     );
+    assert_eq!(job(&env, "build")["attempts"], 2, "an accept resumes nothing: {b}");
     let out = relay(&env, &["land", "fetch", "build"]);
     assert!(!out_of(&out).contains("note:"), "{}", out_of(&out));
-    assert!(board(&env).contains("review by rev2: accept"), "{}", board(&env));
+    assert!(board(&env).contains("review by rev: accept"), "{}", board(&env));
+}
+
+/// The job once it has `n` verdicts, bounded.
+fn wait_verdicts(env: &Env, name: &str, n: usize) -> serde_json::Value {
+    for _ in 0..150 {
+        let j = job(env, name);
+        if j["verdicts"].as_array().is_some_and(|v| v.len() >= n) {
+            return j;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("{name} never had {n} verdicts: {}", job(env, name));
 }
 
 #[test]
-fn a_resumed_review_is_told_the_commit_it_is_to_judge_now() {
+fn a_builder_that_answers_a_reject_is_judged_again_on_its_new_tip() {
     if !have_bwrap() {
         return;
     }
@@ -1587,18 +1580,29 @@ fn a_resumed_review_is_told_the_commit_it_is_to_judge_now() {
     let new_tip = rev_parse(&workdir(&env, "build"), "HEAD");
     assert_ne!(new_tip, tip, "the reject sent the builder back to work");
 
-    // The reviewer is resumed after the builder moved: its ref is fetched again, and its prompt, though
-    // it is only a resume message, says which commit that is, so a verdict cannot name one it never saw.
+    // Nobody asks: the reviewer is resumed. Its ref is fetched again, and its prompt names the commit,
+    // so a verdict cannot be for one it never saw.
+    let b = wait_verdicts(&env, "build", 2);
+    assert_eq!(wait_for(&env, "rev")["attempts"], 2);
+    let v = &b["verdicts"][1];
+    assert_eq!((v["verdict"].as_str(), v["commit"].as_str()), (Some("accept"), Some(new_tip.as_str())), "{b}");
+    let told = prompts(&env, "a");
+    assert!(told.contains(&format!("at commit {new_tip}")) && told.contains("Judge its branch again"), "{told}");
+    assert_eq!(rev_parse(&env.repo, "refs/relay/review/rev"), new_tip);
+    // The board shows the verdict for the latest reviewed commit, not the stale reject.
+    let shown = board(&env);
+    assert!(shown.contains("review by rev: accept") && !shown.contains("review by rev: reject"), "{shown}");
+    assert_eq!(job(&env, "build")["attempts"], 2, "an accept resumes nothing");
+    let out = relay(&env, &["land", "fetch", "build"]);
+    assert!(!out_of(&out).contains("note:"), "{}", out_of(&out));
+
+    // A person may still resume a review by hand.
     let seen = prompts(&env, "a").len();
     ok(&relay(&env, &["queue", "resume", "rev", "--message", "[verdict-accept] Look again."]), "resume");
-    assert_eq!(wait_for(&env, "rev")["status"], "done");
-    let told = prompts(&env, "a")[seen..].to_owned();
-    assert!(told.contains(&format!("at commit {new_tip}")) && told.contains("Look again"), "{told}");
-    assert_eq!(rev_parse(&env.repo, "refs/relay/review/rev"), new_tip);
-    let v = job(&env, "build")["verdicts"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!((v["verdict"].as_str(), v["commit"].as_str()), (Some("accept"), Some(new_tip.as_str())), "{v}");
+    assert_eq!(wait_for(&env, "rev")["attempts"], 3);
+    assert!(prompts(&env, "a")[seen..].contains(&format!("at commit {new_tip}")));
 
-    // gc takes a review's ref once the review is over, and `land clean` takes it with the review.
+    // gc takes a review's ref once the review is over.
     configure(&env, "", "[gc]\noutputs_after_hours = 0\n");
     let out = relay(&env, &["land", "gc"]);
     ok(&out, "gc");
@@ -1627,6 +1631,10 @@ fn rejects_past_max_decisions_are_recorded_but_stop_resuming_the_builder() {
     let b = job(&env, "build");
     assert_eq!(b["verdicts"].as_array().unwrap().len(), 2, "the verdict is recorded all the same");
     assert_eq!(b["attempts"], 2, "but the builder was not sent back again: {b}");
+    // Landing is never blocked, but the note says the tip has no accepting verdict.
+    let out = relay(&env, &["land", "fetch", "build"]);
+    ok(&out, "land");
+    assert!(out_of(&out).contains("note: no review has accepted"), "{}", out_of(&out));
 }
 
 #[test]
@@ -1981,4 +1989,55 @@ fn a_checkpoint_reads_the_worktree_without_running_the_clones_filters() {
     assert!(prompt.contains("[filter]"), "the stub saw its flag: {prompt}");
     let marker = env.home.join(".claude.a/filter-ran");
     assert!(!marker.exists(), "a filter from the clone's configuration ran on the host");
+}
+
+/// What `stat -f` says the filesystem under `path` is, as seen from the host.
+fn fs_type(path: &Path) -> String {
+    let out = Command::new("stat").args(["-f", "-c", "%T"]).arg(path).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+#[test]
+fn a_jobs_tmp_is_a_directory_on_disk_that_is_counted_and_collected_and_hidden_directories_are_read_only() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("tmp", false);
+    configure(&env, "disk_sample_minutes = 0.02\n", "");
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "look", "--text", "[tmpcheck] Look around.", "--readonly"]), "queue");
+
+    // The scratch directory is on disk, under the project's data directory, and what the job wrote under
+    // /tmp is in it, so the job's disk use and the board's size column count it.
+    let scratch = env.root.join("data/relay/flow/scratch/look");
+    let fill = scratch.join("relay-fill");
+    for _ in 0..200 {
+        if fill.exists() && job(&env, "look")["disk_bytes"].as_u64().unwrap_or(0) >= 8_000_000 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(std::fs::metadata(&fill).map_or(0, |m| m.len()), 8 * 1024 * 1024, "the write landed on the host");
+    let j = job(&env, "look");
+    assert!(j["disk_bytes"].as_u64().unwrap_or(0) >= 8_000_000, "the job's disk use counts /tmp: {j}");
+    assert!(board(&env).contains("8."), "the size column shows it: {}", board(&env));
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(wait_for(&env, "look")["status"], "done");
+
+    let said = |f: &str| std::fs::read_to_string(env.home.join(".claude.a").join(f)).unwrap_or_default();
+    assert_eq!(said("tmp-fs").trim(), fs_type(&scratch), "inside, /tmp is the filesystem the scratch directory is on");
+    if fs_type(&scratch) != "tmpfs" {
+        assert_ne!(said("tmp-fs").trim(), "tmpfs");
+    }
+    assert_eq!(said("hidden-write").trim(), "refused", "a hidden directory is read-only, not RAM");
+    assert!(!env.root.join("state/probe-write").exists());
+
+    // gc takes the directory of a job that has ended, with the clone's build outputs, and says so.
+    configure(&env, "", "[gc]\noutputs_after_hours = 0\n");
+    let out = relay(&env, &["land", "gc"]);
+    ok(&out, "gc");
+    assert!(out_of(&out).contains("scratch/look"), "{}", out_of(&out));
+    assert!(!scratch.exists(), "the scratch directory is gone");
 }

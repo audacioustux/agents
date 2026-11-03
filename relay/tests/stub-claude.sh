@@ -12,6 +12,8 @@
 #   decisions appended to by every decision hook run there
 #   argv     appended to with every session's arguments
 #   prompts  appended to with every worker prompt (and the resume messages it is sent)
+#   tmp-fs, hidden-write  written by a brief containing [tmpcheck]: /tmp's filesystem type, and whether a write into a hidden directory worked
+#   rereview  the verdict (accept|reject) of a review that relay resumed after its reject (default accept)
 #   cargo    appended to with every session's CARGO_INCREMENTAL (`unset` when it has none)
 # A brief containing [idle] makes no commit; one containing [status-done] reports status: done;
 # [verdict-accept] and [verdict-reject] also give a review's verdict; [uncommitted] leaves a changed tracked
@@ -52,6 +54,12 @@ fi
 mkdir -p "$(dirname "$transcript")"
 echo '{"turn":1}' >>"$transcript"
 echo '{"type":"system","subtype":"init"}'
+case "$prompt" in *"[tmpcheck]"*)
+  # 8 MB under /tmp, the filesystem /tmp is on, and whether a hidden sibling of the repository is writable.
+  dd if=/dev/zero of=/tmp/relay-fill bs=1M count=8 2>/dev/null
+  stat -f -c %T /tmp >"$acct/tmp-fs"
+  if touch "$(dirname "$PWD")/state/probe-write" 2>/dev/null; then echo wrote >"$acct/hidden-write"; else echo refused >"$acct/hidden-write"; fi ;;
+esac
 while [ -f "$acct/hold" ]; do sleep 0.1; done
 if [ -f "$acct/fail" ]; then
   echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","num_turns":1,"total_cost_usd":0.01}'
@@ -84,6 +92,7 @@ case "$prompt" in *"[status-done]"*) final="FINAL\\nstatus: done" ;; esac
 case "$prompt" in
 *"[verdict-reject]"*) final="FINAL\\nstatus: done\\nverdict: reject\\nreason: test-failure\\nnotes: parse panics on empty input" ;;
 *"[verdict-accept]"*) final="FINAL\\nstatus: done\\nverdict: accept" ;;
+*"Judge its branch again"*) final="FINAL\\nstatus: done\\nverdict: $(cat "$acct/rereview" 2>/dev/null || echo accept)" ;;
 esac
 printf '%s\n--\n' "$prompt" >>"$acct/prompts"
 case "$prompt" in *"[idle]"*) ;; *)

@@ -176,6 +176,11 @@ pub fn dir_size(path: &Path, within: Duration) -> (u64, bool) {
     (total, true)
 }
 
+/// The disk the directories hold together, each walked for at most `within` (a lower bound past it).
+pub fn dirs_size(paths: &[std::path::PathBuf], within: Duration) -> u64 {
+    paths.iter().map(|p| dir_size(p, within).0).sum()
+}
+
 /// A size for people and boards: `340K`, `12G`, `1.5G` (decimal units).
 pub fn size_str(bytes: u64) -> String {
     #[allow(clippy::cast_precision_loss)]

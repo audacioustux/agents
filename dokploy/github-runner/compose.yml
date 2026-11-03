@@ -1,4 +1,4 @@
-# Three runner services on one host. A runner registers to exactly one scope, so
+# Four runner services on one host. A runner registers to exactly one scope, so
 # each pool is its own service; scaling either is its `deploy.replicas`.
 #
 # Replicas rule out `container_name` and per-replica named volumes, so runner
@@ -55,21 +55,31 @@ services:
     # 64 MB failed CI run 41156386358 ("could not resize shared memory
     # segment", Tickify inbox 1807). 2 GB counts against the 16G limit below.
     shm_size: 2gb
-    # replicas x limits.cpus must not exceed the host's 20 cores. At 3 x 8 (24)
-    # three concurrent CI runs slowed each other until units hit their 600 s
-    # cap and the 50-minute step cap (stage-crew/tickify run 37960180645: 65 of
-    # 66 units passed, then the step timed out). 2 x 10 runs two full checks at
-    # once without contention, and the check's CHECK_CONCURRENCY=auto reads the
-    # 10-CPU limit (5 units at a time instead of 4). The Optics pool below
-    # borrows only idle cores, at a small fraction of this pool's weight.
+    # replicas x limits.cpus must not exceed the host's 20 cores: 4 x 5. At
+    # 3 x 8 (24) three concurrent CI runs slowed each other until units hit
+    # their 600 s cap and the 50-minute step cap (stage-crew/tickify run
+    # 37960180645: 65 of 66 units passed, then the step timed out).
+    #
+    # Four runners are for four shards. The check sizes itself from this
+    # container's CPU quota (CHECK_CONCURRENCY=auto, CORES_PER_UNIT = 2 in
+    # tickify's scripts/run-check.ts), so 5 CPUs is 2 units at a time, not 5:
+    # tickify's two shards on 5-CPU runners took 144 minutes in the replay,
+    # and the first shard that ran wholly at 5 CPUs was cut at the 60-minute
+    # step limit (run 39310585455; agents#19, closed). Four shards at
+    # CHECK_CONCURRENCY=3 replay at 52 minutes; at auto, at 76 (README, "Four
+    # runners of five CPUs"). So this count only runs with tickify's ci.yml
+    # dealing four shards at CHECK_CONCURRENCY=3, never beside two shards.
+    # Memory stays at the 10-CPU runner's: fewer units share it. The Optics
+    # pool below borrows only idle cores, at a small fraction of this pool's
+    # weight.
     deploy:
-      replicas: 2
+      replicas: 4
       resources:
         reservations:
-          cpus: 2
+          cpus: 1
           memory: 16G
         limits:
-          cpus: 10
+          cpus: 5
           memory: 16G
     environment:
       RUNNER_SCOPE: repo
@@ -97,13 +107,17 @@ services:
     # 4 CPUs and 8 GB: twice the CPUs of GitHub's hosted runner for a private
     # repo, on which tickify's production apply ran in 13-14 minutes (its runs
     # of 18 Oct). Over-committing the host's 20 cores is allowed (owner,
-    # 20 Oct): the limits sum to 4 + 2 x 10 + 2 x 4 = 32. Limits are not
-    # reservations, and CPU weight is what a busy host divides by: against two
-    # CI replicas at the default weight and Optics' two at 64, this one is
-    # owed 1024 / (3 x 1024 + 2 x 64) of 20 cores, about 6.4, above its limit of 4,
-    # so CI cannot hold it below its limit.
+    # 20 Oct): the limits sum to 4 + 4 x 5 + 2 x 2 + 2 x 4 = 36. Limits are
+    # not reservations, and CPU weight is what a busy host divides by. Beside
+    # four CI replicas and two small ones at the default weight (and Optics'
+    # two at 64) a default-weight production runner is owed about 3.1 of 20
+    # cores, below its limit of 4 (the small pool capped at its 2 each, the
+    # rest divided by weight; cgroup v1 shares), where beside two CI replicas
+    # it was owed its whole 4. At twice the default weight it is owed 5.2
+    # before the cap, so CI cannot hold it below its limit.
     # Production's jobs start no containers and need no fixed port, so no
     # Docker socket and no host network.
+    cpu_shares: 2048
     deploy:
       replicas: 1
       resources:
@@ -118,6 +132,39 @@ services:
       LABELS: dokploy-tickify
       # Without `self-hosted`, `Linux` and `X64`, only a job that names
       # dokploy-tickify lands here.
+      NO_DEFAULT_LABELS: "true"
+      DISABLE_AUTO_UPDATE: "true"
+
+  # The small jobs of stage-crew/tickify (security scans, Edge, backup, e-mail
+  # and Grafana checks; the repository variable SMALL_RUNNER=on sends them
+  # here), which used to queue on the CI pool's two big runners. Until now this
+  # was a container run by hand (tickify-runner-small-1); README, "Moving the
+  # small runner in".
+  #
+  # Like production's runner: no Docker socket and no host network (no small
+  # job starts a container or reads a host-published port), the bare label
+  # dropped so only a job that names dokploy-tickify-small lands here, and
+  # given only its own token. The backup service's deploy holds Railway and
+  # backup credentials, so this pool is trusted as the CI pool is.
+  # 2 x 2 CPUs = the hand-run runner's 2, twice; 6G is above its 4G because
+  # Semgrep (security.yml's static-analysis) is the memory risk (agents#22) and RAM
+  # is plentiful.
+  runner-tickify-small:
+    <<: *runner
+    deploy:
+      replicas: 2
+      resources:
+        reservations:
+          memory: 2G
+        limits:
+          cpus: 2
+          memory: 6G
+    environment:
+      RUNNER_SCOPE: repo
+      REPO_URL: ${TICKIFY_REPO_URL:?}
+      ACCESS_TOKEN: ${TICKIFY_SMALL_ACCESS_TOKEN:?}
+      RUNNER_NAME_PREFIX: dokploy-tickify-small
+      LABELS: dokploy-tickify-small
       NO_DEFAULT_LABELS: "true"
       DISABLE_AUTO_UPDATE: "true"
 

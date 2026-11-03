@@ -962,3 +962,192 @@ fn a_job_held_too_long_is_decided_and_forced_where_policy_allows() {
     assert_eq!(wait_for(&env, "s1")["status"], "done");
     assert_eq!(wait_for(&env, "s2")["status"], "done");
 }
+
+/// Where relay keeps the job's records (its log, answer and brief).
+fn records(env: &Env, name: &str, ext: &str) -> PathBuf {
+    env.root.join("state/relay/flow/jobs").join(format!("{name}.{ext}"))
+}
+
+fn workdir(env: &Env, name: &str) -> PathBuf {
+    PathBuf::from(job(env, name)["workdir"].as_str().unwrap())
+}
+
+fn out_of(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The repository's commit subjects on `rev`, newest first; empty when there is no such ref.
+fn subjects(env: &Env, rev: &str) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&env.repo)
+        .args(["log", "--format=%s", rev])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    out_of(&out)
+}
+
+#[test]
+fn gc_empties_the_clones_of_ended_jobs_nothing_holds_and_only_those() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("gc-outputs", false);
+    configure(&env, "max_running = 1\n", "[gc]\noutputs_after_hours = 0\n[session.env]\nCARGO_INCREMENTAL = \"0\"\n");
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "old", "--text", "Make a change."]), "queue old");
+    assert_eq!(wait_for(&env, "old")["status"], "done");
+    ok(&relay(&env, &["queue", "add", "waited", "--text", "Make a change."]), "queue waited");
+    assert_eq!(wait_for(&env, "waited")["status"], "done");
+    let cargo = std::fs::read_to_string(env.home.join(".claude.a/cargo")).unwrap();
+    assert_eq!(cargo.lines().collect::<Vec<_>>(), ["0", "0"], "[session.env] reaches every job: {cargo}");
+
+    // A running job holds the only seat, so a job queued after `waited` stays queued and keeps it.
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "busy", "--text", "Make a change."]), "queue busy");
+    until(&env, "busy", "running");
+    ok(&relay(&env, &["queue", "add", "next", "--text", "Review it.", "--after", "waited"]), "queue next");
+    for name in ["old", "waited", "busy"] {
+        let dir = workdir(&env, name);
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        std::fs::write(dir.join("target/debug/big"), vec![0u8; 50_000]).unwrap();
+    }
+
+    let dry = relay(&env, &["land", "gc", "--dry-run"]);
+    ok(&dry, "dry run");
+    let text = out_of(&dry);
+    assert!(text.contains("gc: would remove") && text.contains("old/target"), "{text}");
+    assert!(workdir(&env, "old").join("target/debug/big").exists(), "a dry run changes nothing");
+
+    let pass = relay(&env, &["land", "gc", "--json"]);
+    ok(&pass, "gc");
+    let report: serde_json::Value = serde_json::from_slice(&pass.stdout).unwrap();
+    let acted: Vec<&str> = report["actions"].as_array().unwrap().iter().filter_map(|a| a["job"].as_str()).collect();
+    assert_eq!(acted, ["old"], "{report}");
+    assert!(report["freed_bytes"].as_u64().unwrap() >= 50_000, "{report}");
+    let old = workdir(&env, "old");
+    assert!(!old.join("target").exists(), "its build outputs are gone");
+    assert!(old.join("relay-output.txt").exists(), "its source stays");
+    assert_eq!(subjects(&env, "HEAD").lines().count(), 1);
+    let tip = Command::new("git").arg("-C").arg(&old).args(["rev-parse", "--verify", "relay/old"]).output().unwrap();
+    assert!(tip.status.success(), "and its branch");
+    assert_eq!(job(&env, "old")["collected"], "outputs");
+    assert!(board(&env).contains("(build outputs removed)"), "{}", board(&env));
+    assert!(workdir(&env, "waited").join("target/debug/big").exists(), "a queued job waits for it");
+    assert!(workdir(&env, "busy").join("target/debug/big").exists(), "a running job's clone is never touched");
+    let events = out_of(&relay(&env, &["view", "events"]));
+    assert!(events.contains("\"type\":\"collected\"") && events.contains("\"what\":\"outputs\""), "{events}");
+
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(wait_for(&env, "busy")["status"], "done");
+}
+
+#[test]
+fn a_done_clone_is_removed_with_its_unfetched_commits_rescued_and_the_job_can_resume() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("gc-clones", false);
+    configure(&env, "", "[gc]\nclones_after_days = 0\n");
+    claude_account(&env.home, "a", 10, false);
+    for name in ["lost", "landed"] {
+        ok(&relay(&env, &["queue", "add", name, "--text", "Make a change."]), "queue");
+        assert_eq!(wait_for(&env, name)["status"], "done");
+    }
+    ok(&relay(&env, &["land", "fetch", "landed"]), "land fetch");
+    let dirs = ["lost", "landed"].map(|n| workdir(&env, n));
+
+    let dry = out_of(&relay(&env, &["land", "gc", "--dry-run"]));
+    assert!(dry.contains("would remove") && workdir(&env, "lost").exists(), "{dry}");
+    assert!(subjects(&env, "refs/relay/rescue/lost").is_empty(), "a dry run rescues nothing");
+
+    let text = out_of(&relay(&env, &["land", "gc"]));
+    assert!(text.contains("rescued lost's unfetched commits into refs/relay/rescue/lost"), "{text}");
+    assert!(text.contains("gc: removed") && text.contains("freed"), "{text}");
+    assert!(dirs.iter().all(|d| !d.exists()), "both clones are gone");
+    assert_eq!(subjects(&env, "refs/relay/rescue/lost").trim(), "stub work\ninit", "its commit is safe");
+    assert!(subjects(&env, "refs/relay/rescue/landed").is_empty(), "a fetched branch needs no rescue");
+    assert!(subjects(&env, "relay/landed").contains("stub work"));
+    assert_eq!(job(&env, "lost")["collected"], "clone");
+    let fetch = relay(&env, &["land", "fetch", "lost"]);
+    assert_eq!(fetch.status.code(), Some(4), "{}", stderr(&fetch));
+    assert!(stderr(&fetch).contains("refs/relay/rescue/lost"), "{}", stderr(&fetch));
+
+    ok(&relay(&env, &["queue", "resume", "lost", "--message", "Go on."]), "resume");
+    assert_eq!(wait_for(&env, "lost")["status"], "done");
+    let log = commits(&job(&env, "lost")["workdir"]);
+    assert_eq!(log.matches("stub work").count(), 2, "the resumed clone started from the rescued work: {log}");
+}
+
+#[test]
+fn an_old_log_is_gzipped_and_still_read_by_view_result() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("gc-logs", false);
+    configure(&env, "", "[gc]\nlogs_gzip_after_days = 0\n");
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "talk", "--text", "Look.", "--readonly"]), "queue");
+    assert_eq!(wait_for(&env, "talk")["status"], "done");
+    let plain = std::fs::read_to_string(records(&env, "talk", "log.ndjson")).unwrap();
+    ok(&relay(&env, &["land", "gc"]), "gc");
+    assert!(!records(&env, "talk", "log.ndjson").exists());
+    let gz = records(&env, "talk", "log.ndjson.gz");
+    let back = Command::new("gzip").arg("-dc").arg(&gz).output().unwrap();
+    assert_eq!(out_of(&back), plain, "gzip gives the log back whole");
+
+    std::fs::remove_file(records(&env, "talk", "result.md")).unwrap();
+    let r = result(&env, "talk");
+    assert!(r.contains("log.ndjson.gz"), "{r}");
+    assert!(r.contains("ran on .claude.a"), "the answer is read out of the compressed log: {r}");
+    let json: serde_json::Value =
+        serde_json::from_slice(&relay(&env, &["view", "result", "talk", "--json"]).stdout).unwrap();
+    assert!(json["log"].as_str().unwrap().ends_with("talk.log.ndjson.gz"), "{json}");
+}
+
+#[test]
+fn a_running_job_over_its_disk_ceiling_is_stopped_and_can_be_resumed() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("disk-stop", false);
+    // 10 KB: any clone is over it.
+    configure(&env, "job_disk_gb = 0.00001\n", "");
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "grows", "--text", "Make a change."]), "queue");
+    let j = wait_for(&env, "grows");
+    assert_eq!(j["status"], "stopped", "{j}");
+    let why = j["reason"].as_str().unwrap();
+    assert!(why.starts_with("disk: clone ") && why.ends_with(" over 10K"), "{why}");
+    assert!(j["disk_bytes"].as_u64().unwrap() > 10_000, "the size is on the record: {j}");
+    assert!(workdir(&env, "grows").exists(), "the clone is kept for a resume");
+
+    std::fs::remove_file(&hold).unwrap();
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(env.repo.join("relay.toml"), conf.replace("job_disk_gb = 0.00001", "job_disk_gb = 40")).unwrap();
+    ok(&relay(&env, &["queue", "resume", "grows", "--message", "Go on."]), "resume");
+    assert_eq!(wait_for(&env, "grows")["status"], "done");
+}
+
+#[test]
+fn a_disk_hook_may_let_a_job_go_on() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("disk-wait", false);
+    let script = env.root.join("decide.sh");
+    std::fs::write(&script, "#!/bin/sh\ncat >/dev/null\necho '{\"action\": \"wait\", \"why\": \"plenty left\"}'\n")
+        .unwrap();
+    Command::new("chmod").arg("755").arg(&script).status().unwrap();
+    configure(&env, "job_disk_gb = 0.00001\n", &format!("[hooks]\ndisk = [\"command:{}\"]\n", script.display()));
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "big", "--text", "Make a change."]), "queue");
+    let j = wait_for(&env, "big");
+    assert_eq!(j["status"], "done", "{j}");
+    let d = &decisions(&env, "big")[0];
+    assert_eq!((d["point"].as_str(), d["action"]["action"].as_str()), (Some("disk"), Some("wait")), "{d}");
+}

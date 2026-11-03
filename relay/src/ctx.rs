@@ -148,6 +148,27 @@ impl Ctx {
         self.jobs.join(format!("{job}.{ext}"))
     }
 
+    /// A job's stream log (`log.ndjson`, `check.ndjson`) where it is now: the
+    /// plain file while it is written, else the gzip gc made of it.
+    pub fn job_log(&self, job: &str, ext: &str) -> PathBuf {
+        let plain = self.job_file(job, ext);
+        let gz = self.job_file(job, &format!("{ext}.gz"));
+        if !plain.exists() && gz.exists() { gz } else { plain }
+    }
+
+    /// A job's log as text, whether gc gzipped (all or part of) it or not: the
+    /// compressed part first, then what was written since.
+    pub fn read_job_log(&self, job: &str, ext: &str) -> String {
+        let mut text = Vec::new();
+        let gz = self.job_file(job, &format!("{ext}.gz"));
+        if gz.exists() {
+            let out = Command::new("gzip").arg("-dc").arg(&gz).stderr(Stdio::null()).output();
+            text.extend(out.ok().filter(|o| o.status.success()).map(|o| o.stdout).unwrap_or_default());
+        }
+        text.extend(std::fs::read(self.job_file(job, ext)).unwrap_or_default());
+        String::from_utf8_lossy(&text).into_owned()
+    }
+
     /// The job's private directory: its prompt file and, for harnesses that
     /// keep sessions with the task, its session store. Mounted writable in the sandbox.
     pub fn job_scratch(&self, job: &str) -> PathBuf {

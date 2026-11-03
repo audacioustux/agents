@@ -11,6 +11,7 @@
 #   decision a decision hook's answer, one line of JSON (default defer)
 #   decisions appended to by every decision hook run there
 #   argv     appended to with every session's arguments
+#   cargo    appended to with every session's CARGO_INCREMENTAL (`unset` when it has none)
 # A brief containing [idle] makes no commit; one containing [status-done] reports status: done.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
@@ -19,6 +20,7 @@ case " $* " in
 *" --version "*) echo "stub 1.0"; exit 0 ;;
 esac
 echo "$*" >>"$acct/argv"
+echo "${CARGO_INCREMENTAL-unset}" >>"$acct/cargo"
 sid=""
 resume=""
 fork=""

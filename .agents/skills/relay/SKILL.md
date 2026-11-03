@@ -84,8 +84,9 @@ its own: queue A again, or `relay queue release NAME [--from A]`.
 ### Hooks: deciding for relay
 
 Where the project's `[hooks]` chain names `orchestrator`, relay parks a
-decision for you at a spend cap (`cap`), at a run's end (`ended`) or on a long
-hold (`held`) and goes on with other work. Run this in the background for as
+decision for you at a spend cap (`cap`), at a run's end (`ended`), on a long
+hold (`held`) or when a running job's clone is too big (`disk`) and goes on
+with other work. Run this in the background for as
 long as you drive relay, and answer what comes in:
 
 ```sh
@@ -115,6 +116,13 @@ effort, budget, read-only, limits, and a note on when to use each);
 unset, and explicit flags win. Which profile a job is, is your judgment; relay
 only maps it to settings and enforces the limits and bans. An unknown profile
 exits 3 and lists the names.
+
+Disk is relay's to keep, not yours: `relay land gc` (also run by the dispatcher)
+removes `target/`, `node_modules/` and `.venv/` of ended jobs after 6 hours,
+old clones after 7 days (their commits rescued into `refs/relay/rescue/NAME`) and
+gzips old logs; a running job whose clone passes `limits.job_disk_gb` (40) is
+stopped, `disk: clone 52G over 40G`, and `queue resume` goes on after cleanup.
+`relay land gc --dry-run` says what it would do. Details: README, Disk.
 
 The brief is the session's only context. See
 [relay/README.md](../../../relay/README.md) for accounts, quota, the sandbox

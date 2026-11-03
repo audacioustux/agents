@@ -26,6 +26,8 @@ use crate::world::{AccountState, DAY_MICROS, Job, Status, Wait, World};
 /// The longest sleep. Only a runner that dies without a word (one started by
 /// an earlier dispatcher, or killed outright) waits this long to be reaped.
 const BACKSTOP: Duration = Duration::from_mins(5);
+/// The least time between gc passes the disk gauge starts.
+const LOW_DISK_GAP: Duration = Duration::from_mins(5);
 /// How long the dispatcher stays with nothing queued or running.
 const IDLE_EXIT: Duration = Duration::from_secs(60);
 
@@ -73,6 +75,7 @@ fn serve(ctx: &Ctx) -> Result<()> {
             return ctx.wake_dispatch();
         }
         let (busy, held, due_us) = tick(ctx)?;
+        let gc_in = gc_pass(ctx);
         if held != last_held {
             for h in &held.0 {
                 eprintln!("{} held: {h}", jiff::Timestamp::now());
@@ -83,7 +86,7 @@ fn serve(ctx: &Ctx) -> Result<()> {
         if idle_since.is_some_and(|t| t.elapsed() > IDLE_EXIT) {
             return Ok(());
         }
-        let mut sleep = BACKSTOP;
+        let mut sleep = BACKSTOP.min(gc_in);
         if let Some(due) = due_us {
             sleep = sleep.min(Duration::from_micros(due.saturating_sub(now_micros())));
         }
@@ -97,6 +100,28 @@ fn serve(ctx: &Ctx) -> Result<()> {
             bell.wait(Duration::ZERO);
         }
     }
+}
+
+/// Starts a gc pass (`relay land gc`, in a process of its own) when one is due:
+/// `gc.interval_minutes` after the last, or at once when free disk is under
+/// `limits.min_free_disk_gb` (but not twice within `LOW_DISK_GAP`, so a disk
+/// that gc cannot help does not start one every pass). Returns how long until
+/// the interval brings the next one.
+fn gc_pass(ctx: &Ctx) -> Duration {
+    let interval = Duration::from_secs_f64(ctx.cfg.gc.interval_minutes * 60.0);
+    let stamp = ctx.state.join("gc.last");
+    let since = std::fs::metadata(&stamp).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+    let min = ctx.cfg.limits.min_free_disk_gb;
+    let low = min > 0.0 && os::free_disk_gb(&ctx.clones).is_some_and(|gb| gb < min);
+    if since.is_none_or(|s| s >= interval || low && s >= LOW_DISK_GAP) {
+        // Stamped now as well as when the pass ends, so a slow one is not started again.
+        let _ = std::fs::write(&stamp, "");
+        if let Err(e) = ctx.spawn_self(&["land", "gc"], &ctx.state.join("gc.log")) {
+            eprintln!("{} gc did not start: {e:#}", jiff::Timestamp::now());
+        }
+        return interval;
+    }
+    interval.saturating_sub(since.unwrap_or_default())
 }
 
 /// One pass over the world. Returns whether anything is still queued or

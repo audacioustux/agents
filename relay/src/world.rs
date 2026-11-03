@@ -106,6 +106,12 @@ pub struct Job {
     /// A decision let it past its profile's limits.
     #[serde(default)]
     pub forced: bool,
+    /// The clone's size when it was last measured while the job ran, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
+    /// What gc removed from the clone: `outputs` (the build outputs) or `clone` (all of it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collected: Option<String>,
 }
 
 impl Job {
@@ -211,7 +217,7 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 
 /// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
 /// holds, how a mark is kept), so checkpoints folded the old way are discarded.
-const FOLD_VERSION: u32 = 8;
+const FOLD_VERSION: u32 = 9;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -418,6 +424,15 @@ impl World {
                     self.jobs.values_mut().for_each(|j| j.after.retain(|a| a != job));
                 }
             }
+            Event::Land(LandEvent::Collected { job, what, .. }) => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    // Without a clone, a resume makes a new one (from the rescued branch, when there is one).
+                    if what == "clone" {
+                        j.workdir = None;
+                    }
+                    j.collected = Some(what.clone());
+                }
+            }
         }
     }
 
@@ -572,6 +587,7 @@ impl World {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.workdir = Some(workdir.clone());
                     j.branch = Some(branch.clone());
+                    j.collected = None;
                 }
             }
             SessionEvent::Started { job, account, session_id, commit } => {
@@ -582,23 +598,18 @@ impl World {
                     j.message = None;
                 }
             }
+            SessionEvent::Disk { job, bytes } => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    j.disk_bytes = Some(*bytes);
+                }
+            }
             SessionEvent::Identified { job, session_id } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.session_id = Some(session_id.clone());
                 }
             }
-            SessionEvent::Rate { account, meters } => {
-                let a = self.account(account);
-                a.meters.clone_from(meters);
-                a.read_at = Some(t);
-            }
-            SessionEvent::Limited { account, until } => {
-                let a = self.account(account);
-                a.limited_until = Some(a.limited_until.map_or(*until, |u| u.max(*until)));
-            }
-            SessionEvent::SignedOut { account } => {
-                let a = self.account(account);
-                (a.signed_out, a.signed_at) = (true, Some(t));
+            SessionEvent::Rate { .. } | SessionEvent::Limited { .. } | SessionEvent::SignedOut { .. } => {
+                self.apply_account_fact(t, e);
             }
             SessionEvent::FollowUp { job, message, budget_usd } => {
                 if let Some(j) = self.jobs.get_mut(job) {
@@ -666,13 +677,33 @@ impl World {
         }
     }
 
+    /// What a session learned of its account.
+    fn apply_account_fact(&mut self, t: u64, e: &SessionEvent) {
+        match e {
+            SessionEvent::Rate { account, meters } => {
+                let a = self.account(account);
+                a.meters.clone_from(meters);
+                a.read_at = Some(t);
+            }
+            SessionEvent::Limited { account, until } => {
+                let a = self.account(account);
+                a.limited_until = Some(a.limited_until.map_or(*until, |u| u.max(*until)));
+            }
+            SessionEvent::SignedOut { account } => {
+                let a = self.account(account);
+                (a.signed_out, a.signed_at) = (true, Some(t));
+            }
+            _ => {}
+        }
+    }
+
     fn apply_decide(&mut self, t: u64, e: &DecideEvent) {
         match e {
             DecideEvent::DecisionRequested { id, job, point, created, attempt } => {
                 // A runner waiting on its decision holds no seat on its account.
                 if let Some(j) = self.jobs.get_mut(job).filter(|j| j.created_at == *created && j.attempts == *attempt)
                     && j.status == Status::Running
-                    && *point != Point::Held
+                    && !matches!(point, Point::Held | Point::Disk)
                 {
                     j.status = Status::Checking;
                 }
@@ -783,6 +814,31 @@ mod tests {
 
     fn ended(job: &str, outcome: Outcome) -> Event {
         Event::Session(SessionEvent::Ended { job: job.into(), outcome, cost_usd: 0.0, turns: 1, reason: None })
+    }
+
+    #[test]
+    fn a_collected_clone_leaves_the_branch_and_the_size_is_kept() {
+        let dir = std::path::PathBuf::from("/c/a");
+        let events = [
+            st(1, queued("a")),
+            st(
+                2,
+                Event::Session(SessionEvent::Cloned {
+                    job: "a".into(),
+                    workdir: dir.clone(),
+                    branch: "relay/a".into(),
+                }),
+            ),
+            st(3, Event::Session(SessionEvent::Disk { job: "a".into(), bytes: 7 })),
+            st(4, ended("a", Outcome::Done)),
+            st(5, Event::Land(LandEvent::Collected { job: "a".into(), what: "outputs".into(), bytes: 9 })),
+        ];
+        let w = World::fold(&events);
+        assert_eq!((w.jobs["a"].disk_bytes, w.jobs["a"].collected.as_deref()), (Some(7), Some("outputs")));
+        assert_eq!(w.jobs["a"].workdir.as_ref(), Some(&dir), "emptied, not removed");
+        let gone = Event::Land(LandEvent::Collected { job: "a".into(), what: "clone".into(), bytes: 9 });
+        let w = World::fold(&[&events[..], &[st(6, gone)]].concat());
+        assert_eq!((w.jobs["a"].workdir.as_ref(), w.jobs["a"].branch.as_deref()), (None, Some("relay/a")));
     }
 
     #[test]

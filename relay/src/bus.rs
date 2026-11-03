@@ -196,6 +196,11 @@ pub enum SessionEvent {
         turns: u32,
         reason: Option<String>,
     },
+    /// The job's clone was measured while it ran: `bytes` allocated.
+    Disk {
+        job: String,
+        bytes: u64,
+    },
 }
 
 /// What a progress check decided at a spend cap.
@@ -295,6 +300,8 @@ pub enum Point {
     Ended,
     /// A queued job has been held by a limit for a while.
     Held,
+    /// A running job's clone is over its disk limit, or the disk is nearly full.
+    Disk,
 }
 
 impl Point {
@@ -303,6 +310,7 @@ impl Point {
             Self::Cap => "cap",
             Self::Ended => "ended",
             Self::Held => "held",
+            Self::Disk => "disk",
         }
     }
 }
@@ -326,7 +334,7 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget: Option<f64>,
     },
-    /// `cap`, `ended`: leave the job failed, for a human.
+    /// `cap`, `ended`: leave the job failed, for a human. `disk`: stop the job, which can be resumed.
     Stop {
         #[serde(default)]
         why: String,
@@ -354,7 +362,7 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
-    /// `held`: keep waiting.
+    /// `held`: keep waiting. `disk`: let the job go on.
     Wait,
     /// `held`: let the job run elsewhere.
     Reroute {
@@ -420,7 +428,16 @@ pub enum DecideEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum LandEvent {
-    Forgotten { job: String },
+    Forgotten {
+        job: String,
+    },
+    /// A gc pass removed what a job's clone held: its build outputs (`what` is
+    /// `outputs`) or the whole clone (`clone`), `bytes` in all.
+    Collected {
+        job: String,
+        what: String,
+        bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -506,7 +523,8 @@ impl SessionEvent {
             | Self::Requeued { job, .. }
             | Self::Checking { job, .. }
             | Self::Checked { job, .. }
-            | Self::Ended { job, .. } => Some(job),
+            | Self::Ended { job, .. }
+            | Self::Disk { job, .. } => Some(job),
             Self::Rate { .. } | Self::Limited { .. } | Self::SignedOut { .. } => None,
         }
     }

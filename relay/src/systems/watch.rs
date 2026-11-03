@@ -81,7 +81,7 @@ fn details(ctx: &Ctx, j: &Job) -> Vec<String> {
     let mut d = vec![head.join(" · ")];
     d.extend(j.reason.iter().map(|r| format!("why: {r}")));
     if j.status == Status::Running {
-        d.push(activity(&ctx.job_file(&j.name, "log.ndjson")));
+        d.push(activity(&ctx.job_log(&j.name, "log.ndjson")));
     }
     if let Ok(answer) = std::fs::read_to_string(ctx.job_file(&j.name, "result.md")) {
         d.push(String::new());

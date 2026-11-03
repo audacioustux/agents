@@ -1,5 +1,5 @@
-//! decide: relay's decision points. At a spend cap, when a run ends and when a
-//! queued job has been held for long, relay asks a chain of handlers what to
+//! decide: relay's decision points. At a spend cap, when a run ends, when a
+//! queued job has been held for long and when a running job's disk runs out, relay asks a chain of handlers what to
 //! do, and carries out only an action from that point's closed set that
 //! passes policy. Emits: decision-requested, parked, decided.
 //!
@@ -61,7 +61,7 @@ pub enum Cmd {
 pub struct Answer {
     id: String,
     /// One of the point's actions: cap: continue, redirect, stop; ended: accept, resume, requeue,
-    /// follow-up, stop; held: wait, reroute, force; any: defer.
+    /// follow-up, stop; held: wait, reroute, force; disk: wait, stop; any: defer.
     #[arg(long)]
     action: String,
     /// What the worker is told (redirect, resume).
@@ -160,6 +160,7 @@ pub fn chain(cfg: &Config, point: Point) -> Option<Vec<Handler>> {
         Point::Cap => h.cap.as_ref(),
         Point::Ended => h.ended.as_ref(),
         Point::Held => h.held.as_ref(),
+        Point::Disk => h.disk.as_ref(),
     };
     if let Some(names) = names {
         return Some(names.iter().filter_map(|n| Handler::parse(n, cfg).ok()).collect());
@@ -176,6 +177,7 @@ pub fn allowed(point: Point) -> &'static [&'static str] {
         Point::Cap => &["continue", "redirect", "stop"],
         Point::Ended => &["accept", "resume", "requeue", "follow-up", "stop"],
         Point::Held => &["wait", "reroute", "force"],
+        Point::Disk => &["wait", "stop"],
     }
 }
 
@@ -252,6 +254,7 @@ fn schema(point: Point) -> Value {
             ),
             one("force", json!({})),
         ],
+        Point::Disk => vec![one("wait", json!({})), one("stop", json!({ "why": "string" }))],
     };
     all.push(one("defer", json!({})));
     json!({ "answer": "one JSON object: {\"action\": ..., \"why\": \"one short line\", ...fields}", "actions": all })

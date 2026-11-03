@@ -145,8 +145,18 @@ pub fn job_cells(cfg: &Config, world: &World, j: &Job, now: u64) -> Vec<String> 
         kind(j),
         since.map_or_else(|| "-".into(), |t| ago(now, t)),
         if j.cost_usd > 0.0 { format!("${:.2}", j.cost_usd) } else { String::new() },
-        format!("{}{reason}{check}", j.task),
+        j.disk_bytes.filter(|_| j.status.has_runner()).map_or_else(String::new, crate::os::size_str),
+        format!("{}{reason}{check}{}", j.task, collected(j)),
     ]
+}
+
+/// What gc took from a job's clone, for its board row.
+fn collected(j: &Job) -> &'static str {
+    match j.collected.as_deref() {
+        Some("clone") => "  (clone removed)",
+        Some(_) => "  (build outputs removed)",
+        None => "",
+    }
 }
 
 /// The jobs and accounts, as text.
@@ -224,8 +234,10 @@ fn gist(line: &str) -> Option<String> {
 
 fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
     let j = &if wait { ended(ctx, name)? } else { job(&ctx.world()?, name)? };
-    let answer = std::fs::read_to_string(ctx.job_file(name, "result.md")).ok();
-    let log = ctx.job_file(name, "log.ndjson");
+    let answer = std::fs::read_to_string(ctx.job_file(name, "result.md"))
+        .ok()
+        .or_else(|| answer_in(&ctx.read_job_log(name, "log.ndjson")));
+    let log = ctx.job_log(name, "log.ndjson");
     if ctx.json {
         let mut v = serde_json::to_value(j)?;
         v["answer"] = answer.as_deref().map(str::trim_end).into();
@@ -256,6 +268,17 @@ fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
     Ok(())
 }
 
+/// The session's last answer in its stream, for a job whose `result.md` is gone.
+fn answer_in(log: &str) -> Option<String> {
+    log.lines().rev().find_map(|l| {
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        if v["type"] != "result" {
+            return None;
+        }
+        v["result"].as_str().map(str::to_owned)
+    })
+}
+
 fn job(world: &World, name: &str) -> Result<Job> {
     let Some(j) = world.jobs.get(name) else { fail!(NotFound, "no job named {name}") };
     Ok(j.clone())
@@ -280,7 +303,14 @@ fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit, table};
+    use super::{answer_in, fit, table};
+
+    #[test]
+    fn the_last_answer_is_found_in_a_stream() {
+        let log = "{\"type\":\"system\"}\n{\"type\":\"result\",\"result\":\"first\"}\nnot json\n{\"type\":\"result\",\"result\":\"last\"}\n";
+        assert_eq!(answer_in(log).as_deref(), Some("last"));
+        assert_eq!(answer_in("{\"type\":\"system\"}"), None);
+    }
 
     #[test]
     fn columns_are_as_wide_as_their_content() {

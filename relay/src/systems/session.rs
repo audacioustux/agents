@@ -19,6 +19,7 @@ use crate::bus::{Action, Check, CheckVerdict, Outcome, Point, SessionEvent, now_
 use crate::ctx::Ctx;
 use crate::harness::report::{Ending, Report, Verdict, verdict};
 use crate::harness::{Home, Invocation, Permissions, Reader, Session, Task};
+use crate::os;
 use crate::sandbox::{self, Mounts};
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request};
@@ -111,6 +112,17 @@ fn dev_env(shell: &[String], deny: &regex::Regex, dir: &Path) -> Result<Vec<(OsS
         .collect())
 }
 
+/// The job's environment, in layers: the project's development environment
+/// (`session.env_shell`) underneath, `session.env` over it, and the harness's
+/// own variables (the account) over both.
+fn layer_env(ctx: &Ctx, inv: &mut Invocation, cwd: &Path) -> Result<()> {
+    let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
+    let dev = dev_env(&ctx.cfg.session.env_shell, &deny, cwd)?;
+    let session_env = ctx.cfg.session.env.iter().map(|(k, v)| (OsString::from(k), Some(OsString::from(v))));
+    inv.env = dev.into_iter().chain(session_env).chain(std::mem::take(&mut inv.env)).collect();
+    Ok(())
+}
+
 fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     let port = port(ctx, job);
     let key = job.account.clone().context("dispatched without an account")?;
@@ -128,7 +140,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     let mut workdir = job.workdir.clone();
     if !job.readonly && workdir.is_none() {
         let bases = bases(&ctx.world()?, job);
-        let (dir, branch) = match clone(ctx, &job.name, &bases) {
+        let (dir, branch) = match clone(ctx, &job.name, &bases, job.session_id.is_some()) {
             Ok(made) => made,
             Err(e) => return Ok((Outcome::Failed, Some(format!("{e:#}")))),
         };
@@ -190,22 +202,28 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         Err(refusal) => return Ok((Outcome::Failed, Some(refusal.0))),
     };
     inv.args.extend(conf.extra_args.iter().map(OsString::from));
-    // The development environment underneath; the harness's own variables (the account) win.
-    let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
-    let dev = dev_env(&ctx.cfg.session.env_shell, &deny, &cwd)?;
-    inv.env = dev.into_iter().chain(std::mem::take(&mut inv.env)).collect();
+    layer_env(ctx, &mut inv, &cwd)?;
     inv.write_files().context("writing the prompt file")?;
     let mut cmd = command(ctx, home, &inv, workdir.as_deref(), &scratch, &cwd);
 
     // An earlier attempt's answer must not pass for this one's.
     let _ = std::fs::remove_file(ctx.job_file(&job.name, "result.md"));
-    let run =
-        Run { session_id: Some(&session_id), budget_usd: job.budget_usd, log: "log.ndjson", stderr: "stderr.log" };
-    let (report, ending) = drive(ctx, job, &key, &run, &mut cmd, inv.stdin.as_deref(), harness.reader())?;
+    let run = Run {
+        session_id: Some(&session_id),
+        budget_usd: job.budget_usd,
+        log: "log.ndjson",
+        stderr: "stderr.log",
+        clone: workdir.as_deref(),
+    };
+    let (report, ending, disk) = drive(ctx, job, &key, &run, &mut cmd, inv.stdin.as_deref(), harness.reader())?;
     if !report.answer.is_empty() {
         std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
     }
     *spend = (report.cost_usd, report.turns);
+    if disk.is_some() {
+        // Stopped, not failed: the clone and the session are kept for a resume after cleanup.
+        return Ok((Outcome::Stopped, disk));
+    }
     let run = Ran { report: &report, dir: workdir.as_deref(), scratch: &scratch, brief: &brief };
     match verdict(&report, ending, &s.final_marker, job.readonly, now_s()) {
         Verdict::Budget => at_cap(ctx, job, &run),
@@ -431,9 +449,15 @@ pub fn consult(
         inv.args.extend(conf.extra_args.iter().map(OsString::from));
         inv.write_files().context("writing the prompt file")?;
         let mut cmd = command(ctx, &home, &inv, None, &scratch, &ctx.cfg.repo);
-        let run =
-            Run { session_id: None, budget_usd: agent.budget_usd, log: "check.ndjson", stderr: "check-stderr.log" };
+        let run = Run {
+            session_id: None,
+            budget_usd: agent.budget_usd,
+            log: "check.ndjson",
+            stderr: "check-stderr.log",
+            clone: None,
+        };
         drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader())
+            .map(|(report, ending, _)| (report, ending))
     };
     let (report, ending) = match run() {
         Ok(r) => r,
@@ -556,6 +580,70 @@ struct Run<'a> {
     /// The job's files its stream and its stderr go to.
     log: &'a str,
     stderr: &'a str,
+    /// The clone to measure while it runs, for a build job's worker.
+    clone: Option<&'a Path>,
+}
+
+/// What the runner hears while it drives a session: a line of output, the
+/// end of the output, or the clone's measured size.
+enum Heard {
+    Line(std::io::Result<String>),
+    End,
+    Disk(u64),
+}
+
+/// The longest one measurement of a clone may take.
+const DISK_WALK: Duration = Duration::from_secs(120);
+/// After a `disk` decision says `wait`, the least time before it is asked again.
+const DISK_REASK: Duration = Duration::from_mins(60);
+
+/// Why a clone of `bytes` should stop its job, when it should: it is over
+/// `limits.job_disk_gb`, or the disk has `free_gb` left, under `limits.min_free_disk_gb`
+/// while this is the largest clone running (`largest`), since stopping a small one
+/// would not help and stopping every one would be worse than the full disk.
+pub fn disk_reason(limits: &crate::config::Limits, bytes: u64, free_gb: Option<f64>, largest: bool) -> Option<String> {
+    let gb = |g: f64| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        os::size_str((g * 1e9) as u64)
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let held = bytes as f64 / 1e9;
+    if limits.job_disk_gb > 0.0 && held > limits.job_disk_gb {
+        return Some(format!("disk: clone {} over {}", os::size_str(bytes), gb(limits.job_disk_gb)));
+    }
+    let free = free_gb.filter(|&f| largest && limits.min_free_disk_gb > 0.0 && f < limits.min_free_disk_gb)?;
+    Some(format!("disk: {} free, under {}", gb(free), gb(limits.min_free_disk_gb)))
+}
+
+/// A measured clone: records its size, and when it is a reason to stop,
+/// asks the `disk` chain (none set: stop). `Some(reason)` stops the job; `None` lets it go on.
+fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: &mut Option<Instant>) -> Result<Option<String>> {
+    port(ctx, job).emit(SessionEvent::Disk { job: job.name.clone(), bytes })?;
+    if quiet_until.is_some_and(|t| Instant::now() < t) {
+        return Ok(None);
+    }
+    let world = ctx.world()?;
+    let largest = world
+        .jobs
+        .values()
+        .filter(|o| o.name != job.name && o.status.has_runner())
+        .all(|o| o.disk_bytes.unwrap_or(0) <= bytes);
+    let free = os::free_disk_gb(&ctx.clones);
+    let Some(why) = disk_reason(&ctx.cfg.limits, bytes, free, largest) else { return Ok(None) };
+    let Some(handlers) = decide::chain(&ctx.cfg, Point::Disk) else { return Ok(Some(why)) };
+    let mut req = Request::new(job, Point::Disk);
+    req.brief = std::fs::read_to_string(ctx.job_file(&job.name, "prompt.md")).unwrap_or_default();
+    req.situation = format!(
+        "{why}. The job is running. Stopping it keeps its clone and session, so it can be resumed after cleanup."
+    );
+    req.spent_usd = job.cost_usd;
+    req.earlier = decide::earlier(&world, job);
+    let d = decide::decide(ctx, job, &req, &handlers, &|| None, Action::Stop { why: why.clone() })?;
+    if d.action == Action::Wait {
+        *quiet_until = Some(Instant::now() + DISK_REASK);
+        return Ok(None);
+    }
+    Ok(Some(why))
 }
 
 /// Runs the agent, feeding its stdin and teeing its stream to the job's log.
@@ -569,7 +657,7 @@ fn drive(
     cmd: &mut Command,
     stdin: Option<&str>,
     mut reader: Box<dyn Reader>,
-) -> Result<(Report, Ending)> {
+) -> Result<(Report, Ending, Option<String>)> {
     let port = port(ctx, job);
     let mut log = Ctx::append_private(&ctx.job_file(&job.name, run.log))?;
     let mut child = cmd
@@ -584,22 +672,44 @@ fn drive(
     }
     let stdout = child.stdout.take().context("stdout")?;
     let (tx, rx) = mpsc::channel();
+    let lines = tx.clone();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
-            if tx.send(line).is_err() {
-                break;
+            if lines.send(Heard::Line(line)).is_err() {
+                return;
             }
         }
+        let _ = lines.send(Heard::End);
     });
+    // Measures the clone now and every `limits.disk_sample_minutes`, until `_stop` is dropped.
+    let (_stop, stopped) = mpsc::channel::<()>();
+    if let Some(dir) = run.clone.map(Path::to_path_buf) {
+        let every = Duration::from_secs_f64(ctx.cfg.limits.disk_sample_minutes * 60.0);
+        std::thread::spawn(move || {
+            loop {
+                if tx.send(Heard::Disk(os::dir_size(&dir, DISK_WALK).0)).is_err() {
+                    return;
+                }
+                if !matches!(stopped.recv_timeout(every), Err(mpsc::RecvTimeoutError::Timeout)) {
+                    return;
+                }
+            }
+        });
+    }
 
     let silent_after = Duration::from_secs(ctx.cfg.limits.silent_minutes * 60);
     let deadline = Instant::now() + Duration::from_secs_f64(ctx.cfg.session.max_hours * 3600.0);
     let mut ending = Ending::default();
+    let mut disk = None;
+    let mut quiet_until = None;
+    let mut heard_at = Instant::now();
     let mut named = run.session_id.map(str::to_owned);
     loop {
-        let wait = silent_after.min(deadline.saturating_duration_since(Instant::now()));
+        let wait =
+            silent_after.saturating_sub(heard_at.elapsed()).min(deadline.saturating_duration_since(Instant::now()));
         match rx.recv_timeout(wait) {
-            Ok(Ok(line)) => {
+            Ok(Heard::Line(Ok(line))) => {
+                heard_at = Instant::now();
                 if reader.keep(&line) {
                     writeln!(log, "{line}")?;
                 }
@@ -619,7 +729,15 @@ fn drive(
                     break;
                 }
             }
-            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(Heard::Disk(bytes)) => {
+                disk = on_disk(ctx, job, bytes, &mut quiet_until)?;
+                if disk.is_some() {
+                    // bwrap's --die-with-parent and pid namespace take everything inside with it.
+                    let _ = child.kill();
+                    break;
+                }
+            }
+            Ok(Heard::Line(Err(_)) | Heard::End) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 (ending.silent, ending.timed_out) =
                     if Instant::now() >= deadline { (false, true) } else { (true, false) };
@@ -630,7 +748,7 @@ fn drive(
         }
     }
     ending.exit_ok = child.wait()?.success();
-    Ok((reader.report().clone(), ending))
+    Ok((reader.report().clone(), ending, disk))
 }
 
 /// The build jobs whose branches a build job starts from: those it waits
@@ -674,7 +792,9 @@ pub fn pick_base(
 /// A private clone that borrows the repository's objects (`--shared`), so it is
 /// small and works across filesystems, on its own branch, unable to push.
 /// A build job with `bases` starts from the newest of their branch tips (`pick_base`).
-fn clone(ctx: &Ctx, name: &str, bases: &[(String, PathBuf, String)]) -> Result<(PathBuf, String)> {
+/// A job that has run (`ran`) and lost its clone to gc starts from its own work in
+/// the repository instead: the rescue ref gc made, else its branch as fetched.
+fn clone(ctx: &Ctx, name: &str, bases: &[(String, PathBuf, String)], ran: bool) -> Result<(PathBuf, String)> {
     let dir = ctx.clones.join(name);
     let branch = format!("{}{name}", ctx.cfg.session.branch_prefix);
     std::fs::create_dir_all(&ctx.clones)?;
@@ -699,7 +819,20 @@ fn clone(ctx: &Ctx, name: &str, bases: &[(String, PathBuf, String)]) -> Result<(
         let ancestor = |a: &str, b: &str| {
             Ctx::git(&dir).args(["merge-base", "--is-ancestor", a, b]).status().is_ok_and(|s| s.success())
         };
-        let start = pick_base(&tips, ancestor).map_err(|e| anyhow::anyhow!(e))?;
+        let own = [format!("refs/relay/rescue/{name}"), format!("refs/heads/{branch}")]
+            .into_iter()
+            .find(|r| ran && checkpoint_rev(&ctx.cfg.repo, r).is_some());
+        let start = match own {
+            Some(r) => {
+                let what = format!("fetching {name}'s own work from {r}");
+                ok(
+                    Ctx::git(&dir).arg("fetch").arg("--quiet").arg(&ctx.cfg.repo).arg(format!("+{r}:refs/relay/own")),
+                    &what,
+                )?;
+                checkpoint_rev(&dir, "refs/relay/own")
+            }
+            None => pick_base(&tips, ancestor).map_err(|e| anyhow::anyhow!(e))?,
+        };
         let mut switch = Ctx::git(&dir);
         switch.args(["switch", "--quiet", "-c", &branch]).args(start.as_deref());
         ok(&mut switch, "git switch")?;
@@ -715,6 +848,30 @@ fn clone(ctx: &Ctx, name: &str, bases: &[(String, PathBuf, String)]) -> Result<(
 fn checkpoint_rev(dir: &Path, rev: &str) -> Option<String> {
     let out = Ctx::git(dir).args(["rev-parse", "--verify", rev]).output().ok().filter(|o| o.status.success())?;
     Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+#[cfg(test)]
+mod disk_tests {
+    use super::disk_reason;
+    use crate::config::Limits;
+
+    #[test]
+    fn a_clone_over_the_ceiling_or_a_full_disk_names_its_reason() {
+        let l = Limits { job_disk_gb: 40.0, min_free_disk_gb: 20.0, ..Limits::default() };
+        let gb = |g: u64| g * 1_000_000_000;
+        assert_eq!(disk_reason(&l, gb(52), Some(500.0), true).as_deref(), Some("disk: clone 52G over 40G"));
+        assert_eq!(disk_reason(&l, gb(40), Some(500.0), true), None, "at the ceiling is not over it");
+        assert_eq!(disk_reason(&l, gb(12), Some(8.0), true).as_deref(), Some("disk: 8G free, under 20G"));
+        assert_eq!(disk_reason(&l, gb(12), Some(8.0), false), None, "only the largest clone answers for a full disk");
+        assert_eq!(disk_reason(&l, gb(12), None, true), None, "unmeasured free space is not a reason");
+        assert_eq!(
+            disk_reason(&l, gb(52), Some(8.0), true).as_deref(),
+            Some("disk: clone 52G over 40G"),
+            "the job's own size comes first"
+        );
+        let off = Limits { job_disk_gb: 0.0, min_free_disk_gb: 0.0, ..l };
+        assert_eq!(disk_reason(&off, gb(900), Some(0.1), true), None, "zero turns both off");
+    }
 }
 
 #[cfg(test)]

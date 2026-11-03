@@ -1,6 +1,8 @@
 //! land: brings a finished job's branch back and clears up after it.
-//! Emits: forgotten. It never checks out, merges or pushes: putting work on
+//! Emits: forgotten, collected. It never checks out, merges or pushes: putting work on
 //! the main branch stays with whoever runs the project's gate.
+
+mod gc;
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
@@ -24,9 +26,18 @@ pub enum Cmd {
     Fetch { name: String },
     /// Delete a finished job's clone and records.
     Clean { name: String },
+    /// Remove what finished jobs no longer need: build outputs, old clones, old logs ([gc] in relay.toml).
+    Gc {
+        /// Say what would be removed; change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
+    if let Cmd::Gc { dry_run } = cmd {
+        return gc::run(ctx, dry_run);
+    }
     // A clean must not race a resume or a dispatch of the same job.
     let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
@@ -34,6 +45,13 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Fetch { name } => {
             let Some(j) = world.jobs.get(&name) else { fail!(NotFound, "no job named {name}") };
             let (Some(dir), Some(branch)) = (&j.workdir, &j.branch) else {
+                if j.branch.is_some() {
+                    fail!(
+                        Conflict,
+                        "{name}'s clone was removed by gc; its commits are in the repository as refs/relay/rescue/{name} \
+                         unless they were fetched before"
+                    )
+                }
                 fail!(Conflict, "{name} has no branch (a read-only job?)")
             };
             let st = Ctx::git(&ctx.cfg.repo)
@@ -49,6 +67,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             let commits: Vec<&str> = log.lines().collect();
             ctx.reply(&serde_json::json!({ "job": name, "branch": branch, "commits": commits }), &log)?;
         }
+        Cmd::Gc { .. } => unreachable!("handled above"),
         Cmd::Clean { name } => {
             let Some(j) = world.jobs.get(&name) else { fail!(NotFound, "no job named {name}") };
             if j.status.is_live() {
@@ -61,9 +80,16 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 }
                 std::fs::remove_dir_all(dir).with_context(|| format!("removing {}", dir.display()))?;
             }
-            for ext in
-                ["prompt.md", "log.ndjson", "stderr.log", "result.md", "runner.log", "check.ndjson", "check-stderr.log"]
-            {
+            for ext in [
+                "prompt.md",
+                "log.ndjson",
+                "log.ndjson.gz",
+                "stderr.log",
+                "result.md",
+                "runner.log",
+                "check.ndjson",
+                "check-stderr.log",
+            ] {
                 let _ = std::fs::remove_file(ctx.job_file(&name, ext));
             }
             let _ = std::fs::remove_dir_all(ctx.job_scratch(&name));

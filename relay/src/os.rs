@@ -148,10 +148,66 @@ pub fn free_disk_gb(path: &Path) -> Option<f64> {
     Some((s.f_bavail * s.f_frsize) as f64 / 1e9)
 }
 
+/// Disk space a tree holds, from a recursive stat walk that does not follow
+/// symlinks and counts a hard-linked file once, in bytes allocated. Stops when
+/// `within` has passed: then the second value is `false` and the first is a
+/// lower bound.
+pub fn dir_size(path: &Path, within: Duration) -> (u64, bool) {
+    use std::os::unix::fs::MetadataExt;
+    let end = std::time::Instant::now() + within;
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0;
+    let mut todo = vec![path.to_path_buf()];
+    while let Some(dir) = todo.pop() {
+        if std::time::Instant::now() >= end {
+            return (total, false);
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.path().symlink_metadata() else { continue };
+            if meta.is_dir() {
+                total += meta.blocks() * 512;
+                todo.push(entry.path());
+            } else if meta.nlink() < 2 || seen.insert((meta.dev(), meta.ino())) {
+                total += meta.blocks() * 512;
+            }
+        }
+    }
+    (total, true)
+}
+
+/// A size for people and boards: `340K`, `12G`, `1.5G` (decimal units).
+pub fn size_str(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let b = bytes as f64;
+    for (unit, scale) in [("G", 1e9), ("M", 1e6), ("K", 1e3)] {
+        if b >= scale {
+            let n = b / scale;
+            let digits = if n < 10.0 { format!("{n:.1}") } else { format!("{n:.0}") };
+            return format!("{}{unit}", digits.strip_suffix(".0").unwrap_or(&digits));
+        }
+    }
+    format!("{bytes}B")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::tempdir::Dir;
+
+    #[test]
+    fn sizes_are_summed_without_following_links_and_read_for_people() {
+        let d = Dir::new();
+        std::fs::create_dir_all(d.path().join("a/b")).unwrap();
+        std::fs::write(d.path().join("a/b/f"), vec![1u8; 20_000]).unwrap();
+        std::fs::hard_link(d.path().join("a/b/f"), d.path().join("a/g")).unwrap();
+        std::os::unix::fs::symlink("/usr", d.path().join("a/link")).unwrap();
+        let (bytes, done) = dir_size(d.path(), Duration::from_secs(10));
+        assert!(done && (20_000..60_000).contains(&bytes), "{bytes}: the file once, the link not followed");
+        assert!(!dir_size(d.path(), Duration::ZERO).1, "out of time: a lower bound");
+        assert_eq!(dir_size(&d.path().join("none"), Duration::from_secs(1)), (0, true));
+        assert_eq!([999, 340_000, 1_500_000_000, 52_000_000_000].map(size_str), ["999B", "340K", "1.5G", "52G"]);
+    }
 
     #[test]
     fn role_is_exclusive_and_released() {

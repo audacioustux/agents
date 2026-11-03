@@ -22,8 +22,8 @@ Linux only. It replaces `lanes`, the Deno runner that was here before. See
 
 ## Requirements
 
-- Linux, [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`), git, and `nice` and `timeout` from
-  coreutils.
+- Linux, [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`), git, `gzip`, and `nice` and
+  `timeout` from coreutils.
 - At least one harness, signed in once per account: `claude` per
   `CLAUDE_CONFIG_DIR=~/.claude.work claude`, `omp` per profile
   (`~/.omp/profiles/<name>`).
@@ -123,6 +123,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay view events` | The merged event log |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it; a fresh reading; switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout) / delete its clone and records |
+| `relay land gc [--dry-run]` | Remove what finished jobs no longer need: build outputs, old clones, old logs ([disk](#disk)) |
 | `relay probe [--account H:L]` | Sandbox self-test for one account of each harness, with controls |
 | `relay ask AGENT MODE ...` | One-shot read-only call, outside the queue ([the skill](../.agents/skills/relay/SKILL.md)) |
 
@@ -199,12 +200,14 @@ only an action from that point's closed set, after checking it against policy:
 | `cap` | a build job's run hits its spend cap | `continue {budget}`, `redirect {message, budget}`, `stop {why}` |
 | `ended` | a run ends done or failed (an error, silence, no FINAL after the follow-up) | `accept`, `resume {message, budget}`, `requeue {profile}`, `follow-up {brief, profile, after, fork, name}`, `stop {why}` |
 | `held` | a queued job has been held by a limit for `held_after_minutes` | `wait`, `reroute {harness, model, profile}`, `force` |
+| `disk` | a running job's clone is over `limits.job_disk_gb`, or the disk is nearly full ([disk](#disk)) | `wait`, `stop {why}` |
 
 ```toml
 [hooks]
 cap   = ["rule", "agent:checker", "orchestrator"]
 ended = ["rule", "orchestrator", "agent:triage"]
 held  = ["rule"]
+disk  = ["orchestrator"]
 held_after_minutes = 60
 orchestrator_timeout_minutes = 20   # then the next handler
 command_timeout_seconds = 120
@@ -214,7 +217,7 @@ allow_force = false                 # whether `held` may answer `force`
 Every handler may also answer `defer`, which passes the decision to the next.
 When all defer, relay does what it does without hooks: at `cap` the job waits
 for a human (`failed`, resume with `--budget`), at `ended` the run's outcome
-stands, at `held` the job waits.
+stands, at `held` the job waits, at `disk` the job is stopped.
 
 - `rule`: relay's own checks, free and deterministic. At `cap`, no new commit
   and no changed file since the last checkpoint is `stop`. At `ended`, a done
@@ -253,6 +256,77 @@ counts toward its job's total. `relay view status --json` has every decision
 under `decisions`. A `follow-up` is queued like `queue add` (by default
 `--after` the job, named `<job>-next`), `requeue` starts the job afresh under
 the profile with its branch kept, and `reroute` and `force` are queue events.
+
+## Disk
+
+A build job's clone can grow without bound (one Rust job's `target/` reached 92G
+across feature builds, release, nextest and clippy), and finished jobs' clones
+sit until someone cleans them. relay keeps the disk from filling on its own.
+**All of this is on with its defaults, with no `[gc]` section at all**, because
+it is a safety feature; the keys only tune it.
+
+```toml
+[gc]
+build_outputs = ["target", "node_modules", ".venv"]  # relative to a clone
+outputs_after_hours = 6      # an ended job's build outputs go after this
+clones_after_days = 7        # a done job's whole clone goes after this
+waiting_retain_days = 7      # a failed or stopped job's clone is kept this long
+logs_gzip_after_days = 3     # <job>.log.ndjson is gzipped after this
+interval_minutes = 60        # the dispatcher runs a pass this often while awake
+pass_seconds = 300           # a pass stops here; the next goes on
+
+[limits]
+job_disk_gb = 40             # a running clone over this reaches the `disk` point (0: off)
+min_free_disk_gb = 10        # also: a pass runs at once below this, and holds new starts
+disk_sample_minutes = 3      # how often a running clone is measured
+
+[session.env]
+CARGO_INCREMENTAL = "0"      # suggested for Rust: incremental dirs are much of target/
+```
+
+**`relay land gc [--dry-run] [--json]`** removes by rule, never by glob, one
+line each (`gc: removed <path> (<size>)`, `gc: would remove ...` in a dry run),
+a totals line, and a `collected` event per clone removed or emptied:
+
+- **Build outputs** of a job that is not live (not running, checking or queued)
+  and that no queued job waits for (`--after`) or forks, once it has ended
+  `outputs_after_hours` ago. The source and the branch stay, so `queue resume`
+  works and only rebuilds.
+- **Whole clones** of `done` jobs after `clones_after_days`, landed or not; of
+  failed or stopped jobs after `waiting_retain_days`, since those may be resumed.
+  Every commit of the job's branch must be in the repository first (`land fetch`
+  ran, or the tip is reachable from a repository ref); otherwise gc fetches it
+  into `refs/relay/rescue/<job>` and says so. A clone with uncommitted work
+  (build outputs aside) is kept, and the line says why. A job whose clone is gone
+  is resumed from that rescue ref (else its fetched branch).
+- **Logs**: `<job>.log.ndjson` of a job that is not live, older than
+  `logs_gzip_after_days`, becomes `.log.ndjson.gz` (a later run's output is
+  appended as another gzip member). `view result`, `view watch` and every
+  reader take either; `view result` falls back to the answer in the log when
+  `result.md` is gone, and shows the `.gz` path.
+- Never a clone with a live runner, never a symlink (skipped whole), never a
+  path outside relay's own clone and state directories. A `build_outputs` entry
+  must be a plain relative path (no `..`, not absolute).
+
+The dispatcher runs a pass at most every `interval_minutes` while it is awake
+(a stamp in the state directory keeps that across restarts), and at once when
+free disk falls under `min_free_disk_gb` (not again within five minutes). A pass
+stops cleanly at `pass_seconds` and the next goes on; only one runs at a time.
+
+**A ceiling for running jobs.** The runner measures a build job's clone when it
+starts and every `disk_sample_minutes` (a recursive stat walk, bounded in time,
+not following links). The size is on the board (`12G`) and in `--json`
+(`disk_bytes`). When a clone passes `job_disk_gb`, or free disk falls under
+`min_free_disk_gb` while it is the largest clone running, the `disk` [hook](#hooks)
+point is reached. With no `disk` chain, or every handler deferring, the job is
+stopped with the reason `disk: clone 52G over 40G` or `disk: 8G free, under 20G`,
+its clone and session kept: free some space (`land gc` first), then `queue
+resume`. `wait` lets it go on, and asks again only after an hour. Nothing is
+ever deleted inside a running job's clone.
+
+`[session] env` sets variables in every job's environment, over the caller's and
+the development environment's and under the harness's own account variables.
+relay hard-codes none: `CARGO_INCREMENTAL = "0"` is the suggestion above.
 
 ## Harnesses and accounts
 
@@ -444,10 +518,10 @@ own process, and owns one output port:
 | --- | --- | --- |
 | queue | takes work in (under a profile, if asked), withdraws it, stops it, releases it from its `--after` jobs, reroutes or forces a held one | queued, released, resumed, rerouted, forced, dequeued, stop-requested |
 | dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
-| session | runs one job, carries out the decisions at its cap and its end, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, requeued, checking, checked, ended |
+| session | runs one job, carries out the decisions at its cap and its end, measures its clone and stops it at the disk ceiling, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, requeued, checking, checked, disk, ended |
 | decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); takes the orchestrator's answers | decision-requested, parked, decided |
 | quota | account readings and switches | reading, unreadable, signed-out, account-enabled |
-| land | brings branches back; cleans up | forgotten |
+| land | brings branches back; cleans up, and gc | forgotten, collected |
 | view, probe | read-only | — |
 
 A runner is identified by its pid together with its start time, so a reused

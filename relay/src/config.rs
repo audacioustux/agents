@@ -28,6 +28,9 @@ pub struct Config {
     pub session: Session,
     #[serde(default)]
     pub sandbox: Sandbox,
+    /// What `relay land gc` removes, and when. On by default: it is a safety feature.
+    #[serde(default)]
+    pub gc: Gc,
     /// Named job profiles, merged from the owner's policy file and this project's config.
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
@@ -180,8 +183,15 @@ pub struct Limits {
     pub silent_minutes: u64,
     /// No new session starts while the 1-minute load average is above this.
     pub max_load: Option<f64>,
-    /// No new build session (each makes a clone) starts below this much free disk.
+    /// No new build session (each makes a clone) starts below this much free
+    /// disk; a gc pass runs at once below it, and the largest running clone's
+    /// job reaches the `disk` decision point.
+    #[serde(alias = "min_free_gb")]
     pub min_free_disk_gb: f64,
+    /// A running build job whose clone passes this many GB reaches the `disk` decision point.
+    pub job_disk_gb: f64,
+    /// How often a running job's clone is measured, in minutes.
+    pub disk_sample_minutes: f64,
     /// Automatic retries of one job for empty or silent deaths, before it is left failed.
     pub max_retries: u32,
     /// At a spend cap, the next run's cap is the last one times this, after a
@@ -204,6 +214,8 @@ pub struct Hooks {
     pub ended: Option<Vec<String>>,
     /// When a queued job has been held by a limit for `held_after_minutes`.
     pub held: Option<Vec<String>>,
+    /// When a running job's clone is over `limits.job_disk_gb`, or the disk is nearly full.
+    pub disk: Option<Vec<String>>,
     pub held_after_minutes: f64,
     /// How long an `orchestrator` handler waits for `relay decide answer` before the next handler.
     pub orchestrator_timeout_minutes: f64,
@@ -219,6 +231,7 @@ impl Default for Hooks {
             cap: None,
             ended: None,
             held: None,
+            disk: None,
             held_after_minutes: 60.0,
             orchestrator_timeout_minutes: 20.0,
             command_timeout_seconds: 120,
@@ -253,10 +266,47 @@ impl Default for Limits {
             silent_minutes: 30,
             max_load: None,
             min_free_disk_gb: 10.0,
+            job_disk_gb: 40.0,
+            disk_sample_minutes: 3.0,
             max_retries: 1,
             budget_growth: 1.0,
             job_ceiling_usd: None,
             checker: Checker::default(),
+        }
+    }
+}
+
+/// What `relay land gc` removes. Every default is on: nothing here needs
+/// switching on to keep the disk from filling.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Gc {
+    /// Paths in a clone, relative to it, removed from the clone of an ended job
+    /// that nothing waits for, once it has been ended for `outputs_after_hours`.
+    pub build_outputs: Vec<String>,
+    pub outputs_after_hours: f64,
+    /// A `done` job's whole clone goes after this many days, its commits kept in the repository.
+    pub clones_after_days: f64,
+    /// A failed or stopped job's clone is kept this long, in case it is resumed.
+    pub waiting_retain_days: f64,
+    /// A job's log (`<job>.log.ndjson`) is gzipped after this many days.
+    pub logs_gzip_after_days: f64,
+    /// The dispatcher runs a pass at most this often while it is awake.
+    pub interval_minutes: f64,
+    /// A pass stops after this long, and the next one goes on.
+    pub pass_seconds: u64,
+}
+
+impl Default for Gc {
+    fn default() -> Self {
+        Self {
+            build_outputs: ["target", "node_modules", ".venv"].map(String::from).to_vec(),
+            outputs_after_hours: 6.0,
+            clones_after_days: 7.0,
+            waiting_retain_days: 7.0,
+            logs_gzip_after_days: 3.0,
+            interval_minutes: 60.0,
+            pass_seconds: 300,
         }
     }
 }
@@ -320,6 +370,10 @@ pub struct Session {
     /// `env` through it on the host before each attempt and passes the result
     /// in, as direnv would. Empty: the caller's environment as it is.
     pub env_shell: Vec<String>,
+    /// Variables set in every job's environment, over the caller's and the
+    /// development environment's, under the harness's own (the account).
+    /// For Rust projects `CARGO_INCREMENTAL = "0"` keeps `target/` small.
+    pub env: BTreeMap<String, String>,
 }
 
 impl Session {
@@ -338,6 +392,7 @@ impl Default for Session {
             branch_prefix: "relay/".into(),
             final_marker: "FINAL".into(),
             env_shell: Vec::new(),
+            env: BTreeMap::new(),
             banned_models: std::collections::BTreeMap::new(),
             max_hours: 4.0,
             nice: 10,
@@ -548,7 +603,7 @@ impl Config {
             p.validate(name)?;
         }
         let h = &self.hooks;
-        for (point, chain) in [("cap", &h.cap), ("ended", &h.ended), ("held", &h.held)] {
+        for (point, chain) in [("cap", &h.cap), ("ended", &h.ended), ("held", &h.held), ("disk", &h.disk)] {
             for handler in chain.iter().flatten() {
                 crate::systems::decide::Handler::parse(handler, self)
                     .map_err(|e| anyhow::anyhow!("hooks.{point}: {e}"))?;
@@ -556,11 +611,42 @@ impl Config {
         }
         ensure!(h.held_after_minutes >= 0.0, "hooks.held_after_minutes must not be negative");
         ensure!(h.orchestrator_timeout_minutes >= 0.0, "hooks.orchestrator_timeout_minutes must not be negative");
+        self.validate_disk()?;
         regex::Regex::new(&self.sandbox.env_deny).context("sandbox.env_deny")?;
         for p in self.sandbox.hide_home.iter().chain(&self.sandbox.caches) {
             if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
                 bail!("{} must be a path inside $HOME, written relative to it", p.display());
             }
+        }
+        Ok(())
+    }
+
+    /// The disk limits, `[gc]` and `[session] env`. A `gc.build_outputs` entry
+    /// names a place inside a clone, so it can never reach outside one.
+    fn validate_disk(&self) -> Result<()> {
+        let (l, g) = (&self.limits, &self.gc);
+        ensure!(l.job_disk_gb.is_finite() && l.job_disk_gb >= 0.0, "limits.job_disk_gb must not be negative");
+        ensure!(positive(l.disk_sample_minutes), "limits.disk_sample_minutes must be a positive number");
+        for (key, v) in [
+            ("outputs_after_hours", g.outputs_after_hours),
+            ("clones_after_days", g.clones_after_days),
+            ("waiting_retain_days", g.waiting_retain_days),
+            ("logs_gzip_after_days", g.logs_gzip_after_days),
+        ] {
+            ensure!(v.is_finite() && v >= 0.0, "gc.{key} must not be negative");
+        }
+        ensure!(positive(g.interval_minutes), "gc.interval_minutes must be a positive number");
+        ensure!(g.pass_seconds >= 1, "gc.pass_seconds must be at least 1");
+        for path in &g.build_outputs {
+            let p = Path::new(path);
+            let plain = p.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+            ensure!(
+                !path.is_empty() && plain && !p.is_absolute(),
+                "gc.build_outputs entry {path:?} must be a path inside the clone, such as \"target\""
+            );
+        }
+        for k in self.session.env.keys() {
+            ensure!(valid_env_name(k), "session.env name {k:?} is not a variable name");
         }
         Ok(())
     }
@@ -586,6 +672,13 @@ impl Config {
     pub fn hidden_dirs(&self) -> Vec<PathBuf> {
         self.sandbox.hide.clone().unwrap_or_else(|| self.repo.parent().map(Path::to_path_buf).into_iter().collect())
     }
+}
+
+/// A shell-style variable name: letters, digits and underscores, not starting with a digit.
+fn valid_env_name(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with(|c: char| c.is_ascii_digit())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 pub fn valid_name(s: &str) -> bool {
@@ -644,6 +737,36 @@ mod tests {
     }
 
     #[test]
+    fn gc_and_the_disk_ceiling_are_on_by_default_and_validated() {
+        let d = repo();
+        let cfg = Config::parse("name = \"demo\"", d.path()).unwrap();
+        assert_eq!(cfg.gc.build_outputs, ["target", "node_modules", ".venv"]);
+        assert_eq!((cfg.gc.outputs_after_hours, cfg.gc.clones_after_days, cfg.gc.waiting_retain_days), (6.0, 7.0, 7.0));
+        assert_eq!((cfg.gc.logs_gzip_after_days, cfg.gc.interval_minutes), (3.0, 60.0));
+        assert_eq!((cfg.limits.job_disk_gb, cfg.limits.min_free_disk_gb), (40.0, 10.0));
+        assert!(cfg.session.env.is_empty(), "no variable is hard-coded");
+        let cfg = Config::parse(
+            "name = \"d\"\n[limits]\nmin_free_gb = 20\n[session.env]\nCARGO_INCREMENTAL = \"0\"",
+            d.path(),
+        )
+        .unwrap();
+        assert_eq!(cfg.limits.min_free_disk_gb, 20.0, "min_free_gb is the same key");
+        assert_eq!(cfg.session.env["CARGO_INCREMENTAL"], "0");
+        for bad in [
+            "[gc]\nbuild_outputs = [\"../x\"]",
+            "[gc]\nbuild_outputs = [\"/usr\"]",
+            "[gc]\nbuild_outputs = [\".\"]",
+            "[gc]\nbuild_outputs = [\"\"]",
+            "[gc]\nclones_after_days = -1",
+            "[gc]\npass_seconds = 0",
+            "[limits]\njob_disk_gb = -5",
+            "[session.env]\n\"A-B\" = \"1\"",
+        ] {
+            assert!(Config::parse(&format!("name = \"demo\"\n{bad}"), d.path()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn the_example_config_parses_and_matches_the_defaults() {
         let d = repo();
         let cfg = Config::parse(include_str!("../relay.example.toml"), d.path()).unwrap();
@@ -653,6 +776,7 @@ mod tests {
         assert_eq!(cfg.sandbox.caches, defaults.sandbox.caches);
         assert_eq!(cfg.session.max_hours, defaults.session.max_hours);
         assert_eq!(format!("{:?}", cfg.hooks), format!("{:?}", defaults.hooks));
+        assert_eq!(format!("{:?}", cfg.gc), format!("{:?}", defaults.gc));
     }
 
     const POLICY: &str = r#"

@@ -206,7 +206,7 @@ can take is held with every account's cause:
 how a fresh orchestrator learns the policy. `relay config show` prints the merged
 bans and profiles with `[policy]` or `[project]` after each setting.
 `relay view status` and `view watch` show a job's profile where it has one, else
-the model it names; `--json` carries both (`profile`, `models`).
+the model it names; `--json` carries both (`profile`, `models`), and each job's `kind` (`build`, `read` or `review`), `readonly` and `acceptance` (`none`, a `check`, a `check-red-first` or the job it is a `review-of`).
 
 ## Hooks
 
@@ -316,8 +316,8 @@ A brief says what to do; the bar says what must be true afterwards, and it is
 judged by relay, not by the session that did the work. It is **declared**: on the
 line, `queue add NAME --check "cargo nextest run --no-tests=fail"`, or as a
 profile's default, `[profiles.P] check = "..."` (for build jobs; a line's own
-`--check` wins). It is stored on the queued record, so changing a check means
-queuing a new job. A job that declares none pays nothing.
+`--check` wins). It is stored on the queued record (`acceptance` in `--json`), so
+changing a check means queuing a new job. A job that declares none pays nothing.
 
 ```toml
 [profiles.builder]
@@ -325,32 +325,57 @@ check = "cargo nextest run --no-tests=fail"
 check_red_first = true     # the profile's own check must also fail at the job's base commit
 ```
 
-When a run ends `done`, the `ended` point's `rule` handler has the check run in the
-job's clone, **inside the same sandbox plan the session used** (the repository is
-read-only there, as it was for the session), under `hooks.command_timeout_seconds`
-(raise it for a long suite). A clone with uncommitted changes to tracked files fails
-the check unrun, since the branch is what lands. relay records `bar-checked {job,
-commit, exit, tail}`, the tail being the end of the output, bounded as worker output
-is before it reaches a handler, and told to the handlers as untrusted.
+When a run ends `done`, the `ended` point's `rule` handler has the check run, and
+relay records `bar-checked {job, commit, exit, tail}`, the tail being the end of the
+output, bounded as worker output is before it reaches a handler, and told to the
+handlers as untrusted.
 
-- **Pass:** the run may be accepted. **`accept` requires a pass:** no handler, the
-  orchestrator included, can accept a run whose check did not pass; `decide answer`
-  refuses it (exit 5).
-- **Fail:** `rule` answers `resume` with the failing tail as the message, so the same
-  session fixes what the check found and ends again, and the check runs again. This
-  is bounded by `hooks.max_decisions` and `limits.job_ceiling_usd`; when a resume is
-  refused the job ends `failed`, its reason naming the check. A fail is not a failed
-  *end*, so it does not count toward [escalation](#escalation) until the job fails.
+- **On the committed tip.** The check judges what would land, so it runs on a clean
+  checkout of the branch's `HEAD`, read once and named in the record: files the
+  session left uncommitted or untracked are not there for it. The checkout is a fresh
+  clone with a configuration of its own, so the session's `.git/config` cannot name a
+  program for the host to run. Because it is fresh, a build starts from nothing.
+- **In the session's sandbox plan** (the repository read-only, the same network and
+  limits), under `hooks.command_timeout_seconds` (raise it for a long suite), but
+  with the session's clone and **its account out of sight**: the check cannot read
+  or change the sign-in the session used. A development environment
+  (`session.env_shell`) is entered from the project's repository, not from files the
+  session could have edited.
+- **Pass:** the run may be accepted. **A run whose check did not pass is never
+  `done`**, whoever decided: after the chain has answered, relay ends it `failed` with
+  the check's result as the reason, even when the orchestrator answered `accept`.
+- **Fail** (the command ran and failed): `rule` answers `resume` with the failing
+  tail as the message, so the same session fixes what the check found and ends again,
+  and the check runs again. This is bounded by `hooks.max_decisions` and
+  `limits.job_ceiling_usd`; when a resume is refused the job ends `failed`, its reason
+  naming the check. A fail is not a failed *end*, so it counts toward
+  [escalation](#escalation) only once the job itself ends failed.
+- **Could not run:** a command that timed out (124), was not found or not runnable
+  (126, 127), was killed, or whose checkout failed said nothing about the code. relay
+  records `check-could-not-run`, does not accept, and stops the job for you to look
+  at: a broken check is not the session's to fix.
 - **Revert control:** `--check-red-first` (or `check_red_first = true` beside the
   profile's `check`) also runs the check at the commit the job's branch started from
-  (its base) in a temporary export of it, and requires it to **fail** there. A check
-  that passes without the change proves nothing: relay records the result
-  `check-proves-nothing`, does not accept, and stops the job (`failed`). A check that
-  filters tests passes when the filter matches none, which is exactly this case: give
-  it a "no tests is a failure" flag, such as `--no-tests=fail` for nextest.
+  (its base), and requires it to **fail** there. Only a real failure counts: a
+  timeout, a missing command or a failed checkout at the base is `check-could-not-run`,
+  never a red. A check that passes without the change proves nothing: relay records
+  `check-proves-nothing`, does not accept, and stops the job. A check that filters
+  tests passes when the filter matches none, which is exactly this case: give it a
+  "no tests is a failure" flag, such as `--no-tests=fail` for nextest.
+- **A ceiling.** A check resumes the session, so `queue add` refuses a job that
+  declares one (or a review, or whose profile escalates) unless `limits.job_ceiling_usd`
+  is set: what such a job may spend is then bounded for sure, not only by
+  `max_decisions`.
 
 `view status` shows the latest result (`check pass`), `view result` the exit statuses
 and commit, and `--json` every run under `bars` (only the latest keeps its tail).
+
+**Older relays.** A job that declares an acceptance carries a dependency on a job
+named `needs-relay-acceptance` that does not exist: a relay that does not know what a
+check or a review is (a dispatcher from an older build sharing the bus) sees a job
+waiting for a job that is gone, and does not start it, where it would otherwise run
+it unchecked. This relay drops that name when it folds, so nothing shows of it, and
+refuses job names that start with `needs-relay-`.
 
 ## Reviews
 
@@ -360,7 +385,11 @@ build job's branch lives in the build's clone, so a plain review cannot see it.
 Before the reviewer starts, relay fetches the branch into your repository as
 `refs/relay/review/<NAME>` (as `land fetch` copies it, but not onto your branches),
 and the prompt's preamble gives the reviewer the ref, its commit and the diff base
-(the commit the builder started from). The ref goes with the review on `land clean`.
+(the commit the builder started from). The preamble comes with **every** start and
+resume of the review, with the commit as the ref stands then, so a resumed review is
+told the exact commit to judge and a verdict never names one it did not see. The ref
+goes with the review on `land clean`, and `land gc` removes the refs of reviews that
+are gone or ended `gc.outputs_after_hours` ago.
 JOB must be a build job; a review never forks it, and is never refused as a repeat
 question (the branch can move under one brief).
 
@@ -376,9 +405,10 @@ with the reviewer, the commit it judged and its reason, and `view status` shows 
 latest (`review by rev: reject: test-failure`).
 
 - **A reject resumes the builder's session** with the reviewer's findings, as `queue
-  resume` would, while the builder is not working and fewer than `hooks.max_decisions`
-  reviews have rejected it. It is up to you (or the orchestrator) to queue the next
-  review once the builder is done again.
+  resume` would, while the builder is not working, no more than `hooks.max_decisions`
+  reviews have rejected it (later rejects are recorded, and say they resumed nothing),
+  and another run keeps it under `limits.job_ceiling_usd`. It is up to you (or the
+  orchestrator) to queue the next review once the builder is done again.
 - **Independence.** relay records the reviewer's model family (`anthropic`, `openai`,
   `google`, ...; a model it does not know is its provider). A review is refused on the
   builder's family only when the reviewed job's profile declares `independent =
@@ -422,7 +452,9 @@ escalate_after = 2
 ```
 
 `escalate_after` counts failed ends of one job (runs that ended `failed`, not retried
-or resumed in place), since it was last requeued. When the count is reached, the
+or resumed in place), since it was last requeued. A job whose profile escalates needs
+`limits.job_ceiling_usd` (`queue add` refuses it otherwise), and a requeue is held to
+it as a resume is. When the count is reached, the
 `ended` point's `rule` answers `requeue {profile: "strong"}`: the job starts afresh
 under `strong` with its branch kept, and the count starts again. The target
 profile's `max_per_day`, its bans and `max_decisions` apply as for any `requeue`; a
@@ -477,6 +509,9 @@ a totals line, and a `collected` event per clone removed or emptied:
   appended as another gzip member). `view result`, `view watch` and every
   reader take either; `view result` falls back to the answer in the log when
   `result.md` is gone, and shows the `.gz` path.
+- **Review refs**: `refs/relay/review/<job>` (the ref a review read its branch by) of
+  a review that is gone, or ended `outputs_after_hours` ago and is not live. A review
+  resumed later fetches it again.
 - Never a clone with a live runner, never a symlink (skipped whole), never a
   path outside relay's own clone and state directories. A `build_outputs` entry
   must be a plain relative path (no `..`, not absolute).

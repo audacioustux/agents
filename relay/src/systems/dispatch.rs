@@ -405,7 +405,7 @@ fn plan(
             held.2.push(j.name.clone());
             continue;
         }
-        if !j.readonly && !disk_ok {
+        if !j.readonly() && !disk_ok {
             held.0.push(format!("{}: free disk below {} GB", j.name, limits.min_free_disk_gb));
             held.2.push(j.name.clone());
             continue;

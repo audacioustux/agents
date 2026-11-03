@@ -487,9 +487,7 @@ mod tests {
                 fork: None,
                 parent: None,
                 depth: 0,
-                check: None,
-                check_red_first: false,
-                review_of: None,
+                acceptance: crate::bus::Acceptance::None,
             })
         };
         let dispatched = |job: &str| {

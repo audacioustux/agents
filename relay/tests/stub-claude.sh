@@ -14,7 +14,8 @@
 #   prompts  appended to with every worker prompt (and the resume messages it is sent)
 #   cargo    appended to with every session's CARGO_INCREMENTAL (`unset` when it has none)
 # A brief containing [idle] makes no commit; one containing [status-done] reports status: done;
-# [verdict-accept] and [verdict-reject] also give a review's verdict.
+# [verdict-accept] and [verdict-reject] also give a review's verdict; [uncommitted] leaves a changed tracked
+# file and an untracked one behind after its commit.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
 case " $* " in
@@ -90,6 +91,9 @@ if [ -w . ] && [ -e .git ]; then
   git add relay-output.txt
   git commit -q -m "stub work"
 fi ;;
+esac
+case "$prompt" in *"[uncommitted]"*)
+  if [ -w . ] && [ -e .git ]; then echo late >>relay-output.txt; echo x >untracked.txt; fi ;;
 esac
 # printf, not echo: dash's echo turns \n into a real newline and splits the JSON line.
 printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"ran on %s with %s transcript turns\\n%s","num_turns":1,"total_cost_usd":%s}\n' "$sid" "$(basename "$acct")" "$turns" "$final" "$cost"

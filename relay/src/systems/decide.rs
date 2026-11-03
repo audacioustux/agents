@@ -245,7 +245,7 @@ pub struct Reviewing {
 impl Request {
     pub fn new(job: &Job, point: Point) -> Self {
         let tail = uuid::Uuid::now_v7().simple().to_string();
-        let review = job.review_of.is_some() && point == Point::Ended;
+        let review = job.review_of().is_some() && point == Point::Ended;
         let mut allowed = allowed(point).to_vec();
         allowed.extend(review.then_some("review"));
         Self {
@@ -256,11 +256,6 @@ impl Request {
             schema: schema(point, review),
             ..Self::default()
         }
-    }
-
-    /// The acceptance check did not pass for the run being decided: it may not be accepted.
-    fn bar_red(&self) -> bool {
-        self.check.as_ref().is_some_and(|c| c.result != BarResult::Pass)
     }
 
     fn point(&self) -> Point {
@@ -410,7 +405,7 @@ pub fn escalation(cfg: &Config, job: &Job) -> Option<(String, u32)> {
 /// Whether the job declares something the `ended` point judges (a check, a review, an escalation),
 /// so that point is reached for it even with no `hooks.ended`, and its decisions are bounded.
 pub fn declares(cfg: &Config, job: &Job) -> bool {
-    job.check.is_some() || job.review_of.is_some() || escalation(cfg, job).is_some()
+    job.check().is_some() || job.review_of().is_some() || escalation(cfg, job).is_some()
 }
 
 /// How many decisions acted on this incarnation of `job`.
@@ -432,7 +427,7 @@ pub fn validate(
         return Ok(());
     }
     let point = req.point();
-    let review = point == Point::Ended && job.review_of.is_some() && action.name() == "review";
+    let review = point == Point::Ended && job.review_of().is_some() && action.name() == "review";
     if !allowed(point).contains(&action.name()) && !review {
         return Err(format!("{} is not an action at {}", action.name(), point.as_str()));
     }
@@ -440,10 +435,6 @@ pub fn validate(
         && (*verdict == Verdict::Reject) != reason.is_some()
     {
         return Err("a reject names its reason (test-failure, behavior-mismatch, insufficient-evidence, stale-head, other), and an accept names none".into());
-    }
-    if *action == Action::Accept && req.bar_red() {
-        let c = req.check.as_ref().map_or("", |c| c.result.as_str());
-        return Err(format!("the job's acceptance check did not pass ({c}); a run is accepted only when it does"));
     }
     let max = cfg.hooks.max_decisions;
     if (cfg.hooks.any() || declares(cfg, job)) && acted(world, job) >= usize::try_from(max).unwrap_or(usize::MAX) {
@@ -475,6 +466,13 @@ pub fn validate(
         if let Some(why) = p.model.as_deref().and_then(|m| cfg.session.banned(m)) {
             return Err(format!("profile {name}'s model is banned: {why}"));
         }
+        // A fresh start spends its profile's cap again, under the same ceiling as a resume.
+        let fresh = p.budget.unwrap_or(req.next_cap_usd);
+        if let (Action::Requeue { .. }, Some(ceiling)) = (action, cfg.limits.job_ceiling_usd)
+            && req.spent_usd + fresh > ceiling
+        {
+            return Err(format!("another ${fresh:.2} would pass the job's ceiling of ${ceiling:.2}"));
+        }
         let running = world.jobs.values().filter(|j| j.status.has_runner() && j.profile.as_deref() == Some(name));
         let starts = world.profile_starts.get(name).map_or(&[][..], Vec::as_slice);
         // A follow-up waits for this job, which holds no slot of its own once it ends.
@@ -502,7 +500,7 @@ pub fn validate(
                 return Err(format!("{}'s session cannot be forked on its harness", job.name));
             }
             let child = named.as_deref().or(job.profile.as_deref()).and_then(|p| cfg.profiles.get(p));
-            if !job.readonly && child.is_some_and(|p| p.readonly == Some(true)) {
+            if !job.readonly() && child.is_some_and(|p| p.readonly == Some(true)) {
                 return Err(format!(
                     "a read-only job may not fork {}, a build job: a review stays independent",
                     job.name
@@ -881,19 +879,6 @@ fn asked(ctx: &Ctx, d: &Decision, job: &Job) -> Request {
         point: Some(d.point),
         spent_usd: file["spent_usd"].as_f64().unwrap_or(job.cost_usd),
         next_cap_usd: file["next_cap_usd"].as_f64().unwrap_or(job.budget_usd),
-        // Only the verdict on the check matters to validation.
-        check: file["check"]["result"].as_str().map(|r| CheckRun {
-            command: String::new(),
-            commit: None,
-            result: match r {
-                "pass" => BarResult::Pass,
-                "fail" => BarResult::Fail,
-                _ => BarResult::CheckProvesNothing,
-            },
-            exit: 0,
-            base_exit: None,
-            tail: String::new(),
-        }),
         ..Request::default()
     }
 }
@@ -1221,7 +1206,7 @@ mod tests {
         let on = |account: Option<&str>, readonly| Job {
             name: "j".into(),
             transcript_account: account.map(Into::into),
-            readonly,
+            kind: if readonly { crate::bus::Kind::Read } else { crate::bus::Kind::Build },
             ..Job::default()
         };
         assert!(validate(&cfg, &w, &on(Some("claude:a"), false), &r, &fork(None), false).is_ok());

@@ -190,7 +190,13 @@ impl<'a> Probe<'a> {
     fn run(self) -> Result<Vec<Outcome>> {
         let user = accounts::home();
         let inv = self.invocation()?;
-        let mounts = Mounts { home: self.home, workdir: Some(&self.clone), scratch: &self.scratch, cwd: &self.clone };
+        let mounts = Mounts {
+            home: self.home,
+            workdir: Some(&self.clone),
+            scratch: &self.scratch,
+            cwd: &self.clone,
+            account: true,
+        };
         let plan = sandbox::plan(self.ctx, &user, &mounts);
         let markers: Vec<PathBuf> = plan
             .iter()

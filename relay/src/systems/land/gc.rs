@@ -9,7 +9,9 @@
 //! - a `done` job's whole clone goes after `clones_after_days`, a failed or
 //!   stopped one's after `waiting_retain_days`, once every commit of its
 //!   branch is in the repository (else rescued into `refs/relay/rescue/<job>`);
-//! - a log (`<job>.log.ndjson`) older than `logs_gzip_after_days` is gzipped.
+//! - a log (`<job>.log.ndjson`) older than `logs_gzip_after_days` is gzipped;
+//! - the ref a review read its branch by (`refs/relay/review/<job>`) goes once the review is gone,
+//!   or has ended `outputs_after_hours` ago: a resumed review fetches it again.
 //!
 //! A clone with a live runner, a symlink, or a path outside relay's own
 //! directories is left alone.
@@ -36,6 +38,8 @@ pub enum Kind {
     Clone,
     /// A log, gzipped.
     Log,
+    /// The ref in the repository a review read its branch by, deleted.
+    ReviewRef,
 }
 
 /// One place a pass acts on, for one job.
@@ -68,7 +72,7 @@ fn waited_for(world: &World, name: &str) -> bool {
 /// What `j`'s clone is due for at `now_us` (bus time). Nothing for a live job, a
 /// job something waits for, or one that has not ended.
 pub fn due(world: &World, j: &Job, gc: &Gc, now_us: u64) -> Due {
-    let Some(ended) = j.ended_at.filter(|_| !j.readonly && !j.status.is_live() && !waited_for(world, &j.name)) else {
+    let Some(ended) = j.ended_at.filter(|_| !j.readonly() && !j.status.is_live() && !waited_for(world, &j.name)) else {
         return Due::default();
     };
     let age = now_us.saturating_sub(ended);
@@ -134,7 +138,27 @@ pub fn plan(ctx: &Ctx, world: &World, now_us: u64) -> Vec<Item> {
             }
         }
     }
+    items.extend(review_refs(ctx, world, gc, now_us));
     items
+}
+
+/// The refs reviews read their branches by that no review needs any more: their job is gone, or ended
+/// `outputs_after_hours` ago and nothing holds it.
+fn review_refs(ctx: &Ctx, world: &World, gc: &Gc, now_us: u64) -> Vec<Item> {
+    const PREFIX: &str = "refs/relay/review/";
+    let listed = Ctx::git(&ctx.cfg.repo).args(["for-each-ref", "--format=%(refname)", PREFIX]).output();
+    let Ok(listed) = listed.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()) else { return Vec::new() };
+    let wait = micros(gc.outputs_after_hours * 3600.0);
+    listed
+        .lines()
+        .filter_map(|r| r.strip_prefix(PREFIX).map(|job| (job, r)))
+        .filter(|(job, _)| {
+            world.jobs.get(*job).is_none_or(|j| {
+                !j.status.is_live() && !runner_alive(j) && j.ended_at.is_some_and(|t| now_us.saturating_sub(t) >= wait)
+            })
+        })
+        .map(|(job, r)| Item { job: job.to_owned(), kind: Kind::ReviewRef, path: PathBuf::from(r) })
+        .collect()
 }
 
 /// The branch tip of `branch` in `dir`.
@@ -251,6 +275,8 @@ impl Action {
         let path = self.path.display();
         match (&self.kept, self.kind, dry) {
             (Some(why), ..) => format!("gc: kept {path} ({why})"),
+            (None, Kind::ReviewRef, false) => format!("gc: removed {path}"),
+            (None, Kind::ReviewRef, true) => format!("gc: would remove {path}"),
             (None, Kind::Log, false) => format!("gc: gzipped {path} ({size})"),
             (None, Kind::Log, true) => format!("gc: would gzip {path} ({size})"),
             (None, _, false) => format!("gc: removed {path} ({size})"),
@@ -280,7 +306,7 @@ pub fn run(ctx: &Ctx, dry_run: bool) -> Result<()> {
             left = items.len() - i;
             break;
         };
-        let (bytes, complete) = if item.kind == Kind::Log {
+        let (bytes, complete) = if matches!(item.kind, Kind::Log | Kind::ReviewRef) {
             (item.path.metadata().map_or(0, |m| m.len()), true)
         } else {
             os::dir_size(&item.path, within)
@@ -307,11 +333,11 @@ pub fn run(ctx: &Ctx, dry_run: bool) -> Result<()> {
         say(&format!("gc: out of time ({}s); {left} place(s) left for the next pass", ctx.cfg.gc.pass_seconds));
     }
     let done: Vec<&Action> = actions.iter().filter(|a| a.kept.is_none()).collect();
-    let freed: u64 = done.iter().filter(|a| a.kind != Kind::Log).map(|a| a.bytes).sum();
+    let freed: u64 = done.iter().filter(|a| !matches!(a.kind, Kind::Log | Kind::ReviewRef)).map(|a| a.bytes).sum();
     let verb = if dry_run { "would remove" } else { "removed" };
     let totals = format!(
         "gc: {verb} {} place(s), {} freed",
-        done.iter().filter(|a| a.kind != Kind::Log).count(),
+        done.iter().filter(|a| !matches!(a.kind, Kind::Log | Kind::ReviewRef)).count(),
         size_str(freed)
     );
     say(&totals);
@@ -337,8 +363,15 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
     if !plan(ctx, &world, now_micros()).contains(item) {
         bail!("the job changed since the plan");
     }
+    if item.kind == Kind::ReviewRef {
+        let name = item.path.to_string_lossy();
+        let out = Ctx::git(&ctx.cfg.repo).args(["update-ref", "-d", &name]).output()?;
+        anyhow::ensure!(out.status.success(), "could not delete {name}");
+        return Ok(());
+    }
     let j = world.jobs.get(&item.job).context("the job is gone")?;
     match item.kind {
+        Kind::ReviewRef => unreachable!("handled above"),
         Kind::Log => gzip_log(&item.path),
         Kind::Outputs => {
             let meta = item.path.symlink_metadata()?;
@@ -416,7 +449,7 @@ mod tests {
             job("held", Status::Done, Some(1)),
             job("forked", Status::Done, Some(1)),
             job("free", Status::Done, Some(1)),
-            Job { readonly: true, ..job("look", Status::Done, Some(1)) },
+            Job { kind: crate::bus::Kind::Read, ..job("look", Status::Done, Some(1)) },
             waiter,
             forker,
         ];

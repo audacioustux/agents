@@ -49,13 +49,12 @@ impl Status {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Job {
     pub name: String,
     pub task: String,
     pub status: Status,
-    pub readonly: bool,
+    pub kind: bus::Kind,
     /// Harness ids it may run on; empty means any enabled harness.
     pub harnesses: Vec<String>,
     /// Model per harness id.
@@ -119,20 +118,15 @@ pub struct Job {
     /// How many follow-ups deep it is.
     #[serde(default)]
     pub depth: u32,
-    /// The acceptance check it was queued with.
+    /// How its result is accepted.
     #[serde(default)]
-    pub check: Option<String>,
-    #[serde(default)]
-    pub check_red_first: bool,
+    pub acceptance: bus::Acceptance,
     /// The commit its branch started from.
     #[serde(default)]
     pub base: Option<String>,
     /// Every acceptance check run, oldest first; only the latest keeps its output tail.
     #[serde(default)]
     pub bars: Vec<Bar>,
-    /// The build job it reviews.
-    #[serde(default)]
-    pub review_of: Option<String>,
     /// The model family a review ran on.
     #[serde(default)]
     pub family: Option<String>,
@@ -176,6 +170,20 @@ impl Reviewed {
 }
 
 impl Job {
+    pub fn readonly(&self) -> bool {
+        self.kind.readonly()
+    }
+
+    /// The acceptance check, if the job declares one.
+    pub fn check(&self) -> Option<&str> {
+        self.acceptance.command()
+    }
+
+    /// The build job this job reviews.
+    pub fn review_of(&self) -> Option<&str> {
+        self.acceptance.review_of()
+    }
+
     /// Resumed by hand during its check: what its runner still says changes
     /// only what was spent, and the owner's instruction stands.
     fn let_go(&self) -> bool {
@@ -518,28 +526,25 @@ impl World {
                 fork,
                 parent,
                 depth,
-                check,
-                check_red_first,
-                review_of,
+                acceptance,
             } => {
                 let j = Job {
                     name: job.clone(),
                     task: task.clone(),
-                    readonly: *readonly,
+                    kind: acceptance.kind(*readonly),
                     harnesses: harnesses.clone(),
                     models: models.clone(),
                     effort: effort.clone(),
                     budget_usd: *budget_usd,
                     pinned: pinned.clone(),
                     reuse_key: reuse_key.clone(),
-                    after: after.clone(),
+                    // The gate is for relays that cannot judge the job; this one can.
+                    after: after.iter().filter(|a| *a != bus::ACCEPTANCE_GATE).cloned().collect(),
                     profile: profile.clone(),
                     fork: fork.as_deref().cloned(),
                     parent: parent.clone(),
                     depth: *depth,
-                    check: check.clone(),
-                    check_red_first: *check_red_first,
-                    review_of: review_of.clone(),
+                    acceptance: acceptance.clone(),
                     created_at: t,
                     queued_at: t,
                     ..Job::default()
@@ -885,6 +890,53 @@ impl World {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_acceptance_sets_the_kind_and_the_gate_is_dropped_from_what_a_job_waits_for() {
+        use bus::{ACCEPTANCE_GATE, Acceptance, Kind};
+        let with = |acceptance: Acceptance, readonly: bool| {
+            let Event::Queue(QueueEvent::Queued {
+                job,
+                task,
+                harnesses,
+                models,
+                effort,
+                budget_usd,
+                pinned,
+                reuse_key,
+                profile,
+                ..
+            }) = queued("j")
+            else {
+                unreachable!()
+            };
+            Event::Queue(QueueEvent::Queued {
+                job,
+                task,
+                readonly,
+                harnesses,
+                models,
+                effort,
+                budget_usd,
+                pinned,
+                reuse_key,
+                after: vec!["dep".into(), ACCEPTANCE_GATE.into()],
+                profile,
+                fork: None,
+                parent: None,
+                depth: 0,
+                acceptance,
+            })
+        };
+        let kind = |a: Acceptance, ro| World::fold(&[st(1, with(a, ro))]).jobs["j"].clone();
+        assert_eq!(kind(Acceptance::None, false).kind, Kind::Build);
+        assert_eq!(kind(Acceptance::Check("c".into()), false).kind, Kind::Build);
+        assert_eq!(kind(Acceptance::None, true).kind, Kind::Read);
+        let review = kind(Acceptance::ReviewOf("b".into()), true);
+        assert_eq!((review.kind, review.review_of()), (Kind::Review, Some("b")));
+        assert!(review.readonly());
+        assert_eq!(review.after, ["dep"], "only a relay that cannot judge the job waits on the gate");
+    }
     use super::*;
 
     fn st(t: u64, event: Event) -> Stamped {
@@ -907,9 +959,7 @@ mod tests {
             fork: None,
             parent: None,
             depth: 0,
-            check: None,
-            check_red_first: false,
-            review_of: None,
+            acceptance: bus::Acceptance::None,
         })
     }
 
@@ -945,9 +995,7 @@ mod tests {
             fork: None,
             parent: None,
             depth: 0,
-            check: None,
-            check_red_first: false,
-            review_of: None,
+            acceptance: bus::Acceptance::None,
         })
     }
 

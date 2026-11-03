@@ -28,8 +28,6 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::harness::Meters;
 
-// `Queued` is the record of a job and is written once per job; boxing its fields would only change the log.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum QueueEvent {
@@ -65,16 +63,9 @@ pub enum QueueEvent {
         /// How many follow-ups deep it is: its parent's depth and one, or `0`.
         #[serde(default, skip_serializing_if = "is_zero")]
         depth: u32,
-        /// The acceptance check: a command that must pass in the job's clone before its run is accepted.
-        /// Part of the record, so changing it means queuing a new job.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        check: Option<String>,
-        /// Also run the check at the job's base commit, where it must fail.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        check_red_first: bool,
-        /// The build job this read-only job reviews.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        review_of: Option<String>,
+        /// How the job's result is accepted. Part of the record, so changing it means queuing a new job.
+        #[serde(default, skip_serializing_if = "Acceptance::is_none")]
+        acceptance: Acceptance,
     },
     /// A held job sent elsewhere by a decision: where it may run from now on.
     Rerouted {
@@ -250,12 +241,81 @@ pub enum SessionEvent {
     },
 }
 
+/// What a job is, by what it may touch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Kind {
+    /// Works in a private clone on a branch of its own.
+    #[default]
+    Build,
+    /// Reads the repository, mounted read-only.
+    Read,
+    /// A read-only job that judges a build job's branch ([`Acceptance::ReviewOf`]).
+    Review,
+}
+
+impl Kind {
+    pub fn readonly(self) -> bool {
+        self != Self::Build
+    }
+}
+
+/// How a job's result is accepted, declared when it is queued.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Acceptance {
+    #[default]
+    None,
+    /// A command that must pass on the committed tip of the job's branch.
+    Check(String),
+    /// As `Check`, and it must also fail at the commit the branch started from.
+    CheckRedFirst(String),
+    /// Reviews the build job of this name.
+    ReviewOf(String),
+}
+
+impl Acceptance {
+    pub fn is_none(&self) -> bool {
+        *self == Self::None
+    }
+
+    /// The job's kind that goes with it: a review is a read-only job of its own kind.
+    pub fn kind(&self, readonly: bool) -> Kind {
+        match (self, readonly) {
+            (Self::ReviewOf(_), _) => Kind::Review,
+            (_, true) => Kind::Read,
+            _ => Kind::Build,
+        }
+    }
+
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            Self::Check(c) | Self::CheckRedFirst(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    pub fn review_of(&self) -> Option<&str> {
+        match self {
+            Self::ReviewOf(job) => Some(job),
+            _ => None,
+        }
+    }
+}
+
+/// A job that waits for this name is never started by a relay that does not know acceptance: it
+/// shows as waiting for a job that is gone. The fold drops it, so a relay that does know ignores it.
+pub const ACCEPTANCE_GATE: &str = "needs-relay-acceptance";
+
 /// How an acceptance check came out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BarResult {
     Pass,
+    /// It ran and the code under test failed it.
     Fail,
+    /// It could not say anything: it timed out, was not found or was killed.
+    CheckCouldNotRun,
     /// It passed, but it also passes at the base commit, so it does not show the change did anything.
     CheckProvesNothing,
 }
@@ -265,6 +325,7 @@ impl BarResult {
         match self {
             Self::Pass => "pass",
             Self::Fail => "fail",
+            Self::CheckCouldNotRun => "check-could-not-run",
             Self::CheckProvesNothing => "check-proves-nothing",
         }
     }

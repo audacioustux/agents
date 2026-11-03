@@ -257,6 +257,14 @@ impl Ctx {
         c.arg("-C").arg(dir);
         c
     }
+
+    /// As [`Ctx::git`], for a repository a session could write: its own configuration cannot name a
+    /// program for git to run on the host (a file system monitor, hooks).
+    pub fn git_untrusted(dir: &Path) -> Command {
+        let mut c = Self::git(dir);
+        c.args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]).env("GIT_CONFIG_NOSYSTEM", "1");
+        c
+    }
 }
 
 use std::os::unix::process::CommandExt;

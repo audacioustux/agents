@@ -74,6 +74,7 @@ fn status(ctx: &Ctx, all: bool) -> Result<()> {
         let mut v = serde_json::to_value(&world)?;
         for j in world.jobs.values() {
             v["jobs"][&j.name]["pending"] = serde_json::to_value(world.waits(j))?;
+            v["jobs"][&j.name]["readonly"] = j.readonly().into();
         }
         out!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
@@ -169,7 +170,7 @@ pub fn job_cells(cfg: &Config, world: &World, j: &Job, now: u64) -> Vec<String> 
 fn declared(j: &Job) -> String {
     let bar = j.bars.last().map_or(String::new(), |b| format!("  check {}", b.result.as_str()));
     let review = j.verdicts.last().map_or(String::new(), |v| format!("  review by {}: {}", v.reviewer, v.summary()));
-    let of = j.review_of.as_deref().map_or(String::new(), |b| format!("  reviews {b}"));
+    let of = j.review_of().map_or(String::new(), |b| format!("  reviews {b}"));
     format!("{of}{bar}{review}")
 }
 
@@ -263,6 +264,7 @@ fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
     let log = ctx.job_log(name, "log.ndjson");
     if ctx.json {
         let mut v = serde_json::to_value(j)?;
+        v["readonly"] = j.readonly().into();
         v["answer"] = answer.as_deref().map(str::trim_end).into();
         v["log"] = log.display().to_string().into();
         return ctx.reply(&v, "");

@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
-use crate::bus::{Fork, QueueEvent};
+mod declare;
+
+use crate::bus::{ACCEPTANCE_GATE, Fork, QueueEvent};
 use crate::config::{Profile, valid_name};
 use crate::ctx::Ctx;
 use crate::os;
@@ -53,8 +55,6 @@ pub enum Cmd {
     Stop { name: String },
 }
 
-// The flags are the command line; each is its own switch.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Args)]
 pub struct Add {
     name: String,
@@ -100,19 +100,8 @@ pub struct Add {
     /// fork; a build job also starts from its branch. Never fork a builder for its review.
     #[arg(long)]
     fork: Option<String>,
-    /// The bar: a command run in the job's clone, inside its sandbox, when a run ends done. The run is
-    /// accepted only if it exits 0; a failure resumes the session with the output's tail. Default: the profile's `check`.
-    #[arg(long)]
-    check: Option<String>,
-    /// Also run the check at the job's base commit, where it must fail: a check that passes without the
-    /// change proves nothing (`check-proves-nothing`, never accepted). A check filtering tests needs a
-    /// "no tests is a failure" flag, such as `--no-tests=fail` for nextest.
-    #[arg(long)]
-    check_red_first: bool,
-    /// Review the build job JOB: read-only, `--after JOB`, with JOB's branch fetched into the repository
-    /// before the review starts and named in the prompt. The reviewer's verdict is recorded on JOB.
-    #[arg(long, value_name = "JOB", conflicts_with_all = ["fork", "no_readonly", "check"])]
-    review_of: Option<String>,
+    #[command(flatten)]
+    declare: declare::Declare,
 }
 
 fn usd(s: &str) -> Result<f64, String> {
@@ -188,17 +177,12 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
 impl Add {
     /// Checks the request, stores the brief, and says what to record.
     fn queued(self, ctx: &Ctx, jobs: &BTreeMap<String, Job>) -> Result<QueueEvent> {
-        if !valid_name(&self.name) {
-            fail!(Usage, "job names are lowercase letters, digits and dashes");
+        if !valid_name(&self.name) || self.name.starts_with(RESERVED) {
+            fail!(Usage, "job names are lowercase letters, digits and dashes, and do not start with {RESERVED}");
         }
-        let fill = Filled::new(self.profile.as_deref().map(|p| ctx.cfg.profile(p)).transpose()?, &self);
-        if fill.readonly && self.check.is_some() {
-            fail!(Usage, "--check judges a build job's branch; a read-only job has none");
-        }
-        if self.check_red_first && fill.check.is_none() {
-            fail!(Usage, "--check-red-first needs a check");
-        }
-        let review = self.review_of.as_deref().map(|r| review_target(r, jobs)).transpose()?;
+        let profile = self.profile.as_deref().map(|p| ctx.cfg.profile(p)).transpose()?;
+        let fill = Filled::new(profile, &self);
+        let declared = self.declare.resolve(ctx, profile, fill.readonly, jobs)?;
         let name = self.name;
         let brief = match (self.prompt, self.text) {
             (Some(p), _) => std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?,
@@ -209,13 +193,16 @@ impl Add {
             fail!(Usage, "the brief is empty");
         }
         let mut after = dependencies(&name, self.after, jobs)?;
-        if let Some(builder) = &review
-            && !after.contains(&builder.name)
-        {
+        if let Some(builder) = declared.review.filter(|b| !after.contains(&b.name)) {
             after.push(builder.name.clone());
         }
+        // A relay that cannot judge the job must not run it: it waits for a job that is gone.
+        if !declared.acceptance.is_none() {
+            after.push(ACCEPTANCE_GATE.to_owned());
+        }
         let fork = self.fork.as_deref().map(|f| fork_of(f, jobs)).transpose()?;
-        if let Some(parent) = self.fork.as_deref().and_then(|f| jobs.get(f)).filter(|p| fill.readonly && !p.readonly) {
+        if let Some(parent) = self.fork.as_deref().and_then(|f| jobs.get(f)).filter(|p| fill.readonly && !p.readonly())
+        {
             fail!(
                 Refused,
                 "--fork {}: a read-only job may not fork a build job; a review stays independent",
@@ -233,11 +220,11 @@ impl Add {
         if let Some((m, reason)) = models.values().find_map(|m| ctx.cfg.session.banned(m).map(|r| (m, r))) {
             fail!(Refused, "model {m} is banned: {reason}");
         }
-        if let Some(builder) = &review {
-            refuse_same_family(ctx, builder, &harnesses, &models)?;
+        if let Some(builder) = declared.review {
+            declare::refuse_same_family(ctx, builder, &harnesses, &models)?;
         }
         // A review reads a branch that can move under the same brief, so the question is never the same twice.
-        let commit = if fill.readonly && review.is_none() { Ctx::clean_head(&ctx.cfg.repo) } else { None };
+        let commit = if fill.readonly && declared.review.is_none() { Ctx::clean_head(&ctx.cfg.repo) } else { None };
         let reuse_key = commit.as_deref().map(|c| reuse_key(&brief, &harnesses, &models, fill.effort.as_deref(), c));
         if let (Some(key), Some(commit), false) = (&reuse_key, &commit, self.again) {
             refuse_repeat(jobs, key, commit, |job| {
@@ -263,47 +250,9 @@ impl Add {
             fork: fork.map(|(f, _)| Box::new(f)),
             parent: None,
             depth: 0,
-            check: fill.check,
-            check_red_first: fill.check_red_first,
-            review_of: review.map(|b| b.name.clone()),
+            acceptance: declared.acceptance,
         })
     }
-}
-
-/// The build job `name` that a review is of.
-fn review_target<'a>(name: &str, jobs: &'a BTreeMap<String, Job>) -> Result<&'a Job> {
-    let Some(j) = jobs.get(name) else { fail!(NotFound, "--review-of {name}: no job named {name}") };
-    if j.readonly {
-        fail!(Conflict, "--review-of {name}: {name} is a read-only job; a review is of a build job's branch");
-    }
-    Ok(j)
-}
-
-/// Refuses a review that can only run on the model family that built `builder`, when the builder's
-/// profile asks for independence. Where the reviewer might run on another family, dispatch decides;
-/// a session that starts on the same family then fails (see `session`).
-fn refuse_same_family(ctx: &Ctx, builder: &Job, harnesses: &[String], models: &BTreeMap<String, String>) -> Result<()> {
-    let asks = builder.profile.as_deref().and_then(|p| ctx.cfg.profiles.get(p)).and_then(|p| p.independent.as_deref());
-    let Some(built) = asks.and(ctx.cfg.model_of(builder)).map(|m| crate::config::model_family(&m)) else {
-        return Ok(());
-    };
-    let candidates: Vec<String> = if harnesses.is_empty() {
-        ctx.cfg.harnesses().iter().map(|h| h.id().to_owned()).collect()
-    } else {
-        harnesses.to_vec()
-    };
-    let families: Vec<Option<String>> = candidates
-        .iter()
-        .map(|h| models.get(h).cloned().or_else(|| ctx.cfg.harness(h).model).map(|m| crate::config::model_family(&m)))
-        .collect();
-    if !families.is_empty() && families.iter().all(|f| f.as_deref() == Some(built.as_str())) {
-        fail!(
-            Refused,
-            "{} is built on the {built} family and its profile asks for an independent review; pick a reviewer model of another family",
-            builder.name
-        );
-    }
-    Ok(())
 }
 
 /// The session `name` has to fork, and its harness, which must be able to fork.
@@ -358,9 +307,7 @@ pub fn follow_up(ctx: &Ctx, parent: &Job, f: FollowUp) -> Result<String> {
         again: true,
         after: if f.after { vec![parent.name.clone()] } else { Vec::new() },
         fork: f.fork.then(|| parent.name.clone()),
-        check: None,
-        check_red_first: false,
-        review_of: None,
+        declare: declare::Declare::default(),
     };
     let mut event = add.queued(ctx, &world.jobs)?;
     if let QueueEvent::Queued { parent: of, depth, .. } = &mut event {
@@ -381,10 +328,14 @@ pub fn resume_reviewed(ctx: &Ctx, builder: &str, message: String) -> Result<Opti
     if j.status.is_live() {
         return Ok(Some(format!("{builder} is {}", j.status.as_str())));
     }
+    // This reject is already among the verdicts: `hooks.max_decisions` of them resume the builder.
     let rejected = j.verdicts.iter().filter(|v| v.verdict == crate::bus::Verdict::Reject).count();
     let max = usize::try_from(ctx.cfg.hooks.max_decisions).unwrap_or(usize::MAX);
     if rejected > max {
-        return Ok(Some(format!("{rejected} reviews have rejected it (hooks.max_decisions {max})")));
+        return Ok(Some(format!("{max} reviews have resumed it already (hooks.max_decisions)")));
+    }
+    if let Some(ceiling) = ctx.cfg.limits.job_ceiling_usd.filter(|c| j.cost_usd + j.budget_usd > *c) {
+        return Ok(Some(format!("another ${:.2} would pass the job's ceiling of ${ceiling:.2}", j.budget_usd)));
     }
     if let Some((_, m, why)) = j.models.iter().find_map(|(h, m)| ctx.cfg.session.banned(m).map(|r| (h, m, r))) {
         return Ok(Some(format!("model {m} is banned: {why}")));
@@ -429,9 +380,6 @@ struct Filled {
     effort: Option<String>,
     budget: Option<f64>,
     readonly: bool,
-    /// The bar: the line's, else the profile's, for a build job.
-    check: Option<String>,
-    check_red_first: bool,
 }
 
 impl Filled {
@@ -442,9 +390,7 @@ impl Filled {
             profile_model: None,
             effort: add.effort.clone(),
             budget: add.budget,
-            readonly: add.readonly || add.review_of.is_some(),
-            check: add.check.clone(),
-            check_red_first: add.check_red_first,
+            readonly: add.readonly || add.declare.is_review(),
         };
         let Some(p) = profile else { return f };
         // The harness is the profile's unless the line names harnesses or pins an account.
@@ -455,11 +401,6 @@ impl Filled {
         f.effort = f.effort.or_else(|| p.effort.clone());
         f.budget = f.budget.or(p.budget);
         f.readonly = f.readonly || (!add.no_readonly && p.readonly == Some(true));
-        // The profile's check is for build jobs, and its red-first flag is for its own check.
-        if add.check.is_none() && !f.readonly {
-            f.check.clone_from(&p.check);
-            f.check_red_first = p.check.is_some() && p.check_red_first == Some(true);
-        }
         f
     }
 
@@ -474,6 +415,9 @@ impl Filled {
         }
     }
 }
+
+/// Job names that start so are relay's own (see `bus::ACCEPTANCE_GATE`).
+const RESERVED: &str = "needs-relay-";
 
 /// The jobs to wait for, each once. Only existing jobs can be named, so no cycle can form;
 /// a job naming itself is refused all the same.
@@ -647,9 +591,7 @@ mod tests {
                     fork: None,
                     parent: None,
                     depth: 0,
-                    check: None,
-                    check_red_first: false,
-                    review_of: None,
+                    acceptance: crate::bus::Acceptance::None,
                 }),
             });
             if let Some(outcome) = outcome {

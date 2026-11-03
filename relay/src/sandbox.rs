@@ -34,6 +34,9 @@ pub struct Mounts<'a> {
     /// The job's private directory (prompt file, session store).
     pub scratch: &'a Path,
     pub cwd: &'a Path,
+    /// Whether the session's own account is mounted. A check run on its work is not the session: it
+    /// gets no sign-in to read and nothing of the account to write.
+    pub account: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,16 +52,16 @@ pub enum Mount {
 pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)> {
     let cfg = &ctx.cfg;
     let own = crate::accounts::harness_of(m.home);
-    let other_homes = crate::harness::ALL.iter().flat_map(|h| h.home_paths(user_home)).filter(|p| *p != m.home.dir);
+    let other_homes =
+        crate::harness::ALL.iter().flat_map(|h| h.home_paths(user_home)).filter(|p| !m.account || *p != m.home.dir);
+    let own_writable = if m.account { own.writable(m.home, user_home) } else { Vec::new() };
+    let own_protected = if m.account { own.protected(m.home) } else { Vec::new() };
     let all = |paths: Vec<PathBuf>, mount: Mount| paths.into_iter().map(|p| (p, mount.clone())).collect::<Vec<_>>();
     let layers: [Vec<(PathBuf, Mount)>; 8] = [
         all(cfg.hidden_dirs().into_iter().chain([runtime_dir()]).chain(host_sockets()).collect(), Mount::Hidden),
         all([cfg.repo.clone()].into_iter().chain(ctx.git_dirs.iter().cloned()).collect(), Mount::ReadOnly),
-        all(other_homes.collect(), Mount::Hidden)
-            .into_iter()
-            .chain(all(own.writable(m.home, user_home), Mount::Writable))
-            .collect(),
-        all(own.protected(m.home), Mount::ReadOnly),
+        all(other_homes.collect(), Mount::Hidden).into_iter().chain(all(own_writable, Mount::Writable)).collect(),
+        all(own_protected, Mount::ReadOnly),
         cfg.sandbox.caches.iter().map(|r| (user_home.join(r), Mount::From(ctx.caches.join(r)))).collect(),
         all(cfg.sandbox.hide_home.iter().map(|r| user_home.join(r)).collect(), Mount::Hidden),
         all(vec![ctx.state_root.clone(), ctx.data_root.clone()], Mount::Hidden),

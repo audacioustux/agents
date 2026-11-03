@@ -37,8 +37,7 @@ pub enum Cmd {
 /// A note when `job` has been put up for review but its tip has no accepting verdict. Never a block:
 /// landing is the operator's step. A job nobody reviews, and nobody has been asked to, gets none.
 fn unreviewed(ctx: &Ctx, world: &crate::world::World, job: &crate::world::Job, branch: &str) -> Option<String> {
-    let asked =
-        !job.verdicts.is_empty() || world.jobs.values().any(|j| j.review_of.as_deref() == Some(job.name.as_str()));
+    let asked = !job.verdicts.is_empty() || world.jobs.values().any(|j| j.review_of() == Some(job.name.as_str()));
     if !asked {
         return None;
     }

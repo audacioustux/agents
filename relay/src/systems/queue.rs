@@ -332,11 +332,19 @@ pub fn resume_reviewed(ctx: &Ctx, builder: &str, message: String) -> Result<Opti
 
 /// Resumes the reviewer `reviewer` of a branch whose builder has answered its reject, so its verdict is
 /// for the new tip. Held to the same bounds as the builder's resume: at most `hooks.max_decisions` rejects
-/// by this reviewer already, the job's ceiling, and a banned model. `None` when resumed, else why not.
+/// by this reviewer already, a reviewer that can no longer have a decision act on it, the job's ceiling,
+/// and a banned model. `None` when resumed, else why not.
 pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String) -> Result<Option<String>> {
     let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
     let Some(j) = world.jobs.get(reviewer) else { return Ok(Some(format!("{reviewer} is gone"))) };
+    // A run that could not record its verdict (the cap on decisions per job) would leave the stale one.
+    if !crate::systems::decide::can_decide(&ctx.cfg, &world, j) {
+        return Ok(Some(format!(
+            "{reviewer} has had {} decisions already (hooks.max_decisions)",
+            ctx.cfg.hooks.max_decisions
+        )));
+    }
     let rejected = world.jobs.get(builder).map_or(0, |b| {
         b.verdicts.iter().filter(|v| v.reviewer == reviewer && v.verdict == crate::bus::Verdict::Reject).count()
     });

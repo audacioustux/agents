@@ -415,9 +415,13 @@ so an earlier commit's reject is history, not the state.
 - **A builder that answers a reject is judged again.** When that run ends `done`, relay
   resumes the reviewer whose latest verdict was the reject, on the new tip: its ref is
   fetched again and the preamble names the new commit, so the board does not keep a
-  stale verdict. The same bounds apply (the reviewer's `hooks.max_decisions` and the
-  job's ceiling, and a banned model), and a builder that fails is not re-reviewed.
-  A reviewer that cannot be resumed is left as it was; queue another review.
+  stale verdict. The same bounds apply (the job's ceiling and a banned model; and
+  `hooks.max_decisions`, which caps the decisions on a job: a reviewer that has had
+  its share is not resumed, since its verdict could not be recorded), so a reviewer
+  and builder that keep rejecting each other stop there, and the board shows the last
+  recorded verdict. A builder that fails is not re-reviewed. A reviewer that cannot be
+  resumed is left as it was; queue another review. If the builder finishes before the
+  review is marked ended, the review's own end asks again.
 - **Independence.** relay records the reviewer's model family (`anthropic`, `openai`,
   `google`, ...; a model it does not know is its provider). A review is refused on the
   builder's family only when the reviewed job's profile declares `independent =
@@ -689,7 +693,8 @@ Each session runs under `bwrap`. It sees the machine read-only, except for:
   repository, so this is where it builds, with `CARGO_TARGET_DIR=/tmp/...` for one.
   It counts in the job's disk use (`limits.job_disk_gb`, the board's size column) and
   gc removes it with the clone's build outputs ([disk](#disk)). Nothing in the
-  sandbox is a RAM tmpfs that holds data.
+  sandbox is a RAM tmpfs that can hold a job's data: hidden directories and `/dev/shm`
+  are empty and read-only (the rest of `/dev` is bubblewrap's own small device tmpfs).
 - **Caches** (`sandbox.caches`, default `~/.cache` and cargo's registry and
   git checkouts): writable, but relay's own directory for the project, shared
   by its sessions and never the host's. A session that could write the host's
@@ -725,7 +730,7 @@ and build jobs its edits-only mode.
 
 `relay probe` checks the plan from the inside, for one account of each
 harness: every hidden path is empty and no socket, with a control proving it
-exists outside, and no hidden directory is writable; every writable one is writable
+exists outside, and no hidden directory or `/dev/shm` is writable; every writable one is writable
 and every read-only one is not; `/tmp` is relay's directory on disk;
 and every cache shows relay's directory, not the host's.
 

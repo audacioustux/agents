@@ -171,14 +171,38 @@ pub(super) fn carry_out(
 /// so the board's verdict is for the new tip. The reviewer's ref is fetched again when it starts, and its
 /// preamble names the new commit. Bounded as the builder's own resume is. Returns who was resumed.
 pub(super) fn rereview(ctx: &Ctx, builder: &str) -> Result<Vec<String>> {
+    resume_rejecting(ctx, builder, None)
+}
+
+/// After a review ended: when the builder it rejected answered and ended before this review was marked
+/// ended (so `rereview` found it still running), the builder's tip has moved past the commit the
+/// review judged and nobody else will ask for the new one: resume it now.
+pub(super) fn rereview_if_overtaken(ctx: &Ctx, reviewer: &str) -> Result<Vec<String>> {
+    let world = ctx.world()?;
+    let Some(of) = world.jobs.get(reviewer).and_then(|r| r.review_of()) else { return Ok(Vec::new()) };
+    resume_rejecting(ctx, of, Some(reviewer))
+}
+
+/// The reviewers of `builder` (just `only`, when named) that rejected it last and can be asked again.
+/// With `only`, the builder must be done and past the commit judged.
+fn resume_rejecting(ctx: &Ctx, builder: &str, only: Option<&str>) -> Result<Vec<String>> {
     let world = ctx.world()?;
     let Some(b) = world.jobs.get(builder) else { return Ok(Vec::new()) };
+    let tip = || {
+        let dir = b.workdir.as_ref().filter(|d| d.exists())?;
+        checkpoint_rev(dir, &format!("refs/heads/{}", b.branch.as_ref()?))
+    };
     let rejecting: Vec<&str> = world
         .jobs
         .values()
-        .filter(|r| r.review_of() == Some(builder))
+        .filter(|r| r.review_of() == Some(builder) && only.is_none_or(|o| o == r.name))
         .filter(|r| {
-            b.verdicts.iter().rev().find(|v| v.reviewer == r.name).is_some_and(|v| v.verdict == Verdict::Reject)
+            let last = b.verdicts.iter().rev().find(|v| v.reviewer == r.name);
+            last.is_some_and(|v| {
+                v.verdict == Verdict::Reject
+                    && (only.is_none()
+                        || (b.status == crate::world::Status::Done && tip().is_some_and(|t| t != v.commit)))
+            })
         })
         .map(|r| r.name.as_str())
         .collect();

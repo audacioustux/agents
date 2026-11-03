@@ -171,11 +171,12 @@ impl<'a> Probe<'a> {
                 outside: None,
             },
             Check {
-                what: "hidden directories are not writable".into(),
+                what: "hidden directories and /dev/shm are not writable".into(),
                 inside: all(plan
                     .iter()
                     .filter(|(p, k)| *k == Mount::Hidden && p.is_dir())
-                    .map(|(p, _)| format!("! test -w {}", q(p)))),
+                    .map(|(p, _)| format!("! test -w {}", q(p)))
+                    .chain(["! test -w /dev/shm".to_owned()])),
                 outside: None,
             },
             Check { what: "caches are relay's own, not the host's".into(), inside: all(caches), outside: None },

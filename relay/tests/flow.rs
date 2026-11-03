@@ -1596,11 +1596,30 @@ fn a_builder_that_answers_a_reject_is_judged_again_on_its_new_tip() {
     let out = relay(&env, &["land", "fetch", "build"]);
     assert!(!out_of(&out).contains("note:"), "{}", out_of(&out));
 
+    // A second reviewer of the same commit is shown beside the first; both judged the latest one.
+    ok(
+        &relay(&env, &["queue", "add", "rev2", "--review-of", "build", "--text", "[verdict-accept] Review it."]),
+        "queue",
+    );
+    assert_eq!(wait_for(&env, "rev2")["status"], "done");
+    let shown = board(&env);
+    assert!(
+        shown.contains("review by rev: accept") && shown.contains("review by rev2: accept"),
+        "every reviewer of the latest commit: {shown}"
+    );
+    assert!(!shown.contains("review by rev: reject"), "{shown}");
+
     // A person may still resume a review by hand.
     let seen = prompts(&env, "a").len();
     ok(&relay(&env, &["queue", "resume", "rev", "--message", "[verdict-accept] Look again."]), "resume");
     assert_eq!(wait_for(&env, "rev")["attempts"], 3);
     assert!(prompts(&env, "a")[seen..].contains(&format!("at commit {new_tip}")));
+
+    // `land clean` takes a job's scratch directory with the rest of it.
+    let scratch = env.root.join("data/relay/flow/scratch/rev2");
+    assert!(scratch.exists());
+    ok(&relay(&env, &["land", "clean", "rev2"]), "land clean");
+    assert!(!scratch.exists(), "the scratch directory went with the job");
 
     // gc takes a review's ref once the review is over.
     configure(&env, "", "[gc]\noutputs_after_hours = 0\n");
@@ -1608,6 +1627,66 @@ fn a_builder_that_answers_a_reject_is_judged_again_on_its_new_tip() {
     ok(&out, "gc");
     assert!(out_of(&out).contains("removed refs/relay/review/rev"), "{}", out_of(&out));
     assert_eq!(rev_parse(&env.repo, "refs/relay/review/rev"), "");
+}
+
+/// A reviewer that keeps rejecting is asked again only while it can still record its verdict
+/// (`hooks.max_decisions` caps the decisions on a job), so the loop stops and the board is the last verdict.
+#[test]
+fn a_reject_loop_stops_where_the_reviewer_can_no_longer_record_a_verdict() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-loop", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "[hooks]\nmax_decisions = 2\n");
+    claude_account(&env.home, "a", 10, false);
+    std::fs::write(env.home.join(".claude.a/rereview"), "reject").unwrap();
+    let b = build(&env, "build", &["--model", "claude=claude-opus-5-5"]);
+    assert_eq!(b["status"], "done");
+    ok(
+        &relay(
+            &env,
+            &[
+                "queue",
+                "add",
+                "rev",
+                "--review-of",
+                "build",
+                "--text",
+                "[verdict-reject] Review the change.",
+                "--model",
+                "claude=claude-sonnet-5-5",
+            ],
+        ),
+        "queue the review",
+    );
+    // reject, builder again, reject again, builder a third time; then the reviewer has had its two
+    // decisions, so it is not resumed on the third tip (its verdict would be dropped, leaving a stale one).
+    let mut settled = None;
+    for _ in 0..200 {
+        let (b, r) = (job(&env, "build"), job(&env, "rev"));
+        let idle = ["done", "failed"].contains(&b["status"].as_str().unwrap_or_default())
+            && ["done", "failed"].contains(&r["status"].as_str().unwrap_or_default());
+        if idle && b["attempts"] == 3 {
+            settled = Some((b, r));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (b, r) = settled.unwrap_or_else(|| panic!("never settled: {}", board(&env)));
+    std::thread::sleep(Duration::from_secs(1));
+    let (b2, r2) = (job(&env, "build"), job(&env, "rev"));
+    assert_eq!(
+        (b2["attempts"].clone(), r2["attempts"].clone()),
+        (b["attempts"].clone(), r["attempts"].clone()),
+        "it stopped: {}",
+        board(&env)
+    );
+    assert_eq!((b2["attempts"].as_u64(), r2["attempts"].as_u64()), (Some(3), Some(2)), "{}", board(&env));
+    let verdicts = b2["verdicts"].as_array().unwrap();
+    assert_eq!(verdicts.len(), 2, "every run that could record a verdict did: {b2}");
+    // The board shows the last recorded verdict, for the commit it judged.
+    assert!(board(&env).contains("review by rev: reject: other"), "{}", board(&env));
+    assert!(r2["reason"].as_str().unwrap_or_default().contains("build resumed"), "its last verdict was acted on: {r2}");
 }
 
 #[test]
@@ -2033,6 +2112,7 @@ fn a_jobs_tmp_is_a_directory_on_disk_that_is_counted_and_collected_and_hidden_di
     }
     assert_eq!(said("hidden-write").trim(), "refused", "a hidden directory is read-only, not RAM");
     assert!(!env.root.join("state/probe-write").exists());
+    assert_eq!(said("shm-write").trim(), "refused", "/dev/shm is no way to RAM either");
 
     // gc takes the directory of a job that has ended, with the clone's build outputs, and says so.
     configure(&env, "", "[gc]\noutputs_after_hours = 0\n");

@@ -69,6 +69,8 @@ pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
     // A reviewed job that answered a reject is judged again, on its new tip.
     if outcome == Outcome::Done {
         let _ = review::rereview(ctx, &name);
+        // And a review that was still ending when the builder it rejected finished.
+        let _ = review::rereview_if_overtaken(ctx, &name);
     }
     ctx.wake_dispatch()
 }

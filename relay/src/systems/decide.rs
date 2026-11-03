@@ -413,6 +413,12 @@ fn acted(world: &World, job: &Job) -> usize {
     world.decisions.values().filter(|d| d.job == job.name && d.created == job.created_at && d.action.is_some()).count()
 }
 
+/// Whether `job` may still have a decision act on it: `hooks.max_decisions` caps them per incarnation.
+pub fn can_decide(cfg: &Config, world: &World, job: &Job) -> bool {
+    let max = usize::try_from(cfg.hooks.max_decisions).unwrap_or(usize::MAX);
+    !(cfg.hooks.any() || declares(cfg, job)) || acted(world, job) < max
+}
+
 /// Why `action` may not be carried out for `job` at `req`'s point, having spent
 /// `req.spent_usd` in all; `orchestrator` when the orchestrator answered.
 pub fn validate(
@@ -447,9 +453,11 @@ pub fn validate(
     {
         return Err("a reject names its reason (test-failure, behavior-mismatch, insufficient-evidence, stale-head, other), and an accept names none".into());
     }
-    let max = cfg.hooks.max_decisions;
-    if (cfg.hooks.any() || declares(cfg, job)) && acted(world, job) >= usize::try_from(max).unwrap_or(usize::MAX) {
-        return Err(format!("{max} decisions have acted on {} already (hooks.max_decisions)", job.name));
+    if !can_decide(cfg, world, job) {
+        return Err(format!(
+            "{} decisions have acted on {} already (hooks.max_decisions)",
+            cfg.hooks.max_decisions, job.name
+        ));
     }
     if let Some(b) = granted(action, req.next_cap_usd) {
         if !crate::config::positive(b) {

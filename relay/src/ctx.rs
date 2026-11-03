@@ -259,12 +259,79 @@ impl Ctx {
     }
 
     /// As [`Ctx::git`], for a repository a session could write: its own configuration cannot name a
-    /// program for git to run on the host (a file system monitor, hooks).
+    /// program for git to run on the host (a file system monitor, hooks, a filter driver that
+    /// `git add` would run for a `.gitattributes` line).
     pub fn git_untrusted(dir: &Path) -> Command {
         let mut c = Self::git(dir);
         c.args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]).env("GIT_CONFIG_NOSYSTEM", "1");
+        // Every filter the repository's configuration defines is emptied (an empty command is no filter),
+        // whatever its name; reading configuration runs nothing.
+        let names = Self::git(dir)
+            .args(["config", "--name-only", "--null", "--get-regexp", r"^filter\..*\.(clean|smudge|process|required)$"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        for key in names.split('\0').filter(|k| !k.is_empty()) {
+            let off = if key.ends_with(".required") { "false" } else { "" };
+            c.arg("-c").arg(format!("{key}={off}"));
+        }
         c
     }
 }
 
 use std::os::unix::process::CommandExt;
+
+#[cfg(test)]
+mod git_tests {
+    use super::*;
+
+    /// A repository whose own configuration names a filter driver and a hook, and whose attributes use the filter.
+    #[test]
+    fn git_untrusted_runs_neither_filters_nor_hooks_of_the_repository() {
+        let d = crate::config::tempdir::Dir::new();
+        let (dir, marker) = (d.path().to_owned(), d.path().join("ran"));
+        let run = |mut c: Command| {
+            let o = c.env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        run({
+            let mut c = Command::new("git");
+            c.arg("-C").arg(&dir).args(["init", "-q"]);
+            c
+        });
+        let touch = format!("touch {}; cat", marker.display());
+        for (k, v) in [("filter.evil.clean", touch.as_str()), ("filter.evil.required", "true")] {
+            run({
+                let mut c = Ctx::git(&dir);
+                c.args(["config", k, v]);
+                c
+            });
+        }
+        std::fs::write(dir.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        // Plain git runs the filter (so the test would notice a repository that stopped naming one) ...
+        run({
+            let mut c = Ctx::git(&dir);
+            c.args(["add", "-A"]);
+            c
+        });
+        assert!(marker.exists(), "the fixture's filter is not in effect");
+        std::fs::remove_file(&marker).unwrap();
+        run({
+            let mut c = Ctx::git(&dir);
+            c.args(["reset", "-q"]);
+            c
+        });
+        // ... the untrusted one does not, and still adds the file.
+        run({
+            let mut c = Ctx::git_untrusted(&dir);
+            c.args(["add", "-A"]);
+            c
+        });
+        assert!(!marker.exists(), "git_untrusted ran the repository's filter");
+        let staged = Ctx::git(&dir).args(["ls-files"]).output().unwrap().stdout;
+        assert_eq!(String::from_utf8_lossy(&staged).trim(), ".gitattributes\na.txt");
+    }
+}

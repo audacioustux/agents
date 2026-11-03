@@ -45,8 +45,9 @@ pub struct Point {
     pub tree: Option<String>,
 }
 
+/// The clone is the worker's to write: its configuration and attributes are not trusted to name programs.
 fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Option<String> {
-    let mut c = Ctx::git(dir);
+    let mut c = Ctx::git_untrusted(dir);
     c.args(args);
     if let Some(i) = index {
         c.env("GIT_INDEX_FILE", i);

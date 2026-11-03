@@ -10,9 +10,9 @@ use clap::Subcommand;
 
 use crate::accounts::{self, harness_of};
 use crate::bus::{QuotaEvent, now_micros, secs};
-use crate::config::Config;
+use crate::config::{Config, Limits};
 use crate::ctx::Ctx;
-use crate::harness::{Home, Identity, Meter, Meters, SignIn};
+use crate::harness::{Home, Identity, Meters, SignIn};
 use crate::os::Role;
 use crate::sandbox;
 use crate::systems::dispatch::{may_use, model_for, seats_taken};
@@ -157,25 +157,41 @@ struct Row<'a> {
     running: usize,
     meters: Option<&'a Meters>,
     read_at: Option<u64>,
-    /// The meter closest to its limit among those that govern the model.
+    /// The meter that decides among those that govern the model, as a table cell.
     #[serde(skip)]
-    tightest: Option<(&'a str, &'a Meter)>,
+    tightest: String,
+    /// The floor of that meter, and why when it is not `limits.floor`.
+    #[serde(flatten)]
+    floor: Floor,
     #[serde(skip)]
     ready: bool,
     /// The account judged for each other model a queued or running job asks of it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    by_model: Vec<Judged<'a>>,
+    by_model: Vec<Judged>,
 }
 
 /// An account judged for one model other than its harness's configured one.
 #[derive(serde::Serialize)]
-struct Judged<'a> {
+struct Judged {
     model: String,
     state: String,
     #[serde(skip)]
-    tightest: Option<(&'a str, &'a Meter)>,
+    tightest: String,
+    #[serde(flatten)]
+    floor: Floor,
     #[serde(skip)]
     ready: bool,
+}
+
+/// The floor that applies to the meter that decides.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Floor {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    floor: Option<f64>,
+    /// Present when the floor is the near-reset one: `floor 98%, resets in 10h`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    floor_why: Option<String>,
 }
 
 impl Row<'_> {
@@ -183,17 +199,16 @@ impl Row<'_> {
     /// would take a job: what an operator scans first comes first, and only
     /// the meter that decides (`--json` has them all).
     fn cells(&self) -> impl Iterator<Item = (Vec<String>, bool)> {
-        let line = |t: Option<(&str, &Meter)>| t.map_or(String::new(), |(k, m)| accounts::meter_line(k, m));
         let running = if self.running > 0 { format!("{} running", self.running) } else { String::new() };
         let who = self.identity.as_ref().map(Identity::label).unwrap_or_default();
         let state = match &self.same_as {
             Some(first) => format!("{}, same sign-in as {first}", self.state),
             None => self.state.clone(),
         };
-        let own = vec![self.account.clone(), who, state, running, line(self.tightest)];
+        let own = vec![self.account.clone(), who, state, running, self.tightest.clone()];
         let others = self.by_model.iter().map(move |j| {
             (
-                vec![format!("  for {}", j.model), String::new(), j.state.clone(), String::new(), line(j.tightest)],
+                vec![format!("  for {}", j.model), String::new(), j.state.clone(), String::new(), j.tightest.clone()],
                 j.ready,
             )
         });
@@ -202,15 +217,15 @@ impl Row<'_> {
 }
 
 /// How an account stands for `model`: its state cell, the meter that decides, and whether it would take the job.
-fn judge<'w>(
+fn judge(
     a: &Home,
-    st: Option<&'w AccountState>,
+    st: Option<&AccountState>,
     model: Option<&str>,
-    floor: f64,
+    limits: &Limits,
     now: u64,
-) -> (String, Option<(&'w str, &'w Meter)>, bool) {
+) -> (String, String, Floor, bool) {
     let h = harness_of(a);
-    let fit = accounts::fit(a, st, model, floor, now);
+    let fit = accounts::fit(a, st, model, limits, now);
     let ready = fit.is_ok();
     let state = match fit {
         Ok(_) if !h.caps().quota => "ready (unmetered)".to_owned(),
@@ -225,11 +240,20 @@ fn judge<'w>(
         Err(accounts::Refusal::AtFloor(_)) => "at floor".to_owned(),
         Err(r) => r.describe(),
     };
-    let tightest = st.and_then(|s| {
+    let deciding = st.and_then(|s| {
         let governing = h.meters_for(model, &s.meters).ok()?;
-        accounts::tightest(&governing, &s.meters, secs(now))
+        // The meter that holds the account back, else the closest to its limit.
+        accounts::at_floor(&governing, &s.meters, limits, secs(now))
+            .or_else(|| accounts::tightest(&governing, &s.meters, secs(now)))
     });
-    (state, tightest, ready)
+    let cell = deciding.map_or(String::new(), |(k, m)| accounts::meter_line(k, m));
+    let floor = deciding.map_or(Floor { floor: None, floor_why: None }, |(_, m)| Floor {
+        floor: Some(limits.floor_for(m.resets_at, secs(now)).0),
+        floor_why: accounts::floor_note(limits, m, secs(now)),
+    });
+    // A floor loosened for a reset is part of what the cell says.
+    let cell = floor.floor_why.as_ref().map_or(cell.clone(), |why| format!("{cell} ({why})"));
+    (state, cell, floor, ready)
 }
 
 /// Whether a queued job may run on `account`, so its reading decides something.
@@ -273,14 +297,14 @@ pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
 /// The view of `found` in `world` (which has heard its neighbours), with the
 /// seats other projects hold (`elsewhere`), at `now` (bus time).
 fn view(cfg: &Config, found: &[Home], world: &World, elsewhere: &BTreeMap<String, usize>, now: u64) -> AccountsView {
-    let floor = cfg.limits.floor;
+    let limits = &cfg.limits;
     let twins = accounts::twins(found);
     let row = |a: &Home| {
         let key = a.key();
         let st = world.accounts.get(&key);
         // The dispatcher's own judgment, for the configured model and every other one its jobs ask for.
         let model = cfg.harness(a.harness).model;
-        let (state, tightest, ready) = judge(a, st, model.as_deref(), floor, now);
+        let (state, tightest, floor, ready) = judge(a, st, model.as_deref(), limits, now);
         let asked: BTreeSet<String> = world
             .jobs
             .values()
@@ -295,8 +319,8 @@ fn view(cfg: &Config, found: &[Home], world: &World, elsewhere: &BTreeMap<String
         let by_model = asked
             .into_iter()
             .map(|m| {
-                let (state, tightest, ready) = judge(a, st, Some(&m), floor, now);
-                Judged { model: m, state, tightest, ready }
+                let (state, tightest, floor, ready) = judge(a, st, Some(&m), limits, now);
+                Judged { model: m, state, tightest, floor, ready }
             })
             .collect();
         // Twins share their seats: a session on either is a session on both.
@@ -317,6 +341,7 @@ fn view(cfg: &Config, found: &[Home], world: &World, elsewhere: &BTreeMap<String
             meters: st.map(|s| &s.meters),
             read_at: st.and_then(|s| s.read_at),
             tightest,
+            floor,
             ready,
             by_model,
         }
@@ -324,8 +349,15 @@ fn view(cfg: &Config, found: &[Home], world: &World, elsewhere: &BTreeMap<String
     let rows: Vec<Row<'_>> = found.iter().map(row).collect();
     let names: Vec<_> = cfg.harnesses().iter().map(|h| h.id()).collect();
     let l = &cfg.limits;
-    let head =
-        format!("accounts on {} (floor {:.0}%, {} session(s) each)", names.join(", "), l.floor * 100.0, l.per_account);
+    let near = l
+        .floor_near_reset
+        .map_or(String::new(), |n| format!(", {:.0}% within {}h of a reset", n.floor * 100.0, n.within_hours));
+    let head = format!(
+        "accounts on {} (floor {:.0}%{near}, {} session(s) each)",
+        names.join(", "),
+        l.floor * 100.0,
+        l.per_account
+    );
     let (cells, ready) = rows.iter().flat_map(Row::cells).unzip();
     AccountsView { json: serde_json::json!({ "harnesses": names, "accounts": rows }), head, cells, ready }
 }
@@ -336,6 +368,7 @@ mod tests {
 
     use super::*;
     use crate::config::tempdir;
+    use crate::harness::Meter;
     use crate::world::Job;
 
     const NOW: u64 = 1_800_000_000 * 1_000_000;

@@ -11,6 +11,7 @@ repo = "."
 max_running = 2          # sessions at once, over all accounts of all harnesses
 per_account = 1          # sessions at once on one account (omp: on one provider of it)
 floor = 0.9              # an account at this utilization of any meter that governs the job takes no new session
+# floor_near_reset = { within_hours = 12, floor = 0.98 }  # a meter that resets within 12h has this floor instead
 budget_usd = 10.0        # spend cap per attempt, enforced by relay for every harness
 silent_minutes = 30      # a session that prints nothing this long is ended
 # max_load = 24.0        # hold new sessions while the 1-minute load average is above this

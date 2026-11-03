@@ -508,7 +508,7 @@ fn checker_home(ctx: &Ctx, job: &Job, harness: &str, model: Option<&str>) -> Opt
     let usable: Vec<&Home> = found
         .iter()
         .filter(|h| h.harness == harness)
-        .filter(|h| accounts::fit(h, world.accounts.get(&h.key()), model.as_deref(), ctx.cfg.limits.floor, now).is_ok())
+        .filter(|h| accounts::fit(h, world.accounts.get(&h.key()), model.as_deref(), &ctx.cfg.limits, now).is_ok())
         .collect();
     let worker = |h: &&&Home| job.account.as_deref() == Some(h.key().as_str());
     let busy = |h: &&&Home| {

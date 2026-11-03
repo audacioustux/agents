@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::bus::secs;
-use crate::config::Config;
+use crate::config::{Config, Limits};
 use crate::harness::{Harness, Home, Identity, Meter, Meters, SignIn};
 use crate::world::{AccountState, World};
 
@@ -102,10 +102,37 @@ pub fn tightest<'m>(governing: &[&Meter], meters: &'m Meters, now_s: i64) -> Opt
         .map(|(k, m)| (k.as_str(), m))
 }
 
+/// Of the `governing` meters, the fullest one at its own floor (one about to
+/// reset may be allowed further), if any.
+pub fn at_floor<'m>(
+    governing: &[&Meter],
+    meters: &'m Meters,
+    limits: &Limits,
+    now_s: i64,
+) -> Option<(&'m str, &'m Meter)> {
+    meters
+        .iter()
+        .filter(|&(_, m)| governing.iter().any(|g| std::ptr::eq(*g, m)) && m.resets_at.is_none_or(|r| r > now_s))
+        .filter(|(_, m)| m.utilization >= limits.floor_for(m.resets_at, now_s).0)
+        .max_by(|a, b| a.1.utilization.total_cmp(&b.1.utilization))
+        .map(|(k, m)| (k.as_str(), m))
+}
+
 /// One meter as an operator reads it: `100% openai-codex/5 hours, resets Nov 2 21:42Z`.
 pub fn meter_line(name: &str, m: &Meter) -> String {
     let at = m.resets_at.map_or(String::new(), |r| format!(", resets {}", fmt_time(r)));
     format!("{:.0}% {name}{at}", m.utilization * 100.0)
+}
+
+/// What `m`'s floor is when it differs from `limits.floor`, in words: `floor 98%, resets in 10h`.
+pub fn floor_note(limits: &Limits, m: &Meter, now_s: i64) -> Option<String> {
+    let (floor, near) = limits.floor_for(m.resets_at, now_s);
+    let left = m.resets_at.map_or(0, |r| r - now_s);
+    near.then(|| format!("floor {:.0}%, resets in {}", floor * 100.0, fmt_left(left)))
+}
+
+fn fmt_left(secs: i64) -> String {
+    if secs >= 3600 { format!("{}h", (secs + 1800) / 3600) } else { format!("{}m", (secs + 59) / 60) }
 }
 
 pub fn fmt_time(unix_s: i64) -> String {
@@ -184,7 +211,7 @@ pub fn fit(
     home: &Home,
     state: Option<&AccountState>,
     model: Option<&str>,
-    floor: f64,
+    limits: &Limits,
     now_us: u64,
 ) -> Result<f64, Refusal> {
     let h = harness_of(home);
@@ -199,10 +226,9 @@ pub fn fit(
     let empty = Meters::new();
     let meters = state.map_or(&empty, |s| &s.meters);
     let governing = h.meters_for(model, meters).map_err(|e| Refusal::Blind(e.0))?;
-    if let Some((name, m)) = tightest(&governing, meters, now_s)
-        && m.utilization >= floor
-    {
-        return Err(Refusal::AtFloor(meter_line(name, m)));
+    if let Some((name, m)) = at_floor(&governing, meters, limits, now_s) {
+        let note = floor_note(limits, m, now_s).map_or(String::new(), |n| format!(" ({n})"));
+        return Err(Refusal::AtFloor(format!("{}{note}", meter_line(name, m))));
     }
     Ok(score(&governing, now_s))
 }
@@ -246,20 +272,44 @@ mod tests {
         let now_us = 1_000 * 1_000_000;
         let now = secs(now_us);
         let read = AccountState { read_at: Some(now_us - 1), ..Default::default() };
-        assert_eq!(fit(&claude("a"), None, None, 0.9, now_us), Err(Refusal::Unread));
+        assert_eq!(fit(&claude("a"), None, None, &Limits::default(), now_us), Err(Refusal::Unread));
         let failed = AccountState { unreadable_at: Some(now_us - 1), ..Default::default() };
-        assert_eq!(fit(&claude("a"), Some(&failed), None, 0.9, now_us), Err(Refusal::Unreadable));
-        assert!(fit(&claude("a"), Some(&read), None, 0.9, now_us).is_ok());
+        assert_eq!(fit(&claude("a"), Some(&failed), None, &Limits::default(), now_us), Err(Refusal::Unreadable));
+        assert!(fit(&claude("a"), Some(&read), None, &Limits::default(), now_us).is_ok());
         let old = AccountState { read_at: Some(now_us - STALE_MICROS - 1), ..read.clone() };
-        assert_eq!(fit(&claude("a"), Some(&old), None, 0.9, now_us), Err(Refusal::Stale));
+        assert_eq!(fit(&claude("a"), Some(&old), None, &Limits::default(), now_us), Err(Refusal::Stale));
         let mut full = read.clone();
         full.meters.insert("seven_day".into(), m(0.95, Some(now + 10)));
-        let held = fit(&claude("a"), Some(&full), None, 0.9, now_us).unwrap_err();
+        let held = fit(&claude("a"), Some(&full), None, &Limits::default(), now_us).unwrap_err();
         assert!(held.describe().starts_with("at floor: 95% seven_day, resets "), "{}", held.describe());
         full.meters.insert("seven_day".into(), m(0.95, Some(now - 10)));
-        assert!(fit(&claude("a"), Some(&full), None, 0.9, now_us).is_ok(), "a meter past its reset no longer counts");
+        assert!(
+            fit(&claude("a"), Some(&full), None, &Limits::default(), now_us).is_ok(),
+            "a meter past its reset no longer counts"
+        );
         let limited = AccountState { limited_until: Some(now + 1), ..read.clone() };
-        assert_eq!(fit(&claude("a"), Some(&limited), None, 0.9, now_us), Err(Refusal::Limited));
+        assert_eq!(fit(&claude("a"), Some(&limited), None, &Limits::default(), now_us), Err(Refusal::Limited));
+    }
+
+    #[test]
+    fn a_meter_about_to_reset_has_its_own_floor() {
+        use crate::config::NearReset;
+        let now_us = 1_000 * 1_000_000;
+        let now = secs(now_us);
+        let limits =
+            Limits { floor_near_reset: Some(NearReset { within_hours: 12.0, floor: 0.98 }), ..Limits::default() };
+        let mut st = AccountState { read_at: Some(now_us - 1), ..Default::default() };
+        st.meters.insert("seven_day".into(), m(0.91, Some(now + 10 * 3600)));
+        assert!(fit(&claude("a"), Some(&st), None, &limits, now_us).is_ok(), "91% a few hours from a reset");
+        assert!(fit(&claude("a"), Some(&st), None, &Limits::default(), now_us).is_err(), "without the setting");
+        st.meters.insert("seven_day".into(), m(0.99, Some(now + 10 * 3600)));
+        let held = fit(&claude("a"), Some(&st), None, &limits, now_us).unwrap_err().describe();
+        assert!(held.starts_with("at floor: 99% seven_day") && held.ends_with("(floor 98%, resets in 10h)"), "{held}");
+        // Per meter: the far meter keeps the ordinary floor even when another is about to reset.
+        st.meters.insert("seven_day".into(), m(0.91, Some(now + 10 * 3600)));
+        st.meters.insert("five_hour".into(), m(0.92, Some(now + 20 * 3600)));
+        let held = fit(&claude("a"), Some(&st), None, &limits, now_us).unwrap_err().describe();
+        assert!(held.starts_with("at floor: 92% five_hour") && !held.contains("floor 98%"), "{held}");
     }
 
     /// A claude home under `root` signed in as `uuid` on `plan`; `None` leaves no `.claude.json`.
@@ -305,9 +355,9 @@ mod tests {
     #[test]
     fn a_home_with_no_sign_in_is_never_a_fit() {
         let mut st = AccountState { read_at: Some(1_000_000), ..Default::default() };
-        assert!(fit(&claude("a"), Some(&st), None, 0.9, 2_000_000).is_ok());
+        assert!(fit(&claude("a"), Some(&st), None, &Limits::default(), 2_000_000).is_ok());
         st.unsigned = true;
-        assert_eq!(fit(&claude("a"), Some(&st), None, 0.9, 2_000_000), Err(Refusal::NotSignedIn));
+        assert_eq!(fit(&claude("a"), Some(&st), None, &Limits::default(), 2_000_000), Err(Refusal::NotSignedIn));
     }
 
     #[test]
@@ -317,9 +367,12 @@ mod tests {
         let omp = Home { harness: "omp", label: "default".into(), dir: PathBuf::from("/o") };
         let mut st = AccountState { read_at: Some(now_us - 1), ..Default::default() };
         st.meters.insert("openai-codex/7 days".into(), m(0.2, Some(now + 86_400 * 5)));
-        assert!(fit(&omp, Some(&st), Some("openai-codex/gpt-5.2"), 0.9, now_us).is_ok());
-        assert!(matches!(fit(&omp, Some(&st), Some("anthropic/x"), 0.9, now_us), Err(Refusal::Blind(_))));
-        assert!(matches!(fit(&omp, Some(&st), None, 0.9, now_us), Err(Refusal::Blind(_))));
+        assert!(fit(&omp, Some(&st), Some("openai-codex/gpt-5.2"), &Limits::default(), now_us).is_ok());
+        assert!(matches!(
+            fit(&omp, Some(&st), Some("anthropic/x"), &Limits::default(), now_us),
+            Err(Refusal::Blind(_))
+        ));
+        assert!(matches!(fit(&omp, Some(&st), None, &Limits::default(), now_us), Err(Refusal::Blind(_))));
     }
 
     #[test]

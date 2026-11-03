@@ -213,6 +213,9 @@ pub struct Limits {
     pub per_account: usize,
     /// An account takes no new session once any quota window reaches this utilization.
     pub floor: f64,
+    /// A meter that resets within `within_hours` has this floor instead of
+    /// `floor`: quota still unused at a reset is lost. Absent, `floor` holds everywhere.
+    pub floor_near_reset: Option<NearReset>,
     /// Default spend cap per session, passed as `--max-budget-usd`.
     pub budget_usd: f64,
     /// A session that prints nothing for this long is ended.
@@ -303,12 +306,33 @@ impl Default for Checker {
     }
 }
 
+/// The looser floor for a meter about to reset.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NearReset {
+    pub within_hours: f64,
+    pub floor: f64,
+}
+
+impl Limits {
+    /// The floor for a meter that resets at `resets_at` (unix seconds), at
+    /// `now_s`, and whether that is the near-reset one.
+    pub fn floor_for(&self, resets_at: Option<i64>, now_s: i64) -> (f64, bool) {
+        #[allow(clippy::cast_precision_loss)]
+        match (self.floor_near_reset, resets_at) {
+            (Some(n), Some(r)) if r > now_s && (r - now_s) as f64 <= n.within_hours * 3600.0 => (n.floor, true),
+            _ => (self.floor, false),
+        }
+    }
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
             max_running: 2,
             per_account: 1,
             floor: 0.9,
+            floor_near_reset: None,
             budget_usd: 10.0,
             silent_minutes: 30,
             max_load: None,
@@ -637,6 +661,13 @@ impl Config {
         ensure!(self.repo.join(".git").exists(), "repo {} is not a git repository", self.repo.display());
         ensure!(self.limits.max_running >= 1 && self.limits.per_account >= 1, "limits must be at least 1");
         ensure!((0.0..=1.0).contains(&self.limits.floor), "limits.floor is a fraction between 0 and 1");
+        if let Some(n) = self.limits.floor_near_reset {
+            ensure!(positive(n.within_hours), "limits.floor_near_reset.within_hours must be a positive number");
+            ensure!(
+                n.floor > self.limits.floor && n.floor <= 1.0,
+                "limits.floor_near_reset.floor must be above limits.floor and at most 1"
+            );
+        }
         ensure!(positive(self.limits.budget_usd), "limits.budget_usd must be a positive number");
         ensure!(
             self.limits.budget_growth.is_finite() && self.limits.budget_growth >= 1.0,
@@ -833,6 +864,27 @@ mod tests {
         assert_eq!(cfg.limits.max_running, 2);
         assert!(cfg.sandbox.enabled);
         assert_eq!(cfg.hidden_dirs(), vec![cfg.repo.parent().unwrap().to_path_buf()]);
+    }
+
+    #[test]
+    fn the_near_reset_floor_is_above_the_floor_and_at_most_one() {
+        let d = repo();
+        let parse = |n: &str| Config::parse(&format!("name = \"demo\"\n[limits]\nfloor_near_reset = {n}"), d.path());
+        let cfg = parse("{ within_hours = 12, floor = 0.98 }").unwrap();
+        assert_eq!(cfg.limits.floor_for(Some(100 + 11 * 3600), 100), (0.98, true));
+        assert_eq!(cfg.limits.floor_for(Some(100 + 13 * 3600), 100), (0.9, false), "too far off");
+        assert_eq!(cfg.limits.floor_for(None, 100), (0.9, false), "an unknown reset is not near");
+        assert_eq!(cfg.limits.floor_for(Some(50), 100), (0.9, false), "a reset past is no meter");
+        assert!(parse("{ within_hours = 12, floor = 1.0 }").is_ok());
+        for bad in [
+            "{ within_hours = 12, floor = 0.9 }",
+            "{ within_hours = 12, floor = 1.1 }",
+            "{ within_hours = 0, floor = 0.95 }",
+            "{ floor = 0.95 }",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        assert_eq!(Config::parse("name = \"demo\"", d.path()).unwrap().limits.floor_near_reset, None);
     }
 
     #[test]

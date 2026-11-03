@@ -424,7 +424,7 @@ fn plan(
                 let on = if provider.is_empty() { String::new() } else { format!(" on {provider}") };
                 causes.push(format!("busy ({taken} of {} seat{}{on})", limits.per_account, plural(limits.per_account)));
             }
-            match accounts::fit(a, world.accounts.get(&a.key()), model.as_deref(), limits.floor, now_us) {
+            match accounts::fit(a, world.accounts.get(&a.key()), model.as_deref(), limits, now_us) {
                 Ok(score) if causes.is_empty() => fits.push((a, score)),
                 Ok(_) => {}
                 Err(r) => causes.push(r.describe()),

@@ -343,7 +343,10 @@ handlers as untrusted.
   session could have edited.
 - **Pass:** the run may be accepted. **A run whose check did not pass is never
   `done`**, whoever decided: after the chain has answered, relay ends it `failed` with
-  the check's result as the reason, even when the orchestrator answered `accept`.
+  the check's result as the reason. That is the one enforcement; it is also told: an
+  `accept` of a run whose check is red is refused where it is given (`decide answer`
+  exits 5 with the reason and the decision keeps waiting; a handler in a chain is recorded
+  as refused and the chain goes on to the next one).
 - **Fail** (the command ran and failed): `rule` answers `resume` with the failing
   tail as the message, so the same session fixes what the check found and ends again,
   and the check runs again. This is bounded by `hooks.max_decisions` and
@@ -452,7 +455,11 @@ escalate_after = 2
 ```
 
 `escalate_after` counts failed ends of one job (runs that ended `failed`, not retried
-or resumed in place), since it was last requeued. A job whose profile escalates needs
+or resumed in place), since it was last requeued. An end the acceptance check turned
+`failed` counts in that number, but the `rule` is asked about a run's own `failed` end
+only, so escalation never fires for a job whose check keeps failing: the check's remedy
+is the resume with its output, bounded by `max_decisions`, and then the job waits
+`failed` for you or the orchestrator (`requeue`) to move it. A job whose profile escalates needs
 `limits.job_ceiling_usd` (`queue add` refuses it otherwise), and a requeue is held to
 it as a resume is. When the count is reached, the
 `ended` point's `rule` answers `requeue {profile: "strong"}`: the job starts afresh
@@ -569,9 +576,26 @@ same 10 minutes. An account is used only when:
 - it has a reading, and not a stale one (unread or stale is not the same as
   having room; a job waits while a fresh one is taken);
 - the meters that govern the job's model are below `limits.floor` (omp meters
-  each provider, so its model must name one: `minimax-code/MiniMax-M3.1-Flash`);
+  each provider, so its model must name one: `minimax-code/MiniMax-M3.1-Flash`),
+  or below `limits.floor_near_reset.floor` for a meter that resets soon (below);
 - it is not limited or signed out;
 - it has a free seat.
+
+Quota that resets soon is lost if unused, so the floor can loosen near a reset:
+
+```toml
+[limits]
+floor = 0.9
+floor_near_reset = { within_hours = 12, floor = 0.98 }
+```
+
+For each meter whose `resetsAt` is within `within_hours` of now, the floor is
+`floor_near_reset.floor` instead of `limits.floor`; every other meter keeps
+`limits.floor` (it is per meter, not per account, and an unknown reset is never near).
+The new floor must be above `limits.floor` and at most 1. Absent, nothing changes.
+`relay quota show` states it where it applies (`91% seven_day, resets Nov 4 07:15Z
+(floor 98%, resets in 10h)`, and `floorWhy` in `--json`), and a held reason names it
+too: `at floor: 99% seven_day, resets Nov 4 07:15Z (floor 98%, resets in 10h)`.
 
 Of those, relay picks the one with the most room left per day until reset,
 because quota still unused at a reset is lost. A session that already ran

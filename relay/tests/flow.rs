@@ -1388,13 +1388,39 @@ fn whoever_accepts_a_red_run_it_does_not_end_done() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    ok(
-        &relay(&env, &["decide", "answer", &waiting.expect("the ended decision is parked"), "--action", "accept"]),
-        "answer",
-    );
+    // The refusal is the orchestrator's to hear: exit 5 with the reason, and the decision still waits.
+    let id = waiting.expect("the ended decision is parked");
+    let out = relay(&env, &["decide", "answer", &id, "--action", "accept"]);
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert!(stderr(&out).contains("acceptance check is fail"), "{}", stderr(&out));
+    ok(&relay(&env, &["decide", "answer", &id, "--action", "stop", "--why", "red"]), "stop instead");
     let j = wait_for(&env, "pushy");
-    assert_eq!(j["status"], "failed", "accepted, and still not done: {j}");
-    assert!(j["reason"].as_str().unwrap_or_default().contains("acceptance check fail"), "{j}");
+    assert_eq!(j["status"], "failed", "{j}");
+}
+
+#[test]
+fn a_handler_that_accepts_a_red_run_is_refused_and_the_chain_goes_on() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("bar-fall", false);
+    let script = env.root.join("accept.sh");
+    std::fs::write(&script, "#!/bin/sh\ncat >/dev/null\necho '{\"action\": \"accept\", \"why\": \"looks fine\"}'\n")
+        .unwrap();
+    Command::new("chmod").arg("755").arg(&script).status().unwrap();
+    configure(
+        &env,
+        "job_ceiling_usd = 100.0\n",
+        &format!("[hooks]\nended = [\"command:{}\", \"rule\"]\nmax_decisions = 2\n", script.display()),
+    );
+    claude_account(&env.home, "a", 10, false);
+    let j = build(&env, "red", &["--check", "false"]);
+    assert_eq!(j["status"], "failed", "{j}");
+    let first = &decisions(&env, "red")[0];
+    let (a, b) = (&first["steps"][0], &first["steps"][1]);
+    assert_eq!(a["action"]["action"], "accept", "{first}");
+    assert!(a["refused"].as_str().unwrap_or_default().contains("acceptance check is fail"), "told why: {first}");
+    assert_eq!((b["handler"].as_str(), b["action"]["action"].as_str()), (Some("rule"), Some("resume")), "{first}");
 }
 
 #[test]
@@ -1846,4 +1872,113 @@ fn a_profile_escalates_a_job_to_another_after_enough_failed_ends() {
     assert!(stderr(&relay(&env, &["profiles"])).contains("escalation cycle"));
     env.write_policy("[profiles.strong]\nescalate_to = \"nobody\"\nescalate_after = 1\n");
     assert!(stderr(&relay(&env, &["profiles"])).contains("not a profile"));
+}
+
+/// An omp default whose one meter stands at `pct` and resets `resets` from now (`10h`, `2d`).
+fn omp_meter(home: &Path, pct: u32, resets: &str) {
+    omp_default(home, 0, false);
+    let usage =
+        format!("Usage\n\nStub — 1 account\n  ● someone\n      ● 7 days  ██░░  {pct}.0% used · resets in {resets}\n");
+    std::fs::write(home.join(".omp/usage"), usage).unwrap();
+}
+
+/// What the dispatcher logged, where it says why a job is held.
+fn dispatch_log(env: &Env) -> String {
+    fn walk(dir: &Path, out: &mut String) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.file_name().is_some_and(|n| n == "dispatch.log") {
+                out.push_str(&std::fs::read_to_string(&p).unwrap_or_default());
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(&env.root.join("state"), &mut out);
+    out
+}
+
+#[test]
+fn a_meter_about_to_reset_has_the_looser_floor_and_quota_says_so() {
+    if !have_bwrap() {
+        return;
+    }
+    let near = "floor_near_reset = { within_hours = 12, floor = 0.98 }\n";
+    let stated = |env: &Env| {
+        ok(&relay(env, &["quota", "refresh"]), "refresh");
+        String::from_utf8_lossy(&relay(env, &["quota", "show"]).stdout).into_owned()
+    };
+
+    // 91% of a meter that resets in 10h: under the near-reset floor, so the job runs.
+    let env = setup("near-ok", true);
+    configure(&env, near, "");
+    omp_meter(&env.home, 91, "10h");
+    let table = stated(&env);
+    assert!(table.contains("floor 90%, 98% within 12h of a reset"), "{table}");
+    assert!(table.contains("ready") && table.contains("(floor 98%, resets in 10h)"), "{table}");
+    let json: serde_json::Value = serde_json::from_slice(&relay(&env, &["quota", "show", "--json"]).stdout).unwrap();
+    assert_eq!(json["accounts"][0]["floor"], 0.98, "{json}");
+    assert_eq!(json["accounts"][0]["floorWhy"], "floor 98%, resets in 10h", "{json}");
+    ok(&relay(&env, &["queue", "add", "use-it", "--text", "Look.", "--readonly"]), "queue");
+    assert_eq!(wait_for(&env, "use-it")["status"], "done");
+
+    // Past the near-reset floor it is held, and the reason names that floor.
+    let env = setup("near-full", true);
+    configure(&env, near, "");
+    omp_meter(&env.home, 99, "10h");
+    ok(&relay(&env, &["queue", "add", "full", "--text", "Look.", "--readonly"]), "queue");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(job(&env, "full")["status"], "queued");
+    let held = dispatch_log(&env);
+    assert!(held.contains("at floor: 99%") && held.contains("(floor 98%, resets in 10h)"), "{held}");
+
+    // The same 91% with the reset two days off is held at the ordinary floor, and says nothing of another.
+    let env = setup("near-far", true);
+    configure(&env, near, "");
+    omp_meter(&env.home, 91, "2d");
+    ok(&relay(&env, &["queue", "add", "far", "--text", "Look.", "--readonly"]), "queue");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(job(&env, "far")["status"], "queued");
+    let held = dispatch_log(&env);
+    assert!(held.contains("at floor: 91%") && !held.contains("floor 98%"), "{held}");
+
+    // Without the setting, nothing changes: 91% is held however soon it resets.
+    let env = setup("near-off", true);
+    omp_meter(&env.home, 91, "10h");
+    ok(&relay(&env, &["queue", "add", "off", "--text", "Look.", "--readonly"]), "queue");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(job(&env, "off")["status"], "queued");
+    assert!(!stated(&env).contains("within"), "no mention of a policy that is not set");
+
+    // The floor is validated: above limits.floor, at most 1.
+    for bad in [
+        "{ within_hours = 12, floor = 0.9 }",
+        "{ within_hours = 12, floor = 1.1 }",
+        "{ within_hours = 0, floor = 0.95 }",
+    ] {
+        let env = setup("near-bad", true);
+        configure(&env, &format!("floor_near_reset = {bad}\n"), "");
+        let out = relay(&env, &["quota", "show"]);
+        assert!(!out.status.success() && stderr(&out).contains("floor_near_reset"), "{bad}: {}", stderr(&out));
+    }
+}
+
+#[test]
+fn a_checkpoint_reads_the_worktree_without_running_the_clones_filters() {
+    if !have_bwrap() {
+        return;
+    }
+    // The worker's clone is its own to write: a filter driver in its configuration and attributes
+    // must not run on the host when relay reads the tree (`git add -A`) for the end-of-run evidence.
+    let env = setup("filter", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "[hooks]\nended = [\"rule\"]\n");
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "work", "--text", "[status-done] [filter] Make a change."]), "queue");
+    let j = wait_for(&env, "work");
+    assert_eq!(j["status"], "done", "{j}");
+    let prompt = prompts(&env, "a");
+    assert!(prompt.contains("[filter]"), "the stub saw its flag: {prompt}");
+    let marker = env.home.join(".claude.a/filter-ran");
+    assert!(!marker.exists(), "a filter from the clone's configuration ran on the host");
 }

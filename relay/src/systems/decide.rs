@@ -431,6 +431,17 @@ pub fn validate(
     if !allowed(point).contains(&action.name()) && !review {
         return Err(format!("{} is not an action at {}", action.name(), point.as_str()));
     }
+    // A red check is never accepted (the session end holds to that whoever decides); saying so here
+    // tells the handler, and a chain goes on to the next one.
+    if *action == Action::Accept
+        && let Some(c) = req.check.as_ref().filter(|c| c.result != BarResult::Pass)
+    {
+        return Err(format!(
+            "the acceptance check is {} (exit {}); a run whose check did not pass is never done",
+            c.result.as_str(),
+            c.exit
+        ));
+    }
     if let Action::Review { verdict, reason, .. } = action
         && (*verdict == Verdict::Reject) != reason.is_some()
     {
@@ -866,6 +877,18 @@ fn answer(ctx: &Ctx, a: Answer) -> Result<()> {
     ctx.reply(&json!({ "id": a.id, "action": name }), &format!("{}: {name}", a.id))
 }
 
+/// The check run a request file records (it is written once, with what `validate` needs of it).
+fn check_of(v: &Value) -> Option<CheckRun> {
+    Some(CheckRun {
+        command: v["command"].as_str()?.to_owned(),
+        commit: v["commit"].as_str().map(str::to_owned),
+        result: serde_json::from_value(v["result"].clone()).ok()?,
+        exit: i32::try_from(v["exit"].as_i64()?).ok()?,
+        base_exit: v["base_exit"].as_i64().and_then(|x| i32::try_from(x).ok()),
+        tail: v["tail"].as_str().unwrap_or_default().to_owned(),
+    })
+}
+
 /// What decision `d` asked, as far as validation needs it: the point, what was
 /// spent and the next cap, from its request file, else from the job.
 fn asked(ctx: &Ctx, d: &Decision, job: &Job) -> Request {
@@ -879,6 +902,7 @@ fn asked(ctx: &Ctx, d: &Decision, job: &Job) -> Request {
         point: Some(d.point),
         spent_usd: file["spent_usd"].as_f64().unwrap_or(job.cost_usd),
         next_cap_usd: file["next_cap_usd"].as_f64().unwrap_or(job.budget_usd),
+        check: file.get("check").and_then(check_of),
         ..Request::default()
     }
 }

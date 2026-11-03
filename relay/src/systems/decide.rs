@@ -798,7 +798,7 @@ fn held(ctx: &Ctx, name: &str, why: &str) -> Result<()> {
     req.spent_usd = job.cost_usd;
     req.earlier = earlier(&world, job);
     let d = decide(ctx, job, &req, &handlers, &|| None, Action::Wait)?;
-    let _lock = ctx.jobs_lock()?;
+    let lock = ctx.jobs_lock()?;
     let now = ctx.world()?;
     let same = |j: &&Job| {
         j.status == Status::Queued
@@ -812,6 +812,7 @@ fn held(ctx: &Ctx, name: &str, why: &str) -> Result<()> {
         Action::Force => crate::systems::queue::force(ctx, &job.name)?,
         _ => {}
     }
+    drop(lock);
     ctx.wake_dispatch()
 }
 

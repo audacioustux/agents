@@ -794,6 +794,7 @@ fn a_run_end_is_decided_by_the_rule_or_an_agent_that_queues_a_follow_up() {
     assert_eq!(n["status"], "done", "{n}");
     assert_eq!((n["profile"].as_str(), n["after"].clone()), (Some("cheap"), serde_json::json!(["work"])), "{n}");
     assert_eq!(n["models"]["claude"], "claude-haiku-5-5");
+    assert_eq!((n["parent"].as_str(), n["depth"].as_u64()), (Some("work"), Some(1)), "{n}");
     assert_eq!(asked(), 1, "the follow-up's clean done needed no agent");
 }
 

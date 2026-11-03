@@ -112,6 +112,12 @@ pub struct Job {
     /// What gc removed from the clone: `outputs` (the build outputs) or `clone` (all of it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collected: Option<String>,
+    /// The job a decision queued this one to follow up.
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// How many follow-ups deep it is.
+    #[serde(default)]
+    pub depth: u32,
 }
 
 impl Job {
@@ -451,6 +457,8 @@ impl World {
                 after,
                 profile,
                 fork,
+                parent,
+                depth,
             } => {
                 let j = Job {
                     name: job.clone(),
@@ -465,6 +473,8 @@ impl World {
                     after: after.clone(),
                     profile: profile.clone(),
                     fork: fork.as_deref().cloned(),
+                    parent: parent.clone(),
+                    depth: *depth,
                     created_at: t,
                     queued_at: t,
                     ..Job::default()
@@ -776,6 +786,8 @@ mod tests {
             after: Vec::new(),
             profile: None,
             fork: None,
+            parent: None,
+            depth: 0,
         })
     }
 
@@ -809,6 +821,8 @@ mod tests {
             after: after.iter().map(|a| (*a).to_owned()).collect(),
             profile,
             fork: None,
+            parent: None,
+            depth: 0,
         })
     }
 

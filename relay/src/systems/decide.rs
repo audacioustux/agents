@@ -332,6 +332,9 @@ pub fn bounded(mut action: Action, next_cap: f64) -> Action {
     action
 }
 
+/// How deep a chain of follow-ups an automated handler may queue; the orchestrator may go deeper.
+pub const FOLLOW_UP_DEPTH: u32 = 1;
+
 /// How many decisions acted on this incarnation of `job`.
 fn acted(world: &World, job: &Job) -> usize {
     world.decisions.values().filter(|d| d.job == job.name && d.created == job.created_at && d.action.is_some()).count()
@@ -366,10 +369,17 @@ pub fn validate(
             return Err(format!("another ${b:.2} would pass the job's ceiling of ${ceiling:.2}"));
         }
     }
-    let _ = orchestrator;
+    if let Action::FollowUp { .. } = action
+        && job.depth >= FOLLOW_UP_DEPTH
+        && !orchestrator
+    {
+        return Err(format!("{} is a follow-up already; only the orchestrator queues one after it", job.name));
+    }
     let profile = match action {
         Action::Requeue { profile } => Some(profile.as_str()),
-        Action::FollowUp { profile, .. } | Action::Reroute { profile, .. } => profile.as_deref(),
+        // A follow-up naming no profile takes its parent's, whose limits then count it.
+        Action::FollowUp { profile, .. } => profile.as_deref().or(job.profile.as_deref()),
+        Action::Reroute { profile, .. } => profile.as_deref(),
         _ => None,
     };
     if let Some(name) = profile {
@@ -975,6 +985,36 @@ mod tests {
         assert!(validate(&cfg, &w, &j, &r, &resume, true).unwrap_err().contains("max_decisions"));
         let again = Job { created_at: 8, ..j };
         assert!(validate(&cfg, &w, &again, &r, &resume, false).is_ok(), "a new incarnation counts afresh");
+    }
+
+    #[test]
+    fn a_follow_up_of_a_follow_up_needs_the_orchestrator() {
+        let cfg: Config = toml::from_str("name = \"x\"").unwrap();
+        let w = World::default();
+        let next = Action::FollowUp { brief: "b".into(), profile: None, after: true, fork: false, name: None };
+        let r = req(Point::Ended, 0.0, 1.0);
+        let first = Job { name: "j".into(), ..Job::default() };
+        assert!(validate(&cfg, &w, &first, &r, &next, false).is_ok());
+        let second = Job { name: "j-next".into(), parent: Some("j".into()), depth: 1, ..Job::default() };
+        assert!(validate(&cfg, &w, &second, &r, &next, false).unwrap_err().contains("only the orchestrator"));
+        assert!(validate(&cfg, &w, &second, &r, &next, true).is_ok());
+    }
+
+    #[test]
+    fn a_profile_at_its_limit_refuses_a_follow_up_even_one_naming_none() {
+        let cfg: Config = toml::from_str("name = \"x\"\n[profiles.solo]\nmax_running = 1\n").unwrap();
+        let mut w = World::default();
+        let busy = Job { name: "busy".into(), status: Status::Running, profile: Some("solo".into()), ..Job::default() };
+        w.jobs.insert(busy.name.clone(), busy);
+        let r = req(Point::Ended, 0.0, 1.0);
+        let named =
+            Action::FollowUp { brief: "b".into(), profile: Some("solo".into()), after: true, fork: false, name: None };
+        let unnamed = Action::FollowUp { brief: "b".into(), profile: None, after: true, fork: false, name: None };
+        let plain = Job { name: "j".into(), ..Job::default() };
+        assert!(validate(&cfg, &w, &plain, &r, &named, false).unwrap_err().contains("solo"));
+        assert!(validate(&cfg, &w, &plain, &r, &unnamed, false).is_ok(), "no profile, no profile limit");
+        let solo = Job { name: "j".into(), profile: Some("solo".into()), ..Job::default() };
+        assert!(validate(&cfg, &w, &solo, &r, &unnamed, false).unwrap_err().contains("solo"), "the parent's profile");
     }
 
     #[test]

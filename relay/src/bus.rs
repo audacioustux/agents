@@ -57,6 +57,12 @@ pub enum QueueEvent {
         /// The session the job starts as a fork of.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fork: Option<Box<Fork>>,
+        /// The job a decision queued this one to follow up.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        /// How many follow-ups deep it is: its parent's depth and one, or `0`.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        depth: u32,
     },
     /// A held job sent elsewhere by a decision: where it may run from now on.
     Rerouted {
@@ -566,6 +572,11 @@ impl Stamped {
             Event::Decide(e) => line(self.t, e),
         }
     }
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 pub fn now_micros() -> u64 {

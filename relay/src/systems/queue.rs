@@ -224,6 +224,8 @@ impl Add {
             after,
             profile: self.profile,
             fork: fork.map(|(f, _)| Box::new(f)),
+            parent: None,
+            depth: 0,
         })
     }
 }
@@ -247,6 +249,7 @@ pub struct FollowUp {
     /// Default: `<parent>-next`, numbered when taken.
     pub name: Option<String>,
     pub brief: String,
+    /// Default: the parent's.
     pub profile: Option<String>,
     /// Wait for the parent to be done.
     pub after: bool,
@@ -268,7 +271,7 @@ pub fn follow_up(ctx: &Ctx, parent: &Job, f: FollowUp) -> Result<String> {
         prompt: None,
         text: Some(f.brief),
         task: None,
-        profile: f.profile,
+        profile: f.profile.or_else(|| parent.profile.clone()),
         readonly: false,
         no_readonly: false,
         harnesses: Vec::new(),
@@ -280,7 +283,10 @@ pub fn follow_up(ctx: &Ctx, parent: &Job, f: FollowUp) -> Result<String> {
         after: if f.after { vec![parent.name.clone()] } else { Vec::new() },
         fork: f.fork.then(|| parent.name.clone()),
     };
-    let event = add.queued(ctx, &world.jobs)?;
+    let mut event = add.queued(ctx, &world.jobs)?;
+    if let QueueEvent::Queued { parent: of, depth, .. } = &mut event {
+        (*of, *depth) = (Some(parent.name.clone()), parent.depth + 1);
+    }
     ctx.port(&Source(())).emit(event)?;
     ctx.wake_dispatch()?;
     Ok(name)
@@ -522,6 +528,8 @@ mod tests {
                     after: Vec::new(),
                     profile: None,
                     fork: None,
+                    parent: None,
+                    depth: 0,
                 }),
             });
             if let Some(outcome) = outcome {

@@ -259,8 +259,11 @@ impl Ctx {
     }
 
     /// As [`Ctx::git`], for a repository a session could write: its own configuration cannot name a
-    /// program for git to run on the host (a file system monitor, hooks, a filter driver that
-    /// `git add` would run for a `.gitattributes` line).
+    /// program for git to run on the host through a file system monitor, hooks, or a filter driver
+    /// (`git add` runs one for a `.gitattributes` line). Every `filter.*` key in effect is emptied, the
+    /// user's global configuration included (so git-lfs does not run either). Diff drivers
+    /// (`diff.external`, textconv) are not neutralised here: a caller that shows a diff passes
+    /// `--no-ext-diff --no-textconv`.
     pub fn git_untrusted(dir: &Path) -> Command {
         let mut c = Self::git(dir);
         c.args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]).env("GIT_CONFIG_NOSYSTEM", "1");

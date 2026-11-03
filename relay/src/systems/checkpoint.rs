@@ -45,7 +45,9 @@ pub struct Point {
     pub tree: Option<String>,
 }
 
-/// The clone is the worker's to write: its configuration and attributes are not trusted to name programs.
+/// The clone is the worker's to write, so this runs git as [`Ctx::git_untrusted`] does (no hooks, fsmonitor or
+/// filter drivers); the commands that show diffs also pass `--no-ext-diff --no-textconv`, since a diff
+/// driver (`diff.external`, `diff.<name>.textconv`) is a program the clone's configuration could name.
 fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Option<String> {
     let mut c = Ctx::git_untrusted(dir);
     c.args(args);
@@ -96,12 +98,12 @@ pub fn bounded(text: &str, max: usize) -> String {
 /// The branch's log since `from`, with its diff when that is small.
 pub fn evidence(dir: &Path, from: &Point, now: &Point) -> String {
     let range = from.head.as_deref().map(|h| format!("{h}..HEAD"));
-    let mut args = vec!["log", "--stat", "--format=commit %h %s"];
+    let mut args = vec!["log", "--stat", "--no-ext-diff", "--no-textconv", "--format=commit %h %s"];
     args.push(range.as_deref().unwrap_or("-20"));
     let log = git(dir, &args, None).unwrap_or_default();
     let mut out = format!("## git log --stat\n\n{}\n", if log.is_empty() { "(no new commits)" } else { &log });
     if let (Some(a), Some(b)) = (&from.tree, &now.tree) {
-        let diff = git(dir, &["diff", a, b], None).unwrap_or_default();
+        let diff = git(dir, &["diff", "--no-ext-diff", "--no-textconv", a, b], None).unwrap_or_default();
         if diff.len() <= MAX_DIFF {
             let _ = write!(out, "\n## diff, committed or not\n\n{diff}\n");
         } else {

@@ -16,7 +16,7 @@
 # A brief containing [idle] makes no commit; one containing [status-done] reports status: done;
 # [verdict-accept] and [verdict-reject] also give a review's verdict; [uncommitted] leaves a changed tracked
 # file and an untracked one behind after its commit; [filter] leaves a clean filter in the clone's own configuration
-# (and a .gitattributes using it) that touches $acct/filter-ran if anything on the host ever runs it.
+# plus diff.external and a textconv driver (and a .gitattributes using them) that touch $acct/filter-ran if anything on the host ever runs it.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
 case " $* " in
@@ -99,7 +99,10 @@ esac
 case "$prompt" in *"[filter]"*)
   if [ -w . ] && [ -e .git ]; then
     git config filter.evil.clean "touch $acct/filter-ran; cat"
-    echo "*.txt filter=evil" >.gitattributes
+    git config diff.external "touch $acct/filter-ran; true"
+    git config diff.x.textconv "sh -c 'touch $acct/filter-ran; cat \"\$1\"' sh"
+    git config diff.x.command "touch $acct/filter-ran; true"
+    printf '*.txt filter=evil diff=x\n' >.gitattributes
     echo y >extra.txt
   fi ;;
 esac

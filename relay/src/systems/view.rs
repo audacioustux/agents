@@ -1,5 +1,7 @@
 //! view: read-only. Who is working on what, and what each session said.
 
+mod stats;
+
 use std::time::Duration;
 
 use anyhow::Result;
@@ -33,6 +35,13 @@ pub enum Cmd {
     },
     /// The merged event log, oldest first, one JSON object per line.
     Events,
+    /// Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits and the
+    /// accounts' shares, folded from the events already on the bus.
+    Stats {
+        /// Only jobs queued within this long (`30m`, `12h`, `7d`, `2w`). Default: all of them.
+        #[arg(long)]
+        since: Option<String>,
+    },
 }
 
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
@@ -40,6 +49,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Status { all } => status(ctx, all),
         Cmd::Watch { all } => crate::systems::watch::run(ctx, all),
         Cmd::Result { name, wait } => result(ctx, &name, wait),
+        Cmd::Stats { since } => stats::run(ctx, since.as_deref()),
         Cmd::Events => {
             for e in ctx.events()? {
                 out!("{}", e.to_json());
@@ -142,6 +152,7 @@ pub fn job_cells(cfg: &Config, world: &World, j: &Job, now: u64) -> Vec<String> 
     let held = if queued && waits.is_none() { profile_hold(cfg, world, j, now) } else { None };
     let reason = waits.or(held).or_else(|| j.reason.clone()).map_or(String::new(), |r| format!("  [{r}]"));
     let check = j.checkpoints.last().map_or(String::new(), |c| format!("  {}", c.summary()));
+    let check = format!("{check}{}", declared(j));
     vec![
         j.name.clone(),
         j.status.as_str().to_owned(),
@@ -152,6 +163,14 @@ pub fn job_cells(cfg: &Config, world: &World, j: &Job, now: u64) -> Vec<String> 
         j.disk_bytes.filter(|_| j.status.has_runner()).map_or_else(String::new, crate::os::size_str),
         format!("{}{reason}{check}{}", j.task, collected(j)),
     ]
+}
+
+/// The latest acceptance check and the latest review of a job, for its board row.
+fn declared(j: &Job) -> String {
+    let bar = j.bars.last().map_or(String::new(), |b| format!("  check {}", b.result.as_str()));
+    let review = j.verdicts.last().map_or(String::new(), |v| format!("  review by {}: {}", v.reviewer, v.summary()));
+    let of = j.review_of.as_deref().map_or(String::new(), |b| format!("  reviews {b}"));
+    format!("{of}{bar}{review}")
 }
 
 /// What gc took from a job's clone, for its board row.
@@ -263,6 +282,18 @@ fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
         if c.next_cap_usd.is_some() && !c.why.is_empty() {
             out!("  why: {}", c.why);
         }
+    }
+    if let Some(b) = j.bars.last() {
+        out!(
+            "check {}: exit {}{}{}",
+            b.result.as_str(),
+            b.exit,
+            b.base_exit.map_or(String::new(), |e| format!(", exit {e} at the base commit")),
+            b.commit.as_deref().map_or(String::new(), |c| format!(", at {}", c.get(..12).unwrap_or(c)))
+        );
+    }
+    for v in &j.verdicts {
+        out!("review by {} at {}: {}", v.reviewer, v.commit.get(..12).unwrap_or(&v.commit), v.summary());
     }
     if let (Some(b), Some(w)) = (&j.branch, &j.workdir) {
         out!("branch {b} in {}   bring it here: relay land fetch {name}", w.display());

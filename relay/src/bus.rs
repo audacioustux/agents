@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::harness::Meters;
 
+// `Queued` is the record of a job and is written once per job; boxing its fields would only change the log.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum QueueEvent {
@@ -63,6 +65,16 @@ pub enum QueueEvent {
         /// How many follow-ups deep it is: its parent's depth and one, or `0`.
         #[serde(default, skip_serializing_if = "is_zero")]
         depth: u32,
+        /// The acceptance check: a command that must pass in the job's clone before its run is accepted.
+        /// Part of the record, so changing it means queuing a new job.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        check: Option<String>,
+        /// Also run the check at the job's base commit, where it must fail.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        check_red_first: bool,
+        /// The build job this read-only job reviews.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review_of: Option<String>,
     },
     /// A held job sent elsewhere by a decision: where it may run from now on.
     Rerouted {
@@ -141,6 +153,9 @@ pub enum SessionEvent {
         job: String,
         workdir: PathBuf,
         branch: String,
+        /// The commit the branch started from, for a fresh start: where a revert-control check runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
     },
     /// An attempt began, on this account, in this session (new or resumed).
     Started {
@@ -150,6 +165,9 @@ pub enum SessionEvent {
         /// For a read-only job, the clean commit it reads; absent when the tree is dirty.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         commit: Option<String>,
+        /// For a review, the model family it runs on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family: Option<String>,
     },
     /// The harness named the session itself (omp chooses its own ids).
     Identified {
@@ -195,6 +213,29 @@ pub enum SessionEvent {
         job: String,
         check: Check,
     },
+    /// The job's acceptance check ran in its clone at `commit`: its exit status and the
+    /// tail of its output (bounded, as worker output is before it reaches a handler).
+    BarChecked {
+        job: String,
+        commit: Option<String>,
+        exit: i32,
+        tail: String,
+        /// The exit status at the base commit, when the job asks for a revert control.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_exit: Option<i32>,
+        result: BarResult,
+    },
+    /// A review was carried out: `job` judged `of`'s branch at `commit`.
+    Reviewed {
+        job: String,
+        of: String,
+        commit: String,
+        verdict: Verdict,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<Reason>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family: Option<String>,
+    },
     Ended {
         job: String,
         outcome: Outcome,
@@ -207,6 +248,74 @@ pub enum SessionEvent {
         job: String,
         bytes: u64,
     },
+}
+
+/// How an acceptance check came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BarResult {
+    Pass,
+    Fail,
+    /// It passed, but it also passes at the base commit, so it does not show the change did anything.
+    CheckProvesNothing,
+}
+
+impl BarResult {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::CheckProvesNothing => "check-proves-nothing",
+        }
+    }
+}
+
+/// A reviewer's judgement of a build job's branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Verdict {
+    Accept,
+    Reject,
+}
+
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::Reject => "reject",
+        }
+    }
+}
+
+/// Why a reviewer rejected, as a code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reason {
+    TestFailure,
+    BehaviorMismatch,
+    InsufficientEvidence,
+    StaleHead,
+    Other,
+}
+
+impl Reason {
+    pub const ALL: [Self; 5] =
+        [Self::TestFailure, Self::BehaviorMismatch, Self::InsufficientEvidence, Self::StaleHead, Self::Other];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TestFailure => "test-failure",
+            Self::BehaviorMismatch => "behavior-mismatch",
+            Self::InsufficientEvidence => "insufficient-evidence",
+            Self::StaleHead => "stale-head",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim().to_ascii_lowercase().replace('_', "-");
+        Self::ALL.into_iter().find(|r| r.as_str() == s)
+    }
 }
 
 /// What a progress check decided at a spend cap.
@@ -356,6 +465,15 @@ pub enum Action {
     },
     /// `ended`: start the job afresh under another profile.
     Requeue { profile: String },
+    /// `ended`, for a review (`--review-of`): the verdict on the reviewed job's branch. A reject
+    /// resumes the builder's session with `message`.
+    Review {
+        verdict: Verdict,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<Reason>,
+        #[serde(default)]
+        message: String,
+    },
     /// `ended`: queue a new job with `brief`, by default after this one, optionally as a fork of its session.
     FollowUp {
         brief: String,
@@ -394,6 +512,7 @@ impl Action {
             Self::Accept => "accept",
             Self::Resume { .. } => "resume",
             Self::Requeue { .. } => "requeue",
+            Self::Review { .. } => "review",
             Self::FollowUp { .. } => "follow-up",
             Self::Wait => "wait",
             Self::Reroute { .. } => "reroute",
@@ -538,6 +657,8 @@ impl SessionEvent {
             | Self::Requeued { job, .. }
             | Self::Checking { job, .. }
             | Self::Checked { job, .. }
+            | Self::BarChecked { job, .. }
+            | Self::Reviewed { job, .. }
             | Self::Ended { job, .. }
             | Self::Disk { job, .. } => Some(job),
             Self::Rate { .. } | Self::Limited { .. } | Self::SignedOut { .. } => None,

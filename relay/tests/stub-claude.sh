@@ -11,8 +11,10 @@
 #   decision a decision hook's answer, one line of JSON (default defer)
 #   decisions appended to by every decision hook run there
 #   argv     appended to with every session's arguments
+#   prompts  appended to with every worker prompt (and the resume messages it is sent)
 #   cargo    appended to with every session's CARGO_INCREMENTAL (`unset` when it has none)
-# A brief containing [idle] makes no commit; one containing [status-done] reports status: done.
+# A brief containing [idle] makes no commit; one containing [status-done] reports status: done;
+# [verdict-accept] and [verdict-reject] also give a review's verdict.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
 case " $* " in
@@ -77,6 +79,11 @@ case "$prompt" in
 esac
 final="FINAL ok"
 case "$prompt" in *"[status-done]"*) final="FINAL\\nstatus: done" ;; esac
+case "$prompt" in
+*"[verdict-reject]"*) final="FINAL\\nstatus: done\\nverdict: reject\\nreason: test-failure\\nnotes: parse panics on empty input" ;;
+*"[verdict-accept]"*) final="FINAL\\nstatus: done\\nverdict: accept" ;;
+esac
+printf '%s\n--\n' "$prompt" >>"$acct/prompts"
 case "$prompt" in *"[idle]"*) ;; *)
 if [ -w . ] && [ -e .git ]; then
   echo "work $sid $turns" >relay-output.txt

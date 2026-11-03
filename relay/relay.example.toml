@@ -80,6 +80,14 @@ env_shell = []
 # max_running = 1
 # max_per_day = 3
 # note = "second-family review of critical code; costly"
+#
+# A bar and an escalation are declared on a profile too (see the README):
+# [profiles.cheap]
+# check = "cargo nextest run --no-tests=fail"  # a build job's run is accepted only if this passes in its clone
+# check_red_first = true                       # ...and fails at the job's base commit
+# independent = "family"                       # a review of its jobs may not run on the model family that built them
+# escalate_to = "strong"                       # after escalate_after failed ends of one job, requeue it under `strong`
+# escalate_after = 2
 
 [hooks]
 # Who decides at each decision point, in order (see README, Hooks). Unset keeps
@@ -91,7 +99,7 @@ env_shell = []
 # disk = ["orchestrator"]            # default (unset): stop the job, resumable after cleanup
 held_after_minutes = 60.0            # a queued job held this long by a limit reaches `held`
 orchestrator_timeout_minutes = 20.0  # then the next handler decides
-command_timeout_seconds = 120        # a `command:` handler's bound
+command_timeout_seconds = 120        # a `command:` handler's bound, and an acceptance check's
 allow_force = false                  # whether a `held` decision may start a job past its profile's limits
 max_decisions = 10                   # decisions that may act on one job before every action is refused
 

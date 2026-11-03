@@ -82,6 +82,16 @@ pub struct Profile {
     pub max_running: Option<usize>,
     /// No more than this many sessions of the profile start in a rolling 24 hours.
     pub max_per_day: Option<usize>,
+    /// The acceptance check a build job of the profile gets when its line names none.
+    pub check: Option<String>,
+    /// Whether that check must also fail at the job's base commit (the revert control).
+    pub check_red_first: Option<bool>,
+    /// `"family"`: a review of a job of this profile may not run on the model family that built it.
+    pub independent: Option<String>,
+    /// The profile a job is requeued under once `escalate_after` of its ends have failed.
+    pub escalate_to: Option<String>,
+    /// How many failed ends of one job reach `escalate_to`.
+    pub escalate_after: Option<u32>,
 }
 
 impl Profile {
@@ -96,6 +106,11 @@ impl Profile {
         put("readonly", self.readonly.map(|b| b.to_string()));
         put("max_running", self.max_running.map(|n| n.to_string()));
         put("max_per_day", self.max_per_day.map(|n| n.to_string()));
+        put("check", self.check.clone());
+        put("check_red_first", self.check_red_first.map(|b| b.to_string()));
+        put("independent", self.independent.clone());
+        put("escalate_to", self.escalate_to.clone());
+        put("escalate_after", self.escalate_after.map(|n| n.to_string()));
         put("note", self.note.clone());
         out
     }
@@ -111,6 +126,11 @@ impl Profile {
             note: self.note.clone().or_else(|| base.note.clone()),
             max_running: self.max_running.or(base.max_running),
             max_per_day: self.max_per_day.or(base.max_per_day),
+            check: self.check.clone().or_else(|| base.check.clone()),
+            check_red_first: self.check_red_first.or(base.check_red_first),
+            independent: self.independent.clone().or_else(|| base.independent.clone()),
+            escalate_to: self.escalate_to.clone().or_else(|| base.escalate_to.clone()),
+            escalate_after: self.escalate_after.or(base.escalate_after),
         }
     }
 
@@ -122,6 +142,20 @@ impl Profile {
         ensure!(self.budget.is_none_or(positive), "profiles.{name}.budget must be a positive number");
         ensure!(self.max_running.is_none_or(|n| n >= 1), "profiles.{name}.max_running must be at least 1");
         ensure!(self.max_per_day.is_none_or(|n| n >= 1), "profiles.{name}.max_per_day must be at least 1");
+        ensure!(self.check.as_deref().is_none_or(|c| !c.trim().is_empty()), "profiles.{name}.check is empty");
+        ensure!(
+            self.check_red_first != Some(true) || self.check.is_some(),
+            "profiles.{name}.check_red_first needs a check"
+        );
+        ensure!(
+            self.independent.as_deref().is_none_or(|i| i == "family"),
+            "profiles.{name}.independent must be \"family\""
+        );
+        ensure!(
+            self.escalate_to.is_some() == self.escalate_after.is_some(),
+            "profiles.{name}: escalate_to and escalate_after go together"
+        );
+        ensure!(self.escalate_after.is_none_or(|n| n >= 1), "profiles.{name}.escalate_after must be at least 1");
         Ok(())
     }
 }
@@ -551,6 +585,16 @@ impl Config {
         self.origins = origins;
     }
 
+    /// The model `job` last ran on, or would run on, when that is known.
+    pub fn model_of(&self, job: &crate::world::Job) -> Option<String> {
+        let account = job.transcript_account.as_deref().or(job.account.as_deref());
+        let harness = account.and_then(|a| a.split(':').next()).or(match job.harnesses.as_slice() {
+            [only] => Some(only.as_str()),
+            _ => None,
+        })?;
+        job.models.get(harness).cloned().or_else(|| self.harness(harness).model)
+    }
+
     /// The profile called `name`. The one place a profile is looked up: an unknown name
     /// is refused (not found) with the names there are.
     pub fn profile(&self, name: &str) -> Result<&Profile> {
@@ -615,6 +659,7 @@ impl Config {
         for (name, p) in &self.profiles {
             p.validate(name)?;
         }
+        self.validate_escalation()?;
         let h = &self.hooks;
         for (point, chain) in [("cap", &h.cap), ("ended", &h.ended), ("held", &h.held), ("disk", &h.disk)] {
             for handler in chain.iter().flatten() {
@@ -640,6 +685,23 @@ impl Config {
 
     /// The disk limits, `[gc]` and `[session] env`. A `gc.build_outputs` entry
     /// names a place inside a clone, so it can never reach outside one.
+    /// Every `escalate_to` names a profile, and following them never comes back round.
+    fn validate_escalation(&self) -> Result<()> {
+        for (name, p) in &self.profiles {
+            let mut seen = vec![name.as_str()];
+            let mut at = p;
+            while let Some(to) = at.escalate_to.as_deref() {
+                let Some(next) = self.profiles.get(to) else {
+                    bail!("profiles.{}.escalate_to names {to}, which is not a profile", seen[seen.len() - 1]);
+                };
+                ensure!(!seen.contains(&to), "profiles.{name}.escalate_to leads back to {to}: an escalation cycle");
+                seen.push(to);
+                at = next;
+            }
+        }
+        Ok(())
+    }
+
     fn validate_disk(&self) -> Result<()> {
         let (l, g) = (&self.limits, &self.gc);
         ensure!(l.job_disk_gb.is_finite() && l.job_disk_gb >= 0.0, "limits.job_disk_gb must not be negative");
@@ -711,6 +773,40 @@ fn find_upwards(start: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_model_belongs_to_the_family_its_provider_names() {
+        let f = super::model_family;
+        assert_eq!(f("claude-opus-5-5"), "anthropic");
+        assert_eq!(f("sonnet"), "anthropic");
+        assert_eq!(f("openai-codex/gpt-6.1-sol"), "openai");
+        assert_eq!(f("o3-mini"), "openai");
+        assert_eq!(f("google-antigravity/gemini-3-pro"), "google");
+        assert_eq!(f("minimax-code/MiniMax-M3.1-Flash"), "minimax");
+        assert_eq!(f("stub/m1"), "stub", "unknown: its provider");
+        assert_eq!(f("llama-9"), "llama", "unknown and bare: its first word");
+        assert_eq!(f("opus"), f("claude-haiku-5-5"), "tiers of one provider are one family");
+    }
+
+    #[test]
+    fn an_escalation_must_name_a_profile_and_never_loop() {
+        let mut cfg: Config = toml::from_str("name = \"x\"").unwrap();
+        let profile = |to: Option<&str>| Profile {
+            escalate_to: to.map(str::to_owned),
+            escalate_after: to.map(|_| 2),
+            ..Profile::default()
+        };
+        cfg.profiles.insert("a".into(), profile(Some("b")));
+        assert!(cfg.validate_escalation().unwrap_err().to_string().contains("not a profile"));
+        cfg.profiles.insert("b".into(), profile(Some("a")));
+        assert!(cfg.validate_escalation().unwrap_err().to_string().contains("escalation cycle"));
+        cfg.profiles.insert("b".into(), profile(None));
+        cfg.validate_escalation().unwrap();
+        assert!(profile(Some("b")).validate("a").is_ok());
+        let half = Profile { escalate_to: Some("b".into()), ..Profile::default() };
+        assert!(half.validate("a").is_err(), "escalate_to and escalate_after go together");
+        let odd = Profile { independent: Some("model".into()), ..Profile::default() };
+        assert!(odd.validate("a").is_err());
+    }
     use super::*;
 
     #[test]
@@ -935,4 +1031,38 @@ pub mod tempdir {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+}
+
+/// The family of a model id (`openai-codex/gpt-6.1-sol` is `openai`, `claude-opus-5-5` is `anthropic`),
+/// by the names the providers use; a model it does not know is its provider prefix, else its first word.
+pub fn model_family(model: &str) -> String {
+    let m = model.to_ascii_lowercase();
+    let name = m.rsplit('/').next().unwrap_or(&m);
+    let has = |keys: &[&str]| keys.iter().any(|k| name.contains(k));
+    let family = if has(&["claude", "haiku", "sonnet", "opus", "fable"]) {
+        "anthropic"
+    } else if has(&["gpt", "codex", "openai"])
+        || (name.starts_with('o') && name[1..].starts_with(|c: char| c.is_ascii_digit()))
+    {
+        "openai"
+    } else if has(&["gemini", "gemma", "google"]) {
+        "google"
+    } else if has(&["minimax"]) {
+        "minimax"
+    } else if has(&["deepseek"]) {
+        "deepseek"
+    } else if has(&["qwen"]) {
+        "qwen"
+    } else if has(&["kimi", "moonshot"]) {
+        "moonshot"
+    } else if has(&["glm", "zhipu"]) {
+        "zhipu"
+    } else if has(&["grok"]) {
+        "xai"
+    } else if has(&["mistral", "mixtral", "codestral"]) {
+        "mistral"
+    } else {
+        return m.split_once('/').map_or_else(|| name.split('-').next().unwrap_or(name), |(p, _)| p).to_owned();
+    };
+    family.to_owned()
 }

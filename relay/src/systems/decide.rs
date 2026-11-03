@@ -20,7 +20,7 @@ use clap::Subcommand;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::bus::{Action, DecideEvent, Point, now_micros};
+use crate::bus::{Action, BarResult, DecideEvent, Point, Reason, Verdict, now_micros};
 use crate::config::Config;
 use crate::ctx::Ctx;
 use crate::systems::checkpoint::bounded as bounded_text;
@@ -62,7 +62,7 @@ pub enum Cmd {
 pub struct Answer {
     id: String,
     /// One of the point's actions: cap: continue, redirect, stop; ended: accept, resume, requeue,
-    /// follow-up, stop; held: wait, reroute, force; disk: wait, stop; any: defer.
+    /// follow-up, stop, review (a review job's verdict); held: wait, reroute, force; disk: wait, stop; any: defer.
     #[arg(long)]
     action: String,
     /// What the worker is told (redirect, resume).
@@ -95,6 +95,12 @@ pub struct Answer {
     /// Reroute: the model.
     #[arg(long)]
     model: Option<String>,
+    /// Review: `accept` or `reject`.
+    #[arg(long)]
+    verdict: Option<String>,
+    /// Review, for a reject: test-failure, behavior-mismatch, insufficient-evidence, stale-head or other.
+    #[arg(long)]
+    reason: Option<String>,
 }
 
 /// Who answers a decision.
@@ -205,19 +211,56 @@ pub struct Request {
     pub ceiling_usd: Option<f64>,
     /// The JSON shape of each allowed action.
     pub schema: Value,
+    /// The latest run of the job's acceptance check, for a run that ended done.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check: Option<CheckRun>,
+    /// For a review: the branch under review.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewing: Option<Reviewing>,
+}
+
+/// One run of a job's acceptance check, as a handler hears of it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CheckRun {
+    pub command: String,
+    pub commit: Option<String>,
+    pub result: BarResult,
+    pub exit: i32,
+    pub base_exit: Option<i32>,
+    /// The end of its output, bounded: worker-written, so untrusted.
+    pub tail: String,
+}
+
+/// The branch a review is of, as the reviewer was told.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Reviewing {
+    pub job: String,
+    /// The ref in the repository the branch was fetched to.
+    pub reference: String,
+    pub commit: String,
+    /// What the branch started from: the diff base.
+    pub base: Option<String>,
 }
 
 impl Request {
     pub fn new(job: &Job, point: Point) -> Self {
         let tail = uuid::Uuid::now_v7().simple().to_string();
+        let review = job.review_of.is_some() && point == Point::Ended;
+        let mut allowed = allowed(point).to_vec();
+        allowed.extend(review.then_some("review"));
         Self {
             id: format!("{}-{}", job.name, &tail[24..]),
             job: job.name.clone(),
             point: Some(point),
-            allowed: allowed(point).to_vec(),
-            schema: schema(point),
+            allowed,
+            schema: schema(point, review),
             ..Self::default()
         }
+    }
+
+    /// The acceptance check did not pass for the run being decided: it may not be accepted.
+    fn bar_red(&self) -> bool {
+        self.check.as_ref().is_some_and(|c| c.result != BarResult::Pass)
     }
 
     fn point(&self) -> Point {
@@ -226,7 +269,7 @@ impl Request {
 }
 
 /// The JSON shape of `point`'s actions, plus `defer`, for agents and commands.
-fn schema(point: Point) -> Value {
+fn schema(point: Point, review: bool) -> Value {
     let one = |action: &str, fields: Value| json!({ "action": action, "fields": fields });
     let mut all: Vec<Value> = match point {
         Point::Cap => vec![
@@ -246,7 +289,19 @@ fn schema(point: Point) -> Value {
                 json!({ "brief": "string", "profile": "string, optional", "after": "bool, default true", "fork": "bool, default false", "name": "string, optional" }),
             ),
             one("stop", json!({ "why": "string" })),
-        ],
+        ]
+        .into_iter()
+        .chain(review.then(|| {
+            one(
+                "review",
+                json!({
+                    "verdict": "accept | reject",
+                    "reason": "for a reject, one of: test-failure, behavior-mismatch, insufficient-evidence, stale-head, other",
+                    "message": "for a reject, the findings the builder's session is resumed with"
+                }),
+            )
+        }))
+        .collect(),
         Point::Held => vec![
             one("wait", json!({})),
             one(
@@ -288,6 +343,17 @@ pub fn prompt(req: &Request) -> String {
     let _ = write!(p, "\n{UNTRUSTED}\n");
     if !req.evidence.is_empty() {
         let _ = write!(p, "\n# The branch (untrusted)\n\n{}\n", bounded_text(req.evidence.trim_end(), 16_384));
+    }
+    if let Some(c) = &req.check {
+        let base = c.base_exit.map_or(String::new(), |b| format!(", and {b} at the base commit"));
+        let _ = write!(
+            p,
+            "\n# The acceptance check `{}`: {} (exit {}{base}) (output untrusted)\n\n{}\n",
+            c.command,
+            c.result.as_str(),
+            c.exit,
+            bounded_text(c.tail.trim_end(), 4096)
+        );
     }
     let report = if req.report.trim().is_empty() { "(none)".into() } else { bounded_text(req.report.trim(), 4096) };
     let _ = write!(p, "\n# The worker's last message (untrusted)\n\n{report}\n");
@@ -335,6 +401,18 @@ pub fn bounded(mut action: Action, next_cap: f64) -> Action {
 /// How deep a chain of follow-ups an automated handler may queue; the orchestrator may go deeper.
 pub const FOLLOW_UP_DEPTH: u32 = 1;
 
+/// The profile `job` is requeued under, and how many failed ends take it there, when its profile says so.
+pub fn escalation(cfg: &Config, job: &Job) -> Option<(String, u32)> {
+    let p = cfg.profiles.get(job.profile.as_deref()?)?;
+    Some((p.escalate_to.clone()?, p.escalate_after?))
+}
+
+/// Whether the job declares something the `ended` point judges (a check, a review, an escalation),
+/// so that point is reached for it even with no `hooks.ended`, and its decisions are bounded.
+pub fn declares(cfg: &Config, job: &Job) -> bool {
+    job.check.is_some() || job.review_of.is_some() || escalation(cfg, job).is_some()
+}
+
 /// How many decisions acted on this incarnation of `job`.
 fn acted(world: &World, job: &Job) -> usize {
     world.decisions.values().filter(|d| d.job == job.name && d.created == job.created_at && d.action.is_some()).count()
@@ -354,11 +432,21 @@ pub fn validate(
         return Ok(());
     }
     let point = req.point();
-    if !allowed(point).contains(&action.name()) {
+    let review = point == Point::Ended && job.review_of.is_some() && action.name() == "review";
+    if !allowed(point).contains(&action.name()) && !review {
         return Err(format!("{} is not an action at {}", action.name(), point.as_str()));
     }
+    if let Action::Review { verdict, reason, .. } = action
+        && (*verdict == Verdict::Reject) != reason.is_some()
+    {
+        return Err("a reject names its reason (test-failure, behavior-mismatch, insufficient-evidence, stale-head, other), and an accept names none".into());
+    }
+    if *action == Action::Accept && req.bar_red() {
+        let c = req.check.as_ref().map_or("", |c| c.result.as_str());
+        return Err(format!("the job's acceptance check did not pass ({c}); a run is accepted only when it does"));
+    }
     let max = cfg.hooks.max_decisions;
-    if cfg.hooks.any() && acted(world, job) >= usize::try_from(max).unwrap_or(usize::MAX) {
+    if (cfg.hooks.any() || declares(cfg, job)) && acted(world, job) >= usize::try_from(max).unwrap_or(usize::MAX) {
         return Err(format!("{max} decisions have acted on {} already (hooks.max_decisions)", job.name));
     }
     if let Some(b) = granted(action, req.next_cap_usd) {
@@ -732,6 +820,24 @@ fn action_of(a: &Answer, job: &str) -> Result<Action> {
             fork: a.fork,
             name: a.name.clone().or_else(|| Some(format!("{job}-next"))),
         },
+        "review" => {
+            let verdict = match a.verdict.as_deref() {
+                Some("accept") => Verdict::Accept,
+                Some("reject") => Verdict::Reject,
+                _ => fail!(Usage, "review needs --verdict accept or reject"),
+            };
+            let reason = match (&a.reason, verdict) {
+                (Some(r), _) => {
+                    let Some(r) = Reason::parse(r) else {
+                        let all: Vec<&str> = Reason::ALL.iter().map(|r| r.as_str()).collect();
+                        fail!(Usage, "--reason is one of {}", all.join(", "))
+                    };
+                    Some(r)
+                }
+                (None, _) => None,
+            };
+            Action::Review { verdict, reason, message: message() }
+        }
         "wait" => Action::Wait,
         "reroute" => Action::Reroute { harness: a.harness.clone(), model: a.model.clone(), profile: a.profile.clone() },
         "force" => Action::Force,
@@ -775,6 +881,19 @@ fn asked(ctx: &Ctx, d: &Decision, job: &Job) -> Request {
         point: Some(d.point),
         spent_usd: file["spent_usd"].as_f64().unwrap_or(job.cost_usd),
         next_cap_usd: file["next_cap_usd"].as_f64().unwrap_or(job.budget_usd),
+        // Only the verdict on the check matters to validation.
+        check: file["check"]["result"].as_str().map(|r| CheckRun {
+            command: String::new(),
+            commit: None,
+            result: match r {
+                "pass" => BarResult::Pass,
+                "fail" => BarResult::Fail,
+                _ => BarResult::CheckProvesNothing,
+            },
+            exit: 0,
+            base_exit: None,
+            tail: String::new(),
+        }),
         ..Request::default()
     }
 }

@@ -49,6 +49,7 @@ impl Status {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Job {
     pub name: String,
@@ -118,6 +119,60 @@ pub struct Job {
     /// How many follow-ups deep it is.
     #[serde(default)]
     pub depth: u32,
+    /// The acceptance check it was queued with.
+    #[serde(default)]
+    pub check: Option<String>,
+    #[serde(default)]
+    pub check_red_first: bool,
+    /// The commit its branch started from.
+    #[serde(default)]
+    pub base: Option<String>,
+    /// Every acceptance check run, oldest first; only the latest keeps its output tail.
+    #[serde(default)]
+    pub bars: Vec<Bar>,
+    /// The build job it reviews.
+    #[serde(default)]
+    pub review_of: Option<String>,
+    /// The model family a review ran on.
+    #[serde(default)]
+    pub family: Option<String>,
+    /// The reviews of this job's branch, oldest first.
+    #[serde(default)]
+    pub verdicts: Vec<Reviewed>,
+    /// Runs of this job that ended failed, since it was last requeued under a profile.
+    #[serde(default)]
+    pub failed_ends: u32,
+}
+
+/// One acceptance check run, as the job's record keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Bar {
+    pub commit: Option<String>,
+    pub result: bus::BarResult,
+    pub exit: i32,
+    pub base_exit: Option<i32>,
+    /// The output tail; kept for the latest run only.
+    pub tail: String,
+}
+
+/// One review of a job's branch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reviewed {
+    pub reviewer: String,
+    pub commit: String,
+    pub verdict: bus::Verdict,
+    pub reason: Option<bus::Reason>,
+    pub family: Option<String>,
+}
+
+impl Reviewed {
+    /// `accept`, or `reject: test-failure`.
+    pub fn summary(&self) -> String {
+        match self.reason {
+            Some(r) => format!("{}: {}", self.verdict.as_str(), r.as_str()),
+            None => self.verdict.as_str().to_owned(),
+        }
+    }
 }
 
 impl Job {
@@ -227,7 +282,7 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 
 /// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
 /// holds, how a mark is kept), so checkpoints folded the old way are discarded.
-const FOLD_VERSION: u32 = 10;
+const FOLD_VERSION: u32 = 11;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -410,7 +465,7 @@ impl World {
 
     /// Whether a session event comes from its job's current attempt, the only
     /// writer the fold listens to. Events from before files were per attempt have no source.
-    fn current(&self, s: &Stamped, e: &SessionEvent) -> bool {
+    pub(crate) fn current(&self, s: &Stamped, e: &SessionEvent) -> bool {
         let Some(o) = &s.from else { return true };
         e.job().is_none_or(|j| j == o.job)
             && self
@@ -419,7 +474,7 @@ impl World {
                 .is_some_and(|j| j.attempts == o.attempt && o.created.is_none_or(|c| c == j.created_at))
     }
 
-    fn apply(&mut self, s: &Stamped) {
+    pub(crate) fn apply(&mut self, s: &Stamped) {
         match &s.event {
             Event::Queue(e) => self.apply_queue(s.t, e),
             Event::Dispatch(e) => self.apply_dispatch(s.t, e),
@@ -463,6 +518,9 @@ impl World {
                 fork,
                 parent,
                 depth,
+                check,
+                check_red_first,
+                review_of,
             } => {
                 let j = Job {
                     name: job.clone(),
@@ -479,6 +537,9 @@ impl World {
                     fork: fork.as_deref().cloned(),
                     parent: parent.clone(),
                     depth: *depth,
+                    check: check.clone(),
+                    check_red_first: *check_red_first,
+                    review_of: review_of.clone(),
                     created_at: t,
                     queued_at: t,
                     ..Job::default()
@@ -598,16 +659,21 @@ impl World {
 
     fn apply_session(&mut self, t: u64, e: &SessionEvent) {
         match e {
-            SessionEvent::Cloned { job, workdir, branch } => {
+            SessionEvent::Cloned { job, workdir, branch, base } => {
                 if let Some(j) = self.jobs.get_mut(job) {
+                    // A clone made again from the job's own work keeps the base it first started from.
+                    if base.is_some() {
+                        j.base.clone_from(base);
+                    }
                     j.workdir = Some(workdir.clone());
                     j.branch = Some(branch.clone());
                     j.collected = None;
                 }
             }
-            SessionEvent::Started { job, account, session_id, commit } => {
+            SessionEvent::Started { job, account, session_id, commit, family } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.ran_at.clone_from(commit);
+                    j.family.clone_from(family);
                     j.transcript_account = Some(account.clone());
                     j.session_id = Some(session_id.clone());
                     j.message = None;
@@ -643,8 +709,43 @@ impl World {
                     j.budget_usd = *budget_usd;
                     (j.session_id, j.transcript_account, j.message, j.fork) = (None, None, None, None);
                     (j.follow_ups, j.reruns) = (0, 0);
+                    j.failed_ends = 0;
                 }
             }
+            SessionEvent::BarChecked { .. } | SessionEvent::Reviewed { .. } => self.apply_judgement(e),
+            SessionEvent::Checking { .. } | SessionEvent::Checked { .. } => self.apply_checkpoint(e),
+            SessionEvent::Ended { job, outcome, cost_usd, turns, reason } => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    j.cost_usd += cost_usd;
+                    j.turns += turns;
+                    if j.let_go() {
+                        return;
+                    }
+                    j.reason.clone_from(reason);
+                    j.ended_at = Some(t);
+                    j.status = match outcome {
+                        Outcome::Done => Status::Done,
+                        Outcome::Failed => Status::Failed,
+                        Outcome::Stopped => Status::Stopped,
+                        Outcome::Retry | Outcome::Rerun => Status::Queued,
+                    };
+                    if j.status == Status::Queued {
+                        j.queued_at = t;
+                    }
+                    if *outcome == Outcome::Rerun {
+                        j.reruns += 1;
+                    }
+                    if *outcome == Outcome::Failed {
+                        j.failed_ends += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// A run that reached its spend cap, and what was decided there.
+    fn apply_checkpoint(&mut self, e: &SessionEvent) {
+        match e {
             SessionEvent::Checking { job, .. } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.status = Status::Checking;
@@ -667,29 +768,38 @@ impl World {
                     j.checkpoints.push(check.clone());
                 }
             }
-            SessionEvent::Ended { job, outcome, cost_usd, turns, reason } => {
+            _ => {}
+        }
+    }
+
+    /// The acceptance checks and reviews a job went through.
+    fn apply_judgement(&mut self, e: &SessionEvent) {
+        match e {
+            SessionEvent::BarChecked { job, commit, exit, tail, base_exit, result } => {
                 if let Some(j) = self.jobs.get_mut(job) {
-                    j.cost_usd += cost_usd;
-                    j.turns += turns;
-                    if j.let_go() {
-                        return;
-                    }
-                    j.reason.clone_from(reason);
-                    j.ended_at = Some(t);
-                    j.status = match outcome {
-                        Outcome::Done => Status::Done,
-                        Outcome::Failed => Status::Failed,
-                        Outcome::Stopped => Status::Stopped,
-                        Outcome::Retry | Outcome::Rerun => Status::Queued,
-                    };
-                    if j.status == Status::Queued {
-                        j.queued_at = t;
-                    }
-                    if *outcome == Outcome::Rerun {
-                        j.reruns += 1;
-                    }
+                    j.bars.iter_mut().for_each(|b| b.tail.clear());
+                    j.bars.push(Bar {
+                        commit: commit.clone(),
+                        result: *result,
+                        exit: *exit,
+                        base_exit: *base_exit,
+                        tail: tail.clone(),
+                    });
                 }
             }
+            SessionEvent::Reviewed { job, of, commit, verdict, reason, family } => {
+                if let Some(j) = self.jobs.get_mut(of) {
+                    let r = Reviewed {
+                        reviewer: job.clone(),
+                        commit: commit.clone(),
+                        verdict: *verdict,
+                        reason: *reason,
+                        family: family.clone(),
+                    };
+                    j.verdicts.push(r);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -797,6 +907,9 @@ mod tests {
             fork: None,
             parent: None,
             depth: 0,
+            check: None,
+            check_red_first: false,
+            review_of: None,
         })
     }
 
@@ -832,6 +945,9 @@ mod tests {
             fork: None,
             parent: None,
             depth: 0,
+            check: None,
+            check_red_first: false,
+            review_of: None,
         })
     }
 
@@ -850,6 +966,7 @@ mod tests {
                     job: "a".into(),
                     workdir: dir.clone(),
                     branch: "relay/a".into(),
+                    base: None,
                 }),
             ),
             st(3, Event::Session(SessionEvent::Disk { job: "a".into(), bytes: 7 })),
@@ -1011,6 +1128,7 @@ mod tests {
                     account: "x".into(),
                     session_id: "s".into(),
                     commit: None,
+                    family: None,
                 }),
             ),
             st(4, Event::Session(SessionEvent::Limited { account: "x".into(), until: 100 })),

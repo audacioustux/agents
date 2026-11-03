@@ -117,6 +117,8 @@ prepend it to your briefs, or have each brief point to it.
 | `relay profiles` / `relay config show` | The resolved profiles with their notes / the merged policy and project config, and which file each part came from |
 | `relay queue resume NAME --message TEXT [--budget USD] [--model H=M]` | Continue an ended or checking session, on any account with room. `--budget` caps that run alone, not the job's total; `--model` moves the job to another model from this run on |
 | `relay queue add NAME ... --after A[,B]` | Start only once every named job is `done` (repeat or comma-separate; unknown names are refused, exit 3) |
+| `relay queue add NAME ... --check CMD [--check-red-first]` | Declare the bar: a command that must pass in the job's clone before its run is accepted ([the bar](#the-bar)) |
+| `relay queue add NAME ... --review-of JOB` | A read-only review of build job JOB, after it, with its branch fetched for the reviewer; its verdict is kept on JOB ([reviews](#reviews)) |
 | `relay queue add NAME ... --fork JOB` | Start as a fork of JOB's session, from its branch when it is a build job ([forks](#what-a-job-is)) |
 | `relay decide list [--wait [--timeout S]]` / `relay decide answer ID --action A ...` | Decisions waiting for the orchestrator / answer one ([hooks](#hooks)) |
 | `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
@@ -125,8 +127,9 @@ prepend it to your briefs, or have each brief point to it.
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends |
 | `relay view watch [--all]` | The status live in a terminal UI (ratatui): jobs, the selected job's latest output and answer, and accounts, redrawn as events land in any project. Click a job to select it, scroll a pane with the wheel, click a key hint; or ↑↓, PgUp/PgDn, `a` older jobs, `q` quit. A reinstalled relay takes the window over by itself (hold Shift to select text) |
 | `relay view events` | The merged event log |
+| `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it; a fresh reading; switches |
-| `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout) / delete its clone and records |
+| `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout), noting when no review has accepted its tip / delete its clone and records |
 | `relay land gc [--dry-run]` | Remove what finished jobs no longer need: build outputs, old clones, old logs ([disk](#disk)) |
 | `relay probe [--account H:L]` | Sandbox self-test for one account of each harness, with controls |
 | `relay ask AGENT MODE ...` | One-shot read-only call, outside the queue ([the skill](../.agents/skills/relay/SKILL.md)) |
@@ -182,7 +185,9 @@ note = "second-family bug hunt or review of critical code and plans only; costly
 ```
 
 A profile has `harness`, `model`, `effort`, `budget`, `readonly`, `note`,
-`max_running` and `max_per_day`, all optional. `relay queue add NAME --profile P`
+`max_running` and `max_per_day`, all optional; and declares the bar, the review
+independence and the escalation of its jobs (`check`, `check_red_first`,
+`independent`, `escalate_to`, `escalate_after`, below). `relay queue add NAME --profile P`
 fills each field the command line does not set (`--no-readonly` turns a profile's
 read-only off); explicit flags win. The model reaches the same banned-model check
 as one given by hand, at queue and at start. The job records its profile, and it
@@ -212,7 +217,7 @@ only an action from that point's closed set, after checking it against policy:
 | point | when | actions |
 | --- | --- | --- |
 | `cap` | a build job's run hits its spend cap | `continue {budget}`, `redirect {message, budget}`, `stop {why}` |
-| `ended` | a run ends done or failed (an error, silence, no FINAL after the follow-up) | `accept`, `resume {message, budget}`, `requeue {profile}`, `follow-up {brief, profile, after, fork, name}`, `stop {why}` |
+| `ended` | a run ends done or failed (an error, silence, no FINAL after the follow-up) | `accept`, `resume {message, budget}`, `requeue {profile}`, `follow-up {brief, profile, after, fork, name}`, `stop {why}`, and for a review `review {verdict, reason, message}` |
 | `held` | a queued job has been held by a limit for `held_after_minutes` | `wait`, `reroute {harness, model, profile}`, `force` |
 | `disk` | a running job's clone is over `limits.job_disk_gb`, or the disk is nearly full ([disk](#disk)) | `wait`, `stop {why}` |
 
@@ -240,7 +245,11 @@ stands, at `held` the job waits, at `disk` the job is stopped.
 - `rule`: relay's own checks, free and deterministic. At `cap`, no new commit
   and no changed file since the last checkpoint is `stop`. At `ended`, a done
   run whose FINAL says `status: done` is `accept`, and a run that went silent
-  is resumed once in the same session. Otherwise it defers.
+  is resumed once in the same session. It also judges what a job declares: a
+  failed [acceptance check](#the-bar) is `resume`, a review's report gives its
+  [verdict](#reviews), and enough failed ends [escalate](#escalation) the job.
+  Otherwise it defers. A job that declares any of these has an `ended` chain
+  of `["rule"]` when `hooks.ended` is unset, so it costs nothing to leave unset.
 - `agent:<profile>`: a short read-only session on that profile's harness, model
   and budget, on another account than the worker's where one is free. Its prompt
   holds the point, the brief, the branch since the last checkpoint, the worker's
@@ -300,6 +309,126 @@ counts toward its job's total. `relay view status --json` has every decision
 under `decisions`. A `follow-up` is queued like `queue add` (by default
 `--after` the job, named `<job>-next`), with its `parent` and `depth`; `requeue` starts the job afresh under
 the profile with its branch kept, and `reroute` and `force` are queue events.
+
+## The bar
+
+A brief says what to do; the bar says what must be true afterwards, and it is
+judged by relay, not by the session that did the work. It is **declared**: on the
+line, `queue add NAME --check "cargo nextest run --no-tests=fail"`, or as a
+profile's default, `[profiles.P] check = "..."` (for build jobs; a line's own
+`--check` wins). It is stored on the queued record, so changing a check means
+queuing a new job. A job that declares none pays nothing.
+
+```toml
+[profiles.builder]
+check = "cargo nextest run --no-tests=fail"
+check_red_first = true     # the profile's own check must also fail at the job's base commit
+```
+
+When a run ends `done`, the `ended` point's `rule` handler has the check run in the
+job's clone, **inside the same sandbox plan the session used** (the repository is
+read-only there, as it was for the session), under `hooks.command_timeout_seconds`
+(raise it for a long suite). A clone with uncommitted changes to tracked files fails
+the check unrun, since the branch is what lands. relay records `bar-checked {job,
+commit, exit, tail}`, the tail being the end of the output, bounded as worker output
+is before it reaches a handler, and told to the handlers as untrusted.
+
+- **Pass:** the run may be accepted. **`accept` requires a pass:** no handler, the
+  orchestrator included, can accept a run whose check did not pass; `decide answer`
+  refuses it (exit 5).
+- **Fail:** `rule` answers `resume` with the failing tail as the message, so the same
+  session fixes what the check found and ends again, and the check runs again. This
+  is bounded by `hooks.max_decisions` and `limits.job_ceiling_usd`; when a resume is
+  refused the job ends `failed`, its reason naming the check. A fail is not a failed
+  *end*, so it does not count toward [escalation](#escalation) until the job fails.
+- **Revert control:** `--check-red-first` (or `check_red_first = true` beside the
+  profile's `check`) also runs the check at the commit the job's branch started from
+  (its base) in a temporary export of it, and requires it to **fail** there. A check
+  that passes without the change proves nothing: relay records the result
+  `check-proves-nothing`, does not accept, and stops the job (`failed`). A check that
+  filters tests passes when the filter matches none, which is exactly this case: give
+  it a "no tests is a failure" flag, such as `--no-tests=fail` for nextest.
+
+`view status` shows the latest result (`check pass`), `view result` the exit statuses
+and commit, and `--json` every run under `bars` (only the latest keeps its tail).
+
+## Reviews
+
+`queue add NAME --review-of JOB` is sugar for a read-only job, `--after JOB`, with
+JOB's branch made visible. A read-only job mounts your repository read-only, and a
+build job's branch lives in the build's clone, so a plain review cannot see it.
+Before the reviewer starts, relay fetches the branch into your repository as
+`refs/relay/review/<NAME>` (as `land fetch` copies it, but not onto your branches),
+and the prompt's preamble gives the reviewer the ref, its commit and the diff base
+(the commit the builder started from). The ref goes with the review on `land clean`.
+JOB must be a build job; a review never forks it, and is never refused as a repeat
+question (the branch can move under one brief).
+
+**Verdicts.** The reviewer is told to end its FINAL section with `verdict: accept` or
+`verdict: reject`, and for a reject `reason: <code>` and its findings in `notes`. The
+`ended` point's `rule` reads them; an `agent`, `command` or the orchestrator can
+answer `review {verdict, reason, message}` instead (`decide answer ID --action
+review --verdict reject --reason test-failure --message ...`). A reject carries a
+coded reason: `test-failure`, `behavior-mismatch`, `insufficient-evidence`,
+`stale-head` or `other`; an accept carries none. relay records `reviewed {job, of,
+commit, verdict, reason, family}`; the fold keeps `verdicts` on the reviewed job, each
+with the reviewer, the commit it judged and its reason, and `view status` shows the
+latest (`review by rev: reject: test-failure`).
+
+- **A reject resumes the builder's session** with the reviewer's findings, as `queue
+  resume` would, while the builder is not working and fewer than `hooks.max_decisions`
+  reviews have rejected it. It is up to you (or the orchestrator) to queue the next
+  review once the builder is done again.
+- **Independence.** relay records the reviewer's model family (`anthropic`, `openai`,
+  `google`, ...; a model it does not know is its provider). A review is refused on the
+  builder's family only when the reviewed job's profile declares `independent =
+  "family"`: at `queue add` (exit 5) when every harness it may use would do, else when
+  its session starts, which then fails at once. Otherwise the family is recorded and
+  allowed.
+- **Landing.** `land fetch` prints `note: no review has accepted <tip>` when a review
+  was asked of the job and none accepted its tip. It never blocks: landing stays
+  your step.
+
+## Stats
+
+`relay view stats [--since DURATION] [--json]` is a read-only fold over the events
+already on the bus (it writes none). It counts the jobs queued within the window
+(`30m`, `12h`, `7d`, `2w`; default all), per profile and model, with:
+
+- jobs by outcome (done, failed, stopped, open) and spend;
+- retries (runs sent back to the queue) and resumes (by hand, by a decision, or the
+  one more turn for a missing report);
+- decisions by action (the action carried out, one per decision);
+- checks by result (`pass`, `fail`, `check-proves-nothing`);
+- reviews received by the jobs, accepts and rejects by reason;
+- the median queue wait (queued or requeued, until a runner starts) and the median
+  run time;
+- each account's share of the runs and its spend, by label (`claude:work`), never by
+  who it is signed in as.
+
+A review is counted for the job it judged, so a profile's reject rate is how often
+its work was sent back. Spend is the runs' and the decisions'; an account's spend is
+its runs' alone.
+
+## Escalation
+
+A profile can name the profile to move to when its jobs keep failing:
+
+```toml
+[profiles.cheap]
+model = "claude-haiku-5-5"
+escalate_to = "strong"
+escalate_after = 2
+```
+
+`escalate_after` counts failed ends of one job (runs that ended `failed`, not retried
+or resumed in place), since it was last requeued. When the count is reached, the
+`ended` point's `rule` answers `requeue {profile: "strong"}`: the job starts afresh
+under `strong` with its branch kept, and the count starts again. The target
+profile's `max_per_day`, its bans and `max_decisions` apply as for any `requeue`; a
+refused one leaves the job `failed`. A first silence is still resumed in place before
+it counts. The names are checked when the config loads: an `escalate_to` that is not a
+profile, or that leads back to itself, is an error.
 
 ## Disk
 
@@ -565,11 +694,11 @@ own process, and owns one output port:
 | --- | --- | --- |
 | queue | takes work in (under a profile, if asked), withdraws it, stops it, releases it from its `--after` jobs, reroutes or forces a held one | queued, released, resumed, rerouted, forced, dequeued, stop-requested |
 | dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
-| session | runs one job, carries out the decisions at its cap and its end, measures its clone and stops it at the disk ceiling, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, requeued, checking, checked, disk, ended |
+| session | runs one job, carries out the decisions at its cap and its end, runs its acceptance check, fetches a review's branch, measures its clone and stops it at the disk ceiling, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, requeued, checking, checked, bar-checked, reviewed, disk, ended |
 | decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); takes the orchestrator's answers | decision-requested, parked, decided |
 | quota | account readings and switches | reading, unreadable, signed-out, account-enabled |
 | land | brings branches back; cleans up, and gc | forgotten, collected |
-| view, probe | read-only | — |
+| view, probe | read-only (`view stats` folds the bus; it writes nothing) | — |
 
 A runner is identified by its pid together with its start time, so a reused
 pid is never mistaken for it or signalled. It starts behind a gate (a pipe on

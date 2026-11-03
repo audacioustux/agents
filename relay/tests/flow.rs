@@ -985,8 +985,16 @@ fn records(env: &Env, name: &str, ext: &str) -> PathBuf {
     env.root.join("state/relay/flow/jobs").join(format!("{name}.{ext}"))
 }
 
+/// The job's clone. A job is `running` a moment before its runner has made the clone and recorded it, so
+/// this waits (bounded) for the record rather than racing it.
 fn workdir(env: &Env, name: &str) -> PathBuf {
-    PathBuf::from(job(env, name)["workdir"].as_str().unwrap())
+    for _ in 0..100 {
+        if let Some(dir) = job(env, name)["workdir"].as_str() {
+            return PathBuf::from(dir);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("{name} has no clone: {}", job(env, name));
 }
 
 fn out_of(out: &Output) -> String {
@@ -1167,4 +1175,550 @@ fn a_disk_hook_may_let_a_job_go_on() {
     assert_eq!(j["status"], "done", "{j}");
     let d = &decisions(&env, "big")[0];
     assert_eq!((d["point"].as_str(), d["action"]["action"].as_str()), (Some("disk"), Some("wait")), "{d}");
+}
+
+fn events(env: &Env) -> Vec<serde_json::Value> {
+    let out = relay(env, &["view", "events"]);
+    String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+}
+
+fn prompts(env: &Env, account: &str) -> String {
+    std::fs::read_to_string(env.home.join(format!(".claude.{account}/prompts"))).unwrap_or_default()
+}
+
+fn rev_parse(dir: &Path, rev: &str) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--verify", rev])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+#[test]
+fn a_declared_check_must_pass_in_the_sandbox_before_a_run_is_accepted() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("bar", false);
+    configure(&env, "", "[hooks]\nmax_decisions = 2\n[profiles.bar]\nharness = \"claude\"\ncheck = \"false\"\n");
+    claude_account(&env.home, "a", 10, false);
+
+    // The stub writes the number of the turn into its output: the first run fails the check, and the
+    // resume it is sent (with the failing output) writes turn 2, which passes. Accepted by the fallback.
+    let check = "grep -Eq ' 2$' relay-output.txt || { echo 'expected the second turn' >&2; exit 3; }";
+    ok(&relay(&env, &["queue", "add", "fix", "--text", "[status-done] Make a change.", "--check", check]), "queue");
+    let j = wait_for(&env, "fix");
+    assert_eq!(j["status"], "done", "{j}");
+    let bars = j["bars"].as_array().unwrap();
+    let results: Vec<&str> = bars.iter().filter_map(|b| b["result"].as_str()).collect();
+    assert_eq!(results, ["fail", "pass"], "{j}");
+    assert_eq!(bars[0]["exit"], 3);
+    assert_eq!(bars[0]["tail"], "", "only the latest run keeps its output tail");
+    assert_eq!(bars[1]["commit"], rev_parse(&workdir(&env, "fix"), "HEAD"), "the check is of the branch tip");
+    assert_eq!(j["check"], check);
+    // The resumed turn reports no `status: done`, so the rule defers and the run stands as accepted: it is green.
+    let steps: Vec<(String, String)> = decisions(&env, "fix")
+        .iter()
+        .map(|d| {
+            (
+                d["steps"][0]["handler"].as_str().unwrap_or("").to_owned(),
+                d["steps"][0]["action"]["action"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(steps, [("rule".to_owned(), "resume".to_owned()), ("rule".to_owned(), "defer".to_owned())], "{steps:?}");
+    let sent = prompts(&env, "a");
+    assert!(
+        sent.contains("acceptance check") && sent.contains("expected the second turn"),
+        "the failing tail is the resume message: {sent}"
+    );
+    let events = events(&env);
+    let ran: Vec<&serde_json::Value> = events.iter().filter(|e| e["type"] == "bar-checked").collect();
+    assert_eq!(ran.len(), 2);
+    assert_eq!(ran[0]["tail"].as_str().map(str::trim), Some("expected the second turn"));
+    assert!(board(&env).contains("check pass"), "{}", board(&env));
+
+    // The profile's check is the default for a build job, and a check that never passes ends the job
+    // when `max_decisions` is spent: two resumes, then it is failed and says why.
+    ok(&relay(&env, &["queue", "add", "stuck", "--text", "[status-done] Make a change.", "--profile", "bar"]), "queue");
+    let j = wait_for(&env, "stuck");
+    assert_eq!(j["status"], "failed", "{j}");
+    assert_eq!(j["check"], "false");
+    let reason = j["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("acceptance check fail") && reason.contains("decisions have acted"), "{reason}");
+    assert_eq!(decisions(&env, "stuck").len(), 3, "two resumes and the one that was refused");
+    assert_eq!(j["bars"].as_array().unwrap().len(), 3);
+
+    // The check runs in the session's sandbox, not on the open host: the repository is read-only there.
+    let touch = format!("touch {}/escaped", env.repo.display());
+    ok(&relay(&env, &["queue", "add", "boxed", "--text", "[status-done] Make a change.", "--check", &touch]), "queue");
+    let j = wait_for(&env, "boxed");
+    assert_eq!(j["status"], "failed", "{j}");
+    assert!(!env.repo.join("escaped").exists(), "the check wrote to the repository");
+    assert!(j["bars"][0]["tail"].is_string());
+    assert!(j["bars"][2]["tail"].as_str().unwrap_or_default().contains("Read-only file system"), "{j}");
+
+    // A check judges a build job's branch.
+    let out = relay(&env, &["queue", "add", "ro", "--text", "x", "--readonly", "--check", "true"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let out = relay(&env, &["queue", "add", "red", "--text", "x", "--check-red-first"]);
+    assert_eq!(out.status.code(), Some(2), "a revert control needs a check: {}", stderr(&out));
+}
+
+#[test]
+fn a_check_that_passes_without_the_change_proves_nothing_and_is_not_accepted() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("bar-red", false);
+    claude_account(&env.home, "a", 10, false);
+
+    // Red at the base commit (no output file yet), green on the branch: accepted.
+    let real = "test -f relay-output.txt";
+    ok(
+        &relay(
+            &env,
+            &["queue", "add", "real", "--text", "[status-done] Make a change.", "--check", real, "--check-red-first"],
+        ),
+        "queue",
+    );
+    let j = wait_for(&env, "real");
+    assert_eq!(j["status"], "done", "{j}");
+    assert_eq!((j["bars"][0]["result"].as_str(), j["bars"][0]["base_exit"].as_i64()), (Some("pass"), Some(1)), "{j}");
+
+    // Green at the base commit too: it shows nothing about the change.
+    ok(
+        &relay(
+            &env,
+            &[
+                "queue",
+                "add",
+                "vacuous",
+                "--text",
+                "[status-done] Make a change.",
+                "--check",
+                "true",
+                "--check-red-first",
+            ],
+        ),
+        "queue",
+    );
+    let j = wait_for(&env, "vacuous");
+    assert_eq!(j["status"], "failed", "{j}");
+    assert_eq!(j["bars"][0]["result"], "check-proves-nothing", "{j}");
+    assert_eq!(j["bars"][0]["base_exit"], 0);
+    assert!(j["reason"].as_str().unwrap_or_default().starts_with("check-proves-nothing"), "{j}");
+    let d = &decisions(&env, "vacuous")[0];
+    assert_eq!(d["action"]["action"], "stop", "{d}");
+    assert!(board(&env).contains("check check-proves-nothing"), "{}", board(&env));
+
+    // The orchestrator cannot accept a red run either.
+    configure(
+        &env,
+        "job_ceiling_usd = 5.0\n",
+        "[hooks]\nended = [\"orchestrator\"]\norchestrator_timeout_minutes = 0.2\n",
+    );
+    ok(&relay(&env, &["queue", "add", "pushy", "--text", "[status-done] Make a change.", "--check", "false"]), "queue");
+    let mut waiting = None;
+    for _ in 0..100 {
+        let out = relay(&env, &["decide", "list", "--json"]);
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        if let Some(d) = v["pending"].as_array().and_then(|p| p.first()) {
+            waiting = d["id"].as_str().map(str::to_owned);
+            assert_eq!(d["request"]["check"]["result"], "fail", "the handler is told: {d}");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let id = waiting.expect("the ended decision is parked");
+    let out = relay(&env, &["decide", "answer", &id, "--action", "accept"]);
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert!(stderr(&out).contains("acceptance check"), "{}", stderr(&out));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_review_sees_the_builders_branch_gives_a_verdict_and_a_reject_resumes_the_builder() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review", false);
+    claude_account(&env.home, "a", 10, false);
+    ok(
+        &relay(
+            &env,
+            &["queue", "add", "build", "--text", "[status-done] Make a change.", "--model", "claude=claude-opus-5-5"],
+        ),
+        "queue",
+    );
+    wait_for(&env, "build");
+    let tip = rev_parse(&workdir(&env, "build"), "HEAD");
+    let base = rev_parse(&env.repo, "HEAD");
+
+    // Sugar for read-only, after the build, with its branch fetched where the reviewer can read it.
+    let out = relay(
+        &env,
+        &[
+            "queue",
+            "add",
+            "rev",
+            "--review-of",
+            "build",
+            "--text",
+            "[verdict-reject] Review the change.",
+            "--model",
+            "claude=claude-sonnet-5-5",
+        ],
+    );
+    ok(&out, "queue the review");
+    let queued = job(&env, "rev");
+    assert_eq!(
+        (queued["readonly"].clone(), queued["review_of"].clone(), queued["after"].clone()),
+        (true.into(), "build".into(), serde_json::json!(["build"])),
+        "{queued}"
+    );
+    let j = wait_for(&env, "rev");
+    assert_eq!(j["status"], "done", "{j}");
+    assert_eq!(rev_parse(&env.repo, "refs/relay/review/rev"), tip, "the branch is in the repository's refs");
+    let told = prompts(&env, "a");
+    assert!(
+        told.contains("refs/relay/review/rev") && told.contains(&tip) && told.contains(&base),
+        "the ref and the diff base are in the preamble: {told}"
+    );
+    assert_eq!(j["family"], "anthropic", "the reviewer's model family is recorded");
+
+    // A reject resumes the builder's session with the findings; the verdict is kept on the builder.
+    let b = wait_for(&env, "build");
+    assert_eq!((b["status"].as_str(), b["attempts"].as_u64()), (Some("done"), Some(2)), "{b}");
+    assert_eq!(b["verdicts"][0]["reviewer"], "rev");
+    assert_eq!(
+        (b["verdicts"][0]["reason"].as_str(), b["verdicts"][0]["commit"].as_str()),
+        (Some("test-failure"), Some(tip.as_str())),
+        "{b}"
+    );
+    assert_eq!(b["verdicts"][0]["family"], "anthropic");
+    let told = prompts(&env, "a");
+    assert!(told.contains("rejected it (test-failure)") && told.contains("parse panics on empty input"), "{told}");
+    assert!(job(&env, "rev")["reason"].as_str().unwrap_or_default().contains("build resumed"), "{}", job(&env, "rev"));
+    assert!(board(&env).contains("review by rev: reject: test-failure"), "{}", board(&env));
+
+    // Landing is never blocked, but the note says the tip has no accepting verdict.
+    let out = relay(&env, &["land", "fetch", "build"]);
+    ok(&out, "land");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("note: no review has accepted"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let new_tip = rev_parse(&workdir(&env, "build"), "HEAD");
+    assert_ne!(new_tip, tip);
+
+    // An accept at the new tip clears it, with no independence declared and the same family allowed.
+    ok(
+        &relay(
+            &env,
+            &[
+                "queue",
+                "add",
+                "rev2",
+                "--review-of",
+                "build",
+                "--text",
+                "[verdict-accept] Review the change.",
+                "--model",
+                "claude=claude-opus-5-5",
+            ],
+        ),
+        "queue",
+    );
+    wait_for(&env, "rev2");
+    let b = job(&env, "build");
+    assert_eq!(
+        (b["verdicts"][1]["verdict"].as_str(), b["verdicts"][1]["commit"].as_str()),
+        (Some("accept"), Some(new_tip.as_str())),
+        "{b}"
+    );
+    assert_eq!(b["attempts"], 2, "an accept resumes nothing");
+    let out = relay(&env, &["land", "fetch", "build"]);
+    ok(&out, "land");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("note:"), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(board(&env).contains("review by rev2: accept"), "{}", board(&env));
+
+    // A review is of a build job, and never forks it.
+    let out = relay(&env, &["queue", "add", "r3", "--review-of", "rev", "--text", "x"]);
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    let out = relay(&env, &["queue", "add", "r4", "--review-of", "nope", "--text", "x"]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let out = relay(&env, &["queue", "add", "r5", "--review-of", "build", "--fork", "build", "--text", "x"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_profile_that_asks_for_an_independent_family_refuses_a_same_family_reviewer() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("family", true);
+    configure(
+        &env,
+        "",
+        "[profiles.careful]\nharness = \"claude\"\nmodel = \"claude-opus-5-5\"\nindependent = \"family\"\n\
+         [profiles.loose]\nharness = \"claude\"\nmodel = \"claude-opus-5-5\"\n",
+    );
+    claude_account(&env.home, "a", 10, false);
+    ok(
+        &relay(&env, &["queue", "add", "built", "--text", "[status-done] Make a change.", "--profile", "careful"]),
+        "queue",
+    );
+    ok(
+        &relay(&env, &["queue", "add", "easy", "--text", "[status-done] Make a change.", "--profile", "loose"]),
+        "queue",
+    );
+    wait_for(&env, "built");
+    wait_for(&env, "easy");
+
+    // Same family as the builder (opus and sonnet are both Anthropic's): refused, and not recorded.
+    let out = relay(
+        &env,
+        &[
+            "queue",
+            "add",
+            "same",
+            "--review-of",
+            "built",
+            "--text",
+            "x",
+            "--harness",
+            "claude",
+            "--model",
+            "claude-sonnet-5-5",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert!(stderr(&out).contains("anthropic") && stderr(&out).contains("independent"), "{}", stderr(&out));
+    assert!(job(&env, "same").is_null());
+    // The reviewer's harness default counts when it names no model.
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(
+        env.repo.join("relay.toml"),
+        conf.replace("[harness.claude]\n", "[harness.claude]\nmodel = \"claude-opus-5-5\"\n"),
+    )
+    .unwrap();
+    let out = relay(&env, &["queue", "add", "same", "--review-of", "built", "--text", "x", "--harness", "claude"]);
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+
+    // Another family is allowed, and so is the same one for a profile that declares nothing.
+    ok(
+        &relay(&env, &["queue", "add", "other", "--review-of", "built", "--text", "x", "--harness", "omp"]),
+        "another family",
+    );
+    ok(
+        &relay(
+            &env,
+            &[
+                "queue",
+                "add",
+                "free",
+                "--review-of",
+                "easy",
+                "--text",
+                "x",
+                "--harness",
+                "claude",
+                "--model",
+                "claude-sonnet-5-5",
+            ],
+        ),
+        "no independence declared",
+    );
+    ok(&relay(&env, &["queue", "dequeue", "other"]), "dequeue");
+    assert_eq!(wait_for(&env, "free")["status"], "done");
+    assert_eq!(
+        job(&env, "free")["family"],
+        "anthropic",
+        "the family is recorded even where it is not required to differ"
+    );
+
+    // Where the reviewer might run on another family, the queue cannot know; a session that starts
+    // on the same one fails at once and says why, spending nothing.
+    ok(
+        &relay(
+            &env,
+            &[
+                "queue",
+                "add",
+                "late",
+                "--review-of",
+                "built",
+                "--text",
+                "x",
+                "--harness",
+                "claude,omp",
+                "--model",
+                "claude=claude-sonnet-5-5",
+            ],
+        ),
+        "queue",
+    );
+    let j = wait_for(&env, "late");
+    assert_eq!(j["status"], "failed", "{j}");
+    assert!(j["reason"].as_str().unwrap_or_default().contains("independent review refused"), "{j}");
+    assert_eq!(j["cost_usd"], 0.0);
+}
+
+#[test]
+fn stats_fold_the_events_per_profile_and_model_and_show_labels_only() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("stats", false);
+    configure(
+        &env,
+        "",
+        "[hooks]\nmax_decisions = 2\n[profiles.worker]\nharness = \"claude\"\nmodel = \"claude-haiku-5-5\"\n",
+    );
+    claude_account(&env.home, "a", 10, false);
+    ok(
+        &relay(
+            &env,
+            &[
+                "queue",
+                "add",
+                "one",
+                "--text",
+                "[status-done] Make a change.",
+                "--profile",
+                "worker",
+                "--check",
+                "test -f relay-output.txt",
+            ],
+        ),
+        "queue",
+    );
+    wait_for(&env, "one");
+    ok(
+        &relay(
+            &env,
+            &[
+                "queue",
+                "add",
+                "two",
+                "--text",
+                "[status-done] Make a change.",
+                "--profile",
+                "worker",
+                "--check",
+                "false",
+            ],
+        ),
+        "queue",
+    );
+    wait_for(&env, "two");
+    ok(
+        &relay(
+            &env,
+            &[
+                "queue",
+                "add",
+                "look",
+                "--review-of",
+                "one",
+                "--text",
+                "[verdict-accept] Review it.",
+                "--model",
+                "claude=claude-sonnet-5-5",
+            ],
+        ),
+        "queue",
+    );
+    wait_for(&env, "look");
+
+    let out = relay(&env, &["view", "stats", "--json"]);
+    ok(&out, "stats");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains(SECRET_EMAIL), "{text}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["project"], "flow");
+    let groups = v["groups"].as_array().unwrap();
+    let worker = groups.iter().find(|g| g["profile"] == "worker").expect("a group for the profile");
+    assert_eq!(worker["model"], "claude-haiku-5-5");
+    assert_eq!(worker["jobs"]["total"], 2, "{worker}");
+    assert_eq!((worker["jobs"]["done"].clone(), worker["jobs"]["failed"].clone()), (1.into(), 1.into()), "{worker}");
+    assert_eq!(worker["checks"]["pass"], 1);
+    assert_eq!(worker["checks"]["fail"], 3, "two's check failed, and again after each of its two resumes: {worker}");
+    assert_eq!(worker["reviews"]["accept"], 1, "a review counts for the job it judged: {worker}");
+    assert_eq!(worker["decisions"]["resume"], 2, "{worker}");
+    assert_eq!((worker["resumes"].clone(), worker["retries"].clone()), (2.into(), 2.into()), "{worker}");
+    assert!(worker["spend_usd"].as_f64().unwrap() > 0.0);
+    assert!(worker["queue_wait_median_s"].is_number() && worker["run_median_s"].is_number(), "{worker}");
+    assert_eq!(v["total"]["jobs"]["total"], 3);
+    let accounts = v["accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0]["account"], "claude:a");
+    assert!((accounts[0]["run_share"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+
+    // The window counts jobs by when they were queued.
+    let out = relay(&env, &["view", "stats", "--json", "--since", "1h"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["total"]["jobs"]["total"], 3);
+    let text = String::from_utf8_lossy(&relay(&env, &["view", "stats"]).stdout).into_owned();
+    assert!(text.contains("worker") && text.contains("claude:a") && text.contains("checks:"), "{text}");
+    assert!(!text.contains(SECRET_EMAIL));
+    let out = relay(&env, &["view", "stats", "--since", "soon"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn a_profile_escalates_a_job_to_another_after_enough_failed_ends() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("escalate", false);
+    configure(
+        &env,
+        "",
+        "[profiles.cheap]\nharness = \"claude\"\nmodel = \"claude-haiku-5-5\"\nescalate_to = \"strong\"\nescalate_after = 2\n\
+         [profiles.strong]\nharness = \"claude\"\nmodel = \"claude-opus-5-5\"\n",
+    );
+    claude_account(&env.home, "a", 10, false);
+    std::fs::write(env.home.join(".claude.a/fail"), "").unwrap();
+    ok(&relay(&env, &["queue", "add", "hard", "--text", "Make a change.", "--profile", "cheap"]), "queue");
+    let j = wait_for(&env, "hard");
+    assert_eq!(
+        (j["status"].as_str(), j["profile"].as_str()),
+        (Some("failed"), Some("cheap")),
+        "one failed end is not enough: {j}"
+    );
+    assert_eq!(j["failed_ends"], 1);
+
+    // The second failed end reaches the profile's number: the rule requeues it under the other.
+    ok(&relay(&env, &["queue", "resume", "hard", "--message", "try again"]), "resume");
+    let mut j = job(&env, "hard");
+    for _ in 0..300 {
+        j = job(&env, "hard");
+        if j["profile"] == "strong" && j["status"] == "failed" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!((j["profile"].as_str(), j["status"].as_str()), (Some("strong"), Some("failed")), "{j}");
+    assert_eq!(j["models"]["claude"], "claude-opus-5-5", "{j}");
+    assert_eq!(j["failed_ends"], 1, "the count starts afresh under the new profile: {j}");
+    assert_eq!(j["attempts"], 3);
+    let ds = decisions(&env, "hard");
+    let acts: Vec<&str> = ds.iter().map(|d| d["steps"][0]["action"]["action"].as_str().unwrap_or("")).collect();
+    assert_eq!(acts, ["defer", "requeue"], "the first failed end is deferred, the second escalates: {ds:?}");
+    assert!(ds[1]["steps"][0]["why"].as_str().unwrap_or_default().contains("escalates to strong"));
+
+    // A target the config cannot follow is an error at load, never at the moment of failure.
+    env.write_policy("[profiles.strong]\nescalate_to = \"cheap\"\nescalate_after = 1\n");
+    let out = relay(&env, &["profiles"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("escalation cycle"), "{}", stderr(&out));
+    env.write_policy("[profiles.strong]\nescalate_to = \"nobody\"\nescalate_after = 1\n");
+    assert!(stderr(&relay(&env, &["profiles"])).contains("not a profile"));
 }

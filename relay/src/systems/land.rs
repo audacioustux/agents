@@ -34,6 +34,31 @@ pub enum Cmd {
     },
 }
 
+/// A note when `job` has been put up for review but its tip has no accepting verdict. Never a block:
+/// landing is the operator's step. A job nobody reviews, and nobody has been asked to, gets none.
+fn unreviewed(ctx: &Ctx, world: &crate::world::World, job: &crate::world::Job, branch: &str) -> Option<String> {
+    let asked =
+        !job.verdicts.is_empty() || world.jobs.values().any(|j| j.review_of.as_deref() == Some(job.name.as_str()));
+    if !asked {
+        return None;
+    }
+    let tip = Ctx::git(&ctx.cfg.repo).args(["rev-parse", "--verify", &format!("refs/heads/{branch}")]).output().ok()?;
+    let tip = String::from_utf8_lossy(&tip.stdout).trim().to_owned();
+    let accepted = job.verdicts.iter().any(|v| v.verdict == crate::bus::Verdict::Accept && v.commit == tip);
+    (!accepted).then(|| {
+        let short = tip.get(..12).unwrap_or(&tip);
+        match job.verdicts.last() {
+            Some(v) => format!(
+                "no review has accepted {short}; the latest, by {} at {}, was {}",
+                v.reviewer,
+                v.commit.get(..12).unwrap_or(&v.commit),
+                v.summary()
+            ),
+            None => format!("no review has accepted {short} yet"),
+        }
+    })
+}
+
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     if let Cmd::Gc { dry_run } = cmd {
         return gc::run(ctx, dry_run);
@@ -65,7 +90,12 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             let log = Ctx::git(&ctx.cfg.repo).args(["log", "--oneline", &format!("HEAD..{branch}")]).output()?;
             let log = String::from_utf8_lossy(&log.stdout);
             let commits: Vec<&str> = log.lines().collect();
-            ctx.reply(&serde_json::json!({ "job": name, "branch": branch, "commits": commits }), &log)?;
+            let note = unreviewed(ctx, &world, j, branch);
+            let text = match &note {
+                Some(n) => format!("{}\nnote: {n}", log.trim_end()),
+                None => log.to_string(),
+            };
+            ctx.reply(&serde_json::json!({ "job": name, "branch": branch, "commits": commits, "note": note }), &text)?;
         }
         Cmd::Gc { .. } => unreachable!("handled above"),
         Cmd::Clean { name } => {
@@ -93,6 +123,8 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 let _ = std::fs::remove_file(ctx.job_file(&name, ext));
             }
             let _ = std::fs::remove_dir_all(ctx.job_scratch(&name));
+            // The ref a review read its branch by is the review's own, and goes with it.
+            let _ = Ctx::git(&ctx.cfg.repo).args(["update-ref", "-d", &format!("refs/relay/review/{name}")]).output();
             ctx.port(&Source(())).emit(LandEvent::Forgotten { job: name.clone() })?;
             ctx.reply(&serde_json::json!({ "job": name, "cleaned": true }), &format!("{name}: cleaned"))?;
         }

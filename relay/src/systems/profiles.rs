@@ -71,6 +71,16 @@ pub fn list(ctx: &Ctx) -> Result<()> {
         if let Some(why) = ban(cfg, p) {
             out!("    banned: {why}");
         }
+        if let Some(check) = &p.check {
+            let red = if p.check_red_first == Some(true) { " (red first)" } else { "" };
+            out!("    check{red}: {check}");
+        }
+        if let (Some(to), Some(n)) = (&p.escalate_to, p.escalate_after) {
+            out!("    escalates to {to} after {n} failed end(s)");
+        }
+        if p.independent.is_some() {
+            out!("    reviews must come from another model family");
+        }
         if let Some(note) = &p.note {
             out!("    {note}");
         }

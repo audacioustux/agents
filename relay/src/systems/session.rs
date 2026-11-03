@@ -1,10 +1,11 @@
 //! session: runs one dispatched job on its account's harness and reports
 //! what happened. Emits: cloned, started, identified, rate, limited,
-//! signed-out, follow-up, requeued, checking, checked, ended. One process per running job, started by
+//! signed-out, follow-up, requeued, checking, checked, bar-checked, reviewed, ended. One process per running job, started by
 //! dispatch. Nothing here names a harness: the account's harness builds the
 //! command and reads the output, and the limits are enforced here for all.
 
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -15,14 +16,15 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 
 use crate::accounts::{self, harness_of};
-use crate::bus::{Action, Check, CheckVerdict, Outcome, Point, SessionEvent, now_micros, secs};
+use crate::bus::Verdict as Judgement;
+use crate::bus::{Action, BarResult, Check, CheckVerdict, Outcome, Point, Reason, SessionEvent, now_micros, secs};
 use crate::ctx::Ctx;
 use crate::harness::report::{Ending, Report, Verdict, verdict};
 use crate::harness::{Home, Invocation, Permissions, Reader, Session, Task};
 use crate::os;
 use crate::sandbox::{self, Mounts};
 use crate::systems::checkpoint::{self, Next};
-use crate::systems::decide::{self, Request};
+use crate::systems::decide::{self, CheckRun, Request, Reviewing};
 use crate::world::{Job, Status, World};
 
 #[derive(Debug, Subcommand)]
@@ -123,6 +125,8 @@ fn layer_env(ctx: &Ctx, inv: &mut Invocation, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
+// One attempt, start to verdict, in the order things happen; splitting it would only scatter that order.
+#[allow(clippy::too_many_lines)]
 fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     let port = port(ctx, job);
     let key = job.account.clone().context("dispatched without an account")?;
@@ -140,31 +144,33 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     let mut workdir = job.workdir.clone();
     if !job.readonly && workdir.is_none() {
         let bases = bases(&ctx.world()?, job);
-        let (dir, branch) = match clone(ctx, &job.name, &bases, job.session_id.is_some()) {
+        let (dir, branch, base) = match clone(ctx, &job.name, &bases, job.session_id.is_some()) {
             Ok(made) => made,
             Err(e) => return Ok((Outcome::Failed, Some(format!("{e:#}")))),
         };
-        port.emit(SessionEvent::Cloned { job: job.name.clone(), workdir: dir.clone(), branch })?;
+        port.emit(SessionEvent::Cloned { job: job.name.clone(), workdir: dir.clone(), branch, base })?;
         workdir = Some(dir);
     }
     let cwd = if job.readonly { ctx.cfg.repo.clone() } else { workdir.clone().unwrap_or_default() };
     let scratch = ctx.job_scratch(&job.name);
     std::fs::create_dir_all(&scratch)?;
 
-    // A fork that never named a session of its own forks again.
-    let fork = job.fork.as_ref().filter(|f| job.session_id.as_deref().is_none_or(|s| s == f.session_id));
-    if let Some(f) = fork {
-        let from = found.iter().find(|h| h.key() == f.account);
-        if !(from.is_some_and(|h| h.harness == home.harness) && harness.carry_fork(&f.session_id, from, home, &cwd)) {
-            return Ok((Outcome::Failed, Some(format!("{}'s session {} cannot be forked here", f.job, f.session_id))));
-        }
+    if let Some(failed) = forkable(job, &found, home, &cwd) {
+        return Ok(failed);
     }
+    let fork = job.fork.as_ref().filter(|f| job.session_id.as_deref().is_none_or(|s| s == f.session_id));
     let resumed = if fork.is_some() { None } else { resumable(job, &found, home, &scratch) };
     let session_id =
         fork.map(|f| f.session_id.clone()).or(resumed.clone()).unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
     let brief = std::fs::read_to_string(ctx.job_file(&job.name, "prompt.md")).context("the job's brief is gone")?;
+    // A review reads a branch that lives in the builder's clone: bring it to the repository first.
+    let reviewing = match review_setup(ctx, job, model.as_deref()) {
+        Ok(r) => r,
+        Err(why) => return Ok((Outcome::Failed, Some(why))),
+    };
+    let preamble = reviewing.as_ref().map(review_preamble);
     // A fork has its parent's context but not its own task: it is told its brief.
-    let prompt = opening(brief.clone(), job.message.as_deref(), resumed.is_some());
+    let prompt = opening(&brief, job.message.as_deref(), resumed.is_some(), preamble.as_deref());
     // What a read-only job reads is the live repository, so its commit is taken now, not when queued.
     let commit = if job.readonly { Ctx::clean_head(&ctx.cfg.repo) } else { None };
     port.emit(SessionEvent::Started {
@@ -172,6 +178,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         account: key.clone(),
         session_id: session_id.clone(),
         commit,
+        family: job.review_of.as_ref().and(model.as_deref()).map(crate::config::model_family),
     })?;
 
     let s = &ctx.cfg.session;
@@ -224,15 +231,31 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         // Stopped, not failed: the clone and the session are kept for a resume after cleanup.
         return Ok((Outcome::Stopped, disk));
     }
-    let run = Ran { report: &report, dir: workdir.as_deref(), scratch: &scratch, brief: &brief };
+    let run = Ran {
+        report: &report,
+        dir: workdir.as_deref(),
+        scratch: &scratch,
+        brief: &brief,
+        reviewing: reviewing.as_ref(),
+        model: model.as_deref(),
+    };
     match verdict(&report, ending, &s.final_marker, job.readonly, now_s()) {
         Verdict::Budget => at_cap(ctx, job, &run),
         v => {
-            let silent = ending.silent;
             let ended = conclude(ctx, job, &key, v, now_s())?;
-            at_end(ctx, job, &run, ended, silent)
+            at_end(ctx, job, home, &run, ended, ending.silent)
         }
     }
+}
+
+/// Whether the session this fork asks for can be carried to `home`: the failure otherwise.
+fn forkable(job: &Job, found: &[Home], home: &Home, cwd: &Path) -> Option<Ended> {
+    // A fork that never named a session of its own forks again.
+    let f = job.fork.as_ref().filter(|f| job.session_id.as_deref().is_none_or(|s| s == f.session_id))?;
+    let from = found.iter().find(|h| h.key() == f.account);
+    let carried =
+        from.is_some_and(|h| h.harness == home.harness) && harness_of(home).carry_fork(&f.session_id, from, home, cwd);
+    (!carried).then(|| (Outcome::Failed, Some(format!("{}'s session {} cannot be forked here", f.job, f.session_id))))
 }
 
 /// What a finished run left, for the decision that follows it.
@@ -241,6 +264,10 @@ struct Ran<'a> {
     dir: Option<&'a Path>,
     scratch: &'a Path,
     brief: &'a str,
+    /// For a review: the branch it read.
+    reviewing: Option<&'a Reviewing>,
+    /// The model the run used.
+    model: Option<&'a str>,
 }
 
 /// The request at `point`, with the brief, the earlier decisions and what was spent.
@@ -331,12 +358,19 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
     })
 }
 
-/// A run that ended done or failed, when `hooks.ended` is set: the chain may
-/// accept it, resume it, start it afresh under another profile, queue a
-/// follow-up, or stop it. Limits, sign-outs and the first missing report stay
-/// relay's own.
-fn at_end(ctx: &Ctx, job: &Job, run: &Ran<'_>, ended: Ended, silent: bool) -> Result<Ended> {
-    let Some(handlers) = decide::chain(&ctx.cfg, Point::Ended) else { return Ok(ended) };
+/// The chain that judges a run when it ends: `hooks.ended`, else just `rule` for a job that declares
+/// something for it to judge (an acceptance check, a review, a profile that escalates).
+fn ended_chain(ctx: &Ctx, job: &Job) -> Option<Vec<decide::Handler>> {
+    decide::chain(&ctx.cfg, Point::Ended)
+        .or_else(|| decide::declares(&ctx.cfg, job).then(|| vec![decide::Handler::Rule]))
+}
+
+/// A run that ended done or failed, when `hooks.ended` is set (or the job declares a check, a review
+/// or an escalation): the chain may accept it, resume it, start it afresh under another profile,
+/// queue a follow-up, give a review's verdict, or stop it. Limits, sign-outs and the first missing
+/// report stay relay's own.
+fn at_end(ctx: &Ctx, job: &Job, home: &Home, run: &Ran<'_>, ended: Ended, silent: bool) -> Result<Ended> {
+    let Some(handlers) = ended_chain(ctx, job) else { return Ok(ended) };
     if !matches!(ended.0, Outcome::Done | Outcome::Failed) {
         return Ok(ended);
     }
@@ -347,12 +381,49 @@ fn at_end(ctx: &Ctx, job: &Job, run: &Ran<'_>, ended: Ended, silent: bool) -> Re
         let now = checkpoint::point(dir, &run.scratch.join("checkpoint.index"));
         req.evidence = checkpoint::evidence(dir, &checkpoint::base(dir, &[]), &now);
     }
+    // The bar, before anyone judges: every handler hears of it, and none can accept a red run.
+    if let (Outcome::Done, Some(cmd), Some(dir)) = (ended.0, job.check.as_deref(), run.dir) {
+        req.check = Some(check_run(ctx, job, home, cmd, dir, run.scratch)?);
+    }
+    req.reviewing = run.reviewing.cloned();
+    if let Some(r) = run.reviewing {
+        let _ = write!(
+            req.situation,
+            " The job is a review of {}'s branch ({} at {}); the report's `verdict:` line is its verdict, given as the `review` action.",
+            r.job, r.reference, r.commit
+        );
+    }
+    let red = req.check.as_ref().filter(|c| c.result != BarResult::Pass).cloned();
     let final_done = final_status_done(&run.report.answer, &ctx.cfg.session.final_marker);
-    let rule = || ended_rule(ended.0, final_done, silent, job.follow_ups);
-    let d = decide::decide(ctx, job, &req, &handlers, &rule, Action::Accept)?;
+    let escalate = decide::escalation(&ctx.cfg, job).map(|(to, after)| (to, after, job.failed_ends + 1));
+    let rule = || {
+        ended_rule(&EndRule {
+            outcome: ended.0,
+            final_done,
+            silent,
+            follow_ups: job.follow_ups,
+            check: req.check.as_ref(),
+            answer: run.report.answer.as_str(),
+            marker: ctx.cfg.session.final_marker.as_str(),
+            reviewing: run.reviewing.is_some(),
+            escalate: escalate.as_ref().map(|(to, after, failed)| (to.as_str(), *after, *failed)),
+        })
+    };
+    // A red run is never accepted, not even when every handler defers or is refused.
+    let fallback = if red.is_some() { Action::Stop { why: String::new() } } else { Action::Accept };
+    let d = decide::decide(ctx, job, &req, &handlers, &rule, fallback)?;
     let port = port(ctx, job);
     Ok(match d.action {
-        Action::Stop { why } => (Outcome::Failed, Some(if why.is_empty() { d.why } else { why })),
+        Action::Stop { why } => {
+            let why = if !why.is_empty() {
+                why
+            } else if let Some(c) = &red {
+                format!("acceptance check {}: {}", c.result.as_str(), d.why)
+            } else {
+                d.why
+            };
+            (Outcome::Failed, Some(why))
+        }
         Action::Resume { message, budget } => {
             let message = if message.trim().is_empty() { "Continue where you left off.".into() } else { message };
             port.emit(SessionEvent::FollowUp { job: job.name.clone(), message, budget_usd: budget })?;
@@ -378,29 +449,357 @@ fn at_end(ctx: &Ctx, job: &Job, run: &Ran<'_>, ended: Ended, silent: bool) -> Re
         Action::FollowUp { brief, profile, after, fork, name } => {
             let spec = crate::systems::queue::FollowUp { name, brief, profile, after, fork };
             let queued = crate::systems::queue::follow_up(ctx, job, spec)?;
+            // A follow-up is not an acceptance: a red run stays failed.
+            let outcome = if red.is_some() { Outcome::Failed } else { ended.0 };
             (
-                ended.0,
+                outcome,
                 Some(ended.1.map_or_else(
                     || format!("follow-up {queued} queued"),
                     |r| format!("{r}; follow-up {queued} queued"),
                 )),
             )
         }
+        Action::Review { verdict, reason, message } => {
+            let note = carry_out_review(ctx, job, run, verdict, reason, &message)?;
+            (ended.0, Some(note))
+        }
         _ => ended,
     })
 }
 
-/// The `rule` handler when a run ends: a clean done is accepted, and a
-/// first silence resumes the same session; anything else is deferred.
-fn ended_rule(outcome: Outcome, final_done: bool, silent: bool, follow_ups: u32) -> Option<(Action, String)> {
-    match outcome {
-        Outcome::Done if final_done => Some((Action::Accept, "done, and its report says status: done".into())),
-        Outcome::Failed if silent && follow_ups == 0 => {
+/// Records a review's verdict on the reviewed job, and for a reject resumes the builder's session
+/// with the findings, within `hooks.max_decisions`. Returns the line for the review's own record.
+fn carry_out_review(
+    ctx: &Ctx,
+    job: &Job,
+    run: &Ran<'_>,
+    verdict: Judgement,
+    reason: Option<Reason>,
+    findings: &str,
+) -> Result<String> {
+    let (Some(of), Some(seen)) = (job.review_of.as_deref(), run.reviewing) else {
+        return Ok(format!("verdict {}, but this job reviews no branch", verdict.as_str()));
+    };
+    let family = run.model.map(crate::config::model_family);
+    port(ctx, job).emit(SessionEvent::Reviewed {
+        job: job.name.clone(),
+        of: of.to_owned(),
+        commit: seen.commit.clone(),
+        verdict,
+        reason,
+        family,
+    })?;
+    let said = match reason {
+        Some(r) => format!("review of {of}: {} ({})", verdict.as_str(), r.as_str()),
+        None => format!("review of {of}: {}", verdict.as_str()),
+    };
+    if verdict == Judgement::Accept {
+        return Ok(said);
+    }
+    let message = format!(
+        "A review of your branch by {} at {} rejected it ({}). Its findings follow; address them, commit your \
+         work, and end with your FINAL section again.\n\n{}",
+        job.name,
+        seen.commit,
+        reason.map_or("other", Reason::as_str),
+        checkpoint::bounded(findings.trim(), 4096)
+    );
+    Ok(match crate::systems::queue::resume_reviewed(ctx, of, message)? {
+        None => format!("{said}; {of} resumed with the findings"),
+        Some(why) => format!("{said}; {of} not resumed: {why}"),
+    })
+}
+
+/// What the `rule` handler judges a run ended by.
+struct EndRule<'a> {
+    outcome: Outcome,
+    final_done: bool,
+    silent: bool,
+    follow_ups: u32,
+    /// The acceptance check's latest run, for a run that ended done.
+    check: Option<&'a CheckRun>,
+    answer: &'a str,
+    marker: &'a str,
+    /// The job is a review of a branch.
+    reviewing: bool,
+    /// Where the profile escalates to, after how many failed ends, and how many there are with this one.
+    escalate: Option<(&'a str, u32, u32)>,
+}
+
+/// The `rule` handler when a run ends: a red acceptance check resumes the session with its output
+/// (or, when it proves nothing, stops the job); a review's verdict is taken from its report; a clean
+/// done is accepted; a first silence resumes the same session; enough failed ends requeue the job under
+/// the profile it escalates to. Anything else is deferred.
+fn ended_rule(r: &EndRule<'_>) -> Option<(Action, String)> {
+    match r.outcome {
+        Outcome::Done => {
+            if let Some(c) = r.check {
+                match c.result {
+                    BarResult::Pass => {}
+                    BarResult::Fail => {
+                        let message = check_message(c);
+                        let why = format!("the acceptance check failed (exit {}); resumed with its output", c.exit);
+                        return Some((Action::Resume { message, budget: None }, why));
+                    }
+                    BarResult::CheckProvesNothing => {
+                        let why = format!(
+                            "check-proves-nothing: `{}` also passes at the base commit, so it shows nothing about this change",
+                            c.command
+                        );
+                        return Some((Action::Stop { why: why.clone() }, why));
+                    }
+                }
+            }
+            if r.reviewing
+                && let Some((verdict, reason)) = review_verdict(r.answer, r.marker)
+            {
+                let tail =
+                    r.answer.rfind(r.marker).filter(|_| !r.marker.is_empty()).map_or(r.answer, |i| &r.answer[i..]);
+                let message = checkpoint::bounded(tail.trim(), 4096);
+                return Some((
+                    Action::Review { verdict, reason, message },
+                    "the review's report gives its verdict".into(),
+                ));
+            }
+            r.final_done.then(|| (Action::Accept, "done, and its report says status: done".into()))
+        }
+        Outcome::Failed if r.silent && r.follow_ups == 0 => {
             let message = "Continue where you left off.".to_owned();
             Some((Action::Resume { message, budget: None }, "went silent once; resumed in the same session".into()))
         }
+        Outcome::Failed => {
+            let (to, after, failed) = r.escalate?;
+            (failed >= after).then(|| {
+                (
+                    Action::Requeue { profile: to.to_owned() },
+                    format!("{failed} failed end(s), the profile escalates to {to} after {after}"),
+                )
+            })
+        }
         _ => None,
     }
+}
+
+/// What the worker is told when its acceptance check failed.
+fn check_message(c: &CheckRun) -> String {
+    format!(
+        "Your run ended, and then the acceptance check `{}` was run on your branch{} and failed (exit {}). \
+         Fix what it reports, commit your work, and end with your FINAL section again. The end of its output:\n\n{}",
+        c.command,
+        c.commit.as_deref().map_or(String::new(), |c| format!(" at {}", c.get(..12).unwrap_or(c))),
+        c.exit,
+        c.tail.trim_end()
+    )
+}
+
+/// A review's verdict from its report's final section: a `verdict: accept|reject` line, and for a
+/// reject a `reason:` line naming a code (`other` when it names none that exists).
+fn review_verdict(answer: &str, marker: &str) -> Option<(Judgement, Option<Reason>)> {
+    let tail = if marker.is_empty() { Some(answer) } else { answer.rfind(marker).map(|i| &answer[i..]) }?;
+    let field = |name: &str| {
+        tail.lines().rev().find_map(|l| {
+            let l = l.trim().trim_start_matches(['-', '*', ' ']);
+            l.get(..name.len() + 1)
+                .filter(|h| h[..name.len()].eq_ignore_ascii_case(name) && h.ends_with(':'))
+                .map(|_| l[name.len() + 1..].trim().to_ascii_lowercase())
+        })
+    };
+    let verdict = match field("verdict")?.split_whitespace().next()? {
+        "accept" | "accepted" => Judgement::Accept,
+        "reject" | "rejected" => Judgement::Reject,
+        _ => return None,
+    };
+    let reason = (verdict == Judgement::Reject).then(|| {
+        field("reason").and_then(|r| Reason::parse(r.split_whitespace().next().unwrap_or(""))).unwrap_or(Reason::Other)
+    });
+    Some((verdict, reason))
+}
+
+/// How long the tail of a check's output may be.
+const CHECK_TAIL: usize = 4096;
+
+/// The end of `text`, at most `max` bytes, saying how much came before.
+fn tail_of(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let cut = (text.len() - max..=text.len()).find(|&i| text.is_char_boundary(i)).unwrap_or(text.len());
+    format!("… ({cut} earlier bytes)\n{}", &text[cut..])
+}
+
+/// Runs the job's acceptance check on its clone, as the `rule` handler's bar for a run that ended
+/// done, and records `bar-checked`. The check runs inside the same sandbox plan as the session, so
+/// it sees what the session saw and can change only what it could, under `command_timeout_seconds`.
+/// With a revert control it also runs at the job's base commit, where it must fail.
+fn check_run(ctx: &Ctx, job: &Job, home: &Home, cmd: &str, dir: &Path, scratch: &Path) -> Result<CheckRun> {
+    let commit = checkpoint_rev(dir, "HEAD");
+    let dirty = Ctx::git(dir)
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .filter(|s| !s.is_empty());
+    let (mut exit, mut text) = match &dirty {
+        // The branch is what lands: tracked changes left uncommitted are not part of it.
+        Some(status) => (1, format!("the clone has uncommitted changes; commit them first:\n{status}")),
+        None => run_in_plan(ctx, home, cmd, dir, dir, scratch),
+    };
+    let mut base_exit = None;
+    if exit == 0 && job.check_red_first {
+        let base = job.base.clone().or_else(|| checkpoint::base(dir, &[]).head);
+        let (code, note) = match base {
+            Some(base) => {
+                let at = scratch.join("check-base");
+                let _ = std::fs::remove_dir_all(&at);
+                let made = std::fs::create_dir_all(&at).is_ok() && export_commit(dir, &base, &at);
+                let ran = if made {
+                    run_in_plan(ctx, home, cmd, dir, &at, scratch)
+                } else {
+                    (-1, format!("could not check out the base commit {base} for the revert control"))
+                };
+                let _ = std::fs::remove_dir_all(&at);
+                ran
+            }
+            None => (-1, "no base commit is known for the revert control".to_owned()),
+        };
+        base_exit = Some(code);
+        if code == 0 {
+            text = format!("{text}\n(the same check also passed at the base commit)");
+        } else if code == -1 {
+            exit = -1;
+            text = note;
+        }
+    }
+    let result = match (exit, base_exit) {
+        (0, Some(0)) => BarResult::CheckProvesNothing,
+        (0, _) => BarResult::Pass,
+        _ => BarResult::Fail,
+    };
+    let tail = checkpoint::bounded(&tail_of(text.trim_end(), CHECK_TAIL), CHECK_TAIL + 64);
+    port(ctx, job).emit(SessionEvent::BarChecked {
+        job: job.name.clone(),
+        commit: commit.clone(),
+        exit,
+        tail: tail.clone(),
+        base_exit,
+        result,
+    })?;
+    Ok(CheckRun { command: cmd.to_owned(), commit, result, exit, base_exit, tail })
+}
+
+/// Writes the tree of `commit` in the clone `dir` into the empty directory `into`.
+fn export_commit(dir: &Path, commit: &str, into: &Path) -> bool {
+    let Ok(mut archive) = Ctx::git(dir).args(["archive", "--format=tar", commit]).stdout(Stdio::piped()).spawn() else {
+        return false;
+    };
+    let Some(tar) = archive.stdout.take() else { return false };
+    let unpacked = Command::new("tar").arg("-x").arg("-C").arg(into).stdin(tar).status().is_ok_and(|s| s.success());
+    unpacked & archive.wait().is_ok_and(|s| s.success())
+}
+
+/// Runs `cmd` with `sh -c` in `cwd`, inside the sandbox plan of a session on `home` with the job's
+/// clone `dir`, bounded by `hooks.command_timeout_seconds` (killed 5 s later if it ignores the TERM).
+/// Its exit status (-1 if it could not run) and the end of its combined output.
+fn run_in_plan(ctx: &Ctx, home: &Home, cmd: &str, dir: &Path, cwd: &Path, scratch: &Path) -> (i32, String) {
+    let go = || -> Result<(i32, String)> {
+        let mut inv = Invocation::new("timeout");
+        inv.args = ["-k", "5", &ctx.cfg.hooks.command_timeout_seconds.max(1).to_string(), "sh", "-c", cmd]
+            .map(OsString::from)
+            .to_vec();
+        layer_env(ctx, &mut inv, cwd)?;
+        let out = scratch.join("check.out");
+        let file = std::fs::File::create(&out)?;
+        let mut c = command(ctx, home, &inv, Some(dir), scratch, cwd);
+        c.stdin(Stdio::null()).stdout(file.try_clone()?).stderr(file);
+        let status = c.status().context("running the acceptance check")?;
+        let text = tail_text(&out, 2 * CHECK_TAIL as u64);
+        let _ = std::fs::remove_file(&out);
+        Ok((status.code().unwrap_or(-1), text))
+    };
+    go().unwrap_or_else(|e| (-1, format!("the acceptance check could not run: {e:#}")))
+}
+
+/// The last `max` bytes of a file, as text.
+fn tail_text(path: &Path, max: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else { return String::new() };
+    let len = f.metadata().map_or(0, |m| m.len());
+    let _ = f.seek(SeekFrom::Start(len.saturating_sub(max)));
+    let mut buf = Vec::new();
+    let _ = f.read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Fetches the branch a review reads into the repository, as `land fetch` does, and says what the
+/// reviewer is to read. Fails the review when the branch cannot be had, or when the reviewed job's
+/// profile asks for an independent family and this review runs on the same one.
+fn review_setup(ctx: &Ctx, job: &Job, model: Option<&str>) -> Result<Option<Reviewing>, String> {
+    let Some(of) = job.review_of.as_deref() else { return Ok(None) };
+    let world = ctx.world().map_err(|e| format!("{e:#}"))?;
+    let Some(builder) = world.jobs.get(of) else { return Err(format!("the job under review, {of}, is gone")) };
+    let asks = builder.profile.as_deref().and_then(|p| ctx.cfg.profiles.get(p)).and_then(|p| p.independent.as_deref());
+    if let (Some(_), Some(model), Some(built)) = (asks, model, ctx.cfg.model_of(builder)) {
+        let (a, b) = (crate::config::model_family(model), crate::config::model_family(&built));
+        if a == b {
+            return Err(format!(
+                "independent review refused: {of} was built on {built} and this review runs on {model}, both the {a} family"
+            ));
+        }
+    }
+    let reference = format!("refs/relay/review/{}", job.name);
+    let repo = &ctx.cfg.repo;
+    let live = builder.workdir.as_ref().zip(builder.branch.as_ref()).filter(|(d, _)| d.exists());
+    let fetched = match live {
+        Some((dir, branch)) => Ctx::git(repo)
+            .args(["fetch", "--quiet"])
+            .arg(dir)
+            .arg(format!("+{branch}:{reference}"))
+            .output()
+            .map_err(|e| e.to_string())
+            .and_then(|o| {
+                if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_owned()) }
+            }),
+        // The clone is gone: its work is in the repository, rescued by gc or fetched by hand.
+        None => [
+            format!("refs/relay/rescue/{of}"),
+            builder.branch.as_ref().map(|b| format!("refs/heads/{b}")).unwrap_or_default(),
+        ]
+        .into_iter()
+        .filter(|r| !r.is_empty())
+        .find_map(|r| checkpoint_rev(repo, &r))
+        .ok_or_else(|| format!("{of}'s branch is in no clone or repository ref"))
+        .and_then(|rev| {
+            let ok = Ctx::git(repo).args(["update-ref", &reference, &rev]).status().is_ok_and(|s| s.success());
+            if ok { Ok(()) } else { Err("git update-ref failed".to_owned()) }
+        }),
+    };
+    fetched.map_err(|e| format!("fetching {of}'s branch for review: {e}"))?;
+    let commit = checkpoint_rev(repo, &reference).ok_or_else(|| format!("{reference} was not created"))?;
+    let base =
+        builder.base.clone().filter(|b| checkpoint_rev(repo, &format!("{b}^{{commit}}")).is_some()).or_else(|| {
+            let out = Ctx::git(repo).args(["merge-base", "HEAD", &commit]).output().ok()?;
+            Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+                .filter(|s| !s.is_empty() && out.status.success())
+        });
+    Ok(Some(Reviewing { job: of.to_owned(), reference, commit, base }))
+}
+
+/// What a review is told before its brief.
+fn review_preamble(r: &Reviewing) -> String {
+    let base = r.base.as_deref().unwrap_or("HEAD");
+    let range = format!("{base}..{}", r.reference);
+    let reasons: Vec<&str> = Reason::ALL.iter().map(|r| r.as_str()).collect();
+    format!(
+        "This is a review of job {job}'s branch. relay fetched it into the repository as `{reference}`, at commit {commit}. \
+         It started from {base}, so `git log {range}` lists its commits and `git diff {range}` is its change. \
+         Review that, and judge the work as the brief asks.\n\n\
+         End your FINAL section with a line `verdict: accept` or `verdict: reject`. For a reject, add a line \
+         `reason: <code>` ({codes}) and put the findings the builder must act on in `notes`.",
+        job = r.job,
+        reference = r.reference,
+        commit = r.commit,
+        codes = reasons.join(", "),
+    )
 }
 
 /// Whether the report's final section says `status: done`.
@@ -502,7 +901,8 @@ fn resumable(job: &Job, found: &[Home], home: &Home, scratch: &Path) -> Option<S
 }
 
 /// What the session is told first: a resumed one already has the brief.
-fn opening(brief: String, message: Option<&str>, resumed: bool) -> String {
+fn opening(brief: &str, message: Option<&str>, resumed: bool, preamble: Option<&str>) -> String {
+    let brief = preamble.map_or_else(|| brief.to_owned(), |p| format!("{p}\n\n{brief}"));
     match (message, resumed) {
         (Some(m), true) => m.to_owned(),
         (None, true) => "Continue where you left off.".into(),
@@ -801,7 +1201,12 @@ pub fn pick_base(
 /// A build job with `bases` starts from the newest of their branch tips (`pick_base`).
 /// A job that has run (`ran`) and lost its clone to gc starts from its own work in
 /// the repository instead: the rescue ref gc made, else its branch as fetched.
-fn clone(ctx: &Ctx, name: &str, bases: &[(String, PathBuf, String)], ran: bool) -> Result<(PathBuf, String)> {
+fn clone(
+    ctx: &Ctx,
+    name: &str,
+    bases: &[(String, PathBuf, String)],
+    ran: bool,
+) -> Result<(PathBuf, String, Option<String>)> {
     let dir = ctx.clones.join(name);
     let branch = format!("{}{name}", ctx.cfg.session.branch_prefix);
     std::fs::create_dir_all(&ctx.clones)?;
@@ -814,7 +1219,7 @@ fn clone(ctx: &Ctx, name: &str, bases: &[(String, PathBuf, String)], ran: bool) 
     };
     // The job has no clone on record, so anything here is relay's own leftover from a failed attempt.
     let _ = std::fs::remove_dir_all(&dir);
-    let made = (|| {
+    let made = (|| -> Result<Option<String>> {
         ok(Command::new("git").args(["clone", "--quiet", "--shared"]).arg(&ctx.cfg.repo).arg(&dir), "git clone")?;
         let mut tips = Vec::new();
         for (job, from, b) in bases {
@@ -843,12 +1248,14 @@ fn clone(ctx: &Ctx, name: &str, bases: &[(String, PathBuf, String)], ran: bool) 
         let mut switch = Ctx::git(&dir);
         switch.args(["switch", "--quiet", "-c", &branch]).args(start.as_deref());
         ok(&mut switch, "git switch")?;
-        ok(Ctx::git(&dir).args(["remote", "set-url", "--push", "origin", "relay-jobs-do-not-push"]), "git remote")
+        ok(Ctx::git(&dir).args(["remote", "set-url", "--push", "origin", "relay-jobs-do-not-push"]), "git remote")?;
+        // Where the branch started, for a job that starts fresh: the revert control runs the check here.
+        Ok(if ran { None } else { checkpoint_rev(&dir, "HEAD") })
     })();
     if made.is_err() {
         let _ = std::fs::remove_dir_all(&dir);
     }
-    made.map(|()| (dir, branch))
+    made.map(|base| (dir, branch, base))
 }
 
 /// The commit `rev` names in `dir`.
@@ -922,15 +1329,122 @@ mod base_tests {
         assert!(e.contains("B and C diverge"), "{e}");
     }
 
+    fn rule<'a>(outcome: super::Outcome, f: impl FnOnce(&mut super::EndRule<'a>)) -> Option<super::Action> {
+        let mut r = super::EndRule {
+            outcome,
+            final_done: false,
+            silent: false,
+            follow_ups: 0,
+            check: None,
+            answer: "",
+            marker: "FINAL",
+            reviewing: false,
+            escalate: None,
+        };
+        f(&mut r);
+        super::ended_rule(&r).map(|r| r.0)
+    }
+
     #[test]
     fn the_end_rule_accepts_a_clean_done_and_resumes_one_silence() {
-        use super::{Action, Outcome, ended_rule};
-        assert_eq!(ended_rule(Outcome::Done, true, false, 0).map(|r| r.0), Some(Action::Accept));
-        assert_eq!(ended_rule(Outcome::Done, false, false, 0), None, "no status: done, so another handler judges");
-        let resumed = ended_rule(Outcome::Failed, false, true, 0).map(|r| r.0);
+        use super::{Action, Outcome};
+        assert_eq!(rule(Outcome::Done, |r| r.final_done = true), Some(Action::Accept));
+        assert_eq!(rule(Outcome::Done, |_| {}), None, "no status: done, so another handler judges");
+        let resumed = rule(Outcome::Failed, |r| r.silent = true);
         assert!(matches!(resumed, Some(Action::Resume { .. })), "{resumed:?}");
-        assert_eq!(ended_rule(Outcome::Failed, false, true, 1), None, "silent twice");
-        assert_eq!(ended_rule(Outcome::Failed, false, false, 0), None, "an error is judged elsewhere");
+        assert_eq!(
+            rule(Outcome::Failed, |r| {
+                r.silent = true;
+                r.follow_ups = 1;
+            }),
+            None,
+            "silent twice"
+        );
+        assert_eq!(rule(Outcome::Failed, |_| {}), None, "an error is judged elsewhere");
+    }
+
+    fn ran(result: super::BarResult) -> super::CheckRun {
+        super::CheckRun {
+            command: "cargo test".into(),
+            commit: Some("0123456789abcdef".into()),
+            result,
+            exit: 1,
+            base_exit: None,
+            tail: "test x ... FAILED".into(),
+        }
+    }
+
+    #[test]
+    fn a_red_bar_resumes_with_its_output_and_a_bar_that_proves_nothing_stops() {
+        use super::{Action, BarResult, Outcome};
+        let red = ran(BarResult::Fail);
+        let a = rule(Outcome::Done, |r| {
+            r.final_done = true;
+            r.check = Some(&red);
+        });
+        let Some(Action::Resume { message, .. }) = a else { panic!("{a:?}") };
+        assert!(
+            message.contains("cargo test") && message.contains("FAILED") && message.contains("0123456789ab"),
+            "{message}"
+        );
+        let nothing = ran(BarResult::CheckProvesNothing);
+        let a = rule(Outcome::Done, |r| {
+            r.final_done = true;
+            r.check = Some(&nothing);
+        });
+        let Some(Action::Stop { why }) = a else { panic!("{a:?}") };
+        assert!(why.starts_with("check-proves-nothing"), "{why}");
+        let green = ran(BarResult::Pass);
+        let a = rule(Outcome::Done, |r| {
+            r.final_done = true;
+            r.check = Some(&green);
+        });
+        assert_eq!(a, Some(Action::Accept), "green and reported done");
+    }
+
+    #[test]
+    fn failed_ends_escalate_the_profile_when_enough_have_failed() {
+        use super::{Action, Outcome};
+        let at = |failed| rule(Outcome::Failed, |r| r.escalate = Some(("strong", 2, failed)));
+        assert_eq!(at(1), None);
+        assert_eq!(at(2), Some(Action::Requeue { profile: "strong".into() }));
+        assert_eq!(at(3), Some(Action::Requeue { profile: "strong".into() }));
+        let first_silence = rule(Outcome::Failed, |r| {
+            r.silent = true;
+            r.escalate = Some(("strong", 1, 1));
+        });
+        assert!(matches!(first_silence, Some(Action::Resume { .. })), "a silence is resumed before it escalates");
+    }
+
+    #[test]
+    fn a_review_gives_its_verdict_from_its_final_section() {
+        use super::{Action, Judgement, Outcome, Reason};
+        let reject = "looked\nFINAL\nstatus: done\nverdict: reject\nreason: test-failure\nnotes: parse() panics";
+        let a = rule(Outcome::Done, |r| {
+            r.reviewing = true;
+            r.answer = reject;
+        });
+        let Some(Action::Review { verdict, reason, message }) = a else { panic!("{a:?}") };
+        assert_eq!((verdict, reason), (Judgement::Reject, Some(Reason::TestFailure)));
+        assert!(message.starts_with("FINAL") && message.contains("parse() panics"), "{message}");
+        assert_eq!(super::review_verdict("FINAL\nverdict: Accept", "FINAL"), Some((Judgement::Accept, None)));
+        assert_eq!(
+            super::review_verdict("FINAL\n- verdict: reject\n- reason: vibes", "FINAL"),
+            Some((Judgement::Reject, Some(Reason::Other))),
+            "a reject whose reason is no code is `other`"
+        );
+        assert_eq!(
+            super::review_verdict("verdict: accept\nFINAL\nstatus: done", "FINAL"),
+            None,
+            "only the final section"
+        );
+        assert_eq!(super::review_verdict("FINAL\nverdict: maybe", "FINAL"), None);
+        let plain = rule(Outcome::Done, |r| {
+            r.reviewing = true;
+            r.final_done = true;
+            r.answer = "FINAL\nstatus: done";
+        });
+        assert_eq!(plain, Some(Action::Accept), "a review that gives no verdict ends as any done run");
     }
 
     #[test]

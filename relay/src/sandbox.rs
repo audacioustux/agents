@@ -112,9 +112,16 @@ pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsS
     a.extend([m.tmp.as_os_str().to_owned(), "/tmp".into()]);
     // A hidden directory is an empty tmpfs, made read-only once every mount has been made inside it:
     // a write fails loudly instead of filling RAM.
-    // `--dev` also makes `/dev/shm` a RAM tmpfs: the same, empty and read-only.
+    // `/dev/shm` is a RAM tmpfs too, capped at `sandbox.shm_mb` (a write past it fails), or at 0 sealed
+    // like a hidden directory.
+    let shm_mb = ctx.cfg.sandbox.shm_mb;
+    let mut sealed = Vec::new();
+    if shm_mb == 0 {
+        sealed.push(PathBuf::from("/dev/shm"));
+    } else {
+        a.extend(["--size".into(), (shm_mb << 20).to_string().into()]);
+    }
     a.extend(["--tmpfs", "/dev/shm"].map(OsString::from));
-    let mut sealed = vec![PathBuf::from("/dev/shm")];
     for (p, mount) in plan(ctx, user_home, m) {
         let (flag, src) = match &mount {
             Mount::Hidden if p.is_dir() => {

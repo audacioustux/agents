@@ -171,13 +171,27 @@ impl<'a> Probe<'a> {
                 outside: None,
             },
             Check {
-                what: "hidden directories and /dev/shm are not writable".into(),
+                what: "hidden directories are not writable".into(),
                 inside: all(plan
                     .iter()
                     .filter(|(p, k)| *k == Mount::Hidden && p.is_dir())
-                    .map(|(p, _)| format!("! test -w {}", q(p)))
-                    .chain(["! test -w /dev/shm".to_owned()])),
+                    .map(|(p, _)| format!("! test -w {}", q(p)))),
                 outside: None,
+            },
+            match self.ctx.cfg.sandbox.shm_mb {
+                0 => Check {
+                    what: "/dev/shm is not writable".into(),
+                    inside: "! test -w /dev/shm".into(),
+                    outside: None,
+                },
+                mb => Check {
+                    what: format!("/dev/shm is writable and holds at most {mb} MiB"),
+                    inside: format!(
+                        "test -w /dev/shm && test \"$(df -Pk /dev/shm | awk 'NR==2 {{print $2}}')\" -le {}",
+                        mb * 1024
+                    ),
+                    outside: None,
+                },
             },
             Check { what: "caches are relay's own, not the host's".into(), inside: all(caches), outside: None },
             Check {

@@ -2082,7 +2082,7 @@ fn a_jobs_tmp_is_a_directory_on_disk_that_is_counted_and_collected_and_hidden_di
         return;
     }
     let env = setup("tmp", false);
-    configure(&env, "disk_sample_minutes = 0.02\n", "");
+    configure(&env, "disk_sample_minutes = 0.02\n", "[sandbox]\nshm_mb = 4\n");
     claude_account(&env.home, "a", 10, false);
     let hold = env.home.join(".claude.a/hold");
     std::fs::write(&hold, "").unwrap();
@@ -2112,7 +2112,8 @@ fn a_jobs_tmp_is_a_directory_on_disk_that_is_counted_and_collected_and_hidden_di
     }
     assert_eq!(said("hidden-write").trim(), "refused", "a hidden directory is read-only, not RAM");
     assert!(!env.root.join("state/probe-write").exists());
-    assert_eq!(said("shm-write").trim(), "refused", "/dev/shm is no way to RAM either");
+    assert_eq!(said("shm-write").trim(), "wrote", "/dev/shm takes a small write");
+    assert_eq!(said("shm-over").trim(), "refused", "/dev/shm holds no more than sandbox.shm_mb (4 MiB here)");
 
     // gc takes the directory of a job that has ended, with the clone's build outputs, and says so.
     configure(&env, "", "[gc]\noutputs_after_hours = 0\n");

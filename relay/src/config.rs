@@ -502,6 +502,10 @@ pub struct Sandbox {
     pub caches: Vec<PathBuf>,
     /// Environment variables whose names match this regex are not passed in.
     pub env_deny: String,
+    /// `/dev/shm`: a RAM tmpfs of at most this many MiB per session, for what wants one (POSIX
+    /// shared memory, a test that keeps fsync cheap). A write past it fails with ENOSPC instead of
+    /// filling RAM. 0 makes it empty and read-only.
+    pub shm_mb: u64,
 }
 
 impl Default for Sandbox {
@@ -532,6 +536,7 @@ impl Default for Sandbox {
             .to_vec(),
             caches: [".cache", ".cargo/registry", ".cargo/git"].map(PathBuf::from).to_vec(),
             env_deny: DEFAULT_ENV_DENY.into(),
+            shm_mb: 256,
         }
     }
 }

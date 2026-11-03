@@ -114,3 +114,4 @@ hide_home = [".ssh", ".gnupg", ".config/gh", ".git-credentials", ".netrc", ".aws
 # each, never the host's own, so a session cannot change what the host runs.
 caches = [".cache", ".cargo/registry", ".cargo/git"]
 # env_deny = "..."       # variables whose names match are not passed in (see the README)
+# shm_mb = 256           # /dev/shm: a RAM tmpfs capped at this many MiB per session; 0 seals it

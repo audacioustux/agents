@@ -12,7 +12,7 @@
 #   decisions appended to by every decision hook run there
 #   argv     appended to with every session's arguments
 #   prompts  appended to with every worker prompt (and the resume messages it is sent)
-#   tmp-fs, hidden-write, shm-write  written by a brief containing [tmpcheck]: /tmp's filesystem type, and whether a write into a hidden directory worked
+#   tmp-fs, hidden-write, shm-write, shm-over  written by a brief containing [tmpcheck]: /tmp's filesystem type, whether a write into a hidden directory worked, and whether /dev/shm takes a small write and refuses 5 MiB
 #   rereview  the verdict (accept|reject) of a review that relay resumed after its reject (default accept)
 #   cargo    appended to with every session's CARGO_INCREMENTAL (`unset` when it has none)
 # A brief containing [idle] makes no commit; one containing [status-done] reports status: done;
@@ -59,6 +59,7 @@ case "$prompt" in *"[tmpcheck]"*)
   dd if=/dev/zero of=/tmp/relay-fill bs=1M count=8 2>/dev/null
   stat -f -c %T /tmp >"$acct/tmp-fs"
   if touch /dev/shm/relay-probe 2>/dev/null; then echo wrote >"$acct/shm-write"; else echo refused >"$acct/shm-write"; fi
+  if dd if=/dev/zero of=/dev/shm/relay-fill bs=1M count=5 2>/dev/null; then echo wrote >"$acct/shm-over"; else echo refused >"$acct/shm-over"; fi
   if touch "$(dirname "$PWD")/state/probe-write" 2>/dev/null; then echo wrote >"$acct/hidden-write"; else echo refused >"$acct/hidden-write"; fi ;;
 esac
 while [ -f "$acct/hold" ]; do sleep 0.1; done

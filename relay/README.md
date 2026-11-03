@@ -692,9 +692,12 @@ Each session runs under `bwrap`. It sees the machine read-only, except for:
   `/tmp`), created when the job starts. A read-only job (a review) cannot write its
   repository, so this is where it builds, with `CARGO_TARGET_DIR=/tmp/...` for one.
   It counts in the job's disk use (`limits.job_disk_gb`, the board's size column) and
-  gc removes it with the clone's build outputs ([disk](#disk)). Nothing in the
-  sandbox is a RAM tmpfs that can hold a job's data: hidden directories and `/dev/shm`
-  are empty and read-only (the rest of `/dev` is bubblewrap's own small device tmpfs).
+  gc removes it with the clone's build outputs ([disk](#disk)). Hidden directories
+  are empty and read-only RAM tmpfs, so they hold no job's data (the rest of `/dev` is
+  bubblewrap's own small device tmpfs).
+- **`/dev/shm`**: a RAM tmpfs capped at `sandbox.shm_mb` MiB (default 256), for what
+  wants one: POSIX shared memory, or a test that keeps fsync cheap. A write past the cap
+  fails with ENOSPC instead of filling RAM; `shm_mb = 0` makes it empty and read-only.
 - **Caches** (`sandbox.caches`, default `~/.cache` and cargo's registry and
   git checkouts): writable, but relay's own directory for the project, shared
   by its sessions and never the host's. A session that could write the host's
@@ -730,7 +733,8 @@ and build jobs its edits-only mode.
 
 `relay probe` checks the plan from the inside, for one account of each
 harness: every hidden path is empty and no socket, with a control proving it
-exists outside, and no hidden directory or `/dev/shm` is writable; every writable one is writable
+exists outside, and no hidden directory is writable; `/dev/shm` is writable within its cap
+(or not at all at `shm_mb = 0`); every writable one is writable
 and every read-only one is not; `/tmp` is relay's directory on disk;
 and every cache shows relay's directory, not the host's.
 

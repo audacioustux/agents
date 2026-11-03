@@ -475,12 +475,12 @@ pub fn run_chain(
 
 /// Waits for the orchestrator's answer until `deadline` (bus time): `answer`
 /// reads it, `sleep` waits for the doorbell or the time given, and `now` is the clock.
-pub fn await_answer(
+pub fn await_answer<A>(
     deadline: u64,
-    mut answer: impl FnMut() -> Option<Action>,
+    mut answer: impl FnMut() -> Option<A>,
     mut sleep: impl FnMut(Duration),
     now: impl Fn() -> u64,
-) -> Option<Action> {
+) -> Option<A> {
     loop {
         if let Some(a) = answer() {
             return Some(a);
@@ -530,10 +530,6 @@ pub fn decide(
     let check = |h: &Handler, a: &Action| validate(&ctx.cfg, &world, job, req, a, *h == Handler::Orchestrator);
     let mut failed = None;
     let record = |h: &Handler, s: &Said, refused: Option<&str>| {
-        // The orchestrator's answer is on the bus already, as `decide answer` or the timeout wrote it.
-        if *h == Handler::Orchestrator && refused.is_none() {
-            return;
-        }
         let e = DecideEvent::Decided {
             id: req.id.clone(),
             handler: h.label(),
@@ -600,44 +596,36 @@ fn ask_command(argv: &[String], req: &Request, timeout: Duration) -> Said {
 }
 
 /// Parks the request on the bus and waits on the doorbell for `relay decide
-/// answer`. Past the timeout it records a `defer`; the first answer recorded wins.
+/// answer` until the timeout. An answer counts only if recorded before then;
+/// the last look, under the jobs lock, sees any that `answer` was writing.
 fn ask_orchestrator(ctx: &Ctx, req: &Request) -> Said {
     let port = ctx.port(&Source(()));
-    let wait = Duration::from_secs_f64(ctx.cfg.hooks.orchestrator_timeout_minutes * 60.0);
+    let minutes = ctx.cfg.hooks.orchestrator_timeout_minutes;
+    let wait = Duration::from_secs_f64(minutes * 60.0);
     let until = now_micros() + u64::try_from(wait.as_micros()).unwrap_or(u64::MAX / 2);
-    let read = || ctx.world().ok().and_then(|w| w.decisions.get(&req.id).and_then(|d| d.answer.clone()));
-    let parked = port.emit(DecideEvent::Parked { id: req.id.clone(), until });
-    let answer = parked.ok().and_then(|()| {
-        let bell = ctx.doorbell().ok();
-        let sleep = |d: Duration| match &bell {
-            Some(b) => {
-                b.wait(d);
-            }
-            None => std::thread::sleep(d.min(Duration::from_secs(1))),
-        };
-        await_answer(until, read, sleep, now_micros)
-    });
-    let action = answer.or_else(|| {
-        let minutes = ctx.cfg.hooks.orchestrator_timeout_minutes;
-        let timeout = DecideEvent::Decided {
-            id: req.id.clone(),
-            handler: "orchestrator".into(),
-            action: Action::Defer,
-            why: format!("no answer in {minutes} minutes"),
-            cost_usd: 0.0,
-            refused: None,
-        };
-        port.emit(timeout).ok()?;
+    let read = || {
+        let w = ctx.world().ok()?;
+        let d = w.decisions.get(&req.id)?;
+        Some((d.answer.clone()?, d.answer_why.clone()))
+    };
+    if port.emit(DecideEvent::Parked { id: req.id.clone(), until }).is_err() {
+        return Said::defer("could not park the request");
+    }
+    let bell = ctx.doorbell().ok();
+    let sleep = |d: Duration| match &bell {
+        Some(b) => {
+            b.wait(d);
+        }
+        None => std::thread::sleep(d.min(Duration::from_secs(1))),
+    };
+    let answer = await_answer(until, read, sleep, now_micros).or_else(|| {
+        let _lock = ctx.jobs_lock().ok();
         read()
     });
-    let why = ctx
-        .world()
-        .ok()
-        .and_then(|w| {
-            w.decisions.get(&req.id)?.steps.iter().find(|s| s.handler == "orchestrator").map(|s| s.why.clone())
-        })
-        .unwrap_or_default();
-    Said { action: action.unwrap_or(Action::Defer), why, cost_usd: 0.0, account: None }
+    answer.map_or_else(
+        || Said::defer(format!("no answer in {minutes} minutes")),
+        |(action, why)| Said { action, why, cost_usd: 0.0, account: None },
+    )
 }
 
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
@@ -648,9 +636,9 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     }
 }
 
-/// The decisions waiting for the orchestrator, oldest first.
-pub fn pending(world: &World) -> Vec<&Decision> {
-    let mut out: Vec<&Decision> = world.decisions.values().filter(|d| d.pending()).collect();
+/// The decisions waiting for the orchestrator at `now`, oldest first.
+pub fn pending(world: &World, now: u64) -> Vec<&Decision> {
+    let mut out: Vec<&Decision> = world.decisions.values().filter(|d| d.pending(now)).collect();
     out.sort_by_key(|d| d.requested_at);
     out
 }
@@ -661,13 +649,13 @@ fn list(ctx: &Ctx, wait: bool, timeout: Option<u64>) -> Result<()> {
     let world = loop {
         let world = ctx.world()?;
         let Some(bell) = &bell else { break world };
-        if !pending(&world).is_empty() || give_up.is_some_and(|t| std::time::Instant::now() >= t) {
+        if !pending(&world, now_micros()).is_empty() || give_up.is_some_and(|t| std::time::Instant::now() >= t) {
             break world;
         }
         let left = give_up.map_or(Duration::from_secs(300), |t| t.saturating_duration_since(std::time::Instant::now()));
         bell.wait(left.min(Duration::from_secs(300)));
     };
-    let ds = pending(&world);
+    let ds = pending(&world, now_micros());
     if ctx.json {
         let all: Vec<Value> = ds
             .iter()
@@ -729,7 +717,7 @@ fn answer(ctx: &Ctx, a: Answer) -> Result<()> {
     let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
     let Some(d) = world.decisions.get(&a.id) else { fail!(NotFound, "no decision {}", a.id) };
-    if !d.pending() {
+    if !d.pending(now_micros()) {
         fail!(Conflict, "decision {} is not waiting for an answer", a.id);
     }
     let Some(job) = world.jobs.get(&d.job) else { fail!(NotFound, "job {} is gone", d.job) };
@@ -739,14 +727,11 @@ fn answer(ctx: &Ctx, a: Answer) -> Result<()> {
         fail!(Refused, "{why}");
     }
     let name = action.name();
-    ctx.port(&Source(())).emit(DecideEvent::Decided {
-        id: a.id.clone(),
-        handler: "orchestrator".into(),
-        action,
-        why: a.why.unwrap_or_default(),
-        cost_usd: 0.0,
-        refused: None,
-    })?;
+    let id = a.id.clone();
+    ctx.port(&Source(())).emit(DecideEvent::Answered { id: a.id.clone(), action, why: a.why.unwrap_or_default() })?;
+    if ctx.world()?.decisions.get(&id).is_none_or(|d| d.answer.is_none()) {
+        fail!(Conflict, "decision {id} timed out before the answer was recorded");
+    }
     ctx.reply(&json!({ "id": a.id, "action": name }), &format!("{}: {name}", a.id))
 }
 
@@ -882,7 +867,7 @@ mod tests {
     fn the_orchestrator_is_waited_for_until_its_deadline() {
         let now = Cell::new(1_000);
         let tick = |d: Duration| now.set(now.get() + u64::try_from(d.as_micros()).unwrap());
-        assert_eq!(await_answer(5_000, || None, tick, || now.get()), None);
+        assert_eq!(await_answer(5_000, || None::<Action>, tick, || now.get()), None);
         assert_eq!(now.get(), 5_000, "it slept to the deadline and no further");
         now.set(0);
         let calls = Cell::new(0);
@@ -974,6 +959,7 @@ mod tests {
                 requested_at: u64::from(i),
                 parked_until: None,
                 answer: None,
+                answer_why: String::new(),
                 steps: Vec::new(),
                 action: Some(resume.clone()),
             };

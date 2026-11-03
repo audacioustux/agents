@@ -417,6 +417,15 @@ pub enum DecideEvent {
     },
     /// The chain reached `orchestrator`: the request waits for `relay decide answer` until `until` (bus time).
     Parked { id: String, until: u64 },
+    /// `relay decide answer`: what the orchestrator answered. It counts only if
+    /// recorded before the parked request's `until`; the runner then records it
+    /// as `decided`, or refuses it.
+    Answered {
+        id: String,
+        action: Action,
+        #[serde(default)]
+        why: String,
+    },
     /// One handler's answer. A `defer`, or an action refused by policy (`refused`), passes to the next.
     Decided {
         id: String,

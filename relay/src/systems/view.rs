@@ -169,7 +169,7 @@ fn board(ctx: &Ctx, world: &crate::world::World, all: bool) -> String {
     if jobs.is_empty() {
         lines.push("  (none)".into());
     }
-    let waiting = crate::systems::decide::pending(world);
+    let waiting = crate::systems::decide::pending(world, crate::bus::now_micros());
     if !waiting.is_empty() {
         lines.push(String::new());
         lines.push("decisions waiting (relay decide answer ID --action ...)".into());

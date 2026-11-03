@@ -193,8 +193,12 @@ pub struct Decision {
     pub requested_at: u64,
     /// Set while it waits for `relay decide answer`: until when (bus time).
     pub parked_until: Option<u64>,
-    /// The orchestrator's answer, the first one recorded.
+    /// The orchestrator's answer, the first one recorded in time; the runner
+    /// carries it out only if it passes policy.
     pub answer: Option<Action>,
+    /// The orchestrator's line for the board.
+    #[serde(default)]
+    pub answer_why: String,
     /// Each handler's answer, in order.
     pub steps: Vec<Step>,
     /// The action carried out, once a handler gave one that passed.
@@ -212,9 +216,9 @@ pub struct Step {
 }
 
 impl Decision {
-    /// Waiting for the orchestrator.
-    pub fn pending(&self) -> bool {
-        self.parked_until.is_some() && self.answer.is_none() && self.action.is_none()
+    /// Waiting for the orchestrator at `now` (bus time).
+    pub fn pending(&self, now: u64) -> bool {
+        self.parked_until.is_some_and(|u| u > now) && self.answer.is_none() && self.action.is_none()
     }
 }
 
@@ -728,6 +732,7 @@ impl World {
                         requested_at: t,
                         parked_until: None,
                         answer: None,
+                        answer_why: String::new(),
                         steps: Vec::new(),
                         action: None,
                     },
@@ -738,6 +743,11 @@ impl World {
                     d.parked_until = Some(*until);
                 }
             }
+            DecideEvent::Answered { id, action, why } => {
+                if let Some(d) = self.decisions.get_mut(id).filter(|d| d.pending(t)) {
+                    (d.answer, d.answer_why) = (Some(action.clone()), why.clone());
+                }
+            }
             DecideEvent::Decided { id, handler, action, why, cost_usd, refused } => {
                 let Some(d) = self.decisions.get_mut(id) else { return };
                 if let Some(j) = self.jobs.get_mut(&d.job).filter(|j| j.created_at == d.created) {
@@ -745,9 +755,6 @@ impl World {
                 }
                 if handler == "orchestrator" {
                     d.parked_until = None;
-                    if d.answer.is_none() {
-                        d.answer = Some(action.clone());
-                    }
                 }
                 if d.action.is_none() && refused.is_none() && *action != Action::Defer {
                     d.action = Some(action.clone());
@@ -1058,6 +1065,40 @@ mod tests {
         evs.push(st(3, Event::Queue(QueueEvent::StopRequested { job: "a".into() })));
         evs.push(st(4, Event::Dispatch(DispatchEvent::Reaped { job: "a".into() })));
         assert_eq!(World::fold(&evs).jobs["a"].status, Status::Stopped);
+    }
+
+    #[test]
+    fn an_answer_counts_only_in_time_and_only_the_runner_records_the_action() {
+        let d = |t, e| st(t, Event::Decide(e));
+        let asked = DecideEvent::DecisionRequested {
+            id: "d".into(),
+            job: "a".into(),
+            point: Point::Ended,
+            created: 1,
+            attempt: 0,
+        };
+        let start =
+            || vec![st(1, queued("a")), d(2, asked.clone()), d(3, DecideEvent::Parked { id: "d".into(), until: 100 })];
+        let answered = |a| DecideEvent::Answered { id: "d".into(), action: a, why: "w".into() };
+        let decided = |action, refused: Option<&str>| DecideEvent::Decided {
+            id: "d".into(),
+            handler: "orchestrator".into(),
+            action,
+            why: String::new(),
+            cost_usd: 0.0,
+            refused: refused.map(Into::into),
+        };
+        let fold = |more: Vec<Stamped>| World::fold(&[start(), more].concat()).decisions["d"].clone();
+        let late = fold(vec![d(100, answered(Action::Accept))]);
+        assert_eq!(late.answer, None, "past its deadline");
+        assert!(fold(vec![]).pending(99) && !fold(vec![]).pending(100));
+        let stop = Action::Stop { why: "x".into() };
+        let refused = fold(vec![d(50, answered(stop.clone())), d(60, decided(stop.clone(), Some("no")))]);
+        assert_eq!((refused.answer, refused.action), (Some(stop.clone()), None), "answered, never carried out");
+        let closed = fold(vec![d(60, decided(Action::Defer, None)), d(70, answered(Action::Accept))]);
+        assert_eq!((closed.answer, closed.action), (None, None), "the timeout closed it");
+        let carried = fold(vec![d(50, answered(stop.clone())), d(51, decided(stop.clone(), None))]);
+        assert_eq!(carried.action, Some(stop));
     }
 
     #[test]

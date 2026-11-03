@@ -166,7 +166,7 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
 }
 
 /// Starts the `held` chain for each job in `held` that has waited past
-/// `hooks.held_after_minutes` and was not asked about since it was queued;
+/// `hooks.held_after_minutes` and may be asked about again (`next_held_ask`);
 /// returns when (bus time) the next one will have waited that long.
 fn ask_held(ctx: &Ctx, world: &World, held: &Held) -> Result<Option<u64>> {
     if ctx.cfg.hooks.held.is_none() {
@@ -177,10 +177,10 @@ fn ask_held(ctx: &Ctx, world: &World, held: &Held) -> Result<Option<u64>> {
     let now = now_micros();
     let mut next = None;
     for j in held.2.iter().filter_map(|n| world.jobs.get(n)) {
-        if crate::systems::decide::asked_while_held(world, j) {
+        let at = crate::systems::decide::next_held_ask(world, j, after);
+        if at == u64::MAX {
             continue;
         }
-        let at = j.queued_at.saturating_add(after);
         if at <= now {
             let prefix = format!("{}: ", j.name);
             let why = held.0.iter().find_map(|l| l.strip_prefix(&prefix)).unwrap_or("a limit holds it");

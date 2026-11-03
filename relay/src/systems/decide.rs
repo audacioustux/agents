@@ -753,12 +753,14 @@ fn asked(ctx: &Ctx, d: &Decision, job: &Job) -> Request {
 }
 
 /// The `held` chain for a job held past `hooks.held_after_minutes`, once per
-/// time it is queued; `wait` when every handler defers.
+/// time it is queued; `wait` when every handler defers. The action is taken
+/// only if the job is still queued as it was when asked.
 fn held(ctx: &Ctx, name: &str, why: &str) -> Result<()> {
     let Some(_role) = crate::os::Role::try_take(&ctx.state.join(format!("held-{name}.lock")))? else { return Ok(()) };
     let world = ctx.world()?;
     let Some(job) = world.jobs.get(name).filter(|j| j.status == Status::Queued) else { return Ok(()) };
-    if asked_while_held(&world, job) {
+    let after = Duration::from_secs_f64(ctx.cfg.hooks.held_after_minutes * 60.0);
+    if next_held_ask(&world, job, u64::try_from(after.as_micros()).unwrap_or(u64::MAX)) > now_micros() {
         return Ok(());
     }
     let Some(handlers) = chain(&ctx.cfg, Point::Held) else { return Ok(()) };
@@ -769,6 +771,13 @@ fn held(ctx: &Ctx, name: &str, why: &str) -> Result<()> {
     req.spent_usd = job.cost_usd;
     req.earlier = earlier(&world, job);
     let d = decide(ctx, job, &req, &handlers, &|| None, Action::Wait)?;
+    let _lock = ctx.jobs_lock()?;
+    let now = ctx.world()?;
+    let same = |j: &&Job| {
+        j.status == Status::Queued
+            && (j.created_at, j.attempts, j.queued_at) == (job.created_at, job.attempts, job.queued_at)
+    };
+    let Some(job) = now.jobs.get(name).filter(same) else { return Ok(()) };
     match d.action {
         Action::Reroute { harness, model, profile } => {
             crate::systems::queue::reroute(ctx, job, harness.as_deref(), model.as_deref(), profile.as_deref())?;
@@ -779,11 +788,22 @@ fn held(ctx: &Ctx, name: &str, why: &str) -> Result<()> {
     ctx.wake_dispatch()
 }
 
-/// Whether a `held` decision was already asked since the job last went into the queue.
-pub fn asked_while_held(world: &World, job: &Job) -> bool {
-    world.decisions.values().any(|d| {
-        d.job == job.name && d.point == Point::Held && d.created == job.created_at && d.requested_at >= job.queued_at
-    })
+/// The least time between two `held` decisions on one job, however often it is queued.
+pub const HELD_GAP_MICROS: u64 = 5 * 60 * 1_000_000;
+
+/// When (bus time) the `held` chain may next be asked about `job`, queued and
+/// held: `after` past its queueing, `HELD_GAP_MICROS` past the last time it
+/// was asked, and never again in one queueing.
+pub fn next_held_ask(world: &World, job: &Job, after: u64) -> u64 {
+    let asked = world.decisions.values().filter(|d| d.job == job.name && d.point == Point::Held);
+    let mut at = job.queued_at.saturating_add(after);
+    for d in asked {
+        if d.created == job.created_at && d.requested_at >= job.queued_at {
+            return u64::MAX;
+        }
+        at = at.max(d.requested_at.saturating_add(HELD_GAP_MICROS));
+    }
+    at
 }
 
 /// The job's earlier decisions, one line each.
@@ -1001,6 +1021,31 @@ mod tests {
         assert!(validate(&cfg, &w, &plain, &r, &unnamed, false).is_ok(), "no profile, no profile limit");
         let solo = Job { name: "j".into(), profile: Some("solo".into()), ..Job::default() };
         assert!(validate(&cfg, &w, &solo, &r, &unnamed, false).unwrap_err().contains("solo"), "the parent's profile");
+    }
+
+    #[test]
+    fn a_held_job_is_asked_once_per_queueing_and_not_twice_within_the_gap() {
+        let job = Job { name: "j".into(), created_at: 1, queued_at: 1_000, ..Job::default() };
+        let mut w = World::default();
+        assert_eq!(next_held_ask(&w, &job, 0), 1_000, "no minimum before the first");
+        let d = Decision {
+            id: "d".into(),
+            job: "j".into(),
+            point: Point::Held,
+            created: 1,
+            attempt: 0,
+            requested_at: 2_000,
+            parked_until: None,
+            answer: None,
+            answer_why: String::new(),
+            steps: Vec::new(),
+            action: Some(Action::Wait),
+        };
+        w.decisions.insert(d.id.clone(), d);
+        assert_eq!(next_held_ask(&w, &job, 0), u64::MAX, "asked in this queueing");
+        let requeued = Job { queued_at: 3_000, ..job };
+        assert_eq!(next_held_ask(&w, &requeued, 0), 2_000 + HELD_GAP_MICROS, "a reroute back is not asked at once");
+        assert_eq!(next_held_ask(&w, &requeued, HELD_GAP_MICROS * 2), 3_000 + HELD_GAP_MICROS * 2);
     }
 
     #[test]

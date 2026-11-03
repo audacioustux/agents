@@ -516,7 +516,8 @@ impl World {
                 }
             }
             QueueEvent::Forced { job } => {
-                if let Some(j) = self.jobs.get_mut(job) {
+                // A job that started meanwhile was not held; a later queueing needs a decision of its own.
+                if let Some(j) = self.jobs.get_mut(job).filter(|j| j.status == Status::Queued) {
                     j.forced = true;
                 }
             }
@@ -610,6 +611,7 @@ impl World {
                     j.transcript_account = Some(account.clone());
                     j.session_id = Some(session_id.clone());
                     j.message = None;
+                    j.forced = false;
                 }
             }
             SessionEvent::Disk { job, bytes } => {
@@ -1099,6 +1101,22 @@ mod tests {
         assert_eq!((closed.answer, closed.action), (None, None), "the timeout closed it");
         let carried = fold(vec![d(50, answered(stop.clone())), d(51, decided(stop.clone(), None))]);
         assert_eq!(carried.action, Some(stop));
+    }
+
+    #[test]
+    fn a_force_lands_only_on_a_queued_job() {
+        let dispatched = st(
+            2,
+            Event::Dispatch(DispatchEvent::Dispatched {
+                job: "a".into(),
+                account: "x".into(),
+                runner_pid: 9,
+                runner_started: 2,
+            }),
+        );
+        let forced = st(3, Event::Queue(QueueEvent::Forced { job: "a".into() }));
+        assert!(!World::fold(&[st(1, queued("a")), dispatched, forced.clone()]).jobs["a"].forced, "it had started");
+        assert!(World::fold(&[st(1, queued("a")), forced]).jobs["a"].forced);
     }
 
     #[test]

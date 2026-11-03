@@ -223,7 +223,15 @@ mod tests {
         // flock locks belong to the open file description, so a second open conflicts.
         assert!(Role::try_take(&p).unwrap().is_none());
         drop(held);
-        assert!(Role::try_take(&p).unwrap().is_some());
+        // Another test thread may be between fork and exec, its child briefly sharing the open file
+        // description (the descriptor is close-on-exec, so only until the exec): the lock frees then.
+        let freed = (0..200).any(|_| {
+            Role::try_take(&p).unwrap().is_some() || {
+                std::thread::sleep(Duration::from_millis(10));
+                false
+            }
+        });
+        assert!(freed, "the role is free once its holder is dropped");
     }
 
     #[test]

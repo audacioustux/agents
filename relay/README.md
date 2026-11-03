@@ -140,6 +140,14 @@ anything else. An agent driving relay can branch on those, never on wording.
 Nothing needs starting by hand. Every command that changes something wakes the
 dispatcher, which exits on its own a minute after the queue empties.
 
+A running dispatcher keeps the config it started with, so it checks the project's
+`relay.toml` and the policy file (the sources `relay config show` merges) on every
+pass, as it does its own binary. When either has changed and the result still
+loads, it hands over to a new dispatcher that reads it; a file that does not load
+(a half-saved edit) changes nothing until it changes again. An edit rings no bell,
+so it is noticed on the next pass, at most five minutes later; any queue command
+makes that pass at once.
+
 ## Policy and profiles
 
 The owner's routing rules live in a policy file, not in an orchestrator's memory:
@@ -185,7 +193,9 @@ runner at once. `max_per_day` is the most of its sessions to start in a rolling
 24 hours, counted from `dispatched` events on the bus, so cleaning a job away
 gives nothing back (a retry on another account is a start too). A job they hold
 stays queued with the reason on the board and in the dispatcher's log:
-`profile bug-hunt: 3 started in 24h (max 3), next slot 14:02Z`.
+`profile bug-hunt: 3 started in 24h (max 3), next slot 14:02Z`. A job no account
+can take is held with every account's cause:
+`no account has room (omp:default busy (1 of 1 seat on openai-codex), at floor: 100% openai-codex/5 hours, resets 13:36Z)`.
 
 `relay profiles [--json]` prints each resolved profile with its note, which is
 how a fresh orchestrator learns the policy. `relay config show` prints the merged
@@ -410,7 +420,10 @@ writing it) and uses the latest reading, the later limit, and the latest
 sign-in change (a sign-out stands until the account is enabled again in any
 project), so a reading one project took is not taken again. Seats are shared
 too: `limits.per_account` counts the sessions every project runs on the
-account, and one machine-wide lock keeps two dispatchers from giving out the
+account (for omp, on the account *and provider*: one profile serves several
+providers, each with a quota of its own, so a `minimax-code/...` review does not
+hold the seat an `openai-codex/...` job needs; two jobs on one provider still
+share it), and one machine-wide lock keeps two dispatchers from giving out the
 same seat. Each dispatcher's doorbell rings for every project's events.
 Whether an account is used at all (`relay quota enable` and `disable`) and
 `limits.max_running` stay per project.

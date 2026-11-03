@@ -10,6 +10,7 @@
 //! Every system that emits wakes it, so it never has to be started by hand.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -66,6 +67,7 @@ fn serve(ctx: &Ctx) -> Result<()> {
     // Every project's bus: a seat freed or a limit hit in another project changes our plan too.
     let bell = ctx.doorbell()?;
     let version = os::binary_version();
+    let mut sources = Sources::watch(&ctx.cfg_path);
     let mut idle_since: Option<Instant> = None;
     let mut last_held = Held::default();
     loop {
@@ -73,6 +75,20 @@ fn serve(ctx: &Ctx) -> Result<()> {
             // A rebuilt binary takes over: drop the role, then start the new one.
             drop(role);
             return ctx.wake_dispatch();
+        }
+        if sources.changed() {
+            // The policy or the project config was edited: a new dispatcher reads it.
+            // One that does not load yet (a half-saved file) changes nothing; it is
+            // looked at again when the file changes again.
+            match Config::load(Some(&ctx.cfg_path)) {
+                Ok(_) => {
+                    drop(role);
+                    return ctx.wake_dispatch();
+                }
+                Err(e) => {
+                    eprintln!("{} config changed but does not load; keeping the old: {e:#}", jiff::Timestamp::now());
+                }
+            }
         }
         let (busy, held, due_us) = tick(ctx)?;
         let gc_in = gc_pass(ctx);
@@ -99,6 +115,40 @@ fn serve(ctx: &Ctx) -> Result<()> {
             std::thread::sleep(Duration::from_millis(200));
             bell.wait(Duration::ZERO);
         }
+    }
+}
+
+/// The files the merged config is read from (the project's `relay.toml` and the
+/// owner's policy, even one that does not exist yet), and their state when last
+/// looked at: a change means the dispatcher's config is out of date.
+#[derive(Debug)]
+struct Sources {
+    files: Vec<std::path::PathBuf>,
+    seen: Vec<Option<(std::time::SystemTime, u64)>>,
+}
+
+impl Sources {
+    fn watch(cfg_path: &Path) -> Self {
+        let mut files = vec![cfg_path.to_path_buf()];
+        files.extend(crate::config::Policy::path().map(|(p, _)| p));
+        Self::of(files)
+    }
+
+    fn of(files: Vec<std::path::PathBuf>) -> Self {
+        let mut s = Self { files, seen: Vec::new() };
+        s.seen = s.stamp();
+        s
+    }
+
+    fn stamp(&self) -> Vec<Option<(std::time::SystemTime, u64)>> {
+        let state = |p: &Path| std::fs::metadata(p).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
+        self.files.iter().map(|p| state(p)).collect()
+    }
+
+    /// Whether any source differs from when last asked (and remembers it).
+    fn changed(&mut self) -> bool {
+        let now = self.stamp();
+        std::mem::replace(&mut self.seen, now.clone()) != now
     }
 }
 
@@ -142,12 +192,12 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     // the seats their sessions hold, count here too. Their jobs stay theirs.
     let neighbours = ctx.neighbours();
     world.hear_accounts(&neighbours);
-    let elsewhere = seats_taken(&neighbours);
+    let elsewhere = seats_held(&ctx.cfg, &neighbours);
     let found = accounts::discover(&ctx.cfg);
     accounts::settle(&mut world, &found);
     refresh_stale(ctx, &world, &found)?;
     let mut held = Held::default();
-    let plan = plan(ctx, &world, &elsewhere, &found, now_micros(), &mut held);
+    let plan = plan(&ctx.cfg, &ctx.clones, &world, &elsewhere, &found, now_micros(), &mut held);
     for (job, account) in plan {
         let (pid, gate) = ctx.spawn_gated(&["session", "run", &job], &ctx.job_file(&job, "runner.log"))?;
         let started = os::start_time(pid).unwrap_or(0);
@@ -213,6 +263,20 @@ fn next_due(accounts: &[(&dyn Harness, Option<&AccountState>)], waiting: bool, n
     times.into_iter().filter(|&t| t > now_us).min()
 }
 
+/// The seats live runners hold in `worlds`: each one's account and, for omp, provider.
+pub fn seats_held(cfg: &Config, worlds: &[World]) -> Vec<(String, String)> {
+    let mut held = Vec::new();
+    for j in worlds.iter().flat_map(|w| w.jobs.values()) {
+        if j.status == Status::Running
+            && let (Some(account), Some((pid, started))) = (&j.account, j.runner)
+            && os::same_process(pid, started)
+        {
+            held.push((account.clone(), provider_on(cfg, j, account)));
+        }
+    }
+    held
+}
+
 /// Sessions running on each account in `worlds`, counting only jobs their
 /// fold says run and whose runner is still alive.
 pub fn seats_taken(worlds: &[World]) -> BTreeMap<String, usize> {
@@ -276,14 +340,15 @@ pub fn profile_hold(
 /// `limits.per_account`, but not against this project's `max_running`. `now_us`
 /// is bus time, so a profile's daily window can be judged at any moment.
 fn plan(
-    ctx: &Ctx,
+    cfg: &Config,
+    clones: &Path,
     world: &World,
-    elsewhere: &BTreeMap<String, usize>,
+    elsewhere: &[(String, String)],
     found: &[Home],
     now_us: u64,
     held: &mut Held,
 ) -> Vec<(String, String)> {
-    let limits = &ctx.cfg.limits;
+    let limits = &cfg.limits;
     let mut running: BTreeMap<&str, usize> = BTreeMap::new();
     let mut starts = world.profile_starts.clone();
     for p in world.jobs.values().filter(|j| j.status.has_runner()).filter_map(|j| j.profile.as_deref()) {
@@ -291,14 +356,15 @@ fn plan(
     }
     // Homes signed in as one account share a seat budget, held under the first one's key.
     let twins = accounts::twins(found);
-    let seat = |key: &str| accounts::seat(&twins, key).to_owned();
+    let seat = |key: &str, provider: &str| seat_key(accounts::seat(&twins, key), provider);
     let mut load: BTreeMap<String, usize> = BTreeMap::new();
-    for (key, n) in elsewhere {
-        *load.entry(seat(key)).or_default() += n;
+    for (key, provider) in elsewhere {
+        *load.entry(seat(key, provider)).or_default() += 1;
     }
     let mut total = 0;
     for j in world.jobs.values().filter(|j| j.status == Status::Running) {
-        *load.entry(seat(j.account.as_deref().unwrap_or_default())).or_default() += 1;
+        let account = j.account.as_deref().unwrap_or_default();
+        *load.entry(seat(account, &provider_on(cfg, j, account))).or_default() += 1;
         total += 1;
     }
     if let (Some(max), Some(now)) = (limits.max_load, os::load_average())
@@ -309,7 +375,7 @@ fn plan(
     }
     // Unmeasured is not the same as enough.
     let disk_ok =
-        limits.min_free_disk_gb <= 0.0 || os::free_disk_gb(&ctx.clones).is_some_and(|gb| gb >= limits.min_free_disk_gb);
+        limits.min_free_disk_gb <= 0.0 || os::free_disk_gb(clones).is_some_and(|gb| gb >= limits.min_free_disk_gb);
     let mut queued: Vec<&Job> = world.jobs.values().filter(|j| j.status == Status::Queued).collect();
     queued.sort_by_key(|j| j.created_at);
     let mut out = Vec::new();
@@ -324,7 +390,7 @@ fn plan(
             }
             continue;
         }
-        let profile = j.profile.as_deref().and_then(|n| ctx.cfg.profiles.get(n).map(|p| (n, p)));
+        let profile = j.profile.as_deref().and_then(|n| cfg.profiles.get(n).map(|p| (n, p)));
         if let Some((n, p)) = profile.filter(|_| !j.forced)
             && let Some((why, until)) = profile_hold(
                 n,
@@ -347,23 +413,29 @@ fn plan(
         // Every account of every harness the job allows, judged the same way:
         // on the meters its harness says govern the job's model there.
         let mut why = Vec::new();
-        let fits: Vec<(&Home, f64)> = found
-            .iter()
-            .filter(|a| may_use(j, a))
-            .filter(|a| load.get(&seat(&a.key())).copied().unwrap_or(0) < limits.per_account)
-            .filter_map(|a| {
-                let model = model_for(&ctx.cfg, j, a.harness);
-                match accounts::fit(a, world.accounts.get(&a.key()), model.as_deref(), limits.floor, now_us) {
-                    Ok(score) => Some((a, score)),
-                    Err(r) => {
-                        why.push(format!("{} {}", a.key(), r.describe()));
-                        None
-                    }
-                }
-            })
-            .collect();
+        let mut fits: Vec<(&Home, f64)> = Vec::new();
+        for a in found.iter().filter(|a| may_use(j, a)) {
+            let model = model_for(cfg, j, a.harness);
+            let provider = provider_of(model.as_deref(), a.harness);
+            let taken = load.get(&seat(&a.key(), provider)).copied().unwrap_or(0);
+            // Every cause appears, so a busy account that is also at its floor says both.
+            let mut causes = Vec::new();
+            if taken >= limits.per_account {
+                let on = if provider.is_empty() { String::new() } else { format!(" on {provider}") };
+                causes.push(format!("busy ({taken} of {} seat{}{on})", limits.per_account, plural(limits.per_account)));
+            }
+            match accounts::fit(a, world.accounts.get(&a.key()), model.as_deref(), limits.floor, now_us) {
+                Ok(score) if causes.is_empty() => fits.push((a, score)),
+                Ok(_) => {}
+                Err(r) => causes.push(r.describe()),
+            }
+            if !causes.is_empty() {
+                why.push(format!("{} {}", a.key(), causes.join(", ")));
+            }
+        }
         let Some(a) = choose(j, &fits) else {
-            held.0.push(format!("{}: no account has room ({})", j.name, why.join("; ")));
+            let why = if why.is_empty() { "the job's harness or pin allows no account".into() } else { why.join("; ") };
+            held.0.push(format!("{}: no account has room ({why})", j.name));
             held.2.push(j.name.clone());
             continue;
         };
@@ -374,9 +446,36 @@ fn plan(
             starts.entry(n.to_owned()).or_default().push(now_us);
         }
         out.push((j.name.clone(), key.clone()));
-        *load.entry(seat(&key)).or_default() += 1;
+        let provider = provider_of(model_for(cfg, j, a.harness).as_deref(), a.harness).to_owned();
+        *load.entry(seat(&key, &provider)).or_default() += 1;
     }
     out
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// What a seat is counted against. A claude account has one budget of seats.
+/// An omp profile serves several providers, each with a quota of its own, so
+/// its seats are counted per provider (the model's prefix before `/`).
+fn seat_key(account: &str, provider: &str) -> String {
+    if provider.is_empty() { account.to_owned() } else { format!("{account}/{provider}") }
+}
+
+/// The provider whose quota a `model` draws on, for the harnesses that have
+/// several (omp); empty for the others, and for a model with no prefix.
+fn provider_of<'m>(model: Option<&'m str>, harness: &str) -> &'m str {
+    if harness != "omp" {
+        return "";
+    }
+    model.and_then(|m| m.split_once('/')).map_or("", |(provider, _)| provider)
+}
+
+/// The provider a running `job` holds a seat on at `account` (`harness:label`).
+fn provider_on(cfg: &Config, job: &Job, account: &str) -> String {
+    let harness = account.split_once(':').map_or(account, |(h, _)| h);
+    provider_of(model_for(cfg, job, harness).as_deref(), harness).to_owned()
 }
 
 /// Whether `job` may run on `account`: the job allows its harness, and any pin names it.
@@ -532,5 +631,121 @@ mod tests {
         let fresh = AccountState { read_at: Some(now_us - 1), ..Default::default() };
         assert!(accounts::is_stale(claude, Some(&fresh), stale_at));
         assert!(!accounts::is_stale(claude, Some(&fresh), stale_at - 1), "the moment matches `is_stale`");
+    }
+
+    const NOW_US: u64 = 1_800_000_000 * 1_000_000;
+
+    fn omp_config(extra: &str) -> (crate::config::tempdir::Dir, Config) {
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let text = format!("name = \"demo\"\n[limits]\nmin_free_disk_gb = 0\nper_account = 1\n{extra}");
+        let cfg = Config::parse(&text, d.path()).unwrap();
+        (d, cfg)
+    }
+
+    /// One omp account with both providers read just now at `codex` and `minimax` utilization.
+    fn omp_world(jobs: &[(&str, Status, &str)], codex: f64, minimax: f64) -> (World, Vec<Home>) {
+        let reset = i64::try_from(NOW_US / 1_000_000).unwrap() + 3600;
+        let meter = |utilization| Meter { utilization, resets_at: Some(reset) };
+        let mut world = World::default();
+        world.accounts.insert(
+            "omp:default".into(),
+            AccountState {
+                read_at: Some(NOW_US - 1),
+                meters: [
+                    ("openai-codex/5 hours".to_owned(), meter(codex)),
+                    ("minimax-code/5 hours".to_owned(), meter(minimax)),
+                ]
+                .into(),
+                ..Default::default()
+            },
+        );
+        for (i, (name, status, model)) in jobs.iter().enumerate() {
+            let j = Job {
+                name: (*name).into(),
+                status: *status,
+                account: (*status == Status::Running).then(|| "omp:default".to_owned()),
+                models: BTreeMap::from([("omp".to_owned(), (*model).to_owned())]),
+                created_at: i as u64,
+                ..Job::default()
+            };
+            world.jobs.insert(j.name.clone(), j);
+        }
+        (world, vec![home("omp", "default")])
+    }
+
+    fn plan_omp(cfg: &Config, world: &World, found: &[Home]) -> (Vec<(String, String)>, Held) {
+        let mut held = Held::default();
+        let out = plan(cfg, Path::new("/"), world, &[], found, NOW_US, &mut held);
+        (out, held)
+    }
+
+    #[test]
+    fn an_omp_account_has_a_seat_per_provider() {
+        let (_d, cfg) = omp_config("");
+        let started = [("review", Status::Running, "minimax-code/M3"), ("sol", Status::Queued, "openai-codex/gpt-6.1")];
+        let (world, found) = omp_world(&started, 0.1, 0.1);
+        let (out, held) = plan_omp(&cfg, &world, &found);
+        assert_eq!(out, [("sol".to_owned(), "omp:default".to_owned())], "{:?}", held.0);
+
+        let same = [("a", Status::Running, "openai-codex/gpt-6.1"), ("b", Status::Queued, "openai-codex/gpt-6.2")];
+        let (world, found) = omp_world(&same, 0.1, 0.1);
+        let (out, held) = plan_omp(&cfg, &world, &found);
+        assert_eq!(out.len(), 0, "one seat per provider");
+        assert_eq!(held.0, ["b: no account has room (omp:default busy (1 of 1 seat on openai-codex))"]);
+    }
+
+    #[test]
+    fn a_seat_held_by_another_project_counts_against_its_provider() {
+        let (_d, cfg) = omp_config("");
+        let (world, found) = omp_world(&[("sol", Status::Queued, "openai-codex/gpt-6.1")], 0.1, 0.1);
+        let other = |provider: &str| vec![("omp:default".to_owned(), provider.to_owned())];
+        let mut held = Held::default();
+        let out = plan(&cfg, Path::new("/"), &world, &other("minimax-code"), &found, NOW_US, &mut held);
+        assert_eq!(out.len(), 1, "another provider's seat is no obstacle");
+        let out = plan(&cfg, Path::new("/"), &world, &other("openai-codex"), &found, NOW_US, &mut held);
+        assert_eq!(out.len(), 0);
+    }
+
+    #[test]
+    fn a_held_reason_names_a_busy_account_and_every_other_cause() {
+        let (_d, cfg) = omp_config("");
+        let jobs = [("a", Status::Running, "openai-codex/gpt-6.1"), ("b", Status::Queued, "openai-codex/gpt-6.1")];
+        let (world, found) = omp_world(&jobs, 1.0, 0.1);
+        let (out, held) = plan_omp(&cfg, &world, &found);
+        assert_eq!(out.len(), 0);
+        let [line] = held.0.as_slice() else { panic!("{:?}", held.0) };
+        let why = line.strip_prefix("b: no account has room (").and_then(|l| l.strip_suffix(')')).unwrap();
+        assert!(why.starts_with("omp:default busy (1 of 1 seat on openai-codex), at floor: "), "{why}");
+        assert!(why.contains("openai-codex/5 hours"), "{why}");
+    }
+
+    #[test]
+    fn a_changed_config_source_is_noticed_once() {
+        let d = crate::config::tempdir::Dir::new();
+        let (project, policy) = (d.path().join("relay.toml"), d.path().join("policy.toml"));
+        std::fs::write(&project, "name = \"demo\"\n").unwrap();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let policy_path = policy.clone();
+        let mut sources = Sources::of(vec![project.clone(), policy.clone()]);
+        assert!(!sources.changed(), "nothing moved; a policy file that is not there yet is fine");
+
+        std::fs::write(&policy, "[profiles.bug-hunt]\nmax_per_day = 3\n").unwrap();
+        assert!(sources.changed(), "a policy file appeared");
+        assert!(!sources.changed(), "seen once");
+
+        let first = std::fs::metadata(&policy).unwrap().modified().unwrap();
+        std::fs::write(&policy, "[profiles.bug-hunt]\nmax_per_day = 10\n").unwrap();
+        let file = std::fs::File::options().write(true).open(&policy).unwrap();
+        file.set_modified(first + Duration::from_secs(5)).unwrap();
+        assert!(sources.changed(), "the policy was edited");
+        let text = std::fs::read_to_string(&policy).unwrap();
+        let policy = crate::config::Policy::parse(&text).unwrap();
+        let project_text = std::fs::read_to_string(&project).unwrap();
+        let cfg = Config::parse_with(&project_text, d.path(), Some((&policy, &policy_path))).unwrap();
+        assert_eq!(cfg.profiles["bug-hunt"].max_per_day, Some(10), "a new pass reads the new value");
+
+        std::fs::write(&project, "name = \"other\"\n").unwrap();
+        assert!(sources.changed(), "the project config was edited");
     }
 }

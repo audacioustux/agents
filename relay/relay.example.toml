@@ -9,7 +9,7 @@ repo = "."
 
 [limits]
 max_running = 2          # sessions at once, over all accounts of all harnesses
-per_account = 1          # sessions at once on one account
+per_account = 1          # sessions at once on one account (omp: on one provider of it)
 floor = 0.9              # an account at this utilization of any meter that governs the job takes no new session
 budget_usd = 10.0        # spend cap per attempt, enforced by relay for every harness
 silent_minutes = 30      # a session that prints nothing this long is ended

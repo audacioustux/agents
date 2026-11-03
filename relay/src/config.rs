@@ -148,16 +148,18 @@ impl Policy {
         Ok(toml::from_str(text)?)
     }
 
-    /// `$RELAY_POLICY`, else `~/.config/relay/policy.toml`; optional. A
-    /// file named by `$RELAY_POLICY` must exist.
+    /// Where the policy is read from, and whether `$RELAY_POLICY` names it
+    /// (then it must exist): `$RELAY_POLICY`, else `~/.config/relay/policy.toml`.
+    pub fn path() -> Option<(PathBuf, bool)> {
+        match std::env::var_os("RELAY_POLICY").filter(|p| !p.is_empty()) {
+            Some(p) => Some((PathBuf::from(p), true)),
+            None => std::env::var_os("HOME").map(|h| (PathBuf::from(h).join(POLICY_FILE), false)),
+        }
+    }
+
+    /// The policy file, optional unless `$RELAY_POLICY` names it.
     pub fn load() -> Result<Option<(Self, PathBuf)>> {
-        let (path, named) = match std::env::var_os("RELAY_POLICY").filter(|p| !p.is_empty()) {
-            Some(p) => (PathBuf::from(p), true),
-            None => match std::env::var_os("HOME") {
-                Some(h) => (PathBuf::from(h).join(POLICY_FILE), false),
-                None => return Ok(None),
-            },
-        };
+        let Some((path, named)) = Self::path() else { return Ok(None) };
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && !named => return Ok(None),

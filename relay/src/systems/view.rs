@@ -111,9 +111,13 @@ pub fn listed(world: &crate::world::World, all: bool) -> Vec<&crate::world::Job>
     jobs
 }
 
-/// What a job is asked to run as: its profile, else the model it names.
+/// What a job is asked to run as: its profile, else the model it names, then its effort.
 pub fn kind(j: &Job) -> String {
-    j.profile.clone().unwrap_or_else(|| j.models.values().cloned().collect::<Vec<_>>().join(","))
+    let what = j.profile.clone().unwrap_or_else(|| j.models.values().cloned().collect::<Vec<_>>().join(","));
+    match j.effort.as_deref() {
+        Some(effort) => format!("{what} {effort}"),
+        None => what,
+    }
 }
 
 /// Why a queued job's profile holds it back now, by `max_running` or `max_per_day`.
@@ -125,7 +129,7 @@ fn profile_hold(cfg: &Config, world: &World, j: &Job, now: u64) -> Option<String
     crate::systems::dispatch::profile_hold(name, p, running, starts, now).map(|(why, _)| why)
 }
 
-/// A job's cells: name, status, account, profile (or model), since when, spend, and its
+/// A job's cells: name, status, account, profile (or model) with effort, since when, spend, and its
 /// task with any reason (a queued job also says what it waits for, or which profile limit holds it).
 pub fn job_cells(cfg: &Config, world: &World, j: &Job, now: u64) -> Vec<String> {
     let since = match j.status {

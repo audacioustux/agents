@@ -752,19 +752,26 @@ fn drive(
 }
 
 /// The build jobs whose branches a build job starts from: those it waits
-/// for and the one it forks, each with its clone and branch.
+/// for, through any read-only job between (build, review, build), and the one
+/// it forks, each with its clone and branch.
 pub fn bases(world: &World, job: &Job) -> Vec<(String, PathBuf, String)> {
-    let mut names: Vec<&String> = job.after.iter().collect();
-    names.extend(job.fork.as_ref().map(|f| &f.job));
+    let mut todo: Vec<&String> = job.after.iter().collect();
+    todo.extend(job.fork.as_ref().map(|f| &f.job));
+    let mut seen: Vec<&String> = Vec::new();
     let mut out: Vec<(String, PathBuf, String)> = Vec::new();
-    for n in names {
-        if let Some(j) = world.jobs.get(n).filter(|j| !j.readonly)
-            && let (Some(dir), Some(branch)) = (&j.workdir, &j.branch)
-            && !out.iter().any(|(m, ..)| m == n)
-        {
+    while let Some(n) = todo.pop() {
+        if seen.contains(&n) {
+            continue;
+        }
+        seen.push(n);
+        let Some(j) = world.jobs.get(n) else { continue };
+        if j.readonly {
+            todo.extend(&j.after);
+        } else if let (Some(dir), Some(branch)) = (&j.workdir, &j.branch) {
             out.push((n.clone(), dir.clone(), branch.clone()));
         }
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
@@ -876,7 +883,30 @@ mod disk_tests {
 
 #[cfg(test)]
 mod base_tests {
-    use super::pick_base;
+    use std::path::PathBuf;
+
+    use super::{bases, pick_base};
+    use crate::world::{Job, World};
+
+    #[test]
+    fn a_build_finds_its_bases_through_a_review_between() {
+        let build = |n: &str, after: &[&str]| Job {
+            name: n.into(),
+            after: after.iter().map(|a| (*a).to_owned()).collect(),
+            workdir: Some(PathBuf::from(format!("/c/{n}"))),
+            branch: Some(format!("job/{n}")),
+            ..Job::default()
+        };
+        let review = |n: &str, after: &[&str]| Job { readonly: true, workdir: None, branch: None, ..build(n, after) };
+        let mut w = World::default();
+        for j in [build("one", &[]), review("look", &["one"]), review("loop", &["loop"]), build("other", &[])] {
+            w.jobs.insert(j.name.clone(), j);
+        }
+        let names = |j: &Job| bases(&w, j).into_iter().map(|b| b.0).collect::<Vec<_>>();
+        assert_eq!(names(&build("two", &["look"])), ["one"], "build, review, build");
+        assert_eq!(names(&build("two", &["look", "other", "loop"])), ["one", "other"]);
+        assert!(names(&build("two", &["loop"])).is_empty(), "a cycle ends");
+    }
 
     #[test]
     fn a_build_starts_from_the_newest_of_its_bases_or_fails_when_they_diverge() {

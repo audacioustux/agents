@@ -10,7 +10,7 @@
 //! the answer, and the waiting process takes the first one.
 
 use std::fmt::Write as _;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -396,22 +396,29 @@ pub fn validate(
         }
     }
     match action {
-        Action::Reroute { model: Some(m), .. } => {
-            if let Some(why) = cfg.session.banned(m) {
+        Action::Reroute { harness, model, .. } => {
+            if let Some(h) = harness.as_deref().filter(|h| !cfg.harnesses().iter().any(|x| x.id() == *h)) {
+                return Err(format!("harness {h} is not enabled here"));
+            }
+            if let Some((m, why)) = model.as_deref().and_then(|m| cfg.session.banned(m).map(|why| (m, why))) {
                 return Err(format!("model {m} is banned: {why}"));
             }
-        }
-        Action::Reroute { harness: Some(h), .. } if !cfg.harnesses().iter().any(|x| x.id() == h) => {
-            return Err(format!("harness {h} is not enabled here"));
         }
         Action::Force if !cfg.hooks.allow_force => return Err("policy does not allow force (hooks.allow_force)".into()),
         Action::FollowUp { brief, .. } if brief.trim().is_empty() => {
             return Err("the follow-up's brief is empty".into());
         }
-        Action::FollowUp { fork: true, .. } => {
+        Action::FollowUp { fork: true, profile: named, .. } => {
             let harness = job.transcript_account.as_deref().and_then(|a| a.split(':').next());
             if !harness.and_then(|h| crate::harness::by_id(h).ok()).is_some_and(|h| h.caps().fork) {
                 return Err(format!("{}'s session cannot be forked on its harness", job.name));
+            }
+            let child = named.as_deref().or(job.profile.as_deref()).and_then(|p| cfg.profiles.get(p));
+            if !job.readonly && child.is_some_and(|p| p.readonly == Some(true)) {
+                return Err(format!(
+                    "a read-only job may not fork {}, a build job: a review stays independent",
+                    job.name
+                ));
             }
         }
         _ => {}
@@ -520,7 +527,10 @@ pub fn decide(
             |(action, why)| Said { action, why, cost_usd: 0.0, account: None },
         ),
         Handler::Agent(a) => ask_agent(ctx, job, a, req),
-        Handler::Command(argv) => ask_command(argv, req, Duration::from_secs(ctx.cfg.hooks.command_timeout_seconds)),
+        Handler::Command(argv) => {
+            let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
+            ask_command(argv, req, Duration::from_secs(ctx.cfg.hooks.command_timeout_seconds), &deny)
+        }
         Handler::Orchestrator => ask_orchestrator(ctx, req),
     };
     let ask = |h: &Handler| match ask(h) {
@@ -564,12 +574,23 @@ fn ask_agent(ctx: &Ctx, job: &Job, a: &Agent, req: &Request) -> Said {
     }
 }
 
-/// Runs an external handler with the request on stdin, bounded by `timeout`.
-fn ask_command(argv: &[String], req: &Request, timeout: Duration) -> Said {
+/// The most a `command:` handler may print.
+const COMMAND_ANSWER_BYTES: u64 = 64 * 1024;
+
+/// Runs an external handler with the request on stdin, bounded by `timeout`
+/// (then killed 5 s later if it ignores the TERM), with no variable `deny`
+/// matches and at most `COMMAND_ANSWER_BYTES` of answer. A cost it reports is
+/// counted, never below zero.
+fn ask_command(argv: &[String], req: &Request, timeout: Duration, deny: &regex::Regex) -> Said {
     let run = || -> Result<String> {
-        let mut child = Command::new("timeout")
-            .arg(timeout.as_secs().max(1).to_string())
-            .args(argv)
+        let mut cmd = Command::new("timeout");
+        cmd.args(["-k", "5"]).arg(timeout.as_secs().max(1).to_string()).args(argv);
+        for (k, _) in std::env::vars_os() {
+            if deny.is_match(&k.to_string_lossy()) {
+                cmd.env_remove(k);
+            }
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -579,16 +600,22 @@ fn ask_command(argv: &[String], req: &Request, timeout: Duration) -> Said {
         if let Some(mut stdin) = child.stdin.take() {
             std::thread::spawn(move || stdin.write_all(&input));
         }
-        let out = child.wait_with_output()?;
-        anyhow::ensure!(out.status.success(), "exited with {}", out.status);
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        let mut out = Vec::new();
+        if let Some(stdout) = child.stdout.take() {
+            stdout.take(COMMAND_ANSWER_BYTES + 1).read_to_end(&mut out)?;
+        }
+        let status = child.wait()?;
+        anyhow::ensure!(out.len() as u64 <= COMMAND_ANSWER_BYTES, "answered more than {COMMAND_ANSWER_BYTES} bytes");
+        anyhow::ensure!(status.success(), "exited with {status}");
+        Ok(String::from_utf8_lossy(&out).into_owned())
     };
     match run() {
         Ok(text) => {
             let cost = serde_json::from_str::<Value>(text.trim()).ok().and_then(|v| v["cost_usd"].as_f64());
+            let cost = cost.filter(|c| c.is_finite()).unwrap_or(0.0).max(0.0);
             parse_answer(&text).map_or_else(
                 || Said::defer(format!("malformed answer from {}", argv.join(" "))),
-                |(action, why)| Said { action, why, cost_usd: cost.unwrap_or(0.0), account: None },
+                |(action, why)| Said { action, why, cost_usd: cost, account: None },
             )
         }
         Err(e) => Said::defer(format!("{}: {e:#}", argv.join(" "))),
@@ -1046,6 +1073,69 @@ mod tests {
         let requeued = Job { queued_at: 3_000, ..job };
         assert_eq!(next_held_ask(&w, &requeued, 0), 2_000 + HELD_GAP_MICROS, "a reroute back is not asked at once");
         assert_eq!(next_held_ask(&w, &requeued, HELD_GAP_MICROS * 2), 3_000 + HELD_GAP_MICROS * 2);
+    }
+
+    #[test]
+    fn a_reroute_names_an_enabled_harness_even_with_a_model() {
+        let cfg: Config = toml::from_str("name = \"x\"\n[session]\nbanned_models = { \"^bad\" = \"no\" }\n").unwrap();
+        let (w, j) = (World::default(), Job { name: "j".into(), ..Job::default() });
+        let r = req(Point::Held, 0.0, 0.0);
+        let both = Action::Reroute { harness: Some("nope".into()), model: Some("ok".into()), profile: None };
+        assert!(validate(&cfg, &w, &j, &r, &both, false).unwrap_err().contains("not enabled"));
+        let banned = Action::Reroute { harness: Some("claude".into()), model: Some("bad-1".into()), profile: None };
+        assert!(validate(&cfg, &w, &j, &r, &banned, false).unwrap_err().contains("banned"));
+    }
+
+    #[test]
+    fn a_fork_needs_a_harness_that_forks_and_a_review_never_forks_its_builder() {
+        let cfg: Config = toml::from_str("name = \"x\"\n[profiles.review]\nreadonly = true\n").unwrap();
+        let w = World::default();
+        let r = req(Point::Ended, 0.0, 1.0);
+        let fork = |profile: Option<&str>| Action::FollowUp {
+            brief: "b".into(),
+            profile: profile.map(Into::into),
+            after: true,
+            fork: true,
+            name: None,
+        };
+        let on = |account: Option<&str>, readonly| Job {
+            name: "j".into(),
+            transcript_account: account.map(Into::into),
+            readonly,
+            ..Job::default()
+        };
+        assert!(validate(&cfg, &w, &on(Some("claude:a"), false), &r, &fork(None), false).is_ok());
+        assert!(validate(&cfg, &w, &on(None, false), &r, &fork(None), false).unwrap_err().contains("cannot be forked"));
+        let review = validate(&cfg, &w, &on(Some("claude:a"), false), &r, &fork(Some("review")), true);
+        assert!(review.unwrap_err().contains("independent"));
+        assert!(validate(&cfg, &w, &on(Some("claude:a"), true), &r, &fork(Some("review")), false).is_ok());
+    }
+
+    #[test]
+    fn a_command_is_bounded_and_filtered_and_its_cost_is_never_negative() {
+        let dir = std::env::temp_dir().join(format!("relay-cmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\ncat >/dev/null\n{body}\n")).unwrap();
+            Command::new("chmod").arg("755").arg(&p).status().unwrap();
+            vec![p.display().to_string()]
+        };
+        let r = req(Point::Cap, 0.0, 1.0);
+        let none = regex::Regex::new("^$").unwrap();
+        let t = Duration::from_secs(1);
+        let neg = script("neg", r#"echo '{"action": "stop", "why": "w", "cost_usd": -5}'"#);
+        let s = ask_command(&neg, &r, t, &none);
+        assert_eq!((s.action.name(), s.cost_usd), ("stop", 0.0));
+        let big = script("big", "yes '{}' | head -c 200000");
+        assert!(ask_command(&big, &r, t, &none).why.contains("more than"));
+        let env = script("env", r#"echo "{\"action\": \"stop\", \"why\": \"[$HOME]\"}""#);
+        assert_eq!(ask_command(&env, &r, t, &regex::Regex::new("^HOME$").unwrap()).why, "[]");
+        let stubborn = script("stubborn", "trap '' TERM\nwhile :; do sleep 1; done");
+        let started = std::time::Instant::now();
+        assert_eq!(ask_command(&stubborn, &r, t, &none).action, Action::Defer);
+        assert!(started.elapsed() < Duration::from_secs(15), "killed after the grace");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

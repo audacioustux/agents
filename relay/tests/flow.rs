@@ -919,6 +919,8 @@ fn a_fork_resumes_its_parents_session_on_its_account_from_its_branch() {
 
     let none = relay(&env, &["queue", "add", "orphan", "--text", "x", "--fork", "nobody"]);
     assert_eq!(none.status.code(), Some(3));
+    let review = relay(&env, &["queue", "add", "peek", "--text", "x", "--fork", "base", "--readonly"]);
+    assert_eq!(review.status.code(), Some(5), "a review never forks its builder: {}", stderr(&review));
 }
 
 #[test]

@@ -189,6 +189,13 @@ impl Add {
         }
         let after = dependencies(&name, self.after, jobs)?;
         let fork = self.fork.as_deref().map(|f| fork_of(f, jobs)).transpose()?;
+        if let Some(parent) = self.fork.as_deref().and_then(|f| jobs.get(f)).filter(|p| fill.readonly && !p.readonly) {
+            fail!(
+                Refused,
+                "--fork {}: a read-only job may not fork a build job; a review stays independent",
+                parent.name
+            );
+        }
         let mut harnesses = allowed_harnesses(ctx, fill.harnesses.clone(), self.account.as_deref())?;
         if let Some((_, h)) = &fork {
             if !harnesses.is_empty() && !harnesses.contains(h) {

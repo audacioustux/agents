@@ -760,7 +760,7 @@ fn a_run_end_is_decided_by_the_rule_or_an_agent_that_queues_a_follow_up() {
     let env = setup("ended", false);
     configure(
         &env,
-        "",
+        "job_ceiling_usd = 5.0\n",
         "[hooks]\nended = [\"rule\", \"agent:triage\"]\n[profiles.triage]\nharness = \"claude\"\nbudget = 0.5\n\
          [profiles.cheap]\nharness = \"claude\"\nmodel = \"claude-haiku-5-5\"\nbudget = 0.5\n",
     );
@@ -803,7 +803,8 @@ fn the_orchestrator_answers_a_parked_decision_and_its_silence_falls_through() {
         return;
     }
     let env = setup("orchestrator", false);
-    configure(&env, "", "[hooks]\nended = [\"orchestrator\", \"rule\"]\norchestrator_timeout_minutes = 1.0\n");
+    let hooks = "[hooks]\nended = [\"orchestrator\", \"rule\"]\norchestrator_timeout_minutes = 1.0\n";
+    configure(&env, "job_ceiling_usd = 5.0\n", hooks);
     claude_account(&env.home, "a", 10, false);
     ok(&relay(&env, &["queue", "add", "park", "--text", "Make a change."]), "queue");
     let mut cmd = Command::new("timeout");
@@ -844,7 +845,7 @@ fn the_orchestrator_answers_a_parked_decision_and_its_silence_falls_through() {
 }
 
 #[test]
-fn a_command_decides_at_a_cap_and_a_bad_or_refused_answer_defers() {
+fn a_command_decides_at_a_cap_a_bad_answer_defers_and_a_big_budget_is_bounded() {
     if !have_bwrap() {
         return;
     }
@@ -852,9 +853,11 @@ fn a_command_decides_at_a_cap_and_a_bad_or_refused_answer_defers() {
     let script = env.root.join("decide.sh");
     std::fs::write(&script, "#!/bin/sh\ncat >/dev/null\ncat \"$1\"\n").unwrap();
     Command::new("chmod").arg("755").arg(&script).status().unwrap();
-    let answer = env.root.join("answer.json");
-    let chain = format!("[hooks]\ncap = [\"rule\", \"command:{} {}\"]\n", script.display(), answer.display());
-    configure(&env, "job_ceiling_usd = 1.0\n", &chain);
+    let (answer, fallback) = (env.root.join("answer.json"), env.root.join("fallback.json"));
+    std::fs::write(&fallback, r#"{"action": "continue", "why": "the second says go"}"#).unwrap();
+    let (sh, first, second) = (script.display(), answer.display(), fallback.display());
+    let chain = format!("[hooks]\ncap = [\"rule\", \"command:{sh} {first}\", \"command:{sh} {second}\"]\n");
+    configure(&env, "job_ceiling_usd = 1.0\nbudget_growth = 2.0\n", &chain);
     claude_account(&env.home, "a", 10, false);
 
     std::fs::write(&answer, r#"{"action": "continue", "budget": 0.03, "why": "the script says go"}"#).unwrap();
@@ -868,16 +871,27 @@ fn a_command_decides_at_a_cap_and_a_bad_or_refused_answer_defers() {
     std::fs::write(&answer, "not json").unwrap();
     ok(&relay(&env, &["queue", "add", "garbled", "--text", "Make a change.", "--budget", "0.015"]), "queue");
     let j = wait_for(&env, "garbled");
-    assert_eq!((j["status"].as_str(), j["checkpoints"][0]["verdict"].as_str()), (Some("failed"), Some("stop")), "{j}");
-    assert!(j["checkpoints"][0]["why"].as_str().unwrap().contains("malformed"), "{j}");
+    assert_eq!(
+        (j["status"].as_str(), j["checkpoints"][0]["verdict"].as_str()),
+        (Some("done"), Some("continue")),
+        "{j}"
+    );
+    let d = &decisions(&env, "garbled")[0];
+    let steps: Vec<(&str, &str)> = d["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["action"]["action"].as_str().unwrap(), s["why"].as_str().unwrap()))
+        .collect();
+    assert!(steps[1].0 == "defer" && steps[1].1.contains("malformed"), "the bad answer passed it on: {d}");
+    assert_eq!(steps[2].0, "continue", "{d}");
 
     std::fs::write(&answer, r#"{"action": "continue", "budget": 100}"#).unwrap();
     ok(&relay(&env, &["queue", "add", "greedy", "--text", "Make a change.", "--budget", "0.015"]), "queue");
     let j = wait_for(&env, "greedy");
-    assert_eq!(j["status"], "failed", "{j}");
-    assert!(j["checkpoints"][0]["why"].as_str().unwrap().contains("ceiling"), "{j}");
+    assert_eq!((j["status"].as_str(), j["budget_usd"].as_f64()), (Some("done"), Some(0.03)), "bounded: {j}");
     let d = &decisions(&env, "greedy")[0];
-    assert!(d["steps"][1]["refused"].as_str().unwrap().contains("ceiling"), "recorded as refused: {d}");
+    assert_eq!(d["action"]["budget"].as_f64(), Some(0.03), "recorded as granted: {d}");
 }
 
 #[test]
@@ -943,7 +957,7 @@ fn a_job_held_too_long_is_decided_and_forced_where_policy_allows() {
          [profiles.solo]\nharness = \"claude\"\nmax_running = 1\n",
         script.display()
     );
-    configure(&env, "", &hooks);
+    configure(&env, "job_ceiling_usd = 5.0\n", &hooks);
     claude_account(&env.home, "a", 10, false);
     claude_account(&env.home, "b", 10, false);
     let holds = [env.home.join(".claude.a/hold"), env.home.join(".claude.b/hold")];

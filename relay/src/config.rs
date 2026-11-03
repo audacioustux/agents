@@ -223,6 +223,16 @@ pub struct Hooks {
     pub command_timeout_seconds: u64,
     /// Whether a `held` decision may `force` a job past its profile's limits.
     pub allow_force: bool,
+    /// The most decisions that may act on one job (one incarnation) once any chain
+    /// is set; past it every action is refused and the point's fallback stands.
+    pub max_decisions: u32,
+}
+
+impl Hooks {
+    /// Whether any chain is set.
+    pub fn any(&self) -> bool {
+        self.cap.is_some() || self.ended.is_some() || self.held.is_some()
+    }
 }
 
 impl Default for Hooks {
@@ -236,6 +246,7 @@ impl Default for Hooks {
             orchestrator_timeout_minutes: 20.0,
             command_timeout_seconds: 120,
             allow_force: false,
+            max_decisions: 10,
         }
     }
 }
@@ -610,6 +621,10 @@ impl Config {
             }
         }
         ensure!(h.held_after_minutes >= 0.0, "hooks.held_after_minutes must not be negative");
+        ensure!(
+            !h.any() || self.limits.job_ceiling_usd.is_some(),
+            "[hooks] needs limits.job_ceiling_usd: a decision may spend more only up to it"
+        );
         ensure!(h.orchestrator_timeout_minutes >= 0.0, "hooks.orchestrator_timeout_minutes must not be negative");
         self.validate_disk()?;
         regex::Regex::new(&self.sandbox.env_deny).context("sandbox.env_deny")?;
@@ -734,6 +749,10 @@ mod tests {
         assert!(Config::parse("name = \"Demo\"", d.path()).is_err());
         assert!(Config::parse("name = \"demo\"\n[limits]\nfloor = 1.5", d.path()).is_err());
         assert!(Config::parse("name = \"demo\"\n[sandbox]\nhide_home = [\"../x\"]", d.path()).is_err());
+        let hooked = "name = \"demo\"\n[hooks]\nended = [\"rule\"]\n";
+        assert!(Config::parse(hooked, d.path()).unwrap_err().to_string().contains("job_ceiling_usd"));
+        let bounded = "name = \"demo\"\n[limits]\njob_ceiling_usd = 5.0\n[hooks]\nended = [\"rule\"]\n";
+        assert!(Config::parse(bounded, d.path()).is_ok());
     }
 
     #[test]

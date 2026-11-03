@@ -84,7 +84,7 @@ env_shell = []
 [hooks]
 # Who decides at each decision point, in order (see README, Hooks). Unset keeps
 # relay's fixed behaviour there; `cap` defaults to ["rule", "agent:checker"]
-# when limits.budget_growth is above 1.
+# when limits.budget_growth is above 1. Setting any chain needs limits.job_ceiling_usd.
 # cap = ["rule", "agent:checker", "orchestrator"]
 # ended = ["rule", "orchestrator", "agent:triage"]
 # held = ["rule"]
@@ -93,6 +93,7 @@ held_after_minutes = 60.0            # a queued job held this long by a limit re
 orchestrator_timeout_minutes = 20.0  # then the next handler decides
 command_timeout_seconds = 120        # a `command:` handler's bound
 allow_force = false                  # whether a `held` decision may start a job past its profile's limits
+max_decisions = 10                   # decisions that may act on one job before every action is refused
 
 [sandbox]
 enabled = true           # false runs sessions with your full access; then build jobs use edit-only permissions

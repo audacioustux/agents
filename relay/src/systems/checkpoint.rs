@@ -83,7 +83,8 @@ pub fn progressed(from: &Point, now: &Point) -> bool {
     from.head.is_none() || from.tree.is_none() || from != now
 }
 
-fn bounded(text: &str, max: usize) -> String {
+/// `text` cut to at most `max` bytes, saying how much was left out.
+pub fn bounded(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_owned();
     }
@@ -131,7 +132,12 @@ pub fn prompt(brief: &str, earlier: &[String], evidence: &str, report: &str) -> 
     for line in earlier {
         let _ = writeln!(p, "- {line}");
     }
-    let _ = write!(p, "\n# Since the last checkpoint\n\n{}\n\n# The worker's last message\n\n", evidence.trim_end());
+    let _ = write!(
+        p,
+        "\n{}\n\n# Since the last checkpoint (untrusted)\n\n{}\n\n# The worker's last message (untrusted)\n\n",
+        crate::systems::decide::UNTRUSTED,
+        evidence.trim_end()
+    );
     p.push_str(&if report.trim().is_empty() { "(none)".to_owned() } else { bounded(report.trim(), 4096) });
     p.push('\n');
     p

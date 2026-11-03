@@ -68,7 +68,9 @@ are no cycles.
 **Where a build job starts.** A build job starts from the repository's `HEAD`,
 unless it waits for build jobs (`--after`) or forks one (`--fork`): then its
 clone starts from that job's branch tip, so it holds the work it depends on
-before anyone lands it. With several such jobs, it starts from the tip that
+before anyone lands it. A read-only job in between passes its own
+dependencies on: a build after a review of a build starts from the first
+build's branch. With several such jobs, it starts from the tip that
 holds all the others; when their branches diverge, so no tip holds them all,
 the job fails at once and says so: land one into another, or queue it after
 one of them. Read-only jobs read your repository, as before.
@@ -83,7 +85,9 @@ the only saving: past the cache's lifetime (minutes), a fork reads the whole
 transcript again at full input price, so fork only for closely related work
 that needs that context, such as a fix to what JOB just built. **A review must
 never fork its builder**: it would inherit the builder's reasoning and blind
-spots, and independence is what a review is for. Queue reviews fresh.
+spots, and independence is what a review is for. Queue reviews fresh: relay
+refuses a read-only job that forks a build job (exit 5), from `queue add` or
+from a decision.
 
 A read-only job cannot change the repository, so the same brief, for the same
 harnesses, models and effort, at the same clean `HEAD` commit, asks the same
@@ -212,6 +216,10 @@ held_after_minutes = 60
 orchestrator_timeout_minutes = 20   # then the next handler
 command_timeout_seconds = 120
 allow_force = false                 # whether `held` may answer `force`
+max_decisions = 10                  # decisions that may act on one job
+
+[limits]
+job_ceiling_usd = 50                # required once any chain is set
 ```
 
 Every handler may also answer `defer`, which passes the decision to the next.
@@ -229,32 +237,58 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   last message, the job's earlier decisions and the JSON shape of each allowed
   action. `limits.checker` with `budget_growth` above 1 is shorthand for
   `cap = ["rule", "agent:checker"]` (see [checkpoints](#checkpoints)).
-- `command:<argv>`: runs the program (argv split on spaces) on the host with the
-  request as JSON on stdin, and reads one JSON object from stdout:
-  `{"action": "continue", "budget": 20, "why": "..."}` (`cost_usd` optional).
-  A malformed answer, a failure or a timeout is a `defer`.
+- `command:<argv>`: runs the program (argv split on spaces, with no quoting) on
+  the host with the request as JSON on stdin, and reads one JSON object from
+  stdout: `{"action": "continue", "budget": 20, "why": "..."}` (`cost_usd`
+  optional, never counted below zero). It runs without the variables
+  `sandbox.env_deny` names, is killed 5 s after `command_timeout_seconds` if it
+  ignores the TERM, and may print at most 64 KiB. A malformed answer, a failure
+  or a timeout is a `defer`.
 - `orchestrator`: parks the request on the bus. `relay decide list --wait`
   blocks on the doorbell until a request is waiting and prints it (`--json`:
   each with its full request); `relay decide answer ID --action A [--message M]
   [--budget USD] [--profile P] [--brief TEXT] [--why W] ...` answers it. Past
-  `orchestrator_timeout_minutes` the chain moves on. A runner waiting for an
+  `orchestrator_timeout_minutes` the chain moves on, and an answer recorded
+  later is refused (exit 4) and changes nothing. A runner waiting for an
   answer shows `checking` and holds no seat. `relay view status` lists waiting
   decisions in their own section, so a human sees them too.
 
-**Safety.** relay checks every action before acting: that the point allows it;
-that a budget is positive and keeps the job under `limits.job_ceiling_usd`;
-that a profile exists, its model is not banned, and its `max_running` and
-`max_per_day` have room; that a rerouted model is not banned; that `force` is
-allowed; that a fork's harness can fork. A handler's action that fails is
-recorded with the refusal and counts as `defer`; `decide answer` refuses it at
-once (exit 5). Hooks never land, push or delete: those stay with you.
+**Safety.** A worker's report and diff reach an `agent` or `command` handler,
+so a worker can try to talk its judge into more money. relay bounds what any
+answer can do, and checks every action before acting:
+
+- the point allows it, and fewer than `max_decisions` decisions have acted on
+  this job (counted afresh when it is queued anew);
+- a budget is positive, and the cap the next run will get (the one named, or
+  the job's cap when none is) keeps the job under `limits.job_ceiling_usd`,
+  which every `[hooks]` setup must name;
+- an `agent` or `command` grants at most the point's next cap (at `cap`, the
+  last cap times `budget_growth`; at `ended`, the job's cap); a larger budget is
+  cut to it. Only the orchestrator names more;
+- a `follow-up` of a job that is itself a follow-up comes only from the
+  orchestrator, so automated chains stop one deep;
+- a profile exists, its model is not banned, and its `max_running` and
+  `max_per_day` have room. A follow-up naming no profile takes its parent's,
+  and that profile's limits count it. A `reroute` naming none keeps the job's,
+  whose limits dispatch applies as before;
+- a rerouted harness is enabled and its model is not banned; `force` is allowed;
+- a fork's harness can fork, and a read-only job does not fork a build job.
+
+The prompt marks the worker's words as untrusted data and bounds them. A
+handler's action that fails is recorded with the refusal and counts as
+`defer`; `decide answer` refuses it at once (exit 5). A `held` decision acts
+only if the job is still queued as it was when asked, and one job is asked
+about at most once per queueing and once per five minutes. Hooks never land,
+push or delete: those stay with you.
 
 Every decision is on the bus: `decision-requested {id, job, point}`, `parked
-{id, until}` while it waits for the orchestrator, and one `decided {id,
-handler, action, why, cost_usd, refused}` per handler asked. A handler's spend
+{id, until}` while it waits for the orchestrator, `answered {id, action, why}`
+from `decide answer` (heard only before `until`), and one `decided {id,
+handler, action, why, cost_usd, refused}` per handler asked, written by the
+process that runs the chain, so the record shows what was carried out. A handler's spend
 counts toward its job's total. `relay view status --json` has every decision
 under `decisions`. A `follow-up` is queued like `queue add` (by default
-`--after` the job, named `<job>-next`), `requeue` starts the job afresh under
+`--after` the job, named `<job>-next`), with its `parent` and `depth`; `requeue` starts the job afresh under
 the profile with its branch kept, and `reroute` and `force` are queue events.
 
 ## Disk

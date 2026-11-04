@@ -156,14 +156,17 @@ fn keys(all: bool) -> [(&'static str, &'static str, Action); 4] {
 
 fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
     let rows = |n: usize| u16::try_from(n).unwrap_or(u16::MAX).saturating_add(2);
-    // The lists as tall as their rows; the selected job's pane takes the rest.
+    // The accounts as tall as their rows; the jobs at most two fifths of the window, scrolling with the
+    // selection inside it, so a long list never pushes the other panes out; the selected job's pane takes the rest.
+    let area = f.area();
+    let jobs_cap = (area.height.saturating_mul(2) / 5).max(rows(1));
     let [jobs, detail, accounts, help] = Layout::vertical([
-        Constraint::Max(rows(b.jobs.len().max(1))),
+        Constraint::Length(rows(b.jobs.len().max(1)).min(jobs_cap)),
         Constraint::Fill(1),
-        Constraint::Max(rows(b.accounts.len())),
+        Constraint::Length(rows(b.accounts.len())),
         Constraint::Length(1),
     ])
-    .areas(f.area());
+    .areas(area);
 
     let clock = jiff::Timestamp::now().strftime(" %H:%M:%S ").to_string();
     let jobs_block = Block::bordered()
@@ -412,6 +415,27 @@ mod tests {
         assert!(first.is_some_and(|l| l.contains("line 3")), "the pane starts three lines down");
         ui.apply(Action::Select(1), &b);
         assert_eq!((ui.selected.selected(), ui.scroll), (Some(1), 0));
+    }
+
+    #[test]
+    fn a_long_job_list_leaves_room_for_the_job_pane_and_every_account() {
+        let mut b = board();
+        b.jobs =
+            (0..60).map(|i| vec![format!("job-{i}"), "done".into(), "claude:a".into(), "Job number".into()]).collect();
+        b.statuses = vec![Status::Done; 60];
+        b.details = (0..60).map(|i| (format!(" job-{i} "), vec![format!("detail of job {i}")])).collect();
+        let mut ui = fresh();
+        ui.selected.select(Some(50));
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(72, 30)).unwrap();
+        t.draw(|f| draw(f, &b, &mut ui)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let frame: Vec<String> =
+            (0..buf.area.height).map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()).collect();
+        let at = |needle: &str| frame.iter().position(|l| l.contains(needle));
+        assert!(at("29% seven_day").is_some(), "the accounts pane is drawn whole");
+        assert!(at("detail of job 50").is_some(), "the selected job's pane shows");
+        assert!(at("job-50 ").is_some_and(|y| y < 12), "the selected job scrolls into the capped list");
+        assert!(at("job-0 ").is_none(), "the list scrolls rather than growing");
     }
 
     #[test]

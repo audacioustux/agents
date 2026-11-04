@@ -119,7 +119,11 @@ pub fn listed(world: &crate::world::World, all: bool) -> Vec<&crate::world::Job>
     let day_ago = now_micros().saturating_sub(24 * 3600 * 1_000_000);
     let mut jobs: Vec<_> =
         world.jobs.values().filter(|j| all || j.status.is_live() || j.ended_at.is_some_and(|t| t > day_ago)).collect();
-    jobs.sort_by_key(|j| j.created_at);
+    // Live jobs first, oldest first; then ended ones, the latest first: what is running stays on top of a long list.
+    jobs.sort_by_key(|j| {
+        let live = j.status.is_live();
+        (!live, if live { j.created_at } else { 0 }, std::cmp::Reverse(j.ended_at))
+    });
     jobs
 }
 

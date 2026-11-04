@@ -232,7 +232,9 @@ impl Add {
             })?;
         }
         // The brief reaches the session on stdin or as a file, never in argv (/proc/<pid>/cmdline is public).
-        std::io::Write::write_all(&mut Ctx::append_private(&ctx.job_file(&name, "prompt.md"))?, brief.as_bytes())?;
+        // A name whose job was dequeued starts clean: its files are the old job's, and the logs append.
+        ctx.wipe_job_files(&name)?;
+        Ctx::write_private(&ctx.job_file(&name, "prompt.md"), brief.as_bytes())?;
         let task =
             self.task.unwrap_or_else(|| brief.trim().lines().next().unwrap_or_default().chars().take(80).collect());
         Ok(QueueEvent::Queued {

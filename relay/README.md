@@ -122,7 +122,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue add NAME ... --fork JOB` | Start as a fork of JOB's session, from its branch when it is a build job ([forks](#what-a-job-is)) |
 | `relay decide list [--wait [--timeout S]]` / `relay decide answer ID --action A ...` | Decisions waiting for the orchestrator / answer one ([hooks](#hooks)) |
 | `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
-| `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one |
+| `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one. A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all]` | Jobs and accounts. With `--json`, the whole folded state |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends |
 | `relay view watch [--all]` | The status live in a terminal UI (ratatui): jobs, the selected job's latest output and answer, and accounts, redrawn as events land in any project. Click a job to select it, scroll a pane with the wheel, click a key hint; or ↑↓, PgUp/PgDn, `a` older jobs, `q` quit. A reinstalled relay takes the window over by itself (hold Shift to select text) |

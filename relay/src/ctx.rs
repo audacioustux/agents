@@ -184,6 +184,41 @@ impl Ctx {
         self.scratch.join(job)
     }
 
+    /// Removes everything a job left under its name: each `<job>.*` file in the jobs directory (prompt,
+    /// logs, results, decision requests, the scratch directory `<job>.d`) and its `/tmp`. Job names hold no
+    /// dots, so the `<job>.` prefix is exactly this job's. Used when a name is cleaned away and when it is
+    /// added again: a new job never inherits, or appends to, a file of the one that held the name before.
+    pub fn wipe_job_files(&self, job: &str) -> Result<()> {
+        let prefix = format!("{job}.");
+        let gone = |r: std::io::Result<()>| {
+            r.or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
+        };
+        for entry in std::fs::read_dir(&self.jobs).with_context(|| format!("reading {}", self.jobs.display()))? {
+            let entry = entry?;
+            if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+                continue;
+            }
+            let path = entry.path();
+            let removed =
+                if entry.file_type()?.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+            gone(removed).with_context(|| format!("removing {}", path.display()))?;
+        }
+        let tmp = self.job_tmp(job);
+        gone(std::fs::remove_dir_all(&tmp)).with_context(|| format!("removing {}", tmp.display()))
+    }
+
+    /// Writes a file readable by its owner only, replacing what was there.
+    pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        std::io::Write::write_all(&mut file, bytes).with_context(|| format!("writing {}", path.display()))
+    }
+
     /// Opens a log for appending, readable by its owner only.
     pub fn append_private(path: &Path) -> Result<File> {
         std::fs::OpenOptions::new()

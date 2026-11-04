@@ -109,20 +109,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 }
                 std::fs::remove_dir_all(dir).with_context(|| format!("removing {}", dir.display()))?;
             }
-            for ext in [
-                "prompt.md",
-                "log.ndjson",
-                "log.ndjson.gz",
-                "stderr.log",
-                "result.md",
-                "runner.log",
-                "check.ndjson",
-                "check-stderr.log",
-            ] {
-                let _ = std::fs::remove_file(ctx.job_file(&name, ext));
-            }
-            let _ = std::fs::remove_dir_all(ctx.job_scratch(&name));
-            let _ = std::fs::remove_dir_all(ctx.job_tmp(&name));
+            ctx.wipe_job_files(&name)?;
             // The ref a review read its branch by is the review's own, and goes with it.
             let _ = Ctx::git(&ctx.cfg.repo).args(["update-ref", "-d", &format!("refs/relay/review/{name}")]).output();
             ctx.port(&Source(())).emit(LandEvent::Forgotten { job: name.clone() })?;

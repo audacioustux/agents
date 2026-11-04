@@ -805,6 +805,57 @@ fn a_run_end_is_decided_by_the_rule_or_an_agent_that_queues_a_follow_up() {
 }
 
 #[test]
+fn a_name_added_again_after_a_dequeue_starts_from_a_clean_slate() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("reuse", false);
+    configure(&env, "job_ceiling_usd = 5.0\n", "[hooks]\nended = [\"rule\"]\n");
+    claude_account(&env.home, "a", 10, false);
+    // A held job keeps the name's first job queued behind it.
+    std::fs::write(env.home.join(".claude.a/hold"), "").unwrap();
+    ok(&relay(&env, &["queue", "add", "blocker", "--text", "[status-done] Hold the line."]), "blocker");
+    until(&env, "blocker", "running");
+    let prompt = records(&env, "reuse", "prompt.md");
+    let mut want = String::new();
+    for round in 1..=3 {
+        ok(
+            &relay(&env, &["queue", "add", "reuse", "--text", &format!("OLD brief {round}"), "--after", "blocker"]),
+            "add",
+        );
+        assert_eq!(std::fs::read_to_string(&prompt).unwrap(), format!("OLD brief {round}"));
+        ok(&relay(&env, &["queue", "dequeue", "reuse"]), "dequeue");
+    }
+    // What the dequeued job's name may have gathered besides its brief: a held-job decision and its log.
+    for stale in ["decide.log", "decision.reuse-old.json", "runner.log"] {
+        std::fs::write(records(&env, "reuse", stale), "OLD brief stale\n").unwrap();
+    }
+    want.push_str("[status-done] NEW brief");
+    ok(&relay(&env, &["queue", "add", "reuse", "--text", &want]), "add again");
+    assert_eq!(std::fs::read_to_string(&prompt).unwrap(), want, "the brief replaced the old one");
+    for stale in ["decide.log", "decision.reuse-old.json", "runner.log"] {
+        assert!(!records(&env, "reuse", stale).exists(), "{stale} of the old job is gone");
+    }
+    std::fs::remove_file(env.home.join(".claude.a/hold")).unwrap();
+    assert_eq!(wait_for(&env, "reuse")["status"], "done");
+    assert_eq!(std::fs::read_to_string(&prompt).unwrap(), want);
+    let seen = prompts(&env, "a");
+    assert!(seen.contains("NEW brief") && !seen.contains("OLD brief"), "the session got only the new brief: {seen}");
+    let d = &decisions(&env, "reuse")[0];
+    let file = std::fs::read_dir(records(&env, "reuse", "x").parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            let n = p.file_name().unwrap().to_string_lossy().into_owned();
+            n.starts_with("reuse.decision.") && n.contains(d["id"].as_str().unwrap())
+        })
+        .expect("the decision request is stored");
+    let req: serde_json::Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    assert_eq!(req["brief"], want.as_str(), "the decision brief equals the stored prompt");
+    assert_eq!(wait_for(&env, "blocker")["status"], "done");
+}
+
+#[test]
 fn the_orchestrator_answers_a_parked_decision_and_its_silence_falls_through() {
     if !have_bwrap() {
         return;

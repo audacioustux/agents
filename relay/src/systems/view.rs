@@ -114,17 +114,28 @@ fn fit(text: &str, width: Option<usize>) -> String {
     text.lines().map(cut).collect::<Vec<_>>().join("\n")
 }
 
-/// The jobs worth showing, oldest first: live ones, those ended within a day, or all.
+/// The jobs worth showing (live ones, those ended within a day, or all), in board order.
 pub fn listed(world: &crate::world::World, all: bool) -> Vec<&crate::world::Job> {
     let day_ago = now_micros().saturating_sub(24 * 3600 * 1_000_000);
     let mut jobs: Vec<_> =
         world.jobs.values().filter(|j| all || j.status.is_live() || j.ended_at.is_some_and(|t| t > day_ago)).collect();
-    // Live jobs first, oldest first; then ended ones, the latest first: what is running stays on top of a long list.
-    jobs.sort_by_key(|j| {
-        let live = j.status.is_live();
-        (!live, if live { j.created_at } else { 0 }, std::cmp::Reverse(j.ended_at))
-    });
+    jobs.sort_by_key(|j| board_order(j));
     jobs
+}
+
+/// Where a job sorts on the board: by status (running, checking, queued, failed, done, stopped), and
+/// within one status by time, the latest first (when it ended, else started, else was queued).
+fn board_order(j: &Job) -> (u8, std::cmp::Reverse<u64>) {
+    use crate::world::Status;
+    let rank = match j.status {
+        Status::Running => 0,
+        Status::Checking => 1,
+        Status::Queued => 2,
+        Status::Failed => 3,
+        Status::Done => 4,
+        Status::Stopped => 5,
+    };
+    (rank, std::cmp::Reverse(j.ended_at.or(j.started_at).unwrap_or(j.created_at)))
 }
 
 /// What a job is asked to run as: its profile, else the model it names, then its effort.
@@ -361,7 +372,31 @@ fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
 
 #[cfg(test)]
 mod tests {
-    use super::{answer_in, fit, table};
+    use super::{answer_in, board_order, fit, table};
+
+    #[test]
+    fn the_board_sorts_by_status_then_the_latest_first() {
+        use crate::world::{Job, Status};
+        let job = |name: &str, status, created_at, ended_at| Job {
+            name: name.into(),
+            status,
+            created_at,
+            ended_at,
+            ..Job::default()
+        };
+        let mut jobs = [
+            job("old-done", Status::Done, 1, Some(2)),
+            job("queued", Status::Queued, 5, None),
+            job("new-done", Status::Done, 3, Some(9)),
+            job("failed", Status::Failed, 4, Some(6)),
+            job("running", Status::Running, 2, None),
+            job("stopped", Status::Stopped, 7, Some(8)),
+            job("older-queued", Status::Queued, 1, None),
+        ];
+        jobs.sort_by_key(board_order);
+        let names: Vec<&str> = jobs.iter().map(|j| j.name.as_str()).collect();
+        assert_eq!(names, ["running", "queued", "older-queued", "failed", "new-done", "old-done", "stopped"]);
+    }
 
     #[test]
     fn the_last_answer_is_found_in_a_stream() {

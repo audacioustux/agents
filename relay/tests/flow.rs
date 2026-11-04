@@ -2173,3 +2173,86 @@ fn a_jobs_tmp_is_a_directory_on_disk_that_is_counted_and_collected_and_hidden_di
     assert!(out_of(&out).contains("scratch/look"), "{}", out_of(&out));
     assert!(!scratch.exists(), "the scratch directory is gone");
 }
+
+/// Growth on, and a checker on omp: with no omp account signed in, the checker has no seat to take.
+fn checker_on_omp(env: &Env, wait_minutes: f64) {
+    configure(
+        env,
+        "budget_growth = 2.0\njob_ceiling_usd = 1.0\nchecker = { harness = \"omp\", budget_usd = 0.5 }\n",
+        &format!("[hooks]\nseat_wait_minutes = {wait_minutes}\n"),
+    );
+}
+
+#[test]
+fn a_run_that_ended_done_over_its_budget_ends_done_with_no_checker_seat_and_its_review_starts() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("overran", false);
+    checker_on_omp(&env, 0.02);
+    claude_account(&env.home, "a", 10, false);
+    // $0.02 against a $0.015 cap, after its FINAL said `status: done`: there is nothing left to authorize.
+    ok(
+        &relay(&env, &["queue", "add", "build", "--text", "[status-done] Make a change.", "--budget", "0.015"]),
+        "queue",
+    );
+    let out =
+        relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "[verdict-accept] Review the change."]);
+    ok(&out, "queue the review");
+    let j = wait_for(&env, "build");
+    assert_eq!(j["status"], "done", "{j}");
+    assert_eq!(j["attempts"], 1, "{j}");
+    assert_eq!(j["checkpoints"].as_array().map(Vec::len), Some(0), "no checkpoint was asked: {j}");
+    assert_eq!(j["overran"], serde_json::json!([0.02, 0.015]), "{j}");
+    let overran: Vec<_> = events(&env).into_iter().filter(|e| e["type"] == "overran").collect();
+    assert_eq!(overran.len(), 1, "{overran:?}");
+    assert_eq!((overran[0]["job"].as_str(), overran[0]["spent_usd"].as_f64()), (Some("build"), Some(0.02)));
+    assert!(board(&env).contains("over budget: $0.02"), "{}", board(&env));
+    assert!(result(&env, "build").contains("over budget: spent $0.02"), "{}", result(&env, "build"));
+    // The chained review waited on a done job, and now runs.
+    let r = wait_for(&env, "rev");
+    assert_eq!(r["status"], "done", "{r}");
+    assert!(job(&env, "build")["verdicts"][0]["verdict"] == "accept", "{}", job(&env, "build"));
+}
+
+#[test]
+fn a_checkpoint_that_needs_a_checker_waits_for_a_seat_and_goes_on_when_one_frees() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("seat-wait", true);
+    checker_on_omp(&env, 2.0);
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "grow", "--text", "Make a change.", "--budget", "0.015"]), "queue");
+    until(&env, "grow", "checking");
+    // No omp account is signed in yet: the job waits at its checkpoint, not failed.
+    std::thread::sleep(Duration::from_secs(5));
+    let j = job(&env, "grow");
+    assert_eq!(j["status"], "checking", "still waiting for a seat: {j}");
+    assert_eq!(j["checkpoints"].as_array().map(Vec::len), Some(0), "{j}");
+    // A seat appears (its reading is taken for the wait), and the check goes on.
+    omp_default(&env.home, 20, false);
+    let j = wait_for(&env, "grow");
+    assert_eq!(j["status"], "done", "{j}");
+    let c = &j["checkpoints"][0];
+    assert_eq!((c["verdict"].as_str(), c["checker"].as_str()), (Some("continue"), Some("omp:default")), "{j}");
+    assert_eq!(std::fs::read_to_string(env.home.join(".omp/checks")).unwrap_or_default().lines().count(), 1);
+}
+
+#[test]
+fn a_checkpoint_that_waits_in_vain_for_a_seat_stops_and_names_the_bound() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("seat-timeout", false);
+    checker_on_omp(&env, 0.03);
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "grow", "--text", "Make a change.", "--budget", "0.015"]), "queue");
+    let j = wait_for(&env, "grow");
+    assert_eq!(j["status"], "failed", "{j}");
+    let c = &j["checkpoints"][0];
+    assert_eq!(c["verdict"], "stop", "{j}");
+    let why = c["why"].as_str().unwrap_or_default();
+    assert!(why.contains("hooks.seat_wait_minutes = 0.03"), "the reason names the bound: {why}");
+    assert!(j["reason"].as_str().unwrap_or_default().contains("hooks.seat_wait_minutes"), "{j}");
+}

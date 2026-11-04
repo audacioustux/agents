@@ -1,6 +1,6 @@
 //! session: runs one dispatched job on its account's harness and reports
 //! what happened. Emits: cloned, started, identified, rate, limited,
-//! signed-out, follow-up, requeued, checking, checked, bar-checked, reviewed, ended. One process per running job, started by
+//! signed-out, follow-up, requeued, overran, checking, checked, bar-checked, reviewed, ended. One process per running job, started by
 //! dispatch. Nothing here names a harness: the account's harness builds the
 //! command and reads the output, and the limits are enforced here for all.
 
@@ -25,13 +25,14 @@ use crate::os;
 use crate::sandbox::{self, Mounts};
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request, Reviewing};
-use crate::world::{Job, Status, World};
+use crate::systems::dispatch;
+use crate::world::{Job, World};
 
 mod bar;
 mod end;
 mod review;
 
-use end::at_end;
+use end::{at_end, final_status_done};
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
@@ -213,7 +214,17 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         reviewing: launch.reviewing.as_ref(),
         model: seat.model.as_deref(),
     };
-    match verdict(&report, ending, &ctx.cfg.session.final_marker, job.readonly(), now_s()) {
+    let marker = &ctx.cfg.session.final_marker;
+    match verdict(&report, ending, marker, job.readonly(), now_s()) {
+        // A cap authorizes more spend; a run that has said `status: done` needs none. It ends as its
+        // report says, the overrun recorded, and the acceptance check and the `ended` chain judge it as usual.
+        Verdict::Budget if report.ended && final_status_done(&report.answer, marker) => {
+            let (spent_usd, cap_usd) = (job.cost_usd + report.cost_usd, job.budget_usd);
+            port(ctx, job).emit(SessionEvent::Overran { job: job.name.clone(), spent_usd, cap_usd })?;
+            let (outcome, _) = conclude(ctx, job, &seat.key, Verdict::Done, now_s())?;
+            let note = format!("finished ${spent_usd:.2} against a ${cap_usd:.2} budget");
+            at_end(ctx, job, seat.home, &ran, (outcome, Some(note)), ending.silent)
+        }
         Verdict::Budget => at_cap(ctx, job, &ran),
         v => {
             let ended = conclude(ctx, job, &seat.key, v, now_s())?;
@@ -442,9 +453,10 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
         cost_usd: d.cost_usd,
         decision: Some(d.id),
     };
+    let stopped = if check.why.is_empty() { String::new() } else { format!(" ({})", check.why) };
     port.emit(SessionEvent::Checked { job: job.name.clone(), check })?;
     Ok(if next.is_none() {
-        (Outcome::Failed, Some("waits for a human at its checkpoint; resume with --budget to go on".into()))
+        (Outcome::Failed, Some(format!("waits for a human at its checkpoint{stopped}; resume with --budget to go on")))
     } else {
         (Outcome::Retry, None)
     })
@@ -452,14 +464,18 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
 
 /// A read-only session for a decision on `agent`'s harness: the account it
 /// ran on, what it cost, and its answer or why there is none.
+/// With `patient` it first waits for a seat, up to `hooks.seat_wait_minutes`.
 pub fn consult(
     ctx: &Ctx,
     job: &Job,
     agent: &decide::Agent,
     prompt: &str,
+    patient: bool,
 ) -> (Option<String>, f64, Result<String, String>) {
-    let Some(home) = checker_home(ctx, job, &agent.harness, agent.model.as_deref()) else {
-        return (None, 0.0, Err(format!("no {} account is free for agent:{}", agent.harness, agent.label)));
+    let wait = if patient { ctx.cfg.hooks.seat_wait_minutes } else { 0.0 };
+    let home = match await_seat(ctx, job, agent, wait) {
+        Ok(home) => home,
+        Err(why) => return (None, 0.0, Err(why)),
     };
     let run = || -> Result<(Report, Ending)> {
         let harness = harness_of(&home);
@@ -510,13 +526,55 @@ pub fn consult(
     (Some(home.key()), report.cost_usd, answer)
 }
 
+/// How often a wait for a seat looks again.
+const SEAT_POLL: Duration = Duration::from_secs(2);
+/// The least between two quota readings a wait for a seat asks for.
+const SEAT_REREAD: Duration = Duration::from_secs(30);
+
+/// A seat for `agent`'s session: waits up to `minutes` for one to free, asking for a fresh quota
+/// reading of any account whose reading is old (dispatch only takes readings for queued jobs, and a
+/// checkpoint is not one). Nothing else is held meanwhile but the worker's own seat.
+fn await_seat(ctx: &Ctx, job: &Job, agent: &decide::Agent, minutes: f64) -> Result<Home, String> {
+    let wait = Duration::from_secs_f64(minutes.max(0.0) * 60.0);
+    let started = Instant::now();
+    let mut asked: Option<Instant> = None;
+    loop {
+        let (home, stale) = checker_home(ctx, job, &agent.harness, agent.model.as_deref());
+        if let Some(home) = home {
+            return Ok(home);
+        }
+        if stale && asked.is_none_or(|t| t.elapsed() >= SEAT_REREAD) {
+            asked = Some(Instant::now());
+            // `quota refresh` holds its own role, so overlapping requests start one reading.
+            let _ = ctx.spawn_self(&["quota", "refresh", "--stale"], &ctx.state.join("quota.log"));
+        }
+        let left = wait.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            let (harness, label) = (&agent.harness, &agent.label);
+            return Err(if wait.is_zero() {
+                format!("no {harness} account is free for agent:{label}")
+            } else {
+                format!("no {harness} account became free for agent:{label} within hooks.seat_wait_minutes = {minutes}")
+            });
+        }
+        std::thread::sleep(left.min(SEAT_POLL));
+    }
+}
+
 /// An account of `harness` that may take a session for `model`: another
 /// than the worker's and idle where there is one, so no worker grades itself.
-fn checker_home(ctx: &Ctx, job: &Job, harness: &str, model: Option<&str>) -> Option<Home> {
+/// Whether it is idle is the dispatcher's count: the live sessions of every
+/// project against `limits.per_account`, homes of one sign-in sharing a seat budget.
+/// Also whether some account of the harness has a quota reading that is old, so none can be trusted.
+fn checker_home(ctx: &Ctx, job: &Job, harness: &str, model: Option<&str>) -> (Option<Home>, bool) {
     let model = model.map(str::to_owned).or_else(|| ctx.cfg.harness(harness).model);
-    let world = ctx.world().ok()?;
+    let Ok(world) = ctx.world() else { return (None, false) };
     let now = now_micros();
     let found = accounts::discover(&ctx.cfg);
+    let stale = found.iter().filter(|h| h.harness == harness).any(|h| {
+        let state = world.accounts.get(&h.key());
+        !state.is_some_and(|s| s.unsigned) && accounts::due(harness_of(h), state, now)
+    });
     // The same judgment the dispatcher makes: a check never spends past an
     // account's floor or on a reading it cannot trust.
     let usable: Vec<&Home> = found
@@ -524,13 +582,20 @@ fn checker_home(ctx: &Ctx, job: &Job, harness: &str, model: Option<&str>) -> Opt
         .filter(|h| h.harness == harness)
         .filter(|h| accounts::fit(h, world.accounts.get(&h.key()), model.as_deref(), &ctx.cfg.limits, now).is_ok())
         .collect();
+    let twins = accounts::twins(&found);
+    let mut load: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut worlds = ctx.neighbours();
+    worlds.push(world);
+    for (account, n) in dispatch::seats_taken(&worlds) {
+        *load.entry(accounts::seat(&twins, &account).to_owned()).or_default() += n;
+    }
     let worker = |h: &&&Home| job.account.as_deref() == Some(h.key().as_str());
-    let busy = |h: &&&Home| {
-        world.jobs.values().any(|j| j.status == Status::Running && j.account.as_deref() == Some(h.key().as_str()))
-    };
+    let busy =
+        |h: &&&Home| load.get(accounts::seat(&twins, &h.key())).copied().unwrap_or(0) >= ctx.cfg.limits.per_account;
     // Another idle account, else the worker's own, whose seat its ended run
     // just freed; never a seat another job holds.
-    usable.iter().find(|h| !worker(h) && !busy(h)).or_else(|| usable.iter().find(worker)).map(|h| (*h).clone())
+    let home = usable.iter().find(|h| !worker(h) && !busy(h)).or_else(|| usable.iter().find(worker));
+    (home.map(|h| (*h).clone()), stale)
 }
 
 /// The session to resume, when the job has one its history can follow here:

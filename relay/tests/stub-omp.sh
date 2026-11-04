@@ -3,6 +3,7 @@
 # ~/.omp, or ~/.omp/profiles/$OMP_PROFILE; files there switch behaviour:
 #   usage    printed for `omp usage`
 #   limited  every session there hits a rate limit
+#   checks   appended to by every progress check run there (which answers `continue`)
 set -eu
 root=$HOME/.omp
 [ -n "${OMP_PROFILE:-}" ] && root=$HOME/.omp/profiles/$OMP_PROFILE
@@ -33,5 +34,11 @@ if [ -f "$root/limited" ]; then
   exit 1
 fi
 turns=$(wc -l <"$dir/$id.jsonl" | tr -d ' ')
+if grep -q "relay's progress check" "$prompt"; then
+  echo check >>"$root/checks"
+  printf '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","usage":{"cost":{"total":0.01}},"content":[{"type":"text","text":"{\\"verdict\\": \\"continue\\", \\"why\\": \\"stub judged\\", \\"message\\": \\"go on\\"}"}]}}\n'
+  echo '{"type":"agent_end"}'
+  exit 0
+fi
 printf '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","usage":{"cost":{"total":0.01}},"content":[{"type":"text","text":"ran on omp:%s with %s transcript turns\\nFINAL ok"}]}}\n' "${OMP_PROFILE:-default}" "$turns"
 echo '{"type":"agent_end"}'

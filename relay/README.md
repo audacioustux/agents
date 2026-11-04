@@ -229,6 +229,7 @@ held  = ["rule"]
 disk  = ["orchestrator"]
 held_after_minutes = 60
 orchestrator_timeout_minutes = 20   # then the next handler
+seat_wait_minutes = 30              # an `agent:` handler waits this long for an account, then defers
 command_timeout_seconds = 120
 allow_force = false                 # whether `held` may answer `force`
 max_decisions = 10                  # decisions that may act on one job
@@ -251,7 +252,14 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   Otherwise it defers. A job that declares any of these has an `ended` chain
   of `["rule"]` when `hooks.ended` is unset, so it costs nothing to leave unset.
 - `agent:<profile>`: a short read-only session on that profile's harness, model
-  and budget, on another account than the worker's where one is free. Its prompt
+  and budget, on another account than the worker's where one is free. A seat is
+  free when the account has room under `limits.per_account` (counting every
+  project's sessions) and a quota reading that is fresh and above the floor; the
+  worker's own account serves when no other does. At `cap` and `ended` the
+  handler waits up to `hooks.seat_wait_minutes` for a seat (taking a new quota
+  reading where one is old), then defers with a reason that names that bound;
+  at `held` and `disk` it does not wait, since neither can: a held job is asked
+  again later, and a disk nearly full stops the job (resumable) at once. Its prompt
   holds the point, the brief, the branch since the last checkpoint, the worker's
   last message, the job's earlier decisions and the JSON shape of each allowed
   action. `limits.checker` with `budget_growth` above 1 is shorthand for
@@ -665,6 +673,20 @@ times the growth; on `stop` the job is left `failed` for you. No new commit and
 no changed file since the last checkpoint is a `stop` that asks no model, and a
 next cap that would take the job past `job_ceiling_usd` always waits for you.
 Read-only jobs, and any job without growth, stop at their cap as before.
+
+A checkpoint that needs a checker waits for one. If no account can take the
+check (every account is busy, at its floor or without a fresh reading), the job
+stays in `checking` for up to `hooks.seat_wait_minutes` (default 30) and goes on
+as soon as a seat frees. Only when that wait runs out does it stop, and its
+checkpoint's `why` and the job's reason say so (`no claude account became free
+for agent:checker within hooks.seat_wait_minutes = 30`).
+
+A run that reaches its cap *after* it has ended with its FINAL section saying
+`status: done` has nothing for a checkpoint to authorize: no more spend is
+asked for. It ends `done` whether or not growth is on, with the overrun recorded
+as an `overran` event, on the board (`over budget: $39.27 of $30.00`) and in
+`view result`; its profile's acceptance check and the `ended` chain run as for
+any other done run, so a chained `--review-of` job starts.
 `relay view status` and `view result` show the latest checkpoint
 (`checkpoint 2: continue → $30.00`); `--json` has all of them under
 `checkpoints`. `relay queue resume NAME --budget X --message M` works from
@@ -781,7 +803,7 @@ own process, and owns one output port:
 | --- | --- | --- |
 | queue | takes work in (under a profile, if asked), withdraws it, stops it, releases it from its `--after` jobs, reroutes or forces a held one | queued, released, resumed, rerouted, forced, dequeued, stop-requested |
 | dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
-| session | runs one job, carries out the decisions at its cap and its end, runs its acceptance check, fetches a review's branch, measures its clone and stops it at the disk ceiling, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, requeued, checking, checked, bar-checked, reviewed, disk, ended |
+| session | runs one job, carries out the decisions at its cap and its end, runs its acceptance check, fetches a review's branch, measures its clone and stops it at the disk ceiling, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, requeued, overran, checking, checked, bar-checked, reviewed, disk, ended |
 | decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); takes the orchestrator's answers | decision-requested, parked, decided |
 | quota | account readings and switches | reading, unreadable, signed-out, account-enabled |
 | land | brings branches back; cleans up, and gc | forgotten, collected |

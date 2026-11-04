@@ -671,8 +671,16 @@ pub fn decide(
     })
 }
 
+/// Whether an `agent:` handler at `point` waits for a seat. A cap's stop is a job failed over a
+/// seat, and an end judged by nobody is a run left unexamined; a held job is asked again later,
+/// and a disk nearly full cannot wait: its stop is resumable, its fallback the safe side.
+fn waits_for_seat(point: Point) -> bool {
+    matches!(point, Point::Cap | Point::Ended)
+}
+
 fn ask_agent(ctx: &Ctx, job: &Job, a: &Agent, req: &Request) -> Said {
-    let (account, cost_usd, answer) = crate::systems::session::consult(ctx, job, a, &prompt(req));
+    let (account, cost_usd, answer) =
+        crate::systems::session::consult(ctx, job, a, &prompt(req), waits_for_seat(req.point()));
     match answer.and_then(|text| parse_answer(&text).ok_or_else(|| format!("agent:{} gave no action", a.label))) {
         Ok((action, why)) => Said { action, why, cost_usd, account },
         Err(why) => Said { cost_usd, account, ..Said::defer(why) },
@@ -1004,6 +1012,12 @@ mod tests {
         assert_eq!(Handler::parse("command:./decide --fast", &cfg).unwrap().label(), "command:./decide --fast");
         assert!(Handler::parse("agent:nope", &cfg).is_err());
         assert!(Handler::parse("magic", &cfg).is_err());
+    }
+
+    #[test]
+    fn only_a_cap_and_an_end_wait_for_a_seat() {
+        assert!(waits_for_seat(Point::Cap) && waits_for_seat(Point::Ended));
+        assert!(!waits_for_seat(Point::Held) && !waits_for_seat(Point::Disk));
     }
 
     #[test]

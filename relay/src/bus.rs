@@ -194,6 +194,13 @@ pub enum SessionEvent {
         effort: Option<String>,
         budget_usd: f64,
     },
+    /// A run that had already ended with its final report, `status: done`, spent past its cap
+    /// before the cap could stop it. Nothing more is asked of anyone: the job ends as its report says.
+    Overran {
+        job: String,
+        spent_usd: f64,
+        cap_usd: f64,
+    },
     /// The run reached its cap and its progress is being checked before more is spent.
     Checking {
         job: String,
@@ -716,6 +723,7 @@ impl SessionEvent {
             | Self::Identified { job, .. }
             | Self::FollowUp { job, .. }
             | Self::Requeued { job, .. }
+            | Self::Overran { job, .. }
             | Self::Checking { job, .. }
             | Self::Checked { job, .. }
             | Self::BarChecked { job, .. }

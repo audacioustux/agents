@@ -154,7 +154,7 @@ pub fn job_cells(cfg: &Config, world: &World, j: &Job, now: u64) -> Vec<String> 
     let held = if queued && waits.is_none() { profile_hold(cfg, world, j, now) } else { None };
     let reason = waits.or(held).or_else(|| j.reason.clone()).map_or(String::new(), |r| format!("  [{r}]"));
     let check = j.checkpoints.last().map_or(String::new(), |c| format!("  {}", c.summary()));
-    let check = format!("{check}{}", declared(j));
+    let check = format!("{check}{}{}", overran(j), declared(j));
     vec![
         j.name.clone(),
         j.status.as_str().to_owned(),
@@ -165,6 +165,11 @@ pub fn job_cells(cfg: &Config, world: &World, j: &Job, now: u64) -> Vec<String> 
         j.disk_bytes.filter(|_| j.status.has_runner()).map_or_else(String::new, crate::os::size_str),
         format!("{}{reason}{check}{}", j.task, collected(j)),
     ]
+}
+
+/// How far past its cap the job's finished run spent, for its board row.
+fn overran(j: &Job) -> String {
+    j.overran.map_or(String::new(), |(spent, cap)| format!("  over budget: ${spent:.2} of ${cap:.2}"))
 }
 
 /// The latest acceptance check and the latest review of a job, for its board row.
@@ -287,6 +292,9 @@ fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
         j.turns,
         j.attempts
     );
+    if let Some((spent, cap)) = j.overran {
+        out!("over budget: spent ${spent:.2} of a ${cap:.2} cap, but its report says status: done");
+    }
     if let Some(c) = j.checkpoints.last() {
         out!("{}", c.summary());
         if c.next_cap_usd.is_some() && !c.why.is_empty() {

@@ -100,6 +100,7 @@ env_shell = []
 # disk = ["orchestrator"]            # default (unset): stop the job, resumable after cleanup
 held_after_minutes = 60.0            # a queued job held this long by a limit reaches `held`
 orchestrator_timeout_minutes = 20.0  # then the next handler decides
+seat_wait_minutes = 30.0             # how long an `agent:` handler waits for an account to take its session
 command_timeout_seconds = 120        # a `command:` handler's bound, and an acceptance check's
 allow_force = false                  # whether a `held` decision may start a job past its profile's limits
 max_decisions = 10                   # decisions that may act on one job before every action is refused

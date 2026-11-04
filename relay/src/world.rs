@@ -97,6 +97,9 @@ pub struct Job {
     /// Every checkpoint at a spend cap, oldest first.
     #[serde(default)]
     pub checkpoints: Vec<bus::Check>,
+    /// What the latest run spent past its cap after it had finished, as `(spent, cap)` in USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overran: Option<(f64, f64)>,
     /// The session it starts as a fork of.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<Fork>,
@@ -686,6 +689,7 @@ impl World {
                     j.session_id = Some(session_id.clone());
                     j.message = None;
                     j.forced = false;
+                    j.overran = None;
                 }
             }
             SessionEvent::Disk { job, bytes } => {
@@ -718,6 +722,11 @@ impl World {
                     (j.session_id, j.transcript_account, j.message, j.fork) = (None, None, None, None);
                     (j.follow_ups, j.reruns) = (0, 0);
                     j.failed_ends = 0;
+                }
+            }
+            SessionEvent::Overran { job, spent_usd, cap_usd } => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    j.overran = Some((*spent_usd, *cap_usd));
                 }
             }
             SessionEvent::BarChecked { .. } | SessionEvent::Reviewed { .. } => self.apply_judgement(e),

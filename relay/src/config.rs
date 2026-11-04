@@ -258,6 +258,9 @@ pub struct Hooks {
     pub held_after_minutes: f64,
     /// How long an `orchestrator` handler waits for `relay decide answer` before the next handler.
     pub orchestrator_timeout_minutes: f64,
+    /// How long an `agent:` handler waits for an account to take its session (a free seat, a usable
+    /// reading) before it defers to the next handler. A cap checkpoint that defers stops the job.
+    pub seat_wait_minutes: f64,
     /// How long a `command:` handler may run.
     pub command_timeout_seconds: u64,
     /// Whether a `held` decision may `force` a job past its profile's limits.
@@ -283,6 +286,7 @@ impl Default for Hooks {
             disk: None,
             held_after_minutes: 60.0,
             orchestrator_timeout_minutes: 20.0,
+            seat_wait_minutes: 30.0,
             command_timeout_seconds: 120,
             allow_force: false,
             max_decisions: 10,
@@ -709,6 +713,10 @@ impl Config {
             "[hooks] needs limits.job_ceiling_usd: a decision may spend more only up to it"
         );
         ensure!(h.orchestrator_timeout_minutes >= 0.0, "hooks.orchestrator_timeout_minutes must not be negative");
+        ensure!(
+            h.seat_wait_minutes.is_finite() && h.seat_wait_minutes >= 0.0,
+            "hooks.seat_wait_minutes must not be negative"
+        );
         self.validate_disk()?;
         regex::Regex::new(&self.sandbox.env_deny).context("sandbox.env_deny")?;
         for p in self.sandbox.hide_home.iter().chain(&self.sandbox.caches) {

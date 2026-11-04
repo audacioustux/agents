@@ -5,4 +5,5 @@ and the deployed stacks.
 
 Start at [`.agents/skills/README.md`](.agents/skills/README.md).
 
-[`lanes/`](lanes/README.md) is a runner for parallel, non-interactive Claude Code and omp agent sessions.
+[`relay/`](relay/README.md) queues coding-agent tasks for any repository and runs them as sandboxed,
+headless Claude Code sessions on whichever account has quota to spare. It replaces `lanes`.

@@ -1,0 +1,118 @@
+# relay.toml: put it at the root of the repository sessions work on.
+# Every key except `name` is optional; the values shown are the defaults.
+
+# Names this project's queue. State lives under $XDG_STATE_HOME/relay/<name>,
+# clones under $XDG_DATA_HOME/relay/<name>/clones.
+name = "myproject"
+# The repository, relative to this file.
+repo = "."
+
+[limits]
+max_running = 2          # sessions at once, over all accounts of all harnesses
+per_account = 1          # sessions at once on one account (omp: on one provider of it)
+floor = 0.9              # an account at this utilization of any meter that governs the job takes no new session
+# floor_near_reset = { within_hours = 12, floor = 0.98 }  # a meter that resets within 12h has this floor instead
+budget_usd = 10.0        # spend cap per attempt, enforced by relay for every harness
+silent_minutes = 30      # a session that prints nothing this long is ended
+# max_load = 24.0        # hold new sessions while the 1-minute load average is above this
+min_free_disk_gb = 10.0  # hold new build sessions (each makes a clone) below this; gc runs at once below it
+job_disk_gb = 40.0       # a running clone over this reaches the `disk` decision point (default: stop the job); 0 turns it off
+disk_sample_minutes = 3.0  # how often a running clone is measured
+max_retries = 1          # automatic retries for a session that died with no output
+
+[accounts]
+# Every signed-in home of every enabled harness is an account, named harness:label
+# (claude:default for ~/.claude, claude:work for ~/.claude.work, omp:default for
+# ~/.omp, omp:work for ~/.omp/profiles/work). These are never used:
+exclude = []
+
+# One table per harness, all with the same keys. A harness is enabled by
+# default when it is installed; `enabled` overrides that.
+# [harness.claude]
+# enabled = true
+# program = "/path/to/claude"   # a different command; tests use a stub
+# model = "sonnet"              # for jobs that name none for this harness
+# effort = "high"
+# extra_args = []
+#
+# [harness.omp]
+# model = "openai-codex/gpt-5.2"  # omp meters quota per provider, so its model must name one
+
+# Disk: on with these defaults even when this section is absent (see README, Disk).
+[gc]
+build_outputs = ["target", "node_modules", ".venv"]  # removed from the clone of an ended job nothing waits for
+outputs_after_hours = 6.0    # ...once it has ended this long
+clones_after_days = 7.0      # a done job's whole clone goes after this (its commits rescued into the repository)
+waiting_retain_days = 7.0    # a failed or stopped job's clone is kept this long
+logs_gzip_after_days = 3.0   # <job>.log.ndjson is gzipped after this
+interval_minutes = 60.0      # the dispatcher runs a pass this often while awake
+pass_seconds = 300           # a pass stops after this long
+
+[session]
+branch_prefix = "relay/"
+final_marker = "FINAL"   # a result without it gets one follow-up asking for the report; "" turns this off
+max_hours = 4.0
+nice = 10
+# A prefix that enters the project's development environment, run on the host
+# before each attempt (its `env` is passed in), for tools that cannot run in
+# the sandbox, such as single-user Nix:
+# env_shell = ["nix", "develop", "-c"]
+env_shell = []
+# Variables set in every job's environment. For Rust projects, incremental
+# dirs are a large share of target/:
+# env = { CARGO_INCREMENTAL = "0" }
+# Appended to the system prompt. {workspace} says where the session is and
+# what it may change; {branch} is the job's branch.
+# briefing = "..."
+
+[session.banned_models]
+# "haiku" = "too weak for this repository's reviews"
+
+# Named job kinds, for `relay queue add --profile`. The owner's policy file
+# ($RELAY_POLICY, else ~/.config/relay/policy.toml) can hold the same
+# [session] banned_models and [profiles.*]; this file overrides it field by
+# field, and its banned_models add to the policy's (see the README).
+# [profiles.bug-hunt]
+# harness = "omp"
+# model = "openai-codex/gpt-6.1-sol"
+# effort = "high"
+# budget = 5.0
+# readonly = true
+# max_running = 1
+# max_per_day = 3
+# note = "second-family review of critical code; costly"
+#
+# A bar and an escalation are declared on a profile too (see the README):
+# [profiles.cheap]
+# check = "cargo nextest run --no-tests=fail"  # a build job's run is accepted only if this passes in its clone
+# check_red_first = true                       # ...and fails at the job's base commit
+# independent = "family"                       # a review of its jobs may not run on the model family that built them
+# escalate_to = "strong"                       # after escalate_after failed ends of one job, requeue it under `strong`
+# escalate_after = 2
+
+[hooks]
+# Who decides at each decision point, in order (see README, Hooks). Unset keeps
+# relay's fixed behaviour there; `cap` defaults to ["rule", "agent:checker"]
+# when limits.budget_growth is above 1. Setting any chain needs limits.job_ceiling_usd.
+# cap = ["rule", "agent:checker", "orchestrator"]
+# ended = ["rule", "orchestrator", "agent:triage"]
+# held = ["rule"]
+# disk = ["orchestrator"]            # default (unset): stop the job, resumable after cleanup
+held_after_minutes = 60.0            # a queued job held this long by a limit reaches `held`
+orchestrator_timeout_minutes = 20.0  # then the next handler decides
+seat_wait_minutes = 30.0             # how long an `agent:` handler waits for an account to take its session
+command_timeout_seconds = 120        # a `command:` handler's bound, and an acceptance check's
+allow_force = false                  # whether a `held` decision may start a job past its profile's limits
+max_decisions = 10                   # decisions that may act on one job before every action is refused
+
+[sandbox]
+enabled = true           # false runs sessions with your full access; then build jobs use edit-only permissions
+# hide = ["/workspaces"] # shown empty inside; default: the repository's parent directory
+hide_home = [".ssh", ".gnupg", ".config/gh", ".git-credentials", ".netrc", ".aws", ".config/gcloud",
+             ".docker", ".npmrc", ".cargo/credentials", ".cargo/credentials.toml", ".local/state/gh", ".local/state/claude",
+             ".omp/ssh-control"]
+# Writable caches under $HOME: relay's own directory per project is mounted at
+# each, never the host's own, so a session cannot change what the host runs.
+caches = [".cache", ".cargo/registry", ".cargo/git"]
+# env_deny = "..."       # variables whose names match are not passed in (see the README)
+# shm_mb = 256           # /dev/shm: a RAM tmpfs capped at this many MiB per session; 0 seals it

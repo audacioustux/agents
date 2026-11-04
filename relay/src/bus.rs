@@ -96,6 +96,19 @@ pub enum QueueEvent {
     Dequeued {
         job: String,
     },
+    /// The review `job` no longer belongs to the chain of the build job it reviews: it does not
+    /// re-review it and its verdicts do not resume it. `by` is the review that replaced it; none for
+    /// `queue unreview`. What it judged stays in the event log.
+    Unchained {
+        job: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
+    },
+    /// The brief the chained review `job` is judged by from its next re-review on.
+    ReviewBriefed {
+        job: String,
+        brief: String,
+    },
     StopRequested {
         job: String,
     },
@@ -233,6 +246,10 @@ pub enum SessionEvent {
         reason: Option<Reason>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         family: Option<String>,
+        /// The builder's head when the verdict came in, when that was not `commit`: the branch moved while the
+        /// review ran, so the verdict is about a commit that is no longer the branch's tip and acts on nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stale_head: Option<String>,
     },
     Ended {
         job: String,

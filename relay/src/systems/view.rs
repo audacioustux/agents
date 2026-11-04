@@ -183,7 +183,8 @@ fn declared(j: &Job) -> String {
             let _ = write!(review, "  review by {}: {}", v.reviewer, v.summary());
         }
     }
-    let of = j.review_of().map_or(String::new(), |b| format!("  reviews {b}"));
+    let left = j.unchained.as_ref().map_or(String::new(), |u| format!(" ({})", u.summary()));
+    let of = j.review_of().map_or(String::new(), |b| format!("  reviews {b}{left}"));
     format!("{of}{bar}{review}")
 }
 

@@ -118,7 +118,9 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue resume NAME --message TEXT [--budget USD] [--model H=M]` | Continue an ended or checking session, on any account with room. `--budget` caps that run alone, not the job's total; `--model` moves the job to another model from this run on |
 | `relay queue add NAME ... --after A[,B]` | Start only once every named job is `done` (repeat or comma-separate; unknown names are refused, exit 3) |
 | `relay queue add NAME ... --check CMD [--check-red-first]` | Declare the bar: a command that must pass in the job's clone before its run is accepted ([the bar](#the-bar)) |
-| `relay queue add NAME ... --review-of JOB` | A read-only review of build job JOB, after it, with its branch fetched for the reviewer; its verdict is kept on JOB ([reviews](#reviews)) |
+| `relay queue add NAME ... --review-of JOB` | A read-only review of build job JOB, after it, with its branch fetched for the reviewer; its verdict is kept on JOB. JOB has one live review chain: this replaces the current one ([reviews](#reviews)) |
+| `relay queue resume JOB ... --review-brief FILE` | Also replace the brief of the review chained to JOB: its reviewer is told FILE's text when it judges the branch again (exit 4 when JOB has no chain) |
+| `relay queue unreview JOB` | Detach the review chained to JOB, with no replacement: it no longer re-reviews or resumes JOB (exit 4 when none is chained) |
 | `relay queue add NAME ... --fork JOB` | Start as a fork of JOB's session, from its branch when it is a build job ([forks](#what-a-job-is)) |
 | `relay decide list [--wait [--timeout S]]` / `relay decide answer ID --action A ...` | Decisions waiting for the orchestrator / answer one ([hooks](#hooks)) |
 | `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
@@ -411,7 +413,7 @@ answer `review {verdict, reason, message}` instead (`decide answer ID --action
 review --verdict reject --reason test-failure --message ...`). A reject carries a
 coded reason: `test-failure`, `behavior-mismatch`, `insufficient-evidence`,
 `stale-head` or `other`; an accept carries none. relay records `reviewed {job, of,
-commit, verdict, reason, family}`; the fold keeps `verdicts` on the reviewed job, each
+commit, verdict, reason, family, stale_head}`; the fold keeps `verdicts` on the reviewed job, each
 with the reviewer, the commit it judged and its reason, and `view status` shows the
 verdicts for the latest reviewed commit only (`review by rev: reject: test-failure`),
 so an earlier commit's reject is history, not the state.
@@ -429,7 +431,24 @@ so an earlier commit's reject is history, not the state.
   and builder that keep rejecting each other stop there, and the board shows the last
   recorded verdict. A builder that fails is not re-reviewed. A reviewer that cannot be
   resumed is left as it was; queue another review. If the builder finishes before the
-  review is marked ended, the review's own end asks again.
+  review is marked ended, the review's own end asks again. A re-review is only asked
+  once the builder is not working, so it always judges the builder's current head.
+- **A job has one live review chain.** A new `queue add --review-of JOB` replaces the
+  chain JOB has: the old reviewer no longer re-reviews JOB or resumes it, and the board
+  says so (`reviews build (superseded by rev2)`; `unchained {by}` in `view status
+  --json`). `queue unreview JOB` detaches the chain with no replacement
+  (`(detached)`). Its verdicts leave the board's `verdicts` but stay in the event log
+  (`reviewed`, `unchained`), so the replacement's rejects count toward `hooks.max_decisions` from nothing. A queued reviewer that has not run is stopped; one that is
+  running finishes, and what it says acts on nothing. `queue resume JOB --review-brief
+  FILE` replaces the chained reviewer's brief (its `prompt.md`) too: its next re-review
+  is told the new brief, once, ahead of the usual message. Without the flag a resume
+  changes nothing about the chain.
+- **A head that moves during a review makes its verdict stale.** When a review ends
+  and the builder's branch is no longer at the commit the review judged (someone
+  resumed the builder meanwhile), relay records the verdict with `stale_head` set to
+  the branch's head (`review by rev: stale-head`), does not resume the builder, and
+  the chain reviews the new head as soon as the builder is done. A stale verdict never
+  counts toward `hooks.max_decisions` on the builder.
 - **Independence.** relay records the reviewer's model family (`anthropic`, `openai`,
   `google`, ...; a model it does not know is its provider). A review is refused on the
   builder's family only when the reviewed job's profile declares `independent =
@@ -801,7 +820,7 @@ own process, and owns one output port:
 
 | System | Responsibility | Emits |
 | --- | --- | --- |
-| queue | takes work in (under a profile, if asked), withdraws it, stops it, releases it from its `--after` jobs, reroutes or forces a held one | queued, released, resumed, rerouted, forced, dequeued, stop-requested |
+| queue | takes work in (under a profile, if asked), withdraws it, stops it, releases it from its `--after` jobs, reroutes or forces a held one, replaces or detaches a review chain | queued, released, resumed, rerouted, forced, dequeued, unchained, review-briefed, stop-requested |
 | dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
 | session | runs one job, carries out the decisions at its cap and its end, runs its acceptance check, fetches a review's branch, measures its clone and stops it at the disk ceiling, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, requeued, overran, checking, checked, bar-checked, reviewed, disk, ended |
 | decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); takes the orchestrator's answers | decision-requested, parked, decided |

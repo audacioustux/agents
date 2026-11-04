@@ -108,6 +108,12 @@ impl Fold {
                     (j.outcome, j.queued_since) = (Some(Outcome::Stopped), None);
                 }
             }
+            Event::Queue(QueueEvent::Unchained { job, .. }) => {
+                // Only a review still waiting to run is stopped by it; a running one finishes.
+                if let Some(j) = self.job(job).filter(|j| j.queued_since.is_some()) {
+                    (j.outcome, j.queued_since) = (Some(Outcome::Stopped), None);
+                }
+            }
             Event::Dispatch(DispatchEvent::Dispatched { job, account, .. }) => {
                 if let Some(j) = self.job(job) {
                     j.waits.extend(j.queued_since.take().map(|q| micros(t, q)));

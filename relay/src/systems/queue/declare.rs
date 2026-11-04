@@ -26,6 +26,8 @@ pub struct Declare {
     check_red_first: bool,
     /// Review the build job JOB: read-only, `--after JOB`, with JOB's branch fetched into the repository
     /// before the review starts and named in the prompt. The reviewer's verdict is recorded on JOB.
+    /// A job has one live review chain: this replaces JOB's current one, whose reviewer then neither
+    /// re-reviews nor resumes JOB.
     #[arg(long, value_name = "JOB", conflicts_with_all = ["fork", "no_readonly", "check"])]
     review_of: Option<String>,
 }
@@ -38,6 +40,11 @@ pub struct Declared<'a> {
 }
 
 impl Declare {
+    /// The build job this line makes a review of.
+    pub fn review_of(&self) -> Option<&str> {
+        self.review_of.as_deref()
+    }
+
     /// A review is read-only whatever the profile says.
     pub fn is_review(&self) -> bool {
         self.review_of.is_some()

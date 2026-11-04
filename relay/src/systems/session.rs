@@ -284,7 +284,16 @@ fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home
     };
     let preamble = reviewing.as_ref().map(review::preamble);
     // A fork has its parent's context but not its own task: it is told its brief.
-    let prompt = opening(&brief, job.message.as_deref(), resumed.is_some(), preamble.as_deref());
+    // A review whose brief was replaced is told the new one when it picks its session up again.
+    let message = match (&job.rebrief, resumed.is_some()) {
+        (Some(b), true) => Some(format!(
+            "Your brief for this review has been replaced. Judge the branch by this brief from now on:\n\n{}\n\n{}",
+            b.trim(),
+            job.message.as_deref().unwrap_or("Judge the branch again, as the new brief asks.")
+        )),
+        _ => job.message.clone(),
+    };
+    let prompt = opening(&brief, message.as_deref(), resumed.is_some(), preamble.as_deref());
     // What a read-only job reads is the live repository, so its commit is taken now, not when queued.
     let commit = if job.readonly() { Ctx::clean_head(&ctx.cfg.repo) } else { None };
     port(ctx, job).emit(SessionEvent::Started {

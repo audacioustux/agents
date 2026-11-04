@@ -139,6 +139,26 @@ pub struct Job {
     /// Runs of this job that ended failed, since it was last requeued under a profile.
     #[serde(default)]
     pub failed_ends: u32,
+    /// For a review: it was taken out of its build job's chain, and by whom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unchained: Option<Unchained>,
+    /// For a review: the brief it is told, in place of its own, when its session next starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebrief: Option<String>,
+}
+
+/// A review that no longer belongs to its build job's chain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Unchained {
+    /// The review that replaced it; none when the chain was detached.
+    pub by: Option<String>,
+}
+
+impl Unchained {
+    /// For the board: `superseded by x` or `detached`.
+    pub fn summary(&self) -> String {
+        self.by.as_ref().map_or_else(|| "detached".to_owned(), |b| format!("superseded by {b}"))
+    }
 }
 
 /// One acceptance check run, as the job's record keeps it.
@@ -160,11 +180,23 @@ pub struct Reviewed {
     pub verdict: bus::Verdict,
     pub reason: Option<bus::Reason>,
     pub family: Option<String>,
+    /// The builder's head when the verdict came in, when the branch had moved past `commit`.
+    #[serde(default)]
+    pub stale_head: Option<String>,
 }
 
 impl Reviewed {
-    /// `accept`, or `reject: test-failure`.
+    /// A reject, or a verdict on a commit the branch has moved past: the reviewer is to judge the branch again
+    /// once its builder is done.
+    pub fn wants_again(&self) -> bool {
+        self.stale_head.is_some() || self.verdict == bus::Verdict::Reject
+    }
+
+    /// `accept`, `reject: test-failure`, or `stale-head`.
     pub fn summary(&self) -> String {
+        if self.stale_head.is_some() {
+            return "stale-head".to_owned();
+        }
         match self.reason {
             Some(r) => format!("{}: {}", self.verdict.as_str(), r.as_str()),
             None => self.verdict.as_str().to_owned(),
@@ -598,11 +630,35 @@ impl World {
                     (j.status, j.reason, j.ended_at) = (Status::Stopped, Some("dequeued".into()), Some(t));
                 }
             }
+            QueueEvent::Unchained { job, by } => self.unchain(t, job, by.as_ref()),
+            QueueEvent::ReviewBriefed { job, brief } => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    j.rebrief = Some(brief.clone());
+                }
+            }
             QueueEvent::StopRequested { job } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.stop_requested = true;
                 }
             }
+        }
+    }
+
+    /// The review `job` leaves its build job's chain.
+    fn unchain(&mut self, t: u64, job: &str, by: Option<&String>) {
+        let builder = self.jobs.get(job).and_then(|r| r.review_of()).map(str::to_owned);
+        if let Some(b) = builder.and_then(|b| self.jobs.get_mut(&b)) {
+            // Its verdicts are history now, in the log; the board shows the chain that is.
+            b.verdicts.retain(|v| v.reviewer != job);
+        }
+        if let Some(j) = self.jobs.get_mut(job) {
+            let left = Unchained { by: by.cloned() };
+            j.rebrief = None;
+            // A review that has not started, or waits for a re-review, never runs again.
+            if j.status == Status::Queued {
+                (j.status, j.reason, j.ended_at) = (Status::Stopped, Some(left.summary()), Some(t));
+            }
+            j.unchained = Some(left);
         }
     }
 
@@ -688,6 +744,7 @@ impl World {
                     j.transcript_account = Some(account.clone());
                     j.session_id = Some(session_id.clone());
                     j.message = None;
+                    j.rebrief = None;
                     j.forced = false;
                     j.overran = None;
                 }
@@ -804,14 +861,17 @@ impl World {
                     });
                 }
             }
-            SessionEvent::Reviewed { job, of, commit, verdict, reason, family } => {
-                if let Some(j) = self.jobs.get_mut(of) {
+            SessionEvent::Reviewed { job, of, commit, verdict, reason, family, stale_head } => {
+                // A review that left the chain still wrote its verdict to the log; the board does not keep it.
+                let chained = self.jobs.get(job).is_some_and(|r| r.unchained.is_none());
+                if let Some(j) = self.jobs.get_mut(of).filter(|_| chained) {
                     let r = Reviewed {
                         reviewer: job.clone(),
                         commit: commit.clone(),
                         verdict: *verdict,
                         reason: *reason,
                         family: family.clone(),
+                        stale_head: stale_head.clone(),
                     };
                     j.verdicts.push(r);
                 }

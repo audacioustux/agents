@@ -41,7 +41,13 @@ pub enum Cmd {
         /// replaces the job's model there from this run on.
         #[arg(long = "model")]
         models: Vec<String>,
+        /// Replace the brief of the review chained to this job (`--review-of`), as the next thing its
+        /// reviewer is told when it judges the branch again. A file.
+        #[arg(long, value_name = "FILE")]
+        review_brief: Option<PathBuf>,
     },
+    /// Detach the review chained to a build job: its reviewer no longer re-reviews or resumes it.
+    Unreview { name: String },
     /// Stop a queued job waiting for the jobs it was queued `--after`.
     Release {
         name: String,
@@ -114,9 +120,11 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     let world = ctx.world()?;
     let name = match &cmd {
         Cmd::Add(add) => add.name.clone(),
-        Cmd::Resume { name, .. } | Cmd::Release { name, .. } | Cmd::Dequeue { name } | Cmd::Stop { name } => {
-            name.clone()
-        }
+        Cmd::Resume { name, .. }
+        | Cmd::Unreview { name }
+        | Cmd::Release { name, .. }
+        | Cmd::Dequeue { name }
+        | Cmd::Stop { name } => name.clone(),
     };
     let job = world.jobs.get(&name);
     // The job, when its status is one the command applies to.
@@ -125,7 +133,9 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Some(j) if !ok(j.status) => fail!(Conflict, "{name} is {}", j.status.as_str()),
         Some(j) => anyhow::Ok(j),
     };
-    // The event, and for a stop the runner to signal once it is recorded.
+    // What is recorded, in order, files the brief changes, and for a stop the runner to signal once it is recorded.
+    let mut events = Vec::new();
+    let mut briefs: Vec<(String, String)> = Vec::new();
     let (event, runner) = match cmd {
         Cmd::Add(add) => {
             // A job that ended before it ever started (dequeued) has nothing to keep:
@@ -133,9 +143,25 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             if job.is_some_and(|j| j.status.is_live() || j.attempts > 0) {
                 fail!(Conflict, "job {name} exists; pick another name, or: relay land clean {name}");
             }
-            (add.queued(ctx, &world.jobs)?, None)
+            let replaced = add.declare.review_of().map(|b| chain(&world.jobs, b)).unwrap_or_default();
+            let queued = add.queued(ctx, &world.jobs)?;
+            // One live chain per job: the new review takes the old one's place, in the same breath.
+            events.extend(
+                replaced
+                    .into_iter()
+                    .filter(|r| *r != name)
+                    .map(|job| QueueEvent::Unchained { job, by: Some(name.clone()) }),
+            );
+            (queued, None)
         }
-        Cmd::Resume { message, budget, models, .. } => {
+        Cmd::Unreview { .. } => {
+            let j = when(|_| true)?;
+            let mut chained = chain(&world.jobs, &j.name);
+            let Some(last) = chained.pop() else { fail!(Conflict, "{name} has no review chained to it") };
+            events.extend(chained.into_iter().map(|job| QueueEvent::Unchained { job, by: None }));
+            (QueueEvent::Unchained { job: last, by: None }, None)
+        }
+        Cmd::Resume { message, budget, models, review_brief, .. } => {
             let j = when(|s| !s.is_live() || s == Status::Checking)?;
             let models = parse_models(ctx, &j.harnesses, &models)?;
             // The model it will run on, checked now: a banned one would only fail at dispatch.
@@ -143,6 +169,23 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             next.extend(models.clone());
             if let Some((h, m, reason)) = next.iter().find_map(|(h, m)| ctx.cfg.session.banned(m).map(|r| (h, m, r))) {
                 fail!(Refused, "model {m} is banned: {reason}; resume with --model {h}=<model>");
+            }
+            if let Some(path) = review_brief {
+                let brief = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+                if brief.trim().is_empty() {
+                    fail!(Usage, "the review brief is empty");
+                }
+                let chained = chain(&world.jobs, &name);
+                if chained.is_empty() {
+                    fail!(
+                        Conflict,
+                        "--review-brief: {name} has no review chained to it (queue add --review-of {name})"
+                    );
+                }
+                for reviewer in chained {
+                    events.push(QueueEvent::ReviewBriefed { job: reviewer.clone(), brief: brief.clone() });
+                    briefs.push((reviewer, brief.clone()));
+                }
             }
             (QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget, models }, None)
         }
@@ -163,7 +206,15 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Stop { .. } => (QueueEvent::StopRequested { job: name.clone() }, when(|s| s == Status::Running)?.runner),
     };
     let recorded = serde_json::to_value(&event)?["type"].clone();
-    ctx.port(&Source(())).emit(event)?;
+    // A reviewer started afresh reads the new brief as its own.
+    for (reviewer, brief) in &briefs {
+        Ctx::write_private(&ctx.job_file(reviewer, "prompt.md"), brief.as_bytes())?;
+    }
+    let port = ctx.port(&Source(()));
+    for before in events {
+        port.emit(before)?;
+    }
+    port.emit(event)?;
     // Only a process that is still the recorded runner is signalled, never a reused pid.
     if let Some((pid, started)) = runner
         && os::same_process(pid, started)
@@ -172,6 +223,11 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     }
     ctx.wake_dispatch()?;
     ctx.reply(&serde_json::json!({ "job": name, "recorded": recorded }), &format!("{name}: recorded"))
+}
+
+/// The reviews chained to the build job `builder`: the ones that have not been replaced or detached.
+fn chain(jobs: &BTreeMap<String, Job>, builder: &str) -> Vec<String> {
+    jobs.values().filter(|r| r.review_of() == Some(builder) && r.unchained.is_none()).map(|r| r.name.clone()).collect()
 }
 
 impl Add {
@@ -328,7 +384,8 @@ pub fn resume_reviewed(ctx: &Ctx, builder: &str, message: String) -> Result<Opti
     let world = ctx.world()?;
     let Some(j) = world.jobs.get(builder) else { return Ok(Some(format!("{builder} is gone"))) };
     // This reject is already among the verdicts: `hooks.max_decisions` of them resume the builder.
-    let rejected = j.verdicts.iter().filter(|v| v.verdict == crate::bus::Verdict::Reject).count();
+    let rejected =
+        j.verdicts.iter().filter(|v| v.verdict == crate::bus::Verdict::Reject && v.stale_head.is_none()).count();
     resume_by_review(ctx, j, rejected, message)
 }
 
@@ -340,6 +397,13 @@ pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String
     let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
     let Some(j) = world.jobs.get(reviewer) else { return Ok(Some(format!("{reviewer} is gone"))) };
+    if let Some(u) = &j.unchained {
+        return Ok(Some(format!("{reviewer} is no longer {builder}'s reviewer ({})", u.summary())));
+    }
+    // A review of a branch that is still being worked on would judge a head that moves under it.
+    if world.jobs.get(builder).is_some_and(|b| b.status.is_live()) {
+        return Ok(Some(format!("{builder} is at work again; its end asks for the review")));
+    }
     // A run that could not record its verdict (the cap on decisions per job) would leave the stale one.
     if !crate::systems::decide::can_decide(&ctx.cfg, &world, j) {
         return Ok(Some(format!(
@@ -348,7 +412,10 @@ pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String
         )));
     }
     let rejected = world.jobs.get(builder).map_or(0, |b| {
-        b.verdicts.iter().filter(|v| v.reviewer == reviewer && v.verdict == crate::bus::Verdict::Reject).count()
+        b.verdicts
+            .iter()
+            .filter(|v| v.reviewer == reviewer && v.verdict == crate::bus::Verdict::Reject && v.stale_head.is_none())
+            .count()
     });
     resume_by_review(ctx, j, rejected, message)
 }

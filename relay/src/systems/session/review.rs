@@ -137,6 +137,10 @@ pub(super) fn carry_out(
         return Ok(format!("verdict {}, but this job reviews no branch", verdict.as_str()));
     };
     let family = run.model.map(model_family);
+    // Who this review is, and where the branch is, now: both can have changed since the review started.
+    let world = ctx.world()?;
+    let unchained = world.jobs.get(&job.name).and_then(|r| r.unchained.clone());
+    let stale_head = world.jobs.get(of).and_then(tip).filter(|t| *t != seen.commit);
     let event = SessionEvent::Reviewed {
         job: job.name.clone(),
         of: of.to_owned(),
@@ -144,12 +148,25 @@ pub(super) fn carry_out(
         verdict,
         reason,
         family,
+        stale_head: stale_head.clone(),
     };
     port(ctx, job).emit(event)?;
     let said = match reason {
         Some(r) => format!("review of {of}: {} ({})", verdict.as_str(), r.as_str()),
         None => format!("review of {of}: {}", verdict.as_str()),
     };
+    if let Some(u) = unchained {
+        return Ok(format!("{said}; not acted on: this review is no longer {of}'s ({})", u.summary()));
+    }
+    if let Some(head) = stale_head {
+        let short = |c: &str| c.get(..12).unwrap_or(c).to_owned();
+        return Ok(format!(
+            "{said}; stale-head: {of} moved from {} to {} while this review ran, so {of} is not resumed and \
+             the new head is reviewed next",
+            short(&seen.commit),
+            short(&head)
+        ));
+    }
     if verdict == Verdict::Accept {
         return Ok(said);
     }
@@ -167,16 +184,22 @@ pub(super) fn carry_out(
     })
 }
 
-/// After a reviewed job's run ended done: resumes each reviewer whose latest verdict on it was a reject,
-/// so the board's verdict is for the new tip. The reviewer's ref is fetched again when it starts, and its
+/// The commit a build job's branch is at in its clone, when it still has one.
+fn tip(b: &Job) -> Option<String> {
+    let dir = b.workdir.as_ref().filter(|d| d.exists())?;
+    checkpoint_rev(dir, &format!("refs/heads/{}", b.branch.as_ref()?))
+}
+
+/// After a reviewed job's run ended done: resumes the chained reviewer whose latest verdict on it was a reject
+/// or was for a head the branch had left, so the board's verdict is for the new tip. The reviewer's ref is fetched again when it starts, and its
 /// preamble names the new commit. Bounded as the builder's own resume is. Returns who was resumed.
 pub(super) fn rereview(ctx: &Ctx, builder: &str) -> Result<Vec<String>> {
     resume_rejecting(ctx, builder, None)
 }
 
-/// After a review ended: when the builder it rejected answered and ended before this review was marked
-/// ended (so `rereview` found it still running), the builder's tip has moved past the commit the
-/// review judged and nobody else will ask for the new one: resume it now.
+/// After a review ended: when the builder it rejected (or whose head moved under the review) answered and ended
+/// before this review was marked ended (so `rereview` found it still running), the builder's tip has moved past
+/// the commit the review judged and nobody else will ask for the new one: resume it now.
 pub(super) fn rereview_if_overtaken(ctx: &Ctx, reviewer: &str) -> Result<Vec<String>> {
     let world = ctx.world()?;
     let Some(of) = world.jobs.get(reviewer).and_then(|r| r.review_of()) else { return Ok(Vec::new()) };
@@ -188,29 +211,30 @@ pub(super) fn rereview_if_overtaken(ctx: &Ctx, reviewer: &str) -> Result<Vec<Str
 fn resume_rejecting(ctx: &Ctx, builder: &str, only: Option<&str>) -> Result<Vec<String>> {
     let world = ctx.world()?;
     let Some(b) = world.jobs.get(builder) else { return Ok(Vec::new()) };
-    let tip = || {
-        let dir = b.workdir.as_ref().filter(|d| d.exists())?;
-        checkpoint_rev(dir, &format!("refs/heads/{}", b.branch.as_ref()?))
-    };
     let rejecting: Vec<&str> = world
         .jobs
         .values()
-        .filter(|r| r.review_of() == Some(builder) && only.is_none_or(|o| o == r.name))
+        .filter(|r| r.review_of() == Some(builder) && r.unchained.is_none() && only.is_none_or(|o| o == r.name))
         .filter(|r| {
             let last = b.verdicts.iter().rev().find(|v| v.reviewer == r.name);
             last.is_some_and(|v| {
-                v.verdict == Verdict::Reject
+                v.wants_again()
                     && (only.is_none()
-                        || (b.status == crate::world::Status::Done && tip().is_some_and(|t| t != v.commit)))
+                        || (b.status == crate::world::Status::Done && tip(b).is_some_and(|t| t != v.commit)))
             })
         })
         .map(|r| r.name.as_str())
         .collect();
     let mut resumed = Vec::new();
     for reviewer in rejecting {
+        let stale = b.verdicts.iter().rev().find(|v| v.reviewer == reviewer).is_some_and(|v| v.stale_head.is_some());
+        let why = if stale {
+            format!("{builder}'s branch moved while you were judging it, so that verdict is not for its head.")
+        } else {
+            format!("{builder} has answered your findings and ended its run.")
+        };
         let message = format!(
-            "{builder} has answered your findings and ended its run. Judge its branch again, now at the commit \
-             named above, and end with your FINAL section and a verdict."
+            "{why} Judge its branch again, now at the commit named above, and end with your FINAL section and a verdict."
         );
         if crate::systems::queue::resume_reviewer(ctx, reviewer, builder, message)?.is_none() {
             resumed.push(reviewer.to_owned());

@@ -1647,18 +1647,15 @@ fn a_builder_that_answers_a_reject_is_judged_again_on_its_new_tip() {
     let out = relay(&env, &["land", "fetch", "build"]);
     assert!(!out_of(&out).contains("note:"), "{}", out_of(&out));
 
-    // A second reviewer of the same commit is shown beside the first; both judged the latest one.
+    // A second reviewer takes the first one's place in the chain; only it is shown.
     ok(
         &relay(&env, &["queue", "add", "rev2", "--review-of", "build", "--text", "[verdict-accept] Review it."]),
         "queue",
     );
     assert_eq!(wait_for(&env, "rev2")["status"], "done");
     let shown = board(&env);
-    assert!(
-        shown.contains("review by rev: accept") && shown.contains("review by rev2: accept"),
-        "every reviewer of the latest commit: {shown}"
-    );
-    assert!(!shown.contains("review by rev: reject"), "{shown}");
+    assert!(shown.contains("review by rev2: accept") && !shown.contains("review by rev:"), "{shown}");
+    assert!(shown.contains("reviews build (superseded by rev2)"), "{shown}");
 
     // A person may still resume a review by hand.
     let seen = prompts(&env, "a").len();
@@ -1740,8 +1737,10 @@ fn a_reject_loop_stops_where_the_reviewer_can_no_longer_record_a_verdict() {
     assert!(r2["reason"].as_str().unwrap_or_default().contains("build resumed"), "its last verdict was acted on: {r2}");
 }
 
+/// `hooks.max_decisions` bounds one chain's rejects of a builder; a replaced chain's verdicts left the board,
+/// so the replacement counts from nothing (the job's ceiling still bounds what the builder may spend).
 #[test]
-fn rejects_past_max_decisions_are_recorded_but_stop_resuming_the_builder() {
+fn a_replacement_chain_counts_its_rejects_from_nothing() {
     if !have_bwrap() {
         return;
     }
@@ -1757,14 +1756,11 @@ fn rejects_past_max_decisions_are_recorded_but_stop_resuming_the_builder() {
         "queue",
     );
     let r = wait_for(&env, "rev2");
-    assert!(r["reason"].as_str().unwrap_or_default().contains("not resumed"), "{r}");
-    let b = job(&env, "build");
-    assert_eq!(b["verdicts"].as_array().unwrap().len(), 2, "the verdict is recorded all the same");
-    assert_eq!(b["attempts"], 2, "but the builder was not sent back again: {b}");
-    // Landing is never blocked, but the note says the tip has no accepting verdict.
-    let out = relay(&env, &["land", "fetch", "build"]);
-    ok(&out, "land");
-    assert!(out_of(&out).contains("note: no review has accepted"), "{}", out_of(&out));
+    assert!(r["reason"].as_str().unwrap_or_default().contains("build resumed"), "{r}");
+    let b = wait_for(&env, "build");
+    assert_eq!(b["attempts"], 3, "the new chain's first reject sent the builder back: {b}");
+    let verdicts = b["verdicts"].as_array().unwrap();
+    assert!(verdicts.iter().all(|v| v["reviewer"] == "rev2"), "only the live chain is on the board: {b}");
 }
 
 #[test]
@@ -2255,4 +2251,235 @@ fn a_checkpoint_that_waits_in_vain_for_a_seat_stops_and_names_the_bound() {
     let why = c["why"].as_str().unwrap_or_default();
     assert!(why.contains("hooks.seat_wait_minutes = 0.03"), "the reason names the bound: {why}");
     assert!(j["reason"].as_str().unwrap_or_default().contains("hooks.seat_wait_minutes"), "{j}");
+}
+
+/// Builder `build` on account a, then its review `rev` on account b that rejects; the builder is held
+/// (account a's `hold`) once the reject resumes it, so the chain can be changed while it works.
+/// Returns the hold file of account a.
+fn rejected_while_builder_is_held(env: &Env) -> PathBuf {
+    configure(env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 10, false);
+    // A re-review that is not told otherwise rejects again: what the old reviewer would do.
+    std::fs::write(env.home.join(".claude.b/rereview"), "reject").unwrap();
+    let b = build(env, "build", &["--account", "claude:a"]);
+    assert_eq!(b["status"], "done", "{b}");
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(
+        &relay(
+            env,
+            &[
+                "queue",
+                "add",
+                "rev",
+                "--review-of",
+                "build",
+                "--account",
+                "claude:b",
+                "--text",
+                "[verdict-reject] Old brief.",
+            ],
+        ),
+        "queue the review",
+    );
+    assert_eq!(wait_for(env, "rev")["status"], "done");
+    wait_status(env, "build", "running");
+    hold
+}
+
+/// The job once its status is `status`, bounded.
+fn wait_status(env: &Env, name: &str, status: &str) -> serde_json::Value {
+    for _ in 0..150 {
+        let j = job(env, name);
+        if j["status"] == status {
+            return j;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("{name} never was {status}: {}", job(env, name));
+}
+
+#[test]
+fn a_new_review_replaces_the_chain_and_only_it_re_reviews() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("chain-replace", false);
+    let hold = rejected_while_builder_is_held(&env);
+    assert_eq!(job(&env, "build")["attempts"], 2, "the reject resumed the builder");
+
+    // The orchestrator settles the points itself and chains a reviewer with the brief it wants.
+    ok(
+        &relay(
+            &env,
+            &[
+                "queue",
+                "add",
+                "rev2",
+                "--review-of",
+                "build",
+                "--account",
+                "claude:b",
+                "--text",
+                "[verdict-accept] New brief.",
+            ],
+        ),
+        "queue the replacement",
+    );
+    let old = job(&env, "rev");
+    assert_eq!(old["unchained"]["by"], "rev2", "the board says who replaced it: {old}");
+    assert!(board(&env).contains("reviews build (superseded by rev2)"), "{}", board(&env));
+    assert_eq!(job(&env, "build")["verdicts"], serde_json::json!([]), "the old chain's verdicts left the board");
+
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(wait_for(&env, "build")["status"], "done");
+    let r2 = wait_for(&env, "rev2");
+    assert_eq!(r2["status"], "done", "{r2}");
+    std::thread::sleep(Duration::from_secs(2));
+
+    // The old reviewer would reject the new head again on its old brief and resume the builder; it did not.
+    let (rev, build_now) = (job(&env, "rev"), job(&env, "build"));
+    assert_eq!((rev["attempts"].as_u64(), build_now["attempts"].as_u64()), (Some(1), Some(2)), "{}", board(&env));
+    let verdicts = build_now["verdicts"].as_array().unwrap();
+    assert_eq!(verdicts.len(), 1, "{build_now}");
+    assert_eq!((verdicts[0]["reviewer"].as_str(), verdicts[0]["verdict"].as_str()), (Some("rev2"), Some("accept")));
+    assert_eq!(verdicts[0]["commit"].as_str(), Some(rev_parse(&workdir(&env, "build"), "HEAD").as_str()));
+    // Its past verdict is still in the event log.
+    let logged = events(&env);
+    assert!(
+        logged.iter().any(|e| e["type"] == "reviewed" && e["job"] == "rev" && e["verdict"] == "reject"),
+        "the log keeps what the old reviewer said"
+    );
+    assert!(logged.iter().any(|e| e["type"] == "unchained" && e["job"] == "rev" && e["by"] == "rev2"));
+}
+
+#[test]
+fn a_review_brief_changes_what_the_re_review_is_told() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("chain-brief", false);
+    let hold = rejected_while_builder_is_held(&env);
+
+    // As the orchestrator did: stop the builder, and resume it by hand with its own decision.
+    ok(&relay(&env, &["queue", "stop", "build"]), "stop");
+    wait_status(&env, "build", "stopped");
+    std::fs::remove_file(&hold).unwrap();
+    let brief = env.root.join("review-brief.md");
+    std::fs::write(&brief, "[verdict-accept] Judge only the migration; the empty-input panic is settled.").unwrap();
+    let seen = prompts(&env, "b").len();
+    let out = relay(
+        &env,
+        &[
+            "queue",
+            "resume",
+            "build",
+            "--message",
+            "Decision: the empty-input panic is accepted.",
+            "--review-brief",
+            brief.to_str().unwrap(),
+        ],
+    );
+    ok(&out, "resume with a review brief");
+    assert_eq!(wait_for(&env, "build")["status"], "done");
+    let b = wait_verdicts(&env, "build", 2);
+    assert_eq!(wait_for(&env, "rev")["attempts"], 2, "the chained reviewer judged the new head");
+    let told = prompts(&env, "b")[seen..].to_owned();
+    assert!(
+        told.contains("Your brief for this review has been replaced") && told.contains("Judge only the migration"),
+        "{told}"
+    );
+    // The old brief would have rejected again (the account's re-review answer); the new one accepts.
+    assert_eq!(b["verdicts"][1]["verdict"], "accept", "{b}");
+    assert_eq!(job(&env, "build")["attempts"], 3);
+    let on_file = std::fs::read_to_string(env.root.join("state/relay/flow/jobs/rev.prompt.md")).unwrap();
+    assert!(on_file.contains("Judge only the migration"), "a reviewer started afresh reads the new brief: {on_file}");
+
+    // Nothing chained: nothing to rebrief.
+    let out = relay(&env, &["queue", "resume", "rev", "--message", "x", "--review-brief", brief.to_str().unwrap()]);
+    assert!(!out.status.success(), "a review has no review chained to it: {}", stderr(&out));
+}
+
+#[test]
+fn unreview_detaches_the_chain_and_nothing_re_reviews() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("chain-unreview", false);
+    let hold = rejected_while_builder_is_held(&env);
+    ok(&relay(&env, &["queue", "unreview", "build"]), "unreview");
+    assert_eq!(job(&env, "rev")["unchained"], serde_json::json!({ "by": null }));
+    assert!(board(&env).contains("reviews build (detached)"), "{}", board(&env));
+    let out = relay(&env, &["queue", "unreview", "build"]);
+    assert_eq!(out.status.code(), Some(4), "nothing left to detach: {}", stderr(&out));
+
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(wait_for(&env, "build")["status"], "done");
+    std::thread::sleep(Duration::from_secs(2));
+    let (rev, b) = (job(&env, "rev"), job(&env, "build"));
+    assert_eq!((rev["attempts"].as_u64(), b["attempts"].as_u64()), (Some(1), Some(2)), "{}", board(&env));
+    assert_eq!(b["verdicts"], serde_json::json!([]));
+    let out = relay(&env, &["land", "fetch", "build"]);
+    assert!(!out_of(&out).contains("note:"), "nobody reviews it now: {}", out_of(&out));
+}
+
+#[test]
+fn a_head_that_moves_during_a_review_makes_its_verdict_stale_and_the_new_head_is_reviewed() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("chain-stale", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 10, false);
+    let b = build(&env, "build", &["--account", "claude:a"]);
+    assert_eq!(b["status"], "done", "{b}");
+    let old_head = rev_parse(&workdir(&env, "build"), "HEAD");
+
+    let hold = env.home.join(".claude.b/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(
+        &relay(
+            &env,
+            &[
+                "queue",
+                "add",
+                "rev",
+                "--review-of",
+                "build",
+                "--account",
+                "claude:b",
+                "--text",
+                "[verdict-reject] Review.",
+            ],
+        ),
+        "queue the review",
+    );
+    wait_status(&env, "rev", "running");
+    // The builder is worked on while the review reads the old head.
+    ok(&relay(&env, &["queue", "resume", "build", "--message", "More work."]), "resume");
+    assert_eq!(wait_for(&env, "build")["status"], "done");
+    let new_head = rev_parse(&workdir(&env, "build"), "HEAD");
+    assert_ne!(new_head, old_head);
+    std::fs::remove_file(&hold).unwrap();
+
+    let b = wait_verdicts(&env, "build", 2);
+    let (first, second) = (&b["verdicts"][0], &b["verdicts"][1]);
+    assert_eq!(
+        (first["verdict"].as_str(), first["commit"].as_str(), first["stale_head"].as_str()),
+        (Some("reject"), Some(old_head.as_str()), Some(new_head.as_str())),
+        "the verdict is recorded, as stale: {b}"
+    );
+    assert_eq!(
+        (second["verdict"].as_str(), second["commit"].as_str(), second["stale_head"].as_str()),
+        (Some("accept"), Some(new_head.as_str()), None),
+        "the chain reviewed the new head: {b}"
+    );
+    assert_eq!(wait_for(&env, "rev")["attempts"], 2);
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(job(&env, "build")["attempts"], 2, "a stale reject resumes nobody: {}", board(&env));
+    assert!(prompts(&env, "b").contains("moved while you were judging it"), "{}", prompts(&env, "b"));
+    let r = events(&env).into_iter().find(|e| e["type"] == "reviewed").unwrap();
+    assert_eq!(r["stale_head"], new_head, "{r}");
 }

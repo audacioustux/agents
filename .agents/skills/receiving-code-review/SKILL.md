@@ -1,6 +1,9 @@
 ---
 name: receiving-code-review
 description: Use when receiving code review feedback, before implementing suggestions, especially if feedback seems unclear or technically questionable - requires technical rigor and verification, not performative agreement or blind implementation
+uses:
+  - name: weighing-quality-dimensions
+    source: audacioustux/agents
 ---
 
 # Code Review Reception
@@ -91,6 +94,8 @@ intent — what it appears designed for is what you would design it for now, whi
 is the belief under test. A reason you inferred is labelled as inference, and a
 search that turned up nothing says where it looked, so the next reader does not
 repeat it.
+
+A finding that the change makes a quality dimension worse (durability, compatibility, cost) is answered with evidence, not reassurance: use the `weighing-quality-dimensions` skill if available, which owns the dimension sweep; otherwise fix the regression or record it as an accepted trade-off in the plan or decision record, not in the thread.
 
 ## YAGNI Check for "Professional" Features
 

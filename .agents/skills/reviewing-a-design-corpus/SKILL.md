@@ -4,6 +4,8 @@ description: Use when reviewing a design document or a set of them — an archit
 uses:
   - name: requesting-code-review
     source: audacioustux/agents
+  - name: weighing-quality-dimensions
+    source: audacioustux/agents
 ---
 
 # Reviewing a Design Corpus
@@ -132,3 +134,6 @@ and why, or the same mechanism is proposed again next round.
 - Is every stated criterion actually evaluable?
 - Does any finding about one branch of a parallel design assume the other behaves
   the same way?
+- Has each decision been swept against the quality dimensions? Use the
+  `weighing-quality-dimensions` skill if available, which owns the sweep; otherwise
+  ask of each decision what it makes worse and whether the document says so.

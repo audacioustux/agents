@@ -10,6 +10,8 @@ uses:
     source: audacioustux/agents
   - name: using-git-worktrees
     source: audacioustux/agents
+  - name: weighing-quality-dimensions
+    source: audacioustux/agents
 ---
 
 # Writing Plans
@@ -180,6 +182,8 @@ After writing the complete plan, look at the spec with fresh eyes and check the 
 **2. Placeholder scan:** Search your plan for red flags — any of the patterns from the "No Placeholders" section above. Fix them.
 
 **3. Type consistency:** Do the types, method signatures, and property names you used in later tasks match what you defined in earlier tasks? A function called `clearLayers()` in Task 3 but `clearFullLayers()` in Task 7 is a bug.
+
+**4. Quality dimensions:** state what the plan's decisions move with the `weighing-quality-dimensions` skill if available, which owns the dimension sweep; otherwise list each quality a decision makes worse, by how much, and the test that would fail if it regressed further.
 
 If you find issues, fix them inline. No need to re-review — just fix and move on. If you find a spec requirement with no task, add the task.
 

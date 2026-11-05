@@ -135,6 +135,41 @@ checker settles belong to the first, and obligations it cannot see belong to the
 second. `writing-async-rust` splits on the same principle — a future dropped at an
 await point is a hazard no type in the signature reports.
 
+Design and domain ownership boundaries:
+
+| Skill | Owns |
+| --- | --- |
+| `modelling-domains-and-events` | Ubiquitous language, bounded contexts as modules, aggregates, event ownership, outbox, process managers |
+| `modelling-domain-invariants` | What the store enforces inside one module: constraints, keys, defaults, nullability |
+| `designing-idempotent-boundaries` | Handlers invoked more than once: keys, dedupe, replay safety |
+| `evolving-shared-contracts` | Changing a shape more than one party depends on |
+| `weighing-quality-dimensions` | The 26 quality dimensions: what a decision moves, the reviewer's sweep, gates for measurable claims |
+
+```mermaid
+flowchart TD
+  domains["modelling-domains-and-events<br/>contexts, aggregates, events"]
+  inv["modelling-domain-invariants<br/>store-enforced rules"]
+  idem["designing-idempotent-boundaries<br/>replay safety"]
+  contracts["evolving-shared-contracts<br/>shared shapes"]
+  quality["weighing-quality-dimensions<br/>the -ilities sweep"]
+  brain["brainstorming"]
+  plans["writing-plans"]
+  reviews["requesting-code-review<br/>receiving-code-review<br/>reviewing-a-design-corpus"]
+
+  domains --> inv & idem & contracts
+  inv & idem & contracts --> domains
+  contracts --> inv
+  brain --> domains & plans
+  plans --> quality & brain
+  reviews --> quality
+  quality --> plans & idem
+```
+
+`modelling-domains-and-events` runs before code and decides where a concept lives;
+`modelling-domain-invariants` then decides what the store enforces inside that
+module. `weighing-quality-dimensions` is a sweep rather than a domain: planning and
+review skills defer the dimension check to it, and it owns no rule they restate.
+
 ## Upstream tracking
 
 `provenance.json` at the repository root records, for every skill, where it came

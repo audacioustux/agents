@@ -1,6 +1,9 @@
 ---
 name: designing-idempotent-boundaries
 description: Use when a handler can be invoked more than once for the same logical event — webhooks, message consumers, retried requests, resubmitted forms, replayed jobs. Also before adding a retry around anything with a side effect, or when a duplicate delivery has produced a duplicate charge, ticket, or record.
+uses:
+  - name: modelling-domains-and-events
+    source: audacioustux/agents
 ---
 
 # Designing Idempotent Boundaries
@@ -9,6 +12,12 @@ Assume every handler runs more than once for the same event. That is not a
 pessimistic edge case, it is the delivery guarantee almost every real system
 offers, and code that assumes otherwise fails in ways that are hard to attribute
 because the second delivery looks exactly like a legitimate first one.
+
+This skill owns making a consumer safe to run twice. Which events exist, which
+module owns each, and how they are published atomically with the state change are
+domain modelling: use `modelling-domains-and-events` if installed; otherwise give
+every event type one emitting module and write it to an outbox in the same
+transaction as the change it reports.
 
 ## At-least-once is the default, including yours
 

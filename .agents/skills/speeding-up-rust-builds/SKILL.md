@@ -4,6 +4,8 @@ description: Use when a Rust project's compile times are slowing the edit-test l
 uses:
   - name: writing-idiomatic-rust
     source: audacioustux/agents
+  - name: optimizing-rust-hot-paths
+    source: audacioustux/agents
 ---
 
 # Speeding Up Rust Builds
@@ -25,8 +27,8 @@ Use for:
 - CI build times
 - deciding what belongs in its own crate
 
-Runtime performance belongs elsewhere; this skill is about compile time only. Code
-shape questions belong to `writing-idiomatic-rust`.
+Runtime performance belongs to `optimizing-rust-hot-paths`; this skill is about
+compile time only. Code shape questions belong to `writing-idiomatic-rust`.
 
 ## Measure first
 

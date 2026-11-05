@@ -114,9 +114,11 @@ type, because of the orphan rule. Derive each one that is semantically true. Add
 redacts them, and carries a test asserting the secret never appears in the output.
 **Types meant to be read are also `Display`** — errors, and anything string-like.
 
-**Do not put derived traits in a struct's bounds.** `struct Bag<T: Clone>` forces the
-bound on every user. `#[derive(Clone)] struct Bag<T>` already applies it only where
-needed.
+**Do not put a bound on a struct only because a derive needs it.** `struct Bag<T: Clone>`
+forces the bound on every user. `#[derive(Clone)] struct Bag<T>` already applies it only
+where needed. Keep a bound the structure itself requires: a field naming an associated
+type (`T::Item`), a `?Sized` opt-out, or a `Drop` impl with bounds, which Rust requires
+the struct to repeat.
 
 **Essential functionality is inherent.** If a type's main operation lives only in a
 trait impl, callers must discover and import the trait to call it. Write the inherent
@@ -142,9 +144,11 @@ add it when shared references genuinely cross threads.
 
 **`#[non_exhaustive]` on public enums** that may gain variants, and on public structs
 with public fields that may gain fields. Without it, adding either is a breaking
-change. Leave it off a closed ontology, such as cardinal directions or a two-state
-enum, and off an options struct meant for `..Default::default()`. Within your own
-crate, `#[non_exhaustive]` has no effect.
+change. Mark the type when it is first published: adding the attribute later to an
+enum, a variant, or a struct with no private fields is itself a breaking change. Leave
+it off a closed ontology, such as cardinal directions or a two-state enum, and off an
+options struct meant for `..Default::default()`. Within your own crate,
+`#[non_exhaustive]` has no effect.
 
 When matching *someone else's* non-exhaustive enum, list every variant you know and
 put only the unknown future in `_`. The wildcard still swallows a new upstream variant
@@ -276,8 +280,8 @@ the caller.
 | `as_*` method that allocates | Rename to `to_*` |
 | Inherent `from_str`, or `new()` with no `Default` | `impl FromStr`; `impl Default` |
 | Public type with no `Debug` | `#[derive(Debug)]`, or a redacting impl plus a test |
-| `struct Foo<T: Clone + Debug>` with matching derives | Drop the bounds from the struct |
-| Public enum or all-`pub` struct without `#[non_exhaustive]` | Add it, unless it is a closed ontology or an options struct |
+| `struct Foo<T: Clone + Debug>` whose bounds only serve its derives | Drop those bounds; keep any the fields or a bounded `Drop` need |
+| Unpublished public enum or all-`pub` struct without `#[non_exhaustive]` | Add it before release, unless it is a closed ontology or an options struct; on a published type, adding it is itself breaking |
 | `_ =>` arm swallowing known variants of a foreign non-exhaustive enum | List the known variants; `_` for the future only |
 | Pure `pub fn` or builder method without `#[must_use]` | Add it |
 | `no_std` feature, or a feature that removes items | `std` feature; additive only |

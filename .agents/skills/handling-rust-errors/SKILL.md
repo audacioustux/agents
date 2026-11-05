@@ -227,7 +227,7 @@ something else.
 | Panic caught, then the same state reused | Discard the touched state; restart the unit |
 | `PoisonError::into_inner` with no restore or check | Propagate with `expect`, or restore a known-good value and `clear_poison` |
 | Library returns `Box<dyn Error>` or `anyhow::Error` | Enum, or a struct with `kind()` |
-| Public error enum without `#[non_exhaustive]` | Add it; a new variant is otherwise a breaking change |
+| Public error enum without `#[non_exhaustive]` | Add it at first release; adding it later, like adding a variant, needs a breaking release |
 | One crate-wide error enum spanning unrelated operations | One error type per family of operations |
 | `.map_err(MyError::Io)?` repeated at call sites | `impl From<io::Error>`, then `?` |
 | `Result<T, ()>` | A unit-struct error implementing `Error` |

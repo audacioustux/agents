@@ -114,14 +114,21 @@ Edition 2024 already warns on `unsafe_op_in_unsafe_fn`, so it is not repeated he
 
 ## Restriction lints to leave off
 
-`unwrap_used`, `expect_used`, `panic`, and `indexing_slicing` turn every panic into a
-lint failure. That contradicts the default in `handling-rust-errors` — panic on a
+`unwrap_used`, `expect_used`, `panic`, and `indexing_slicing` turn most panic sites into
+lint failures. That contradicts the default in `handling-rust-errors` — panic on a
 detected bug — and pushes code toward `Err` variants nobody can act on, or toward
 silently ignored results. Enable them only in a crate or module whose contract is
 never to panic, such as a parser for untrusted input or firmware. Even then, exempt
 tests in `clippy.toml` (`allow-unwrap-in-tests`, `allow-expect-in-tests`,
 `allow-panic-in-tests`, `allow-indexing-slicing-in-tests`) rather than scattering
 `#[allow]` across test modules.
+
+Even together they are a partial check. Checked on Clippy 0.1.99, they flag `panic!`,
+indexing, `unwrap`, and `expect`, but not `assert!`, `unreachable!`, `todo!`, or
+`unimplemented!`; the restriction lints `unreachable`, `todo`, and `unimplemented`
+add those three. No lint covers `assert!`, or a panic inside a called function —
+`RefCell::borrow_mut`, integer division by zero, overflow in a debug build. A
+never-panic contract still needs an audit of its assertions and its callees.
 
 `arithmetic_side_effects`, `as_conversions`, and `float_arithmetic` belong only in code
 where every operation needs a stated overflow or precision policy: money, safety

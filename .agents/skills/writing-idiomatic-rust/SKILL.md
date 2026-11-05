@@ -90,8 +90,8 @@ that no signature states. `Arc` also has a cost the source does not show: every
 clone and drop is an atomic read-modify-write on one shared cache line. In a
 thread-per-core, shared-nothing design, a count touched from several cores bounces
 that line between them. Google's guide says to prefer unique ownership and borrowing,
-and Microsoft's warns against reflexively wrapping nested types in `Arc`. That
-pattern costs a sequential memory lookup per layer on every access.
+and Microsoft's warns against reflexively wrapping nested types in `Arc`; what that
+nesting costs on each access is `optimizing-rust-hot-paths` § Indirection.
 
 - `Rc` is acceptable inside one thread or core, when a structure really has several
   owners. It is not an escape from a borrow-checker error.
@@ -144,8 +144,8 @@ target range. It is a preference where the range is proven a line away. Even the
 
 ## Iterators
 
-Iterate rather than index. The bounds check an index loop needs is one the iterator
-does not, and the intent survives the next edit better than a counter does.
+Iterate rather than index. The intent survives the next edit better than a counter
+does; what it saves in bounds checks is `optimizing-rust-hot-paths` § Bounds checks.
 
 Avoid materialising an intermediate collection between two adapters. A `collect`
 whose result is immediately iterated again has allocated a vector to hold values that
@@ -207,7 +207,6 @@ boundaries, because all of it must be compiled.
 | `fn f(x: &T)` whose first line is `x.clone()` | Take `T` by value; let the caller decide |
 | `Rc`/`Arc` added right after a borrow-checker error | Revisit ownership; give the data one owner |
 | `Arc<T>` per request, row, or message on a hot path | One owner (arena, table) plus indices or borrows |
-| `Arc<Config>` inside `Arc<Inner>` inside `Arc<Service>` | Embed the data, and lift the hot fields |
 | `x.clone()` where `x` is an `Arc` | `Arc::clone(&x)` |
 | `.clone()` added right after a borrow-checker error | Revisit the ownership design; the error was information |
 | `.clone()` inside a loop body | Hoist the borrow outside the loop |

@@ -145,8 +145,8 @@ legitimate panic. Google forbids reaching inside a poisoned mutex at all.
 Std does allow recovery, and that is the override: overwrite the value with a
 known-good one, or verify it is consistent, then call `clear_poison`. Calling
 `into_inner` on the `PoisonError` merely to make the error go away is the defect.
-Unsafe code must never rely on poisoning for soundness; std says panic detection is
-not reliable enough for that.
+Whether unsafe code may rely on poisoning is `reviewing-unsafe-rust`'s question; it
+may not.
 
 ## Designing the error type
 
@@ -157,8 +157,8 @@ application's reader is a person.
 
 1. **Library, failures the caller can act on, no payload needed.** A `#[non_exhaustive]`
    enum with one variant per failure the caller would handle differently. It costs no
-   allocation, gives the caller a `match`, and is `Copy` when its variants carry no
-   data. Google recommends `Copy` errors wherever the fields allow it.
+   allocation, and gives the caller a `match`. Derive `Copy` when its variants carry
+   no data; Google recommends `Copy` errors wherever the fields allow it.
 2. **Library, error must carry context or a source** (a path, an upstream error, a
    position). Use a struct over a private representation, with a `kind()` accessor
    returning a `#[non_exhaustive]`, `Copy`, fieldless kind enum. This is how

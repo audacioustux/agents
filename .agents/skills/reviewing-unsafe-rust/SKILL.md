@@ -10,6 +10,8 @@ uses:
     source: audacioustux/agents
   - name: configuring-rust-lints
     source: audacioustux/agents
+  - name: optimizing-rust-hot-paths
+    source: audacioustux/agents
 ---
 
 # Reviewing Unsafe Rust
@@ -59,9 +61,9 @@ hatch. Reaching for it because the borrow checker rejected a design converts a
 compile-time error into a runtime one and moves the proof obligation from the compiler
 to a person who may not know they inherited it.
 
-Nor is it a performance tool by default. Bounds checks are frequently eliminated
-where the optimiser can prove the index is in range, so removing them by hand often
-buys nothing. Measure before trading a guarantee for a number nobody has seen.
+Nor is it a performance tool by default. Measure before trading a guarantee for a
+number nobody has seen, and try the safe ways to drop a bounds check first; they are
+`optimizing-rust-hot-paths` § Bounds checks.
 
 That leaves three valid reasons: a new abstraction std and the ecosystem do not
 already provide (a container, an allocator); a measured performance gain; and FFI
@@ -140,9 +142,9 @@ Assume caller-supplied code misbehaves. A `Clone`, `Deref`, `Drop`, `Ord`, or `H
 implementation on a user's type can return nonsense, panic, or be inconsistent between
 calls, and safe code is allowed to do all of that. So an unsafe abstraction must stay
 sound when it does. A closure that panics halfway through an operation must leave the
-structure valid: restore the invariant in a guard's `Drop`, or mark the structure
-poisoned. Lock poisoning itself is no help here; std documents that unsafe code cannot
-rely on it for soundness.
+structure valid: restore the invariant in a guard's `Drop`, or have that guard set a
+poisoned flag the structure owns and checks. Lock poisoning itself is no help here; std
+documents that unsafe code cannot rely on it for soundness.
 
 ## FFI boundaries
 
@@ -166,7 +168,7 @@ whether the caller can live with an abort:
 | --- | --- |
 | Abort is acceptable | Plain `extern "C"` is enough; std's own docs say no `catch_unwind` is needed |
 | Caller must get an error, and the build uses `panic = "unwind"` | Wrap the body in `catch_unwind` and return an error code |
-| `panic = "abort"` | `catch_unwind` catches nothing. Prevent panics on that path instead: validate inputs, return `Result` internally |
+| `panic = "abort"` | Prevent panics on that path: validate inputs, return `Result` internally. `handling-rust-errors` § A panic stops the program explains why a catch cannot help |
 | Unwinding is meant to cross into frames that handle it | `extern "C-unwind"`, on both sides |
 
 A library cannot know which strategy its final binary uses, so an FFI entry point that
@@ -205,13 +207,13 @@ reach. None of these substitute for the per-operation argument; they check it.
 | --- | --- |
 | `unsafe` block spanning many lines for one operation | Shrink it to the operation; the rest follows safe rules anyway |
 | `unsafe` added after a borrow-checker rejection | Revisit the design; the obligation moved from compiler to reader |
-| `unsafe` used for speed with no measurement | Measure first; bounds checks are often already eliminated |
+| `unsafe` used for speed with no measurement | Measure first; see `optimizing-rust-hot-paths` |
 | `unsafe` block with no `// SAFETY:` comment, or one that restates the operation | State why each precondition holds here |
 | One `unsafe` block covering several unsafe operations | One operation per block, one argument per comment |
 | `transmute` between enums, or `unsafe impl Send` to get past a bound | Use the safe conversion; fix the type, or build a sound abstraction |
 | Macro expanding to an `unsafe` block the caller never wrote | Make the caller write `unsafe`, or expose an `unsafe fn` |
 | Safe method trusting a field another module can set | Make the field private; the module is the soundness boundary |
-| Unsafe abstraction calling user `Clone`/`Ord`/`Drop` or a closure mid-update | Stay sound if they lie or panic: guard, or poison |
+| Unsafe abstraction calling user `Clone`/`Ord`/`Drop` or a closure mid-update | Stay sound if they lie or panic: restore in a drop guard, or have the guard set a self-managed poisoned flag |
 | Raw deref justified by a null check alone | State all five: non-null, aligned, initialised, aliasing, still-valid |
 | Two `&mut` derived from one raw pointer | UB whether or not both are used; restructure so only one exists |
 | `unsafe impl Send`/`Sync` with no comment | State the per-field argument beside it |
@@ -220,7 +222,7 @@ reach. None of these substitute for the per-operation argument; they check it.
 | Wrapper or alias that hides `unsafe` in its name | Keep the word; renaming closes the warning channel |
 | Length from foreign code used unvalidated | Bound it, upper limit included |
 | `extern "C"` entry point that can panic, where abort is unacceptable | Remove the panic path; under `unwind`, also `catch_unwind` into an error code |
-| `catch_unwind` at an FFI boundary in a `panic = "abort"` build | It catches nothing; make the path panic-free |
+| `catch_unwind` at an FFI boundary in a `panic = "abort"` build | Make the path panic-free; see `handling-rust-errors` |
 | Struct shared with C using the default representation | `#[repr(C)]`; the default reorders fields |
 | Unsafe paths covered only by `cargo test` | Run them under Miri; Clippy sees none of this |
 
@@ -244,7 +246,7 @@ reach. None of these substitute for the per-operation argument; they check it.
 - A safe function documenting a precondition it does not enforce.
 - Trusting a clean Clippy run as evidence about unsafe code.
 - Treating a "five capabilities" list as current: inline asm and, in edition 2024, unsafe attributes also qualify.
-- Assuming an escaping panic is UB rather than an abort — or that `catch_unwind` protects a `panic = "abort"` build.
+- Assuming an escaping panic is UB rather than an abort.
 - `// SAFETY: this is safe` — a comment that satisfies the lint and argues nothing.
 
 ## Sources

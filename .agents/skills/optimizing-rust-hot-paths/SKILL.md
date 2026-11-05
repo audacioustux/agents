@@ -43,9 +43,9 @@ Compile time belongs to `speeding-up-rust-builds`. Unchecked indexing and other
 **Calibrate.** On a hot path that has been identified, each item here is a finding,
 except that an item gated on a measurement (a hasher swap, a small-vector type, a
 release-profile setting) stays gated: on a hot path you take the measurement; you do
-not skip it. Elsewhere, prefer the clearer code — with one exception. Clippy's `perf` group and the
-cheap habits (sizing a collection whose length you already know, not cloning to read)
-cost nothing in clarity, so apply them everywhere.
+not skip it. Elsewhere, prefer the clearer code — with one exception. Clippy's `perf`
+group and the cheap habits (sizing a collection whose length you already know, not
+cloning to read) cost nothing in clarity, so apply them everywhere.
 
 ## Measure first
 
@@ -91,7 +91,10 @@ exception.
 **Strings allocate quietly.** `format!`, `to_string`, and `to_owned` each allocate.
 Write into an existing buffer with `write!`, keep `&'static str` where the text is
 fixed, and use `Cow<'static, str>` where most values are literals and a few are built.
-To join more than two pieces, prefer one `format!` or `write!` to chained `+`.
+To join pieces on a hot path, size once and append: `String::with_capacity(total)`
+then `push_str`, or `[a, b, c].concat()`. `format!` and `write!` go through
+`core::fmt`'s dynamically dispatched machinery; they are the readable choice off the
+hot path, not the fast one on it.
 
 **Small collections.** If most vectors hold a few elements, `SmallVec` keeps them
 inline and allocates only past `N`. It is slightly slower per operation than `Vec`, and
@@ -151,7 +154,10 @@ Optimise for items per CPU cycle, not just for latency.
   per item.
 - Partition work ahead of time, and let each thread or task own its slice. Shared
   state is worth it only when sharing costs less than recomputing.
-- Do not spin to receive single items sooner. Sleep or yield when there is no work.
+- **Default, overridable — do not spin to receive single items sooner;** sleep or
+  yield when there is no work. Override it for a core dedicated to a busy-poll loop
+  (io_uring with SQPOLL, DPDK-style polling), where spinning is the design and the core
+  does nothing else.
 - A long CPU-bound async loop needs yield points; `writing-async-rust` covers the
   budget.
 
@@ -207,8 +213,8 @@ Libraries set none of them; the final binary owns its profile.
 | Hot API returning a fresh `Vec` per call | Add a `_into(&mut buf)` form |
 | `for line in reader.lines()` on a hot path | `read_line` into one reused `String` |
 | `a = b.clone()` where `a` already has capacity | `a.clone_from(&b)` |
-| `format!` or `to_string` per item in a loop | `write!` into a reused buffer, or a literal |
-| `s1 + &s2 + &s3 + &s4` | One `format!` or `write!` |
+| `format!` or `to_string` per item in a loop | `push_str` (or `write!`) into a reused buffer, or a literal |
+| `s1 + &s2 + &s3 + &s4` on a hot path | `String::with_capacity` plus `push_str`, or `[..].concat()` |
 | Enum whose size is set by one rare large variant | Box that variant's payload |
 | `Vec<String>` frozen after build, in a type with many instances | `Box<[Box<str>]>` |
 | Long-lived collection grown from empty | `shrink_to_fit` after building |
@@ -250,4 +256,4 @@ Verified against these on 2026-11-05:
 - The Rust Performance Book (Nicholas Nethercote): Benchmarking, Build Configuration, Linting, Profiling, Hashing, Heap Allocations, Type Sizes, Iterators, Bounds Checks, I/O, General Tips.
 - Microsoft Pragmatic Rust Guidelines: M-HOTPATH, M-THROUGHPUT, M-MEM-REUSE, M-INITIAL-CAPACITY, M-SHRINK-TO-FIT, M-BOX-DST, M-AVOID-INDIRECTION, M-FAST-HASHER, M-LOG-OVERHEAD, M-MIMALLOC-APPS, M-TARGET-CPU.
 - Rust API Guidelines: C-NO-OUT, C-CALLER-CONTROL.
-- Google Rust Style Guide: "Prefer `format!` / `write!` for concatenation and substitution".
+- Google Rust Style Guide: "Prefer `format!` / `write!` for concatenation and substitution" (adopted for readability off the hot path only).

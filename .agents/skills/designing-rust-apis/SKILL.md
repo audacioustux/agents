@@ -127,9 +127,16 @@ implementation is indirection, as `writing-idiomatic-rust` § Dispatch explains.
 a trait (a private supertrait) when only your crate should implement it. That keeps
 the freedom to add methods without a breaking release.
 
-**Public types are `Send` and `Sync` where possible.** A non-`Send` type held across
-an await makes the whole future non-`Send`. Assert it for key types and futures at
-compile time: `const _: () = { const fn check<T: Send>() {} check::<Client>(); };`.
+**Types used with a work-stealing runtime are `Send`.** On a multi-threaded executor
+such as tokio's default, a non-`Send` value held across an await makes the whole future
+non-`Send`, so it cannot be spawned. Assert it for key types and futures at compile
+time: `const _: () = { const fn check<T: Send>() {} check::<Client>(); };`. A
+thread-per-core API may be `!Send` on purpose — `Rc` and per-core state avoid atomics
+there, as `writing-idiomatic-rust` § Shared ownership allows — and says so in its docs.
+Microsoft's guidelines lean the other way for ecosystem reach: an occasional
+uncontended atomic costs little, and `!Send` locks callers out of tokio. Pick `Send`
+when the type will meet a work-stealing runtime. `Sync` is not a default requirement;
+add it when shared references genuinely cross threads.
 
 ## Future-proofing
 

@@ -63,13 +63,13 @@ Lower priority loses, so the individual lines then override the group.
 | `suspicious`, `complexity`, `perf`, `style` | warn | Leave on. Follow `perf` even off the hot path. |
 | `pedantic` | allow | Enable as a group at `priority = -1`, then opt out of named lints. |
 | `restriction` | allow | Never as a group; Clippy itself warns if you try. Cherry-pick. |
-| `nursery` | allow | Never as a group; buggy by definition. Cherry-pick at most. |
+| `nursery` | allow | Never as a group; its lints are still under development. Cherry-pick at most. |
 | `cargo` | allow | Only for crates published to a registry. |
 
 **Default, overridable — `pedantic` on as a group for libraries and long-lived
 crates.** Microsoft enables it whole. Clippy's docs suggest cherry-picking instead,
 and warn that it needs generous `#[allow]`s. Embark's standard set cherry-picks
-about seventy lints. The group is preferred here because it carries the checks other
+68 Clippy lints. The group is preferred here because it carries the checks other
 skills rely on: `missing_errors_doc`, `missing_panics_doc`, `must_use_candidate`,
 `cast_possible_truncation`, `cast_sign_loss`, `needless_for_each`, and
 `fn_params_excessive_bools`. Opting out of the few that do not fit, by name with a
@@ -94,7 +94,6 @@ trivial_numeric_casts = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
-module_name_repetitions = "allow"    # stutters such as `http::HttpClient` are fine
 
 # Restriction lints, chosen one at a time.
 undocumented_unsafe_blocks = "warn"     # every `unsafe {}` carries `// SAFETY:`
@@ -145,7 +144,8 @@ needs it.** An `#[allow]` outlives the code it excused. An `#[expect]` warns
 (`unfulfilled_lint_expectations`) once the lint stops firing, so stale exceptions
 surface on their own. Microsoft requires this, and `allow_attributes_without_reason`
 enforces the `reason`. Add `allow_attributes` only if you want `#[allow]` banned
-outright.
+outright. `#[expect]` is stable since Rust 1.81; a crate whose `rust-version` is older
+must use `#[allow]` with a reason.
 
 "I can't run the linter, so I'll use `allow` in case the lint doesn't fire" gets this
 backwards. An unfulfilled expectation is a warning that names the dead exception, and

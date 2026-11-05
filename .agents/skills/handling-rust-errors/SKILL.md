@@ -124,7 +124,7 @@ positions hold, under different strategies:
 | Panic strategy | Rule |
 | --- | --- |
 | `abort` | Do not write `catch_unwind`. It catches nothing, and its presence implies a guarantee that does not exist. |
-| `unwind`, library code | Do not catch. The caller owns that decision. |
+| `unwind`, library code | Do not catch; the caller owns that decision. The exception is an FFI entry point the library itself exports, where `reviewing-unsafe-rust` keeps the catch as a backstop. |
 | `unwind`, application boundary | Allowed where it isolates unrelated work — one request, one job, one plugin call. Discard whatever state the panicking code could have touched, and treat the panic as a bug report that triggers a restart, not a recovery. |
 
 The danger after a caught panic is torn state. A panic between two updates that must
@@ -134,8 +134,10 @@ trait impls must at least stay memory-safe if they panic midway.
 
 ## Poisoned locks
 
-A std `Mutex` or `RwLock` becomes poisoned when a thread panics while holding it,
-because the data may now violate its invariant.
+A std `Mutex` becomes poisoned when a thread panics while holding it, because the
+data may now violate its invariant. An `RwLock` is poisoned only by a panic under its
+write guard; a panicking reader leaves it clean. Poisoning is advisory, and std notes
+some panics escape detection, so a clean lock is not proof of consistent data.
 
 **Default, overridable — propagate the poison.** `lock().expect("cache mutex
 poisoned")` turns one bug into a stop rather than letting other threads read
@@ -198,7 +200,10 @@ Mechanics, for every shape:
   diagnosable.
 - Convert with `impl From<Upstream> for Error` once, and let `?` apply it. Reserve
   `map_err` for adding context. But every public `From` impl makes the upstream type
-  part of your API, so a shape-2 error converts into its *private* representation.
+  part of your API. For a shape-2 error, keep the conversion private: `?` converts
+  straight to the function's own error type and never chains two `From` impls, so
+  internal helpers return the private representation and the public function wraps it
+  once at the boundary.
 
 **Default, overridable — backtraces only in applications, or behind a feature.**
 `Backtrace::capture()` is nearly free when `RUST_BACKTRACE` is unset and expensive when
@@ -218,7 +223,7 @@ something else.
 | Nested `match` to bind one value or return | `let ... else` |
 | `.unwrap()` far from the reason it cannot fail | `.expect("why this cannot fail")` |
 | `assert!` message restating the condition | State why it should hold, or the values that broke it |
-| `catch_unwind` in a library, or in a `panic = "abort"` build | Remove it |
+| `catch_unwind` in a library outside its own FFI entry points, or in a `panic = "abort"` build | Remove it |
 | Panic caught, then the same state reused | Discard the touched state; restart the unit |
 | `PoisonError::into_inner` with no restore or check | Propagate with `expect`, or restore a known-good value and `clear_poison` |
 | Library returns `Box<dyn Error>` or `anyhow::Error` | Enum, or a struct with `kind()` |
@@ -234,7 +239,7 @@ something else.
 - Could a correct program reach each panic? If so, it should be a `Result`.
 - Does each `Err` describe something the caller can act on?
 - Does every `expect` say why, and every non-obvious assertion carry context?
-- Is any `catch_unwind` in library code, in an `abort` build, or followed by reuse of touched state?
+- Is any `catch_unwind` in library code other than an exported FFI entry point, in an `abort` build, or followed by reuse of touched state?
 - Is any poisoned lock entered without restoring or checking the data?
 - Is each public error enum `#[non_exhaustive]`, `Send + Sync + 'static`, and does it implement `Error`?
 - Does any public `From` impl leak an upstream type the crate did not mean to commit to?

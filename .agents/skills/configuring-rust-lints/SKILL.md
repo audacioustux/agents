@@ -170,9 +170,10 @@ refuse warnings:
 
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
 - `cargo fmt --all --check`
-- `cargo hack check --feature-powerset` (or `--each-feature` for many features), so
-  every feature combination builds — `designing-rust-apis` requires features to be
-  additive
+- `cargo hack check --feature-powerset`, so every feature combination builds —
+  `designing-rust-apis` requires features to be additive. With many features, bound
+  it with `--depth N`, or fall back to `--each-feature`, which builds each feature
+  alone and catches far less; then also check the combinations you know interact
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`, so broken intra-doc links fail
 - Miri over unsafe code, per `reviewing-unsafe-rust`; dependency policy, per
   `hardening-rust-supply-chain`

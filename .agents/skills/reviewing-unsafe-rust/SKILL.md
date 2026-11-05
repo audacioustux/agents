@@ -134,9 +134,11 @@ the channel while leaving the hazard.
 
 Soundness has no "theoretical" exemption. A safe function is unsound if *any* call
 from safe code can cause undefined behaviour, however contrived the call. The
-boundary of the argument is the module. A safe method may rely on an invariant that
-every other function in the same module upholds, because private fields keep code
-outside the module from breaking it. Code in another module gets no such trust.
+boundary of the argument is the module and its descendants, because private fields
+are visible to both — including an inline `mod tests`. A safe method may rely on an
+invariant that all of that code upholds, plus any code given wider access through
+`pub(crate)`, `pub(super)`, or `pub(in path)`. Code outside those scopes gets no such
+trust.
 
 Assume caller-supplied code misbehaves. A `Clone`, `Deref`, `Drop`, `Ord`, or `Hash`
 implementation on a user's type can return nonsense, panic, or be inconsistent between
@@ -212,7 +214,7 @@ reach. None of these substitute for the per-operation argument; they check it.
 | One `unsafe` block covering several unsafe operations | One operation per block, one argument per comment |
 | `transmute` between enums, or `unsafe impl Send` to get past a bound | Use the safe conversion; fix the type, or build a sound abstraction |
 | Macro expanding to an `unsafe` block the caller never wrote | Make the caller write `unsafe`, or expose an `unsafe fn` |
-| Safe method trusting a field another module can set | Make the field private; the module is the soundness boundary |
+| Safe method trusting a field code outside its module tree can set | Make the field private; the module and its descendants are the soundness boundary |
 | Unsafe abstraction calling user `Clone`/`Ord`/`Drop` or a closure mid-update | Stay sound if they lie or panic: restore in a drop guard, or have the guard set a self-managed poisoned flag |
 | Raw deref justified by a null check alone | State all five: non-null, aligned, initialised, aliasing, still-valid |
 | Two `&mut` derived from one raw pointer | UB whether or not both are used; restructure so only one exists |

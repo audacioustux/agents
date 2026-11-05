@@ -132,8 +132,10 @@ looks fine.
 
 How long is too long? Alice Ryhl's rule of thumb for tokio is no more than 10 to 100
 microseconds between awaits; Microsoft's guidelines arrive at the same range from the
-cost of a task switch. A loop doing more CPU work than that per await is blocking,
-even though every call in it is "async".
+cost of a task switch. Count the time between actual yields to the executor, not
+between `.await` expressions. Awaiting a future that is already ready returns at once
+without suspending, so a loop whose awaits all complete immediately is blocking, even
+though every call in it is "async".
 
 Move blocking and CPU-bound work to a facility built for it, and keep the async path
 for waiting. The concept is general; the API is not, and std provides nothing here.
@@ -196,7 +198,7 @@ explicitly rather than by dropping the handle and hoping.
 | Blocking or CPU-bound call on the async path | Offload it; `spawn_blocking` under tokio, and note `block_in_place` is multi-thread only |
 | `for` loop awaiting each item in turn, called concurrent | Join them, or use a bounded stream |
 | One spawned task per item of unbounded input | Bound the concurrency explicitly |
-| CPU loop with no await for more than about 100 µs | Offload it, or yield every N items |
+| CPU loop running more than about 100 µs without the task actually yielding — no await, or awaits that are always ready | Offload it, or yield every N items |
 | Hot `async fn` taking a large argument by value | Process it in a plain `fn` returning `impl Future`, or pass a reference |
 | Future size never measured on a hot path | `size_of_val` assertion in a test; Clippy `large_futures` |
 | `let _ = spawn(...)` or a handle dropped immediately | tokio detaches, smol cancels — call `detach()` explicitly, and keep the handle to see panics |
@@ -210,7 +212,7 @@ explicitly rather than by dropping the handle and hoping.
 - Is anything non-`Send` held across an await in a future that must be spawned across threads?
 - Are sequential awaits intended, or meant to overlap?
 - Is per-item concurrency bounded?
-- Does any task run more than about 100 µs of CPU between awaits?
+- Does any task run more than about 100 µs of CPU between actual yields, counting always-ready awaits as no yield?
 - Is any hot future large, and is its size guarded by a test?
 - Does every spawned task have an owner that observes its outcome?
 - Does the code assume handle-drop detaches, on a runtime where it cancels?

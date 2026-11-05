@@ -83,7 +83,7 @@ Follow std, because callers already know it.
 | Consumes `self` | `into_foo` | `String::into_bytes`; `into_inner` unwraps a wrapper |
 | Getter | `foo()`, `foo_mut()` | No `get_` prefix, unless there is one obvious thing to get (`Cell::get`) |
 | Setter, replace, take | `set_foo`, `replace_foo`, `take_foo` | `replace` and `take` return the old value |
-| Constructor | `new`, `try_new`, `with_foo`, `from_foo` | Associated functions; `try_new` returns `Result`; `from_foo` pairs with a `From` impl |
+| Constructor | `new`, `try_new`, `with_foo`, `from_foo` | Associated functions; `try_new` returns `Result`; `from_foo` for conversions `From` cannot express (unsafe, extra arguments, or input whose meaning the type alone does not fix: `String::from_utf8`, `Box::from_raw`) |
 | Iterators | `iter`, `iter_mut`, `into_iter` | Returning `Iter`, `IterMut`, `IntoIter` |
 | Extension trait | `FooExt` | Adds methods to a type you do not own |
 
@@ -147,8 +147,9 @@ enum, and off an options struct meant for `..Default::default()`. Within your ow
 crate, `#[non_exhaustive]` has no effect.
 
 When matching *someone else's* non-exhaustive enum, list every variant you know and
-put only the unknown future in `_`. Then a new upstream variant shows up in review
-rather than falling silently into the wildcard.
+put only the unknown future in `_`. The wildcard still swallows a new upstream variant
+silently, so treat a dependency upgrade as the time to re-read those matches against
+its changelog.
 
 **Fields are private by default.** A public field can never gain an invariant or
 change its representation. Make a field public only when any value is valid and the
@@ -192,9 +193,12 @@ provide a builder.
 Logic that parses, decides, or transforms should not own a socket, a file, or the
 clock.
 
-- **Sans-I/O.** Accept `impl Read`/`impl Write` (by value; `&mut R` also implements
-  them), or a byte slice, rather than a `File` or a path. One parser then serves files,
-  sockets, stdin, and tests.
+- **Sans-I/O.** Put the logic in a core that takes and returns bytes and state, and
+  never reads or writes itself: `fn feed(&mut self, input: &[u8]) -> Events`. Thin
+  adapters at the edges drive it from a socket, a file, or an async stream. Where a
+  one-shot blocking reader is all you need, accept `impl Read`/`impl Write` (by value;
+  `&mut R` also implements them) rather than a `File` or a path. That abstracts the
+  source, but it still blocks on it, so it is not sans-I/O.
 - **Mockable effects.** A type that touches the network, filesystem, clock, or entropy
   takes that capability as input, or holds a private enum of `Real` and (behind a
   feature) `Mock`. `Library::new_mocked() -> (Library, MockCtrl)` returns the
@@ -266,7 +270,7 @@ the caller.
 | Symptom | Fix |
 | --- | --- |
 | `type Id = u64;` used where ids and counts could mix | `struct Id(u64);` |
-| Newtype with `pub` inner field or infallible `From` | Private field; fallible constructor or `TryFrom` |
+| Newtype guarding an invariant, with a `pub` field or infallible `From` | Private field; fallible constructor or `TryFrom`. A newtype that accepts every value, like `UserId(u64)`, may offer `From` |
 | `f(x, true, false)` | Enums for the flags, or separate functions |
 | `get_name()` getter | `name()` |
 | `as_*` method that allocates | Rename to `to_*` |
@@ -278,7 +282,7 @@ the caller.
 | Pure `pub fn` or builder method without `#[must_use]` | Add it |
 | `no_std` feature, or a feature that removes items | `std` feature; additive only |
 | Fallible builder setters (`.name(x)?`) | Infallible setters; `build()` returns `Result` |
-| `fn parse(path: &Path)` that only reads bytes | `fn parse(r: impl Read)` |
+| `fn parse(path: &Path)` that only reads bytes | A byte-slice core, with `impl Read` or a path only at the edge |
 | `SystemTime::now()` or `rand::random()` deep inside logic | Take a clock or RNG as input |
 | `pub fn f(x: Arc<Mutex<T>>)` | `&T`/`&mut T`; hide the sharing |
 | `pub use inner::*` | Re-export by name |

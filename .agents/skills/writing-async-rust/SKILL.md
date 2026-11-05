@@ -4,6 +4,8 @@ description: Use when writing or reviewing async Rust — deciding what happens 
 uses:
   - name: writing-idiomatic-rust
     source: audacioustux/agents
+  - name: handling-rust-errors
+    source: audacioustux/agents
 ---
 
 # Writing Async Rust
@@ -32,7 +34,8 @@ Use for:
 - state held across an await point
 - a runtime that stalls, or a task that never completes
 
-Ownership, error, and dispatch questions belong to `writing-idiomatic-rust`.
+Ownership and dispatch questions belong to `writing-idiomatic-rust`, and error types
+to `handling-rust-errors`.
 
 ## Cancellation is the default, not the exception
 
@@ -103,7 +106,16 @@ then hits the hang above. The rule holds either way; only the enforcement differ
 
 Large values held across awaits inflate the state machine, which is allocated as a
 whole. A future carrying a large buffer across several awaits pays for it at every
-suspension point.
+suspension point. Arguments count too: everything passed to an `async fn` is stored in
+its future before the first poll, and a local with a `Drop` impl stays in the state
+machine until its scope ends, even if it was last used before the await.
+
+For a future created thousands of times a second, measure it. Assert
+`size_of_val(&hot(args))` against a limit in a test, so growth fails review. Clippy's
+pedantic `large_futures` flags futures over 16 KiB by default. To shrink one, end
+large locals' scopes before the await, do argument processing in a plain `fn` that
+returns `impl Future`, and move only what the async part needs into the `async`
+block.
 
 ## Blocking
 
@@ -118,6 +130,13 @@ The symptom is characteristic: latency that degrades under load in code that is 
 itself slow, because the queue behind the blocked thread grows while the profile
 looks fine.
 
+How long is too long? Alice Ryhl's rule of thumb for tokio is no more than 10 to 100
+microseconds between awaits; Microsoft's guidelines arrive at the same range from the
+cost of a task switch. Count the time between actual yields to the executor, not
+between `.await` expressions. Awaiting a future that is already ready returns at once
+without suspending, so a loop whose awaits all complete immediately is blocking, even
+though every call in it is "async".
+
 Move blocking and CPU-bound work to a facility built for it, and keep the async path
 for waiting. The concept is general; the API is not, and std provides nothing here.
 Tokio offers `spawn_blocking`, plus `block_in_place`, which is multi-threaded-only and
@@ -125,6 +144,13 @@ panics on a current-thread runtime. Other runtimes have their own, and some have
 equivalent at all. The rule is not "no synchronous code" — it is that nothing which
 waits on the OS or occupies the CPU for a long time belongs on a thread other tasks
 need.
+
+Where the CPU work must stay on the task, insert a yield every few tens of
+microseconds of work, such as every N items. Under tokio that is
+`task::yield_now().await`, which tokio documents as a hint and not a guarantee. The
+runtime may poll the same task again at once, and inside a `select!` whose other branch
+completes first the yield does not reach the runtime at all. Correctness must not
+depend on it; only fairness does.
 
 ## Concurrency is not parallelism
 
@@ -172,6 +198,9 @@ explicitly rather than by dropping the handle and hoping.
 | Blocking or CPU-bound call on the async path | Offload it; `spawn_blocking` under tokio, and note `block_in_place` is multi-thread only |
 | `for` loop awaiting each item in turn, called concurrent | Join them, or use a bounded stream |
 | One spawned task per item of unbounded input | Bound the concurrency explicitly |
+| CPU loop running more than about 100 µs without the task actually yielding — no await, or awaits that are always ready | Offload it, or yield every N items |
+| Hot `async fn` taking a large argument by value | Process it in a plain `fn` returning `impl Future`, or pass a reference |
+| Future size never measured on a hot path | `size_of_val` assertion in a test; Clippy `large_futures` |
 | `let _ = spawn(...)` or a handle dropped immediately | tokio detaches, smol cancels — call `detach()` explicitly, and keep the handle to see panics |
 
 ## Review checklist
@@ -183,6 +212,8 @@ explicitly rather than by dropping the handle and hoping.
 - Is anything non-`Send` held across an await in a future that must be spawned across threads?
 - Are sequential awaits intended, or meant to overlap?
 - Is per-item concurrency bounded?
+- Does any task run more than about 100 µs of CPU between actual yields, counting always-ready awaits as no yield?
+- Is any hot future large, and is its size guarded by a test?
 - Does every spawned task have an owner that observes its outcome?
 - Does the code assume handle-drop detaches, on a runtime where it cancels?
 
@@ -194,3 +225,12 @@ explicitly rather than by dropping the handle and hoping.
 - A detached task whose panic nobody observes.
 - Assuming a dropped task handle detaches, which inverts between tokio and smol.
 - Reaching for an async mutex by default, where the guard never reaches an await.
+
+## Sources
+
+The 2026-11-05 additions were verified against:
+
+- Alice Ryhl, "Async: What is blocking?" (10–100 µs between awaits).
+- tokio: `task::yield_now`.
+- Microsoft Pragmatic Rust Guidelines: M-YIELD-POINTS, M-ASYNC-STACK-SIZE.
+- Clippy: `large_futures`, checked on a probe crate.

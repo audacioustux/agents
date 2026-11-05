@@ -1014,12 +1014,41 @@
           "repo": "Rust-Coding-Guidelines/rust-coding-guidelines-zh",
           "sha": "6b3fc48b285b4f87696634a3e18572d010b30fd4",
           "license": "MIT"
+        },
+        {
+          "repo": "google/styleguide",
+          "sha": "0917409e4ed99f65d535f00f08342dc66a4d735e",
+          "license": "CC-BY-3.0",
+          "path": "rustguide.md"
+        },
+        {
+          "repo": "microsoft/rust-guidelines",
+          "sha": "9585e288d21d2da994a0550c926a09b62d79f8bd",
+          "license": "MIT"
+        },
+        {
+          "repo": "rustfoundation/safety-critical-rust-coding-guidelines",
+          "sha": "9e7012faeb6f0024f8b0b7de616e8cf244ee0300",
+          "license": "MIT OR Apache-2.0",
+          "note": "all cited guidelines carry status: draft"
+        },
+        {
+          "url": "https://doc.rust-lang.org/nomicon/ffi.html",
+          "retrieved": "2026-11-05"
+        },
+        {
+          "url": "https://doc.rust-lang.org/std/panic/fn.catch_unwind.html",
+          "retrieved": "2026-11-05"
+        },
+        {
+          "url": "https://doc.rust-lang.org/std/sync/struct.Mutex.html",
+          "retrieved": "2026-11-05"
         }
       ],
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "85b2930b792f317756abc037f162ba55a4417963970f6a8ee9c0863500c18824",
+          "sha256": "25625db49524602ae3e0d318d42a77b0cbd40ddbacea8a7761ddc50edd319b2c",
           "upstream": {
             "status": "native"
           }
@@ -1064,7 +1093,7 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "2d0795a5a76e1b8e94737b42a3f012167c28e4b604b870ea30c619ac55e9f2f0",
+          "sha256": "ea61a3af45b22d0a464495ad045b649e76bda927039f8857028f739d74cf30bb",
           "upstream": {
             "status": "native"
           }
@@ -1255,7 +1284,7 @@
           }
         },
         "references/testing-anti-patterns.md": {
-          "sha256": "c4f4f45f576252476c2f01ae0f7eefc960f0db612a012d09bb574299cc75f959",
+          "sha256": "96ab8d861363301e559a502753923509a7851459ec38d1f2a193e56bcccd4b59",
           "upstream": {
             "status": "added-locally"
           }
@@ -1274,7 +1303,8 @@
         }
       },
       "decisions": [
-        "2026-09-21: trimmed one restated-fact section in SKILL.md (346 -> 344 LOC, -0.6%). The dedicated 'Why Order Matters' section was a one-sentence pointer to references/why-test-first.md that restated the immediately-preceding 'Implement fresh from tests. Period.'; folded into Iron Law as a follow-on sentence with the reference link preserved. An initial broader pass collapsed the Iron Law / Red Flags / Final Rule triad but the reviewer correctly flagged that the framing lines ('These are observable states, not excuses', the fenced Final Rule contract, the standalone 'No exceptions without your human partner's permission') were load-bearing structural context, not decorative duplication. Reverted to main and applied only the one unambiguous cut."
+        "2026-09-21: trimmed one restated-fact section in SKILL.md (346 -> 344 LOC, -0.6%). The dedicated 'Why Order Matters' section was a one-sentence pointer to references/why-test-first.md that restated the immediately-preceding 'Implement fresh from tests. Period.'; folded into Iron Law as a follow-on sentence with the reference link preserved. An initial broader pass collapsed the Iron Law / Red Flags / Final Rule triad but the reviewer correctly flagged that the framing lines ('These are observable states, not excuses', the fenced Final Rule contract, the standalone 'No exceptions without your human partner's permission') were load-bearing structural context, not decorative duplication. Reverted to main and applied only the one unambiguous cut.",
+        "2026-11-05: Anti-Pattern 6 gained one paragraph from Microsoft M-TAUTOLOGICAL-TESTS (microsoft/rust-guidelines@9585e28, MIT): test a property a constant table must satisfy rather than its values."
       ],
       "rationale": "absorbs tdd; most-referenced skill, keep the name",
       "owned": true
@@ -1473,12 +1503,27 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "524f3ed8e6e64adfc3b9edbdcbb23e9895d812efc598aa6101df43df04ef2e4b",
+          "sha256": "64337d98b310bed35eeb4e5f3615aedb34cc0189e5112dbe4a43ef428bec64fc",
           "upstream": {
             "status": "native"
           }
         }
-      }
+      },
+      "references": [
+        {
+          "repo": "microsoft/rust-guidelines",
+          "sha": "9585e288d21d2da994a0550c926a09b62d79f8bd",
+          "license": "MIT"
+        },
+        {
+          "url": "https://ryhl.io/blog/async-what-is-blocking/",
+          "retrieved": "2026-11-05"
+        },
+        {
+          "url": "https://docs.rs/tokio/latest/tokio/task/fn.yield_now.html",
+          "retrieved": "2026-11-05"
+        }
+      ]
     },
     "writing-idiomatic-rust": {
       "disposition": "keep-as-is",
@@ -1495,12 +1540,43 @@
           "repo": "Rust-Coding-Guidelines/rust-coding-guidelines-zh",
           "sha": "6b3fc48b285b4f87696634a3e18572d010b30fd4",
           "license": "MIT"
+        },
+        {
+          "repo": "google/styleguide",
+          "sha": "0917409e4ed99f65d535f00f08342dc66a4d735e",
+          "license": "CC-BY-3.0",
+          "path": "rustguide.md"
+        },
+        {
+          "repo": "microsoft/rust-guidelines",
+          "sha": "9585e288d21d2da994a0550c926a09b62d79f8bd",
+          "license": "MIT"
+        },
+        {
+          "repo": "rust-lang/api-guidelines",
+          "sha": "97a0969cb07fe4cabb0eed8a56234053f47d83dc",
+          "license": "MIT OR Apache-2.0"
+        },
+        {
+          "repo": "nnethercote/perf-book",
+          "sha": "bc7cb0d1bca9561dda9effd0f3d86112eab3e948",
+          "license": "MIT OR Apache-2.0"
+        },
+        {
+          "repo": "rustfoundation/safety-critical-rust-coding-guidelines",
+          "sha": "9e7012faeb6f0024f8b0b7de616e8cf244ee0300",
+          "license": "MIT OR Apache-2.0",
+          "note": "all cited guidelines carry status: draft"
+        },
+        {
+          "url": "https://rust-analyzer.github.io/book/contributing/style.html",
+          "retrieved": "2026-11-05"
         }
       ],
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "6250e132549cda68289213c82d1cdc5a76b1d17f2ee3199b5e2528d185b20f06",
+          "sha256": "3c3b9acdc67a72e8da41078c3aafef7b0ecbb5c035475d0069656d6ed93f3b13",
           "upstream": {
             "status": "native"
           }
@@ -1625,6 +1701,203 @@
           "sha256": "e291e773a6c243b748bb495b0e3687fa1c1aff1fcb3b94f82a4eb74ab20a4db4"
         }
       }
+    },
+    "handling-rust-errors": {
+      "disposition": "keep-as-is",
+      "rationale": "authored in this repo; split out of writing-idiomatic-rust (its Fallibility and error-type sections moved here) and extended with the Google/Microsoft panic, catch_unwind, poison and error-shape rules. Mechanisms independently restated, no text copied.",
+      "owned": true,
+      "upstream": [],
+      "references": [
+        {
+          "repo": "google/styleguide",
+          "sha": "0917409e4ed99f65d535f00f08342dc66a4d735e",
+          "license": "CC-BY-3.0",
+          "path": "rustguide.md"
+        },
+        {
+          "repo": "microsoft/rust-guidelines",
+          "sha": "9585e288d21d2da994a0550c926a09b62d79f8bd",
+          "license": "MIT"
+        },
+        {
+          "repo": "rust-lang/api-guidelines",
+          "sha": "97a0969cb07fe4cabb0eed8a56234053f47d83dc",
+          "license": "MIT OR Apache-2.0"
+        },
+        {
+          "url": "https://doc.rust-lang.org/std/io/struct.Error.html",
+          "retrieved": "2026-11-05"
+        },
+        {
+          "url": "https://doc.rust-lang.org/std/io/enum.ErrorKind.html",
+          "retrieved": "2026-11-05"
+        },
+        {
+          "url": "https://doc.rust-lang.org/std/panic/fn.catch_unwind.html",
+          "retrieved": "2026-11-05"
+        },
+        {
+          "url": "https://doc.rust-lang.org/std/sync/struct.Mutex.html",
+          "retrieved": "2026-11-05"
+        },
+        {
+          "url": "https://burntsushi.net/unwrap/",
+          "retrieved": "2026-11-05"
+        },
+        {
+          "url": "https://matklad.github.io/2020/10/15/study-of-std-io-error.html",
+          "retrieved": "2026-11-05"
+        }
+      ],
+      "state": "native",
+      "files": {
+        "SKILL.md": {
+          "sha256": "2e40e3c6e50fccb8e24ca8d4ada14919c623d371cf8ca52c1c4f6352b8cd945e",
+          "upstream": {
+            "status": "native"
+          }
+        }
+      }
+    },
+    "designing-rust-apis": {
+      "disposition": "keep-as-is",
+      "rationale": "authored in this repo; no prior skill owned a crate's public surface. Distilled from the Rust API Guidelines, Google's API-design rules and Microsoft's Library/UX, Resilience, Building, Docs and Macros sections. No text copied.",
+      "owned": true,
+      "upstream": [],
+      "references": [
+        {
+          "repo": "rust-lang/api-guidelines",
+          "sha": "97a0969cb07fe4cabb0eed8a56234053f47d83dc",
+          "license": "MIT OR Apache-2.0"
+        },
+        {
+          "repo": "google/styleguide",
+          "sha": "0917409e4ed99f65d535f00f08342dc66a4d735e",
+          "license": "CC-BY-3.0",
+          "path": "rustguide.md"
+        },
+        {
+          "repo": "microsoft/rust-guidelines",
+          "sha": "9585e288d21d2da994a0550c926a09b62d79f8bd",
+          "license": "MIT"
+        },
+        {
+          "repo": "rustfoundation/safety-critical-rust-coding-guidelines",
+          "sha": "9e7012faeb6f0024f8b0b7de616e8cf244ee0300",
+          "license": "MIT OR Apache-2.0",
+          "note": "all cited guidelines carry status: draft"
+        },
+        {
+          "url": "https://doc.rust-lang.org/cargo/reference/features.html",
+          "retrieved": "2026-11-05"
+        },
+        {
+          "url": "https://doc.rust-lang.org/reference/attributes/diagnostics.html",
+          "retrieved": "2026-11-05"
+        },
+        {
+          "url": "https://rust-analyzer.github.io/book/contributing/style.html",
+          "retrieved": "2026-11-05"
+        }
+      ],
+      "state": "native",
+      "files": {
+        "SKILL.md": {
+          "sha256": "bd722c76e201eb825b4cc83108038b6fa153b3b57ca8752958f59b8a01a476c6",
+          "upstream": {
+            "status": "native"
+          }
+        }
+      }
+    },
+    "optimizing-rust-hot-paths": {
+      "disposition": "keep-as-is",
+      "rationale": "authored in this repo; runtime-cost counterpart to speeding-up-rust-builds. Distilled from the Rust Performance Book and Microsoft's Performance block; mimalloc and target-cpu deliberately not adopted as defaults. No text copied.",
+      "owned": true,
+      "upstream": [],
+      "references": [
+        {
+          "repo": "nnethercote/perf-book",
+          "sha": "bc7cb0d1bca9561dda9effd0f3d86112eab3e948",
+          "license": "MIT OR Apache-2.0"
+        },
+        {
+          "repo": "microsoft/rust-guidelines",
+          "sha": "9585e288d21d2da994a0550c926a09b62d79f8bd",
+          "license": "MIT"
+        },
+        {
+          "repo": "rust-lang/api-guidelines",
+          "sha": "97a0969cb07fe4cabb0eed8a56234053f47d83dc",
+          "license": "MIT OR Apache-2.0"
+        },
+        {
+          "repo": "google/styleguide",
+          "sha": "0917409e4ed99f65d535f00f08342dc66a4d735e",
+          "license": "CC-BY-3.0",
+          "path": "rustguide.md"
+        }
+      ],
+      "state": "native",
+      "files": {
+        "SKILL.md": {
+          "sha256": "4a17b75733d9ff55e4c29bdd8f9231209b25df58688bfea8ea8c2baedf836c5d",
+          "upstream": {
+            "status": "native"
+          }
+        }
+      }
+    },
+    "configuring-rust-lints": {
+      "disposition": "keep-as-is",
+      "rationale": "authored in this repo; owns the enforcement mechanism only, each rule stays with its owning skill. Baseline [lints] table, clippy.toml keys, lint-group membership and #[expect](unsafe_code) confinement verified on a probe crate (rustc 1.100.0-nightly 2026-08-17, clippy 0.1.99).",
+      "owned": true,
+      "upstream": [],
+      "references": [
+        {
+          "repo": "microsoft/rust-guidelines",
+          "sha": "9585e288d21d2da994a0550c926a09b62d79f8bd",
+          "license": "MIT"
+        },
+        {
+          "repo": "EmbarkStudios/rust-ecosystem",
+          "sha": "bc9f6c527108a8b79b74d44121aed574e7b5e526",
+          "license": "MIT OR Apache-2.0",
+          "path": "lints.toml"
+        },
+        {
+          "repo": "google/styleguide",
+          "sha": "0917409e4ed99f65d535f00f08342dc66a4d735e",
+          "license": "CC-BY-3.0",
+          "path": "rustguide.md"
+        },
+        {
+          "repo": "nnethercote/perf-book",
+          "sha": "bc7cb0d1bca9561dda9effd0f3d86112eab3e948",
+          "license": "MIT OR Apache-2.0"
+        },
+        {
+          "url": "https://doc.rust-lang.org/stable/clippy/lints.html",
+          "retrieved": "2026-11-05"
+        },
+        {
+          "url": "https://doc.rust-lang.org/cargo/reference/manifest.html#the-lints-section",
+          "retrieved": "2026-11-05"
+        },
+        {
+          "url": "https://doc.rust-lang.org/reference/attributes/diagnostics.html",
+          "retrieved": "2026-11-05"
+        }
+      ],
+      "state": "native",
+      "files": {
+        "SKILL.md": {
+          "sha256": "6348a0ae5f7f932b57177f9566a6b88f285004e5bc419f4dec531bb272d8f5b1",
+          "upstream": {
+            "status": "native"
+          }
+        }
+      }
     }
   },
   "dispositionsRecorded": "2026-09-04",
@@ -1672,7 +1945,11 @@
     "corpus-review-2026-09-07": "Full 33-skill review for rendering and structural defects. Checked: fence closure and tagging, fence languages, table/heading/list blank-line separation, bare URLs, backtick balance, paragraph length and prose runs, heading depth, emoji, all-caps, trailing whitespace, TODO markers, and heading vocabulary. Fixed three real defects: (1) systematic-debugging's h2 read '## your human partner's Signals You're Doing It Wrong', ungrammatical damage from an earlier find-and-replace de-personalisation pass; (2) one trailing-whitespace line in writing-skills; (3) twelve headings across eight skills that differed only in casing - 'When To Use'/'When to Use' vs 'When to use', 'Anti-Patterns' vs 'Anti-patterns', 'Red flags' vs 'Red Flags', 'Common mistakes' vs 'Common Mistakes' - normalised to the corpus-majority form, with no internal anchor links or prose references to break. Deliberately NOT changed: the `dot` fence at writing-skills:281, which the `diagrams` decision records as the one deliberately-bad example kept as graphviz because the section heading is '### Code in Flowcharts' and the fence IS the anti-pattern; 30 untagged fences, which hold pseudo-code process templates and directory trees rather than runnable code; and the semantic split between 'Anti-patterns' (12), 'Red Flags' (5) and 'Common Mistakes' (5), which mark genuinely different things in workflow skills. No unclosed fences, no oversized paragraphs (longest 107 words), no h4+ nesting outside two skills, and no broken tables were found. SECOND PASS: the first review only opened SKILL.md files and its fence scan matched `{3,}, so it was structurally blind to malformed delimiters. A reviewer caught 68 two-backtick fence lines across 5 files in testing-skills (SKILL.md, examples/claude-md-test-campaign.md, references/bulletproofing.md, references/persuasion-principles.md, references/testing-with-subagents.md), including tagged opens like ``markdown and ``yaml, all of which render as inline code rather than blocks - 34 blocks broken. Verified before converting: every file balanced (opens == closes), zero pre-existing three-tick fences, zero mid-line double-backtick spans that a ^`` pass could clobber, and no nested fences needing longer delimiters. Converted all 68 and confirmed content byte-identical apart from the added tick. Also swept all 73 markdown files (33 SKILL.md + 40 companions) for single-backtick line starts, unclosed fences, trailing whitespace, consecutive blanks, lowercase headings and missing trailing newlines; the remaining flags were all false positives - prose lines wrapping onto a backticked term, and legitimate headings ('# iOS input zoom recipes', '# advanced.md'). Root-caused the miss: the corpus-wide grep used the BRE `^``\\([^`]\\|$\\)`, which returns 0 rather than erroring. Verified against the pre-fix file at 70e1fd2 - that pattern finds 0 matches while `grep -P '^``(?!`)'` and `grep '^``' | grep -v '```'` both find 12. Isolated the failing construct: `^``[^`]` alone matches and `^``` alone matches, but the escaped alternation inside the group yields 0 under BOTH BRE and ERE, and `\\|` is alternation in BRE yet a literal pipe in ERE, so the pattern was never portable. The silent zero sent the investigation to symlinks and git-tracking before the JS scan settled it. Rule going forward: a zero result from a hand-written regex is a claim that needs a positive control - run the pattern against content known to contain the target before believing an empty result. THIRD PASS, closing the two items the review measured but left: (1) ten sentence-initial 'your human partner' artifacts across five files - the same find-and-replace damage as the systematic-debugging heading - capitalised, with the 13 legitimate mid-sentence uses preserved. (2) The Rust skills were the corpus's prose-heaviest at 79% prose against a 34% average, four of five with zero tables while the UI skills carry '## Detection patterns' tables throughout. Added that section to all five, each row sourced from a defect its own body already establishes, matching the '| Symptom | Fix |' convention in refining-typography and building-color-systems. Prose density fell to 68% and table rows rose from an average of 2 to 16; no Rust skill now lacks a detection table. Audited the new tables against writing-skills' own rule that the left column must be an observable symptom and that a row restating the principle above it earns nothing. Verified all 60 rows trace to a defect already in their body (10 apparent orphans were exact-match failures in the checker - `clone`, `unwrap`, `MutexGuard` and the rest are all present in their own bodies). Five rows genuinely violated the convention by describing intent or activity rather than an inspectable artifact - 'Task handle dropped to let it run in the background', 'Lockfile gitignored because it is a library', 'Dependency judged by its unsafe count alone', 'Optimising by total build time', 'Linker assumed from a version number'. Rewritten as artifacts (`let _ = spawn(...)`, `Cargo.lock` in `.gitignore`, `.cargo/config.toml` sets a linker nobody confirmed) and two adjacent duplicates merged, leaving 58 rows. Cross-section dedup: after adding the tables, measured Jaccard overlap between every anti-pattern and every table row. A reviewer claimed all 9 async anti-patterns restated a row; measured, 10 of 41 entries across the five skills duplicated a row (3 in async, 3 in builds, 2 in supply-chain, 1 each in idiomatic and unsafe) while 31 were unique, so cutting the sections wholesale would have destroyed content the tables cannot express. Removed the 10 duplicates, leaving 31; max residual overlap is 0.33. Also found one checklist item ('Is any blocking or CPU-bound call sitting on the async path?') that was its table row rephrased as a question, and cut it. Detection tables now own detection; anti-patterns keep only what a symptom/fix pair cannot state, such as 'Reaching for unsafe because the borrow checker rejected the design'. One further duplicate surfaced only when the check was widened from anti-patterns to checklists as well: 'Is cleanup written after an await rather than in a Drop guard?' restated its table row at 0.40. Cut. Final state across the five skills - 58 table rows, 31 anti-patterns, 41 checklist items, maximum cross-section overlap 0.33, verified over all three pairings including anti-pattern against checklist. Extended the dedup measurement from the five Rust skills to all 33, over every table row and every bullet in an anti-pattern, red-flag, rationalization, mistake or checklist section. Found 10 duplicate pairs in 5 skills. Two shapes: test-driven-development and verifying-before-completion each duplicated quoted excuses between a Red Flags list and a Rationalizations table that already carried the rebuttal (one pair scored 1.00), so the lists were cut back to observable states with a pointer to the table; writing-idiomatic-rust, speeding-up-rust-builds and using-git-worktrees each had checklist items restating a table row. Zero pairs remain. Separately, speeding-up-rust-builds held the corpus's longest unstructured stretch - 10 consecutive paragraphs under one '## Dev profile' heading spanning debug info, LTO, linking, dependency optimisation and codegen backends - split into four topic sections, bringing the maximum run to 6, which matches test-driven-development and the pre-existing companion files. Found a duplication shape the token-overlap metric was structurally blind to: Never/Always polarity inversion, where one rule appears in both lists with opposite phrasing and almost no shared vocabulary ('Proceed with failing tests' against 'Verify tests before offering options' share nothing). Only 7 skills use Never/Always blocks; 5 of them list different subjects in each block, so the defect was confined to using-git-worktrees and finishing-a-development-branch, which held 5 inversions between them - 3 and 2 respectively. Kept whichever side carried the sharper instruction and cut the other. A polarity-aware matcher, which strips negation and maps inverse verbs before comparing, now reports zero pairs across the corpus. Traced the excuse-duplication defect to its source: testing-skills/references/bulletproofing.md prescribed building a rationalization table of quoted excuses and then a red-flags list containing those same quoted excuses, so the authoring guidance would regenerate in any new skill exactly what was removed from test-driven-development and verifying-before-completion. Corrected the prescribed example to separate the two - the table owns excuses with their rebuttals, the red-flags list owns observable states - and added the rule that a quoted excuse belongs in exactly one place. Then swept every fenced example across writing-skills and testing-skills for the same shape, including Never/Always example blocks; all now clean. A consulted oracle agent disagreed with the claim that duplication was eliminated, and was right: all three prior detectors were within-file, so cross-file duplication was structurally invisible to every one of them. Verified its citations before acting. Fixed three real cases - a four-sentence rationale duplicated verbatim between dispatching-parallel-agents and subagent-driven-development, the RED/REFACTOR checklists restated in writing-skills while annotated as owned by testing-skills and already drifted by three requirements, and a core principle stated in both writing-skills and testing-skills whose final clauses had already diverged. Also fixed the unfenced generator the earlier fenced-example sweep missed: testing-with-subagents prescribed adding each rationalization to a table AND a red-flag list, the instruction living in headings between the fences rather than inside them. Added a cross-file shingle detector; the four remaining pairs are dependency manifests and template legends, which are single-owner by construction. Corrected an overreaching claim about the oracle agent's model list: the frontmatter selectors are spawn-time model precedence (task-agent-discovery.md documents 'entries are tried in order' under task-dispatch precedence), while retry.fallbackChains is consulted at step 6 of the retry path and is keyed by role, per non-compaction-retry-policy.md and its retry_fallback_applied {from,to,role} event. No source states the frontmatter list preempts the role chain when a turn fails mid-flight, so the accurate claim is that the list adds in-class candidates at spawn time; mid-turn retry precedence is untested and the role chain may still hand off to chat class. Verified both fallback selectors are in enabledModels, which is availability, not precedence. Swept the corpus for the render defect found in oracle.md, where list and table structure inside a raw XML block collapses because Markdown treats abutting content as HTML. A heuristic scan reported two hits in the vendored Anthropic reference; rendering those blocks through marked showed both render correctly, so the heuristic was wrong and the corpus has zero instances. The corrected detector renders each candidate block and carries a positive control proving it can fire. Separately swept for oversized paragraphs: 14 at 80 words or more, of which two buried measurement tables in prose (linker timings, debug-info timings and frame counts) and are now tables. The other twelve are continuous single arguments where breaking them would be style churn. Re-audited the render scan under a three-class split: custom tags inside fenced examples (3, in 2 files, correctly excluded by fence-blanking), vendor anthropic-best-practices content (2, render correctly, not restyled), and live wrappers around lists or tables outside fences (0). That qualifier turned out to be wrong, and the after-review caught it: the corpus contained 8 live custom tags outside fences — <Good>/<Bad> in test-driven-development and bulletproofing, <Before>/<After> in testing-with-subagents — and each one DID collapse. A line-alone tag opens a CommonMark type-7 raw-HTML block that swallows the fence opener, so the enclosed code rendered as prose with literal backticks, and in two files a blank line ended the HTML block early so the closing ``` re-opened a fence that captured the closing tag and the next heading. Measured with marked: test-driven-development 13 fences rendered 10 code blocks, bulletproofing 6 rendered 4, testing-with-subagents 14 rendered 12. Fixed with the same blank-line remedy as oracle.md; all three now render every fence. Class three is the oracle case, and no file in the skills corpus is one. oracle.md, which lives outside the corpus at .omp/agent/agents/oracle.md, still wraps a numbered list, two tables, and a bullet list in live XML; e46fb91 fixed its rendering by adding blank lines around the tags, not by removing the wrappers. Also tested a length-independent drift proxy, scoring adjacent-sentence vocabulary overlap: it returned 9 candidates including a 65-word paragraph that word count alone would never surface, but reading them showed the proxy is inverted. Cohesion scored 0.000 precisely where each sentence advances the argument with new vocabulary instead of repeating terms, which is what good technical prose does. No edits were made on it.",
     "harness-bridge-add-omp": "Executed 2026-09-21: admitted omp as the third supported CLI in harness-bridge. omp's argv surface differs (--approval-mode, no --fork-session/--session-id/--name, no stream-json), so an optional per-CLI build hook on AgentSpec was added. omp's hook pins --approval-mode always-ask (approval-gated, not read-only), refuses resume (no fork primitive would silently bypass the safety contract), and refuses stdin delivery (no stream-json). SKILL.md documents three contract gaps. Three commits on lean-hb-omp: 731db3f (initial omp entry), ea976b7 (tighten approval-mode semantics + log injection), ab6801e (defence-in-depth: enforce contract at hook layer + restore AgentId narrowing + smoke tests for --no-session and --model). Reviewer (puku-cli adversarial): APPROVE after two rounds.",
     "source-rejections-autoprompt-skill": "audited Spielewoy/autoprompt-skill (b6516cf52a7891d797621fdd2a8ca0311e1ae0a9) on 2026-09-21. First-pass verdict (NOT a fork candidate, extract 3-5 rules) was drafted by puku-cli and corrected during drafting for: (1) blending two orthogonal decisions (fork vs extract) into one statement; (2) overcounting file volume (the 550 claim was wrong; the real structure is 7 hand-authored contracts + 11 generated provider packages + manifests); (3) skipping the corpus's documented audit schema (docs/audits/cursor-plugins/README.md Reading-a-row block, disposition/status/note/evidence/landedIn + caveat); (4) missing generation-coupling framing for the fork argument; (5) overstating vendor-paths as a hard rule when provenance.json decisions.paths makes it conditional. omp subsequently reviewed the revised ledger under the harness-bridge safety contract (approval-gated, not read-only) and returned DO NOT MERGE with three blockers (missing rows for roles.json/schemas/, total:11 vs 6 rows contradiction, README off-by-one), two high findings (read-only misattribution, auditor-field conflation), three medium (line-drift citations, reviewer_trail misattribution, undocumented destination field), and three low. The nine corrections are applied in commit 38cf161. Round-3 review returned APPROVE on d388171 and the ledger was merged to main as 50559bb. Round 4 (lean-route-nonselectors): read routes.json in full at SHA b6516cf52a7891d797621fdd2a8ca0311e1ae0a9. The contract's `nonSelectors` field lists 9 inputs that MUST NOT escalate the route on their own (file-count, repository-size, max-subs, available-agent-count, security-word-alone, refactor-word-alone, research-word-alone, one-failed-implementation, benchmark-label); the round-1 verdict named 4 of these, the other 5 were equally load-bearing. Adopted the nonSelectors discipline into writing-plans/SKILL.md as a new 'Not by themselves reasons to plan' section, landed in commit 56b8894. Rejected the rest of routes.json (23-input routeFactsSchema, 9-rule precedenceTable, routeAnalyst role with 120s time-limit, runOwnerDecision role with 240s time-limit, capabilityRequirements matrix) as inseparable from the autoprompt packaging model. The ledger now carries 8 disposition rows: 1 adopt-rule landed (routes.json -> writing-plans, commit 56b8894), 2 adopt-rule no-action (gates.json+state-machine.json -> verifying-before-completion; conformance-evidence JSONs -> harness-bridge), 5 reject. Fork decision: NO, on generation coupling (would invert the curated-skills model).",
-    "registry-survey-2": "Re-surveyed ui-skills.com/skills/registry.txt on 2026-09-22: 331 entries, up from 289 at the 2026-09-06 survey. Sources named in that survey were not re-litigated. Of the rest, 58 are vendor-coupled and the remainder are visual-style prescription, personal-brand/taste skills, non-web platforms, or hosted rule engines - all rejected on the standing grounds. Three mechanisms adopted. From jakubkrehel, an author this corpus had already mined for better-colors/better-typography/better-writing: the forced-colors focus rule from better-accessibility (verified against its focus-and-keyboard.md companion) into building-accessible-interfaces, and the theme-switch transition suppression from better-ui into animating-interface-motion. Both verified absent from the corpus first by grep. Also surveyed sethdford/claude-skills (454 skills, 8 role directories): rejected entirely. Its skills average 420 words against this corpus's 1208, 391 of 454 share identical template headings, and no file in it contains MUST, NEVER or ALWAYS. Two security rules there were accurate - NIST SP 800-63B's inversion of composition rules and rotation, and AES-GCM nonce uniqueness - but a security skill built on them would be a new domain this corpus does not own, not an extension of an existing one. The third is raphaelsalaja/to-spring-or-not-to-spring's velocity-continuity rule, restated vendor-free in animating-interface-motion: that skill already said a transition retargets mid-flight, which is true of position and silent on velocity, and building-accessible-interfaces line 100 hands it the question of which technique keeps motion interruptible without answering it. Its duration tables were rejected: this corpus is on record that no published source gives an empirical basis for a specific figure."
+    "registry-survey-2": "Re-surveyed ui-skills.com/skills/registry.txt on 2026-09-22: 331 entries, up from 289 at the 2026-09-06 survey. Sources named in that survey were not re-litigated. Of the rest, 58 are vendor-coupled and the remainder are visual-style prescription, personal-brand/taste skills, non-web platforms, or hosted rule engines - all rejected on the standing grounds. Three mechanisms adopted. From jakubkrehel, an author this corpus had already mined for better-colors/better-typography/better-writing: the forced-colors focus rule from better-accessibility (verified against its focus-and-keyboard.md companion) into building-accessible-interfaces, and the theme-switch transition suppression from better-ui into animating-interface-motion. Both verified absent from the corpus first by grep. Also surveyed sethdford/claude-skills (454 skills, 8 role directories): rejected entirely. Its skills average 420 words against this corpus's 1208, 391 of 454 share identical template headings, and no file in it contains MUST, NEVER or ALWAYS. Two security rules there were accurate - NIST SP 800-63B's inversion of composition rules and rotation, and AES-GCM nonce uniqueness - but a security skill built on them would be a new domain this corpus does not own, not an extension of an existing one. The third is raphaelsalaja/to-spring-or-not-to-spring's velocity-continuity rule, restated vendor-free in animating-interface-motion: that skill already said a transition retargets mid-flight, which is true of position and silent on velocity, and building-accessible-interfaces line 100 hands it the question of which technique keeps motion interruptible without answering it. Its duration tables were rejected: this corpus is on record that no published source gives an empirical basis for a specific figure.",
+    "rust-guidelines-2026-11-05": "2026-11-05: adopted Google's Rust Style Guide and Microsoft's Pragmatic Rust Guidelines, reconciled with the Rust API Guidelines, the Rust Performance Book, Clippy's lint-group docs, std docs (io::Error, catch_unwind, Mutex poisoning), the Nomicon (FFI unwinding), BurntSushi (unwrap), matklad (io::Error), Alice Ryhl (blocking), rust-analyzer's style guide, Embark's lints and the draft Safety-Critical Rust Coding Guidelines. Every rule was checked against its source text; lint names and clippy.toml keys were checked on a probe crate. Structure: writing-idiomatic-rust kept ownership/Rc-Arc/clones/integers/iterators/dispatch; its fallibility and error-type sections moved to new handling-rust-errors; new designing-rust-apis, optimizing-rust-hot-paths and configuring-rust-lints; reviewing-unsafe-rust, writing-async-rust and speeding-up-rust-builds extended or re-pointed. Resolutions, each written in as an overridable default with reasons: (1) library errors are a #[non_exhaustive] enum, or an io::Error-style struct with a public kind() when context is needed; Microsoft's canonical struct adopted only for that case, its hidden-kind is_xxx() form not adopted; applications use one opaque error; backtraces only in apps or behind a feature. (2) Rc/Arc: single ownership default, Rc within a thread, Arc for cross-thread hand-off and cold Clone service handles, never per hot entity. (3) #[expect] with reason over #[allow]; dispatch concrete > generic > dyn; glob re-exports only for a deliberate prelude or cfg platform forwarding; panic on detected bugs only, with optional never-panic twins. (4) catch_unwind decided by panic strategy (Google's ban vs the unsafe skill's old 'catch at every extern boundary' contradiction resolved: extern \"C\" already aborts; catch only under unwind when abort is unacceptable). (5) Clippy pedantic enabled as a group at priority -1; restriction cherry-picked; unwrap_used/panic/indexing_slicing left off except in never-panic code. Left out: Chromium/Android/Fuchsia/gtest-specific rules, mimalloc and target-cpu as defaults, Microsoft's fundle/deps-struct builder variant, M-CRATES-FLAT-FOLDER and M-SMALLER-CRATES (repo layout, owned by speeding-up-rust-builds where it matters), M-FFI-NAMING/M-ISOLATE-DLL-STATE (Windows DLL specifics), Google's import-granularity and qualified-function-call conventions (rustfmt/team style, not correctness). M-DESIGN-FOR-AI has no rule of its own (it points at docs, examples, strong types and testable APIs, all now in designing-rust-apis); M-TAUTOLOGICAL-TESTS was already test-driven-development Anti-Pattern 6, which gained Microsoft's property-test remedy.",
+    "rust-guidelines-review-2026-11-05": "2026-11-05: independent-review fixes. Send required only for types meeting a work-stealing runtime; thread-per-core APIs may be !Send on purpose (Sync dropped as a default). module_name_repetitions removed from the lint baseline: it left pedantic (re-probed on clippy 0.1.99). Hot-path string joining is with_capacity+push_str or concat; format! kept as the off-hot-path readability choice. Busy-polling named as the override to 'do not spin'. One home per fact: poisoning-vs-soundness in reviewing-unsafe-rust, catch_unwind-under-abort in handling-rust-errors, nested-Arc and bounds-check costs in optimizing-rust-hot-paths. Verified: lint_groups_priority is deny-by-default (probe), #[expect] stable since 1.81 (Rust 1.81.0 release post), Embark v6 lists 68 Clippy lints. Owner rulings: public kind() kept; pedantic on as warnings with a pinned toolchain; designing-rust-apis kept whole.",
+    "rust-guidelines-copilot-2026-11-05": "2026-11-05: Copilot review of PR #27, all ten comments verified against primary docs and fixed: cargo-hack --each-feature is not a powerset; from_foo need not pair with From (C-CTOR); a `_` arm hides new upstream variants, so audit on upgrade; impl Read/Write abstracts the source but is not sans-I/O; infallible From is fine for newtypes that accept every value; library catch_unwind ban exempts its own FFI entry points; RwLock poisons only under a write guard (std); `?` does not chain From impls, so shape-2 helpers return the private repr; private fields are visible to descendant modules (Reference); the async CPU budget counts actual yields, not always-ready awaits.",
+    "rust-guidelines-copilot-2-2026-11-05": "2026-11-05: Copilot second review of PR #27, three comments, all valid and fixed. Panic lints are partial: probed on clippy 0.1.99, unwrap_used/expect_used/panic/indexing_slicing flag unwrap, expect, panic! and indexing only; unreachable/todo/unimplemented lints add those macros; nothing flags assert! or panics in callees. Struct bounds: drop only derive-only bounds (C-STRUCT-BOUNDS exceptions: associated types, ?Sized, bounded Drop). #[non_exhaustive] must be added at first publication; adding it to an existing enum, variant or all-public struct is a major change (Cargo SemVer reference)."
   },
   "consolidated": "2026-09-04",
   "upstreamRetrieval": "Upstream bytes are fetched on demand at the pinned SHA rather than vendored into this repo: https://raw.githubusercontent.com/<repo>/<sha>/<path>. Every upstream file records its sha256 here, so a drift check verifies the fetched bytes without trusting the network. A vendor-snapshot/ directory previously held these bytes; it was removed as bloat (1.2MB, 134 files) after verifying the fetched blobs are byte-identical to the snapshot and that vendor-snapshot/local duplicated content already in git history at f7b6fdf.",

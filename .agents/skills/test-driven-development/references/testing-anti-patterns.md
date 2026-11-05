@@ -273,6 +273,9 @@ Write the expected value by hand, from the requirement. If you cannot state it
 without running the code, you do not yet know what the code should do, and the
 test would only record what it currently does.
 
+For a table of constants, assert a property the table must satisfy — sorted, evenly
+spaced, covering a range without gaps — rather than repeating its values.
+
 ## When Mocks Become Too Complex
 
 **Warning signs:**

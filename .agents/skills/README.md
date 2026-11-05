@@ -108,32 +108,48 @@ Rust ownership boundaries:
 
 | Skill | Owns |
 | --- | --- |
-| `writing-idiomatic-rust` | Ownership at API boundaries, clones, fallibility, error-type design, iterators, dispatch |
-| `reviewing-unsafe-rust` | What each unsafe operation requires, safe-abstraction contracts, FFI boundaries |
-| `writing-async-rust` | Cancellation, state across await points, blocking, task lifetime |
+| `writing-idiomatic-rust` | Ownership at API boundaries, `Rc`/`Arc`, clones, integer overflow and casts, iterators, dispatch |
+| `handling-rust-errors` | Panic versus `Option` versus `Result`, assertion messages, `catch_unwind`, poisoned locks, error-type design |
+| `designing-rust-apis` | Public surface: newtypes, naming, traits, `#[non_exhaustive]`, `#[must_use]`, features, builders, I/O at the edges, re-exports, docs, macros |
+| `optimizing-rust-hot-paths` | Runtime cost: measurement, allocation, footprint, indirection, hashing, batching, buffered I/O, release-profile settings |
+| `configuring-rust-lints` | `[lints]` tables, Clippy groups and restriction picks, `#[expect]` versus `#[allow]`, confining `unsafe`, lint and format CI |
+| `reviewing-unsafe-rust` | What each unsafe operation requires, `SAFETY` arguments, safe-abstraction contracts, FFI boundaries |
+| `writing-async-rust` | Cancellation, state across await points, future size, blocking and yield budget, task lifetime |
 | `hardening-rust-supply-chain` | Dependency policy, lockfile discipline, advisory response |
 | `speeding-up-rust-builds` | Compile time: crate graph, dev profiles, linking |
 
 ```mermaid
 flowchart TD
-  idio["writing-idiomatic-rust<br/>ownership, errors, dispatch"]
+  idio["writing-idiomatic-rust<br/>ownership, dispatch"]
+  errors["handling-rust-errors<br/>panics, error types"]
+  api["designing-rust-apis<br/>public surface"]
+  perf["optimizing-rust-hot-paths<br/>runtime cost"]
+  lints["configuring-rust-lints<br/>lint policy"]
   unsafe_["reviewing-unsafe-rust<br/>soundness, FFI"]
   async_["writing-async-rust<br/>cancellation, await points"]
   supply["hardening-rust-supply-chain<br/>dependency policy"]
   builds["speeding-up-rust-builds<br/>compile time"]
 
-  idio --> unsafe_ & async_ & builds
-  unsafe_ --> idio & supply
-  async_ --> idio
+  idio --> errors & api & perf & lints & unsafe_ & async_ & builds
+  errors --> idio & api & unsafe_
+  api --> idio & errors & perf & lints
+  perf --> idio & errors & unsafe_ & async_ & builds
+  lints --> idio & errors & api & unsafe_ & supply
+  unsafe_ --> idio & errors & lints & supply
+  async_ --> idio & errors
   supply --> unsafe_
-  builds --> idio
+  builds --> idio & perf
 ```
 
-`writing-idiomatic-rust` is the entry point for Rust work. The split between it and
-`reviewing-unsafe-rust` is what the compiler checks: ownership questions the borrow
-checker settles belong to the first, and obligations it cannot see belong to the
-second. `writing-async-rust` splits on the same principle — a future dropped at an
-await point is a hazard no type in the signature reports.
+`writing-idiomatic-rust` is the entry point for Rust work, and routes each concern to
+its owner. The split between it and `reviewing-unsafe-rust` is what the compiler
+checks: ownership questions the borrow checker settles belong to the first, and
+obligations it cannot see belong to the second. `writing-async-rust` splits on the
+same principle — a future dropped at an await point is a hazard no type in the
+signature reports. `configuring-rust-lints` owns no coding rule of its own. It owns
+the mechanism that enforces the other skills' rules, and each rule stays with the
+skill that states it. `designing-rust-apis` also defers to `evolving-shared-contracts`
+for rolling a breaking change out across consumers.
 
 Design and domain ownership boundaries:
 

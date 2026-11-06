@@ -105,7 +105,11 @@ impl Ui {
     pub fn sync(&mut self, b: &Board) {
         self.generation += 1;
         let found = self.selected.as_ref().and_then(|k| b.find(k));
-        self.select(b, found.unwrap_or_else(|| self.index.min(b.jobs.len().saturating_sub(1))));
+        let i = found.unwrap_or_else(|| self.index.min(b.jobs.len().saturating_sub(1)));
+        // A selection that stays on its row keeps the list where the wheel left it.
+        if found != Some(self.index) {
+            self.select(b, i);
+        }
         if self.focus == Id::Decisions && b.decisions.is_empty() {
             self.focus = Id::Jobs;
         }
@@ -237,7 +241,8 @@ impl Detail {
         }
         let title =
             if b.everywhere { format!(" {}/{} ", e.key.project, e.key.name) } else { format!(" {} ", e.key.name) };
-        let page = Some(format!("{}\n\n{}", head.join("\n"), answer.as_deref().unwrap_or("(no answer yet)")));
+        let answer_text = answer.as_deref().unwrap_or("(no answer yet)").trim_end();
+        let page = Some(format!("{}\n\n{answer_text}\n", head.join("\n")));
         Self { key: e.key.clone(), generation, title, lines, page, answer: cache }
     }
 

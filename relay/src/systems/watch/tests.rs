@@ -129,7 +129,7 @@ fn the_board_fits_80x24_and_120x40_with_headings_keys_and_a_zoned_clock() {
         }
         assert!(fr.iter().any(|l| l.contains("claude:a1")), "the accounts");
         assert_eq!(b.accounts[0][3], "-", "an empty cell says so");
-        let task = row_of(&fr, " build ");
+        let task = row_of(&fr, "┌ build ");
         assert!(fr[usize::from(task) + 1].contains("Build the thing"), "the job pane starts with its task");
     }
 }
@@ -166,7 +166,7 @@ fn the_end_of_a_long_answer_is_reachable() {
     assert_eq!(job.offset, job.rows - job.view);
     assert!(fr.iter().any(|l| l.contains("THE LAST LINE")), "{fr:#?}");
     assert!(fr.iter().any(|l| l.contains(&format!("of {} ┛", job.rows))), "x of y on the focused pane");
-    assert!(fr[0].starts_with('┌') && fr[row_of(&fr, " build ") as usize].starts_with('┏'), "the focused border");
+    assert!(fr[0].starts_with('┌') && fr.iter().any(|l| l.starts_with("┏ build ")), "the focused border");
 }
 
 #[test]
@@ -310,4 +310,41 @@ fn decisions_waiting_are_a_badge_and_a_pane() {
     assert!(fr.iter().any(|l| l.contains("decision waiting at cap")), "the job's pane says so too");
     ui.apply(Action::Cycle(1), &b);
     assert_eq!(ui.focus, Id::Decisions, "the pane takes focus in its turn");
+}
+
+#[test]
+fn a_wheel_scroll_of_the_jobs_list_survives_the_next_read() {
+    let jobs: Vec<Job> = (0..60).map(|i| job(&format!("job-{i:02}"), Status::Queued, 100 - i, "work")).collect();
+    let f = fixture(&jobs, &[]);
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    frame(&b, &mut ui, 80, 24);
+    ui.apply(Action::Wheel(Id::Jobs, 3), &b);
+    ui.apply(Action::Wheel(Id::Jobs, 3), &b);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    frame(&b, &mut ui, 80, 24);
+    assert_eq!((ui.pane(Id::Jobs).offset, ui.index), (6, 0), "the read keeps the list where the wheel left it");
+    ui.apply(Action::Step(Step::Rows(1)), &b);
+    assert_eq!(ui.pane(Id::Jobs).offset, 1, "moving the selection brings it back into view");
+}
+
+#[test]
+fn the_selected_row_is_marked_without_colour() {
+    let f = two_jobs();
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    let fr = frame(&b, &mut ui, 80, 24);
+    assert!(fr[row_of(&fr, "Build the thing") as usize].contains("› build"), "{fr:#?}");
+    assert!(!fr[row_of(&fr, "Look at it") as usize].contains('›'));
+}
+
+#[test]
+fn an_interrupt_while_the_pager_runs_is_the_pagers() {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    assert!(!super::ends_board(SIGINT, true));
+    assert!(super::ends_board(SIGINT, false));
+    assert!(super::ends_board(SIGTERM, true) && super::ends_board(SIGHUP, true));
 }

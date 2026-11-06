@@ -12,6 +12,8 @@ mod ui;
 
 use std::io::{Write as _, stdout};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -53,14 +55,15 @@ impl Drop for Mouse {
 /// back as `q` does (and exits with 128 plus its number). Redraws on every project's events (the accounts are shared), on any key, click
 /// or resize, and each second for the clock.
 pub fn run(scope: Scope<'_>, all: bool, everywhere: bool) -> Result<()> {
-    let bell = crate::os::Doorbell::watch(&crate::ctx::buses_in(scope.root))?;
+    // A bus that cannot be watched is left out: the read names its project as unreadable.
+    let bell = crate::os::Doorbell::watch_readable(&crate::ctx::buses_in(scope.root))?;
     let (tx, rang) = mpsc::channel();
     std::thread::spawn(move || while tx.send(bell.wait(Duration::from_secs(60))).is_ok() {});
-    restore_on_signals()?;
+    let paging = restore_on_signals()?;
     let close = ratatui::run(|terminal| {
         let _mouse = Mouse::capture()?;
         let mut ui = Ui::new(all, everywhere, scope.home.is_some());
-        board_loop(terminal, scope, &mut ui, &rang)
+        board_loop(terminal, scope, &mut ui, &rang, &paging)
     })?;
     match close {
         Close::Quit => Ok(()),
@@ -74,18 +77,26 @@ pub fn run(scope: Scope<'_>, all: bool, everywhere: bool) -> Result<()> {
 
 /// SIGTERM, SIGHUP and SIGINT end the board as `q` does, from a thread of their own: the main
 /// thread may be inside crossterm's read of a terminal that has hung up, which never returns.
-fn restore_on_signals() -> Result<()> {
+/// While the returned flag is set (the pager runs), SIGINT is the pager's: Ctrl-C there reaches it too.
+fn restore_on_signals() -> Result<Arc<AtomicBool>> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
     let mut signals = signal_hook::iterator::Signals::new([SIGTERM, SIGHUP, SIGINT]).context("handling signals")?;
+    let paging = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&paging);
     std::thread::spawn(move || {
-        if let Some(signal) = signals.forever().next() {
+        if let Some(signal) = signals.forever().find(|&s| ends_board(s, flag.load(Ordering::SeqCst))) {
             // A terminal that has gone away takes none of this; the exit is what matters then.
             let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen, cursor::Show);
             let _ = disable_raw_mode();
             std::process::exit(128 + signal);
         }
     });
-    Ok(())
+    Ok(paging)
+}
+
+/// Whether `signal` ends the board: any of them, but an interrupt while the pager runs is the pager's.
+fn ends_board(signal: i32, paging: bool) -> bool {
+    !(paging && signal == signal_hook::consts::SIGINT)
 }
 
 fn read(scope: Scope<'_>, ui: &Ui) -> Result<Board> {
@@ -98,6 +109,7 @@ fn board_loop(
     scope: Scope<'_>,
     ui: &mut Ui,
     rang: &mpsc::Receiver<bool>,
+    paging: &AtomicBool,
 ) -> Result<Close> {
     let version = crate::os::binary_version();
     // A failed read keeps the last good board (at first, an empty one) and says why; the next read retries.
@@ -143,7 +155,7 @@ fn board_loop(
             Action::ToggleEverywhere if ui.can_toggle => (ui.shown.everywhere, stale) = (!ui.shown.everywhere, true),
             Action::Open => {
                 if let Some(text) = ui.detail(&board).page.clone()
-                    && let Err(e) = page(terminal, &text)
+                    && let Err(e) = page(terminal, &text, paging)
                 {
                     ui.error = Some(format!("{}: {e}", e.root_cause()));
                 }
@@ -154,11 +166,13 @@ fn board_loop(
 }
 
 /// Hands `text` to `$PAGER` (else `less`) with the terminal given back for as long as it runs,
-/// then takes the terminal again, whatever the pager did.
-fn page(terminal: &mut DefaultTerminal, text: &str) -> Result<()> {
+/// then takes the terminal again, whatever the pager did. `paging` is set meanwhile, so an
+/// interrupt is the pager's.
+fn page(terminal: &mut DefaultTerminal, text: &str, paging: &AtomicBool) -> Result<()> {
     let pager = std::env::var("PAGER").ok().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "less".into());
     execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
+    paging.store(true, Ordering::SeqCst);
     let ran = (|| -> Result<()> {
         let mut child = Command::new("sh")
             .args(["-c", &pager])
@@ -170,6 +184,7 @@ fn page(terminal: &mut DefaultTerminal, text: &str) -> Result<()> {
         child.wait().with_context(|| format!("waiting for {pager}"))?;
         Ok(())
     })();
+    paging.store(false, Ordering::SeqCst);
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     terminal.clear()?;

@@ -6,7 +6,8 @@ use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Wrap,
+    Block, BorderType, Clear, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    TableState, Wrap,
 };
 
 use super::board::{ACCOUNTS, Board};
@@ -15,6 +16,7 @@ use super::ui::{Action, Id, Ui};
 use crate::world::Status;
 
 const GAP: u16 = 2;
+const MARK: &str = "› ";
 
 pub fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
     let area = f.area();
@@ -124,8 +126,11 @@ fn table_pane<R: AsRef<[String]>, S: Fn(usize) -> Style>(
     let view = usize::from(inner.height.saturating_sub(1));
     pane.place(area, view, rows.len());
     // A scrollbar takes the last inner column, when there is one.
+    // A scrollbar takes the last inner column, when there is one; a table with a selection marks
+    // it with `› ` (reverse video alone is gone under NO_COLOR) in a column of its own.
     let bar = usize::from(pane.rows > pane.view);
-    let w = widths(cols, rows, usize::from(inner.width).saturating_sub(bar), GAP.into());
+    let mark = if selected.is_some() { MARK.chars().count() } else { 0 };
+    let w = widths(cols, rows, usize::from(inner.width).saturating_sub(bar + mark), GAP.into());
     let heading = Row::new(cols.iter().zip(&w).map(|(c, &w)| cut(c.head, w))).style(Style::new().bold().underlined());
     let shown = rows.iter().enumerate().skip(pane.offset).take(view).map(|(i, r)| {
         let st = if Some(i) == selected { style(i).add_modifier(Modifier::REVERSED) } else { style(i) };
@@ -137,7 +142,16 @@ fn table_pane<R: AsRef<[String]>, S: Fn(usize) -> Style>(
     };
     let block = position.map_or(block.clone(), |p| block.title_bottom(Line::from(format!(" {p} ")).right_aligned()));
     let widths = w.iter().map(|&w| Constraint::Length(u16::try_from(w).unwrap_or(u16::MAX)));
-    f.render_widget(Table::new(shown, widths).header(heading).column_spacing(GAP).block(block), area);
+    let table = Table::new(shown, widths).header(heading).column_spacing(GAP).block(block);
+    match selected {
+        Some(i) => {
+            // The rows drawn start at the pane's offset; the selection, when in view, is among them.
+            let mut state = TableState::default().with_selected(i.checked_sub(pane.offset).filter(|&r| r < view));
+            let table = table.highlight_symbol(MARK).highlight_spacing(HighlightSpacing::Always);
+            f.render_stateful_widget(table, area, &mut state);
+        }
+        None => f.render_widget(table, area),
+    }
     if rows.is_empty() && !empty.is_empty() && inner.height > 1 {
         let below = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
         f.render_widget(Paragraph::new(empty.to_owned()).wrap(Wrap { trim: true }), below);

@@ -63,6 +63,11 @@ pub fn project_dirs(root: &Path) -> impl Iterator<Item = PathBuf> {
     std::fs::read_dir(root).into_iter().flatten().flatten().map(|e| e.path()).filter(|d| d.join("bus").is_dir())
 }
 
+/// Every project's event directories under `root`, for a doorbell.
+pub fn buses_in(root: &Path) -> Vec<PathBuf> {
+    project_dirs(root).flat_map(|d| [d.join("bus"), d.join("bus/session")]).filter(|d| d.is_dir()).collect()
+}
+
 /// A job's stream log in the jobs directory `jobs`, where it is now: the plain
 /// file while it is written, else the gzip gc made of it.
 pub fn log_in(jobs: &Path, job: &str, ext: &str) -> PathBuf {
@@ -152,7 +157,7 @@ impl Ctx {
 
     /// Every project's event directories, for a doorbell.
     pub fn buses(&self) -> Vec<PathBuf> {
-        self.projects().flat_map(|d| [d.join("bus"), d.join("bus/session")]).filter(|d| d.is_dir()).collect()
+        buses_in(&self.state_root)
     }
 
     /// Rings on any project's events.

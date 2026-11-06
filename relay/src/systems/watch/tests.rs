@@ -1,0 +1,310 @@
+//! The board without a terminal: built from folds, drawn on ratatui's `TestBackend`, driven by
+//! the events a terminal would send.
+
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+use super::board::Board;
+use super::draw::draw;
+use super::pane::Step;
+use super::ui::{Action, Id, Ui};
+use crate::config::{Config, tempdir};
+use crate::systems::quota::AccountsView;
+use crate::systems::view::machine::{Machine, Project};
+use crate::world::{Decision, Job, Status, World};
+
+const NOW: u64 = 1_800_000_000 * 1_000_000;
+
+fn job(name: &str, status: Status, ago_s: u64, task: &str) -> Job {
+    let t = NOW - ago_s * 1_000_000;
+    let ended = !status.is_live();
+    Job {
+        name: name.into(),
+        status,
+        task: task.into(),
+        created_at: t,
+        started_at: (status == Status::Running).then_some(t),
+        ended_at: ended.then_some(t),
+        account: (status == Status::Running).then(|| "claude:a".into()),
+        ..Job::default()
+    }
+}
+
+fn world(jobs: &[Job]) -> World {
+    let mut w = World::default();
+    for j in jobs {
+        w.jobs.insert(j.name.clone(), j.clone());
+    }
+    w
+}
+
+/// A project directory with a config, and the folds of `demo` (ours) and `other`.
+struct Fixture {
+    dir: tempdir::Dir,
+    cfg: Config,
+    machine: Machine,
+}
+
+fn fixture(ours: &[Job], theirs: &[Job]) -> Fixture {
+    let dir = tempdir::Dir::new();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let cfg = Config::parse("name = \"demo\"\n[harness.omp]\nenabled = false\n", dir.path()).unwrap();
+    let project = |name: &str, jobs: &[Job], own: bool| {
+        let d = dir.path().join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        Project { name: name.into(), jobs: d, world: world(jobs), own }
+    };
+    let machine = Machine {
+        projects: vec![project("demo", ours, true), project("other", theirs, false)],
+        unreadable: Vec::new(),
+    };
+    Fixture { dir, cfg, machine }
+}
+
+fn accounts(n: usize) -> AccountsView {
+    let row = |i: usize| {
+        vec![format!("claude:a{i}"), "Ultra #f4bd75".into(), "ready".into(), String::new(), "29% seven_day".into()]
+    };
+    AccountsView {
+        json: serde_json::Value::Null,
+        head: "accounts on claude (floor 90%, 1 session(s) each)".into(),
+        cells: (0..n).map(row).collect(),
+        ready: vec![true; n],
+    }
+}
+
+impl Fixture {
+    fn board(&self, ui: &Ui, accounts_n: usize) -> Board {
+        Board::new(&self.cfg, &self.machine, accounts(accounts_n), ui.shown.all, ui.shown.everywhere, NOW)
+    }
+
+    fn answer(&self, project: &str, job: &str, text: &str) {
+        std::fs::write(self.dir.path().join(project).join(format!("{job}.result.md")), text).unwrap();
+    }
+}
+
+fn frame(b: &Board, ui: &mut Ui, w: u16, h: u16) -> Vec<String> {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| draw(f, b, ui)).unwrap();
+    let buf = t.backend().buffer().clone();
+    (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>()).collect()
+}
+
+fn row_of(frame: &[String], needle: &str) -> u16 {
+    u16::try_from(frame.iter().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{needle}: {frame:#?}")))
+        .unwrap()
+}
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
+    Event::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE })
+}
+
+fn key(code: KeyCode) -> Event {
+    Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+fn two_jobs() -> Fixture {
+    fixture(
+        &[job("build", Status::Running, 180, "Build the thing"), job("look", Status::Done, 7200, "Look at it")],
+        &[job("theirs", Status::Queued, 60, "Their task")],
+    )
+}
+
+#[test]
+fn the_board_fits_80x24_and_120x40_with_headings_keys_and_a_zoned_clock() {
+    let f = two_jobs();
+    for (w, h) in [(80, 24), (120, 40)] {
+        let mut ui = Ui::new(false, false, true);
+        let b = f.board(&ui, 2);
+        ui.sync(&b);
+        let fr = frame(&b, &mut ui, w, h);
+        assert!(fr[0].contains("demo · 1 running"), "{w}x{h}: {}", fr[0]);
+        assert!(fr[0].trim_end_matches(['┓', '┐']).trim_end().ends_with('Z'), "the clock says its zone: {}", fr[0]);
+        assert!(fr[1].contains("job") && fr[1].contains("state") && fr[1].contains("task"), "headings: {}", fr[1]);
+        assert!(!fr.iter().any(|l| l.contains("Their task")), "one project by default");
+        let keys = &fr[usize::from(h) - 1];
+        for hint in ["q quit", "? help", "↑", "↓", "PgUp", "PgDn", "Tab pane", "a older", "p all projects"] {
+            assert!(keys.contains(hint), "{w}x{h}: {hint} missing from {keys}");
+        }
+        assert!(fr.iter().any(|l| l.contains("claude:a1")), "the accounts");
+        let task = row_of(&fr, " build ");
+        assert!(fr[usize::from(task) + 1].contains("Build the thing"), "the job pane starts with its task");
+    }
+}
+
+#[test]
+fn every_project_adds_a_column_and_each_projects_counts() {
+    let f = two_jobs();
+    let mut ui = Ui::new(false, true, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    let fr = frame(&b, &mut ui, 120, 40);
+    assert!(fr[0].contains("every project · demo 1 running · other 0 running, 1 queued"), "{}", fr[0]);
+    assert!(fr[1].contains("project"), "{}", fr[1]);
+    assert!(fr[row_of(&fr, "Their task") as usize].contains("other"));
+    assert!(fr.iter().any(|l| l.contains("demo/build")), "the job pane names the project");
+}
+
+#[test]
+fn the_end_of_a_long_answer_is_reachable() {
+    let f = two_jobs();
+    let long: Vec<String> = (0..112).map(|i| format!("line {i} {}", "with words that wrap ".repeat(i % 7))).collect();
+    f.answer("demo", "build", &format!("## Findings\n{}\nnotes: THE LAST LINE\n", long.join("\n")));
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    let fr = frame(&b, &mut ui, 80, 24);
+    assert!(fr.iter().any(|l| l.contains("│Findings")), "a heading without its #s");
+    ui.apply(Action::Cycle(1), &b);
+    assert_eq!(ui.focus, Id::Job);
+    ui.apply(Action::Step(Step::Bottom), &b);
+    let fr = frame(&b, &mut ui, 80, 24);
+    let job = ui.pane(Id::Job);
+    assert!(job.rows > 112, "rows are counted wrapped: {}", job.rows);
+    assert_eq!(job.offset, job.rows - job.view);
+    assert!(fr.iter().any(|l| l.contains("THE LAST LINE")), "{fr:#?}");
+    assert!(fr.iter().any(|l| l.contains(&format!("of {} ┛", job.rows))), "x of y on the focused pane");
+    assert!(fr[0].starts_with('┌') && fr[row_of(&fr, " build ") as usize].starts_with('┏'), "the focused border");
+}
+
+#[test]
+fn the_selection_follows_its_job_by_name() {
+    let mut f = fixture(&[job("a", Status::Queued, 30, "A"), job("b", Status::Queued, 20, "B")], &[]);
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 0);
+    ui.sync(&b);
+    assert_eq!(ui.selected.as_ref().map(|k| k.name.as_str()), Some("b"), "the first job is selected");
+    ui.apply(Action::Step(Step::Rows(1)), &b);
+    ui.apply(Action::Wheel(Id::Job, 3), &b);
+    assert_eq!(ui.selected.as_ref().map(|k| k.name.as_str()), Some("a"));
+    let newer = job("c", Status::Queued, 1, "C");
+    f.machine.projects[0].world.jobs.insert("c".into(), newer);
+    let b = f.board(&ui, 0);
+    ui.sync(&b);
+    assert_eq!((ui.selected.as_ref().map(|k| k.name.as_str()), ui.index), (Some("a"), 2), "a new row moves it");
+    f.machine.projects[0].world.jobs.remove("a");
+    let b = f.board(&ui, 0);
+    ui.sync(&b);
+    assert_eq!(ui.selected.as_ref().map(|k| k.name.as_str()), Some("b"), "its row's job, once it is gone");
+    f.machine.projects[0].world.jobs.clear();
+    let b = f.board(&ui, 0);
+    ui.sync(&b);
+    assert_eq!(ui.selected, None);
+    f.machine.projects[0].world.jobs.insert("d".into(), job("d", Status::Queued, 1, "D"));
+    let b = f.board(&ui, 0);
+    ui.sync(&b);
+    assert_eq!(ui.selected.as_ref().map(|k| k.name.as_str()), Some("d"), "after an empty list, the first again");
+}
+
+#[test]
+fn a_click_selects_the_job_under_it_after_the_list_has_scrolled() {
+    let jobs: Vec<Job> = (0..60).map(|i| job(&format!("job-{i:02}"), Status::Queued, 100 - i, "work")).collect();
+    let f = fixture(&jobs, &[]);
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    frame(&b, &mut ui, 80, 24);
+    ui.apply(Action::Step(Step::Rows(30)), &b);
+    let fr = frame(&b, &mut ui, 80, 24);
+    assert!(ui.pane(Id::Jobs).offset > 0, "the list scrolled with the selection");
+    assert!(fr.iter().any(|l| l.contains("31 of 60")), "the position in the list");
+    let y = row_of(&fr, "job-32");
+    let picked = ui.action(&mouse(MouseEventKind::Down(MouseButton::Left), 5, y));
+    let Some(Action::Select(i)) = picked else { panic!("{picked:?}") };
+    assert_eq!(b.jobs[i].key.name, "job-32");
+}
+
+#[test]
+fn the_wheel_scrolls_the_pane_under_it_and_keys_act_on_the_focused_one() {
+    let f = two_jobs();
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 30);
+    ui.sync(&b);
+    let fr = frame(&b, &mut ui, 80, 24);
+    let accounts = ui.pane(Id::Accounts);
+    assert!(accounts.area.height <= 6, "the accounts take at most a quarter: {}", accounts.area.height);
+    assert!(fr.iter().any(|l| l.contains("of 30")), "the accounts say where they are");
+    let over = mouse(MouseEventKind::ScrollDown, 5, accounts.area.y + 2);
+    assert_eq!(ui.action(&over), Some(Action::Wheel(Id::Accounts, 3)));
+    ui.apply(Action::Wheel(Id::Accounts, 3), &b);
+    assert_eq!((ui.pane(Id::Accounts).offset, ui.index), (3, 0), "the selection stays");
+    ui.apply(Action::Focus(Id::Accounts), &b);
+    ui.apply(Action::Step(Step::Bottom), &b);
+    assert_eq!(ui.pane(Id::Accounts).offset, 30 - ui.pane(Id::Accounts).view);
+    assert_eq!(ui.action(&key(KeyCode::BackTab)), Some(Action::Cycle(-1)));
+    for (code, step) in
+        [(KeyCode::Home, Step::Top), (KeyCode::Char('G'), Step::Bottom), (KeyCode::Char(' '), Step::Pages(1))]
+    {
+        assert_eq!(ui.action(&key(code)), Some(Action::Step(step)));
+    }
+}
+
+#[test]
+fn every_shown_key_does_what_it_says() {
+    let f = two_jobs();
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    let fr = frame(&b, &mut ui, 120, 40);
+    let keys = fr.last().unwrap();
+    let click = |ui: &Ui, label: &str| {
+        let x = keys[..keys.find(label).unwrap()].chars().count();
+        ui.action(&mouse(MouseEventKind::Down(MouseButton::Left), u16::try_from(x).unwrap(), 39))
+    };
+    assert_eq!(click(&ui, "↑"), Some(Action::Step(Step::Rows(-1))));
+    assert_eq!(click(&ui, "↓"), Some(Action::Step(Step::Rows(1))));
+    assert_eq!(click(&ui, "PgUp"), Some(Action::Step(Step::Pages(-1))));
+    assert_eq!(click(&ui, "PgDn"), Some(Action::Step(Step::Pages(1))));
+    assert_eq!(click(&ui, "? help"), Some(Action::Help));
+    assert_eq!(click(&ui, "all projects"), Some(Action::ToggleEverywhere));
+    assert_eq!(click(&ui, "pager"), Some(Action::Open));
+    ui.apply(Action::Help, &b);
+    let fr = frame(&b, &mut ui, 120, 40);
+    assert!(fr.iter().any(|l| l.contains("hold Shift to select text")), "the help");
+    assert_eq!(ui.action(&key(KeyCode::Esc)), Some(Action::Help), "a key closes the help, not the board");
+}
+
+#[test]
+fn empty_states_say_what_is_hidden_and_how_to_show_it() {
+    let f = fixture(&[job("old", Status::Done, 3 * 86_400, "Old")], &[job("theirs", Status::Queued, 1, "T")]);
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 0);
+    ui.sync(&b);
+    let fr = frame(&b, &mut ui, 120, 40);
+    let text = fr.join("\n");
+    assert!(text.contains("press a to show 1 older one, or press p for the 1 in other projects"), "{text}");
+    assert!(text.contains("No accounts found for claude"), "{text}");
+    for (w, h) in [(10, 3), (20, 5), (40, 12), (1, 1)] {
+        frame(&b, &mut ui, w, h);
+    }
+}
+
+#[test]
+fn decisions_waiting_are_a_badge_and_a_pane() {
+    let mut f = two_jobs();
+    let d = Decision {
+        id: "build-cap-1".into(),
+        job: "build".into(),
+        point: crate::bus::Point::Cap,
+        created: NOW,
+        attempt: 1,
+        requested_at: NOW,
+        parked_until: Some(NOW + 600_000_000),
+        answer: None,
+        answer_why: String::new(),
+        steps: Vec::new(),
+        action: None,
+    };
+    f.machine.projects[0].world.decisions.insert(d.id.clone(), d);
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    let fr = frame(&b, &mut ui, 120, 40);
+    assert!(fr[0].contains("1 decision waiting"), "{}", fr[0]);
+    assert!(fr.iter().any(|l| l.contains("decisions waiting · relay decide answer")));
+    assert!(fr.iter().any(|l| l.contains("build-cap-1")));
+    assert!(fr.iter().any(|l| l.contains("decision waiting at cap")), "the job's pane says so too");
+    ui.apply(Action::Cycle(1), &b);
+    assert_eq!(ui.focus, Id::Decisions, "the pane takes focus in its turn");
+}

@@ -70,7 +70,7 @@ impl Pane {
 
     /// `12-30 of 164` when it does not all fit.
     pub fn position(&self) -> Option<String> {
-        (self.rows > self.view)
+        (self.view > 0 && self.rows > self.view)
             .then(|| format!("{}-{} of {}", self.offset + 1, (self.offset + self.view).min(self.rows), self.rows))
     }
 }
@@ -87,7 +87,8 @@ pub fn wrap(line: &str, cols: usize) -> Vec<String> {
     let (mut rows, mut row, mut w) = (Vec::new(), String::new(), 0);
     // Where the row's last space is, as a byte index.
     let mut space: Option<usize> = None;
-    for c in line.replace('\t', "    ").chars() {
+    // Trailing spaces show nothing, and would only wrap into an empty row.
+    for c in line.trim_end().replace('\t', "    ").chars() {
         let Some(cw) = c.width() else { continue };
         if w + cw > cols && !row.is_empty() {
             let rest = match space.filter(|&s| s > 0 && c != ' ') {
@@ -146,19 +147,24 @@ pub struct Column {
 
 /// The narrowest a column but the last is squeezed to, and the room the last one is left first.
 const FLOOR: usize = 4;
-const LAST_MIN: usize = 16;
+const LAST_MIN: usize = 12;
 
 /// Each column's width in `avail` columns with `gap` between them: as wide as its widest cell or
 /// heading up to its cap, the last taking the rest. When they do not fit, the widest give way
 /// first, down to a floor, so the last keeps some room.
-pub fn widths(cols: &[Column], rows: &[Vec<String>], avail: usize, gap: usize) -> Vec<usize> {
+pub fn widths<R: AsRef<[String]>>(cols: &[Column], rows: &[R], avail: usize, gap: usize) -> Vec<usize> {
     let Some(last) = cols.len().checked_sub(1) else { return Vec::new() };
-    let widest = |c: usize| rows.iter().filter_map(|r| r.get(c)).map(|s| width(s)).max().unwrap_or(0);
+    let widest = |c: usize| rows.iter().filter_map(|r| r.as_ref().get(c)).map(|s| width(s)).max().unwrap_or(0);
+    let content: Vec<usize> = (0..last).map(widest).collect();
     let mut w: Vec<usize> =
-        cols[..last].iter().enumerate().map(|(c, col)| widest(c).max(col.head.width()).min(col.cap)).collect();
+        cols[..last].iter().zip(&content).map(|(col, &c)| c.max(col.head.width()).min(col.cap)).collect();
     let used = |w: &[usize]| w.iter().sum::<usize>() + gap * last;
     while used(&w) + LAST_MIN > avail {
-        let Some(i) = (0..last).filter(|&i| w[i] > FLOOR).max_by_key(|&i| (w[i], std::cmp::Reverse(i))) else { break };
+        // A heading wider than its cells is cut first, then the widest column.
+        let slack =
+            (0..last).filter(|&i| w[i] > content[i].max(2)).max_by_key(|&i| (w[i] - content[i], std::cmp::Reverse(i)));
+        let widest = || (0..last).filter(|&i| w[i] > FLOOR).max_by_key(|&i| (w[i], std::cmp::Reverse(i)));
+        let Some(i) = slack.or_else(widest) else { break };
         w[i] -= 1;
     }
     w.push(avail.saturating_sub(used(&w)));
@@ -267,6 +273,7 @@ mod tests {
         assert_eq!(wrap("", 4), [""], "an empty line is one row");
         assert_eq!(wrap("日本語の文", 4), ["日本", "語の", "文"], "wide characters take two columns");
         assert_eq!(wrap("a\tb\r", 10), ["a    b"]);
+        assert_eq!(wrap("full row ", 8), ["full row"], "a trailing space adds no row");
         assert!(wrap(&"word ".repeat(100), 37).iter().all(|r| width(r) <= 37));
     }
 
@@ -284,9 +291,13 @@ mod tests {
             [Column { head: "job", cap: 10 }, Column { head: "account", cap: 20 }, Column { head: "task", cap: 0 }];
         let rows = vec![vec!["build".into(), "usage unreadable (sign it in, or list it)".into(), "Build it".into()]];
         assert_eq!(widths(&cols, &rows, 80, 2), [5, 20, 51]);
-        assert_eq!(widths(&cols, &rows, 30, 2), [5, 5, 16], "the widest gives way first");
-        assert_eq!(widths(&cols, &[], 80, 2), [3, 7, 66], "as wide as the headings");
+        assert_eq!(widths(&cols, &rows, 30, 2), [5, 9, 12], "the widest gives way first");
+        assert_eq!(widths::<Vec<String>>(&cols, &[], 80, 2), [3, 7, 66], "as wide as the headings");
         assert_eq!(widths(&cols, &rows, 6, 2), [4, 4, 0], "never below the floor, never a panic");
+        let rows = vec![vec!["a".into(), "claude:solo".into(), "t".into()]];
+        let cols =
+            [Column { head: "project", cap: 16 }, Column { head: "account", cap: 20 }, Column { head: "task", cap: 0 }];
+        assert_eq!(widths(&cols, &rows, 32, 2), [5, 11, 12], "a heading wider than its cells gives way first");
     }
 
     #[test]

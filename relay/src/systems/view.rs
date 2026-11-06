@@ -210,16 +210,19 @@ fn profile_hold(cfg: &Config, world: &World, j: &Job, now: u64) -> Option<String
     crate::systems::dispatch::profile_hold(name, p, running, starts, now).map(|(why, _)| why)
 }
 
-/// What a job's row says after its task: why it waits or ended (a queued job, what it waits for or,
-/// with its project's `cfg`, which profile limit holds it), its latest checkpoint, check and review,
-/// and what gc took.
-pub fn notes(cfg: Option<&Config>, world: &World, j: &Job, now: u64) -> Vec<String> {
+/// Why a job waits or ended: a queued job's dependencies or, with its project's `cfg`, the
+/// profile limit that holds it; else the reason recorded.
+pub fn reason(cfg: Option<&Config>, world: &World, j: &Job, now: u64) -> Option<String> {
     let queued = j.status == crate::world::Status::Queued;
     let waits = if queued { Wait::summary(&world.waits(j)) } else { None };
     let held = if queued && waits.is_none() { cfg.and_then(|c| profile_hold(c, world, j, now)) } else { None };
-    let mut notes: Vec<String> =
-        waits.or(held).or_else(|| j.reason.clone()).map(|r| format!("[{r}]")).into_iter().collect();
-    notes.extend(j.checkpoints.last().map(crate::bus::Check::summary));
+    waits.or(held).or_else(|| j.reason.clone())
+}
+
+/// What a job's row says after its task and reason: its latest checkpoint, check and review,
+/// how far it overran, and what gc took.
+pub fn notes(j: &Job) -> Vec<String> {
+    let mut notes: Vec<String> = j.checkpoints.last().map(crate::bus::Check::summary).into_iter().collect();
     notes.extend(overran(j));
     notes.extend(declared(j));
     notes.extend(collected(j).map(str::to_owned));
@@ -227,14 +230,15 @@ pub fn notes(cfg: Option<&Config>, world: &World, j: &Job, now: u64) -> Vec<Stri
 }
 
 /// A job's cells: name, status, account, profile (or model) with effort, since when, spend, disk,
-/// and its task with its [`notes`].
+/// and its task with its [`reason`] and [`notes`].
 pub fn job_cells(cfg: Option<&Config>, world: &World, j: &Job, now: u64) -> Vec<String> {
     let since = match j.status {
         crate::world::Status::Running | crate::world::Status::Checking => j.started_at,
         crate::world::Status::Queued => j.ended_at.or(Some(j.created_at)),
         _ => j.ended_at,
     };
-    let task = std::iter::once(j.task.clone()).chain(notes(cfg, world, j, now)).collect::<Vec<_>>().join("  ");
+    let reason = reason(cfg, world, j, now).map(|r| format!("[{r}]"));
+    let task = std::iter::once(j.task.clone()).chain(reason).chain(notes(j)).collect::<Vec<_>>().join("  ");
     vec![
         j.name.clone(),
         j.status.as_str().to_owned(),

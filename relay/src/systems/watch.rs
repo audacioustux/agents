@@ -166,7 +166,6 @@ fn board_loop(
                     (board, ui.error) = (b, None);
                     good_at = jiff::Timestamp::now().strftime("%H:%M:%SZ").to_string();
                 }
-                // The cause first: the path after it is the part a narrow title cuts.
                 Err(e) => ui.error = Some(format!("read failed (board as of {good_at}): {e:#}")),
             }
             ui.sync(&board);
@@ -217,36 +216,36 @@ fn page(terminal: &mut DefaultTerminal, text: &str, handoff: &Handoff) -> Result
     ran
 }
 
-/// Runs `pager` through the shell on `text`. One the shell cannot start, or that fails, is an
-/// error with the last thing it said; one ended by Ctrl-C was meant to end.
+/// Runs `pager` through the shell on `text`, its stderr left on the terminal (a pager is
+/// interactive: some prompt there, or read keys through it). One the shell cannot start, or that
+/// fails, is an error from its exit status; one ended by Ctrl-C was meant to end.
 fn run_pager(pager: &str, text: &str) -> Result<()> {
     let mut child = Command::new("sh")
         .args(["-c", pager])
         .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("starting the pager {pager}"))?;
-    let mut stderr = child.stderr.take().context("the pager's stderr")?;
-    let said = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = std::io::Read::read_to_string(&mut stderr, &mut s);
-        s
-    });
     // A pager that quits before reading it all closes the pipe; that is no failure.
     let _ = child.stdin.take().context("the pager's stdin")?.write_all(text.as_bytes());
     let status = child.wait().with_context(|| format!("waiting for {pager}"))?;
-    pager_outcome(pager, status, &said.join().unwrap_or_default())
+    pager_outcome(pager, status)
 }
 
-fn pager_outcome(pager: &str, status: std::process::ExitStatus, said: &str) -> Result<()> {
+fn pager_outcome(pager: &str, status: std::process::ExitStatus) -> Result<()> {
     use std::os::unix::process::ExitStatusExt;
     let sigint = signal_hook::consts::SIGINT;
     // Killed by the interrupt, or a shell reporting that its command was.
     if status.success() || status.signal() == Some(sigint) || status.code() == Some(128 + sigint) {
         return Ok(());
     }
-    let last = said.lines().rev().find(|l| !l.trim().is_empty());
-    anyhow::bail!("pager {pager}: {}", last.map_or_else(|| status.to_string(), str::to_owned))
+    // What the shell or the pager said went to the terminal's main screen, under the board: it
+    // shows once the board quits.
+    let what = match status.code() {
+        Some(127) => " (the shell found no such command)",
+        Some(126) => " (the shell could not run it)",
+        _ => "",
+    };
+    anyhow::bail!("pager {pager}: {status}{what}; what it said shows when the board quits")
 }
 
 #[cfg(test)]

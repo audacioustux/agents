@@ -368,8 +368,9 @@ fn an_interrupt_that_ends_the_pager_does_not_end_the_board() {
 
 #[test]
 fn a_pager_that_cannot_start_or_fails_says_so_and_an_interrupted_one_is_fine() {
-    let err = super::run_pager("relay-no-such-pager", "text").unwrap_err().to_string();
-    assert!(err.contains("relay-no-such-pager") && err.contains("not found"), "{err}");
+    let err = super::run_pager("relay-no-such-pager 2>/dev/null", "text").unwrap_err().to_string();
+    assert!(err.contains("relay-no-such-pager") && err.contains("exit status: 127"), "{err}");
+    assert!(err.contains("no such command") && err.contains("shows when the board quits"), "{err}");
     assert!(super::run_pager("exit 3", "text").unwrap_err().to_string().contains("exit status: 3"));
     super::run_pager("cat >/dev/null", "text").unwrap();
     super::run_pager("kill -INT $$", "text").unwrap();
@@ -416,4 +417,12 @@ fn a_smaller_window_keeps_the_selection_in_view() {
     let b = f.board(&ui, 1);
     ui.sync(&b);
     assert!(frame(&b, &mut ui, 80, 24).iter().any(|l| l.contains("› job-00")), "and after the next read");
+}
+
+/// A pager is interactive: its stderr is the board's own terminal, not a pipe of the board's.
+#[test]
+fn the_pagers_stderr_is_the_boards() {
+    let ours = std::fs::read_link("/proc/self/fd/2").unwrap();
+    let check = format!("test \"$(readlink /proc/$$/fd/2)\" = '{}' || exit 9", ours.display());
+    super::run_pager(&check, "text").unwrap();
 }

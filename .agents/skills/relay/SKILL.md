@@ -79,20 +79,24 @@ briefs that share a preamble all look alike.
 **Acceptance.** A build is judged by what it declares, not by its own report:
 
 - `--check CMD` runs on a fresh clone of the branch's committed tip, inside the
-  sandbox and without the session's account; a run whose check fails is resumed with
-  the output's tail, and is never `done` while the check is red. The clone holds
+  sandbox and without the session's account. A run is never `done` while its check
+  is red, whoever decides; by default a failed check resumes the session with the
+  output's tail. The clone holds
   only committed files (no build output, no untracked dependencies), so the command
   does its own installs and builds; `sandbox.caches` persist between runs. It is
   bounded by `hooks.command_timeout_seconds` (default 120, which also bounds
   `command:` hook handlers): raise it in the project's `relay.toml` for a long
-  suite, or check only what the job touches. A timeout is not resumed: the job ends
-  `failed` (`check-could-not-run`) for you to look at.
+  suite, or check only what the job touches. By default a timeout is not resumed:
+  the job ends `failed` (`check-could-not-run`) for you to look at.
 - `--check-red-first` also runs the check at the base commit, where it must fail;
   a check that passes without the change proves nothing.
 - `--review-of JOB` queues a read-only review after JOB with JOB's branch visible to
   it. It ends `verdict: accept` or `verdict: reject`; a reject resumes the builder,
   and the review runs again on the new commit when the builder's run ends `done`,
   within `hooks.max_decisions` and the ceiling. Queue it fresh: never a fork.
+- "By default" means the `rule` handler, which a job with a check or review gets
+  when `hooks.ended` is unset. A chain that puts another handler before `rule` lets
+  that handler decide, and it may resume a timed-out or rejected run.
 - A job with a check, a review or an escalating profile needs
   `limits.job_ceiling_usd`. Details: README, *The bar* and *Reviews*.
 

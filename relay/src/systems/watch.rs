@@ -59,11 +59,11 @@ pub fn run(scope: Scope<'_>, all: bool, everywhere: bool) -> Result<()> {
     let bell = crate::os::Doorbell::watch_readable(&crate::ctx::buses_in(scope.root))?;
     let (tx, rang) = mpsc::channel();
     std::thread::spawn(move || while tx.send(bell.wait(Duration::from_secs(60))).is_ok() {});
-    let paging = restore_on_signals()?;
+    let handoff = restore_on_signals()?;
     let close = ratatui::run(|terminal| {
         let _mouse = Mouse::capture()?;
         let mut ui = Ui::new(all, everywhere, scope.home.is_some());
-        board_loop(terminal, scope, &mut ui, &rang, &paging)
+        board_loop(terminal, scope, &mut ui, &rang, &handoff)
     })?;
     match close {
         Close::Quit => Ok(()),
@@ -77,26 +77,63 @@ pub fn run(scope: Scope<'_>, all: bool, everywhere: bool) -> Result<()> {
 
 /// SIGTERM, SIGHUP and SIGINT end the board as `q` does, from a thread of their own: the main
 /// thread may be inside crossterm's read of a terminal that has hung up, which never returns.
-/// While the returned flag is set (the pager runs), SIGINT is the pager's: Ctrl-C there reaches it too.
-fn restore_on_signals() -> Result<Arc<AtomicBool>> {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
-    let mut signals = signal_hook::iterator::Signals::new([SIGTERM, SIGHUP, SIGINT]).context("handling signals")?;
+/// While the pager has the terminal, SIGINT is the pager's: Ctrl-C there reaches it too.
+fn restore_on_signals() -> Result<Handoff> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
+    let mut signals =
+        signal_hook::iterator::Signals::new([SIGTERM, SIGHUP, SIGINT, SIGUSR1]).context("handling signals")?;
     let paging = Arc::new(AtomicBool::new(false));
+    let (settled, heard) = mpsc::channel();
     let flag = Arc::clone(&paging);
     std::thread::spawn(move || {
-        if let Some(signal) = signals.forever().find(|&s| ends_board(s, flag.load(Ordering::SeqCst))) {
-            // A terminal that has gone away takes none of this; the exit is what matters then.
-            let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen, cursor::Show);
-            let _ = disable_raw_mode();
-            std::process::exit(128 + signal);
+        loop {
+            // Every signal taken in at once is judged by who had the terminal then.
+            let batch: Vec<i32> = signals.wait().collect();
+            if let Some(signal) = ending(&batch, flag.load(Ordering::SeqCst)) {
+                // A terminal that has gone away takes none of this; the exit is what matters then.
+                let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen, cursor::Show);
+                let _ = disable_raw_mode();
+                std::process::exit(128 + signal);
+            }
+            if batch.contains(&SIGUSR1) && settled.send(()).is_err() {
+                return;
+            }
         }
     });
-    Ok(paging)
+    Ok(Handoff { paging, heard })
 }
 
-/// Whether `signal` ends the board: any of them, but an interrupt while the pager runs is the pager's.
-fn ends_board(signal: i32, paging: bool) -> bool {
-    !(paging && signal == signal_hook::consts::SIGINT)
+/// The signal of `batch` that ends the board: SIGTERM or SIGHUP, or SIGINT unless the pager has
+/// the terminal. SIGUSR1 is the board's own (see [`Handoff::take_back`]).
+fn ending(batch: &[i32], paging: bool) -> Option<i32> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    batch.iter().copied().find(|&s| s == SIGTERM || s == SIGHUP || (s == SIGINT && !paging))
+}
+
+/// Who has the terminal, the board or the pager, as the signal thread judges an interrupt by.
+struct Handoff {
+    paging: Arc<AtomicBool>,
+    /// A word from the signal thread each time it has taken in the board's SIGUSR1.
+    heard: mpsc::Receiver<()>,
+}
+
+impl Handoff {
+    fn give(&self) {
+        self.paging.store(true, Ordering::SeqCst);
+    }
+
+    /// Takes the terminal back from the pager. A Ctrl-C that ended the pager was delivered to the
+    /// board too, but the signal thread may not have taken it in yet: so the board first raises
+    /// SIGUSR1 and waits for the thread to take that in. Both handlers have run by the time the
+    /// raise returns (pending signals are handled before a thread returns to its code), so the
+    /// thread meets the interrupt no later than the SIGUSR1, while the pager still has the terminal.
+    fn take_back(&self) {
+        while self.heard.try_recv().is_ok() {}
+        if signal_hook::low_level::raise(signal_hook::consts::SIGUSR1).is_ok() {
+            let _ = self.heard.recv_timeout(Duration::from_secs(1));
+        }
+        self.paging.store(false, Ordering::SeqCst);
+    }
 }
 
 fn read(scope: Scope<'_>, ui: &Ui) -> Result<Board> {
@@ -109,7 +146,7 @@ fn board_loop(
     scope: Scope<'_>,
     ui: &mut Ui,
     rang: &mpsc::Receiver<bool>,
-    paging: &AtomicBool,
+    handoff: &Handoff,
 ) -> Result<Close> {
     let version = crate::os::binary_version();
     // A failed read keeps the last good board (at first, an empty one) and says why; the next read retries.
@@ -155,7 +192,7 @@ fn board_loop(
             Action::ToggleEverywhere if ui.can_toggle => (ui.shown.everywhere, stale) = (!ui.shown.everywhere, true),
             Action::Open => {
                 if let Some(text) = ui.detail(&board).page.clone()
-                    && let Err(e) = page(terminal, &text, paging)
+                    && let Err(e) = page(terminal, &text, handoff)
                 {
                     ui.error = Some(format!("{}: {e}", e.root_cause()));
                 }
@@ -166,29 +203,50 @@ fn board_loop(
 }
 
 /// Hands `text` to `$PAGER` (else `less`) with the terminal given back for as long as it runs,
-/// then takes the terminal again, whatever the pager did. `paging` is set meanwhile, so an
-/// interrupt is the pager's.
-fn page(terminal: &mut DefaultTerminal, text: &str, paging: &AtomicBool) -> Result<()> {
+/// then takes the terminal again, whatever the pager did.
+fn page(terminal: &mut DefaultTerminal, text: &str, handoff: &Handoff) -> Result<()> {
     let pager = std::env::var("PAGER").ok().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "less".into());
     execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
-    paging.store(true, Ordering::SeqCst);
-    let ran = (|| -> Result<()> {
-        let mut child = Command::new("sh")
-            .args(["-c", &pager])
-            .stdin(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("starting the pager {pager}"))?;
-        // A pager that quits before reading it all closes the pipe; that is no failure.
-        let _ = child.stdin.take().context("the pager's stdin")?.write_all(text.as_bytes());
-        child.wait().with_context(|| format!("waiting for {pager}"))?;
-        Ok(())
-    })();
-    paging.store(false, Ordering::SeqCst);
+    handoff.give();
+    let ran = run_pager(&pager, text);
+    handoff.take_back();
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     terminal.clear()?;
     ran
+}
+
+/// Runs `pager` through the shell on `text`. One the shell cannot start, or that fails, is an
+/// error with the last thing it said; one ended by Ctrl-C was meant to end.
+fn run_pager(pager: &str, text: &str) -> Result<()> {
+    let mut child = Command::new("sh")
+        .args(["-c", pager])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("starting the pager {pager}"))?;
+    let mut stderr = child.stderr.take().context("the pager's stderr")?;
+    let said = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut s);
+        s
+    });
+    // A pager that quits before reading it all closes the pipe; that is no failure.
+    let _ = child.stdin.take().context("the pager's stdin")?.write_all(text.as_bytes());
+    let status = child.wait().with_context(|| format!("waiting for {pager}"))?;
+    pager_outcome(pager, status, &said.join().unwrap_or_default())
+}
+
+fn pager_outcome(pager: &str, status: std::process::ExitStatus, said: &str) -> Result<()> {
+    use std::os::unix::process::ExitStatusExt;
+    let sigint = signal_hook::consts::SIGINT;
+    // Killed by the interrupt, or a shell reporting that its command was.
+    if status.success() || status.signal() == Some(sigint) || status.code() == Some(128 + sigint) {
+        return Ok(());
+    }
+    let last = said.lines().rev().find(|l| !l.trim().is_empty());
+    anyhow::bail!("pager {pager}: {}", last.map_or_else(|| status.to_string(), str::to_owned))
 }
 
 #[cfg(test)]

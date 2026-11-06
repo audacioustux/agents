@@ -38,6 +38,16 @@ impl Pane {
         self.offset = self.offset.min(self.last_offset());
     }
 
+    /// As [`Pane::place`], keeping row `keep` in view when it was in view before: a smaller
+    /// window does not hide the selection, while one scrolled away by the wheel stays away.
+    pub fn place_keeping(&mut self, area: Rect, view: usize, rows: usize, keep: Option<usize>) {
+        let shown = keep.filter(|&i| i >= self.offset && i < self.offset + self.view);
+        self.place(area, view, rows);
+        if let Some(i) = shown {
+            self.reveal(i);
+        }
+    }
+
     /// The furthest it scrolls: its last row at the bottom.
     pub fn last_offset(&self) -> usize {
         self.rows.saturating_sub(self.view)
@@ -264,6 +274,17 @@ mod tests {
         assert_eq!(p.offset, 9, "the row is the last in view");
         p.reveal(2);
         assert_eq!(p.offset, 2);
+    }
+
+    #[test]
+    fn a_shrinking_pane_keeps_a_row_that_was_in_view() {
+        let mut p = pane(13, 60);
+        p.reveal(59);
+        p.place_keeping(Rect::default(), 6, 60, Some(59));
+        assert_eq!(p.offset, 54, "the selection is still the last row in view");
+        p.scroll(Step::Top);
+        p.place_keeping(Rect::default(), 3, 60, Some(59));
+        assert_eq!(p.offset, 0, "a row scrolled away stays away");
     }
 
     #[test]

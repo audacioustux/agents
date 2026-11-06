@@ -343,8 +343,77 @@ fn the_selected_row_is_marked_without_colour() {
 
 #[test]
 fn an_interrupt_while_the_pager_runs_is_the_pagers() {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
-    assert!(!super::ends_board(SIGINT, true));
-    assert!(super::ends_board(SIGINT, false));
-    assert!(super::ends_board(SIGTERM, true) && super::ends_board(SIGHUP, true));
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
+    assert_eq!(super::ending(&[SIGINT], true), None);
+    assert_eq!(super::ending(&[SIGINT, SIGUSR1], true), None);
+    assert_eq!(super::ending(&[SIGINT], false), Some(SIGINT));
+    assert_eq!(super::ending(&[SIGUSR1], false), None, "the board's own handoff signal");
+    assert_eq!(super::ending(&[SIGTERM], true), Some(SIGTERM));
+    assert_eq!(super::ending(&[SIGHUP], true), Some(SIGHUP));
+}
+
+/// The real signal thread: a Ctrl-C that ends the pager reaches the board as well, and the board
+/// takes the terminal back at once. Were the interrupt judged after the hand-back, this test's
+/// process would exit with 130 and the run would fail.
+#[test]
+fn an_interrupt_that_ends_the_pager_does_not_end_the_board() {
+    let handoff = super::restore_on_signals().unwrap();
+    for _ in 0..20 {
+        handoff.give();
+        signal_hook::low_level::raise(signal_hook::consts::SIGINT).unwrap();
+        handoff.take_back();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
+
+#[test]
+fn a_pager_that_cannot_start_or_fails_says_so_and_an_interrupted_one_is_fine() {
+    let err = super::run_pager("relay-no-such-pager", "text").unwrap_err().to_string();
+    assert!(err.contains("relay-no-such-pager") && err.contains("not found"), "{err}");
+    assert!(super::run_pager("exit 3", "text").unwrap_err().to_string().contains("exit status: 3"));
+    super::run_pager("cat >/dev/null", "text").unwrap();
+    super::run_pager("kill -INT $$", "text").unwrap();
+    super::run_pager("head -c1 >/dev/null", &"x".repeat(1 << 20)).unwrap();
+}
+
+#[test]
+fn a_read_failure_shows_before_the_counts_a_narrow_title_cuts() {
+    let mut f = two_jobs();
+    for i in 0..8 {
+        let jobs = [job(&format!("j{i}"), Status::Queued, 5, "t")];
+        let jobs_dir = f.dir.path().join(format!("project-with-a-long-name-{i}"));
+        f.machine.projects.push(Project {
+            name: format!("project-with-a-long-name-{i}"),
+            jobs: jobs_dir,
+            world: world(&jobs),
+            own: false,
+        });
+    }
+    f.machine.unreadable.push("broken: Permission denied".into());
+    let mut ui = Ui::new(false, true, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    ui.error = Some("read failed (board as of 12:00:00Z): Permission denied".into());
+    let fr = frame(&b, &mut ui, 80, 24);
+    assert!(fr[0].contains("every project · read failed"), "{}", fr[0]);
+    let fr = frame(&b, &mut ui, 200, 24);
+    assert!(fr[0].contains("unreadable: broken"), "{}", fr[0]);
+    assert!(fr[0].find("unreadable").unwrap() < fr[0].find("demo 1 running").unwrap(), "{}", fr[0]);
+}
+
+#[test]
+fn a_smaller_window_keeps_the_selection_in_view() {
+    let jobs: Vec<Job> = (0..60).map(|i| job(&format!("job-{i:02}"), Status::Queued, 100 - i, "work")).collect();
+    let f = fixture(&jobs, &[]);
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    frame(&b, &mut ui, 120, 40);
+    ui.apply(Action::Step(Step::Bottom), &b);
+    assert!(frame(&b, &mut ui, 120, 40).iter().any(|l| l.contains("› job-00")));
+    let fr = frame(&b, &mut ui, 80, 24);
+    assert!(fr.iter().any(|l| l.contains("› job-00")), "{fr:#?}");
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    assert!(frame(&b, &mut ui, 80, 24).iter().any(|l| l.contains("› job-00")), "and after the next read");
 }

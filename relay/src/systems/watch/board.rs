@@ -43,8 +43,11 @@ impl Entry {
 /// One frame's worth of the board.
 #[derive(Debug, Default)]
 pub struct Board {
-    /// The jobs pane's title: the project, or every project with each one's counts.
+    /// The jobs pane's title: the project's name, or `every project`.
     pub title: String,
+    /// What follows it, after any diagnostic: the jobs running and queued, per project when every
+    /// project shows (unbounded, so a narrow title cuts these first).
+    pub counts: String,
     pub everywhere: bool,
     pub jobs: Vec<Entry>,
     pub decisions: Vec<Vec<String>>,
@@ -97,7 +100,12 @@ impl Board {
             harnesses.join(", ")
         };
         Self {
-            title: title(&shown, everywhere, now),
+            title: if everywhere {
+                "every project".to_owned()
+            } else {
+                shown.first().map_or_else(String::new, |p| p.name.clone())
+            },
+            counts: counts(&shown, everywhere, now),
             everywhere,
             decisions: decision_cells(shown.iter().copied(), everywhere, now),
             no_jobs: no_jobs(!all && older > 0, older, elsewhere),
@@ -182,8 +190,8 @@ fn head(cfg: &Config, p: &Project, j: &Job, now: u64) -> Vec<String> {
     head
 }
 
-/// `agents · 2 running · 1 queued`, or for every project each one's counts.
-fn title(shown: &[&Project], everywhere: bool, now: u64) -> String {
+/// `2 running, 1 queued`, or for every project each one's counts after its name.
+fn counts(shown: &[&Project], everywhere: bool, now: u64) -> String {
     let counts = |p: &Project| {
         let n = |s: Status| p.world.jobs.values().filter(|j| j.status == s).count();
         let mut c = vec![format!("{} running", n(Status::Running))];
@@ -193,15 +201,14 @@ fn title(shown: &[&Project], everywhere: bool, now: u64) -> String {
         c.join(", ")
     };
     if !everywhere {
-        return shown.first().map_or_else(String::new, |p| format!("{} · {}", p.name, counts(p)));
+        return shown.first().map_or_else(String::new, |p| counts(p));
     }
     let busy: Vec<String> = shown
         .iter()
         .filter(|p| p.world.jobs.values().any(|j| view::recent(j, now)))
         .map(|p| format!("{} {}", p.name, counts(p)))
         .collect();
-    let rest = if busy.is_empty() { "nothing recent".to_owned() } else { busy.join(" · ") };
-    format!("every project · {rest}")
+    if busy.is_empty() { "nothing recent".to_owned() } else { busy.join(" · ") }
 }
 
 /// What an empty jobs list says: what is hidden, and the key that shows it.

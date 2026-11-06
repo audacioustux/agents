@@ -74,19 +74,24 @@ fn framed(title: Line<'static>, focused: bool) -> Block<'static> {
 
 /// The project (or every project's counts), a badge for the decisions waiting, and why the last
 /// read failed or which projects could not be read.
+/// The diagnostics and the badge come before the counts, which can be long, so a narrow window
+/// cuts the counts first.
 fn jobs_title(b: &Board, ui: &Ui) -> Line<'static> {
     let mut spans = vec![Span::from(format!(" {} ", b.title)).bold()];
+    if let Some(e) = &ui.error {
+        spans.push(Span::from(format!("· {e} ")).fg(Color::Red).bold());
+    }
+    for u in &b.unreadable {
+        spans.push(Span::from(format!("· unreadable: {u} ")).fg(Color::Red));
+    }
     let n = b.decisions.len();
     if n > 0 {
         spans.push(
             Span::from(format!("· {n} decision{} waiting ", if n == 1 { "" } else { "s" })).fg(Color::Yellow).bold(),
         );
     }
-    if let Some(e) = &ui.error {
-        spans.push(Span::from(format!("· {e} ")).fg(Color::Red).bold());
-    }
-    for u in &b.unreadable {
-        spans.push(Span::from(format!("· unreadable: {u} ")).fg(Color::Red));
+    if !b.counts.is_empty() {
+        spans.push(Span::from(format!("· {} ", b.counts)).bold());
     }
     Line::from(spans)
 }
@@ -124,7 +129,7 @@ fn table_pane<R: AsRef<[String]>, S: Fn(usize) -> Style>(
     let (selected, empty) = (*selected, *empty);
     let inner = block.inner(area);
     let view = usize::from(inner.height.saturating_sub(1));
-    pane.place(area, view, rows.len());
+    pane.place_keeping(area, view, rows.len(), selected);
     // A scrollbar takes the last inner column, when there is one; a table with a selection marks
     // it with `› ` (reverse video alone is gone under NO_COLOR) in a column of its own.
     let bar = usize::from(pane.rows > pane.view);

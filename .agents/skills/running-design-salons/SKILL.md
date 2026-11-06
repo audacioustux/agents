@@ -125,8 +125,10 @@ The report states its scope (actors, moves, losses) and what it leaves out.
 ### Round 2: fork each voice, paste the others verbatim
 
 - **Fork each voice's own session** (`relay queue add NAME --fork JOB --after JOB`).
-  Queue round 2 as soon as round 1 lands, while the prompt cache is warm; a late
-  fork re-reads the whole transcript at full price.
+  Queue round 2 as soon as the last round-1 answer lands and the round-2 briefs
+  are written, while the prompt cache is warm; a late fork re-reads the whole
+  transcript at full price. It cannot go earlier: a fork needs its parent's
+  session, and the brief is fixed when queued, before the others' answers exist.
 - **Paste the other voices' round-1 text verbatim.** A summary drops the detail
   that mattered and anchors every voice on your reading.
 - **Add a short driver section:** where they converged, the one disagreement that
@@ -199,7 +201,7 @@ broke, which ideas are new. Then ask the questions, each with its trade-off.
 | A cost is given per operation, but not per entity at rest or system-wide | Ask for all three grains at the target scale |
 | The README or spec says "the salon decided" | Change it to "proposed, not ruled"; take the question to the owner |
 | The owner question offers one option and a straw man | Use the adversary's rewrite, which names the trade-off |
-| Round 2 queued hours after round 1 | Queue the forks with `--after`, at the same time as round 1 |
+| Round 2 queued hours after round 1 | Write the round-2 briefs as soon as the last round-1 answer lands, and queue the forks then. Not earlier: a fork needs its parent's session, and its brief is fixed when queued |
 | The driver's lean is first written down after the voices answer | Write it before round 1; score it with the rest |
 | Voices agreed, so the claim is reported as settled | Survives only after the adversary tested it |
 | A voice's round-1 idea is the one a review already broke | Add a "dead, do not repair" block to the seed, with what killed each |

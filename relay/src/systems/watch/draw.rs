@@ -125,7 +125,6 @@ fn table_pane<R: AsRef<[String]>, S: Fn(usize) -> Style>(
     let inner = block.inner(area);
     let view = usize::from(inner.height.saturating_sub(1));
     pane.place(area, view, rows.len());
-    // A scrollbar takes the last inner column, when there is one.
     // A scrollbar takes the last inner column, when there is one; a table with a selection marks
     // it with `› ` (reverse video alone is gone under NO_COLOR) in a column of its own.
     let bar = usize::from(pane.rows > pane.view);

@@ -160,6 +160,7 @@ Design and domain ownership boundaries:
 | `designing-idempotent-boundaries` | Handlers invoked more than once: keys, dedupe, replay safety |
 | `evolving-shared-contracts` | Changing a shape more than one party depends on |
 | `weighing-quality-dimensions` | The 26 quality dimensions: what a decision moves, the reviewer's sweep, gates for measurable claims |
+| `running-design-salons` | Exploring an open design with several agent sessions: lenses, rounds, the fresh adversary, recording as proposed |
 
 ```mermaid
 flowchart TD
@@ -171,6 +172,7 @@ flowchart TD
   brain["brainstorming"]
   plans["writing-plans"]
   reviews["requesting-code-review<br/>receiving-code-review<br/>reviewing-a-design-corpus"]
+  salon["running-design-salons<br/>multi-session exploration"]
 
   domains --> inv & idem & contracts
   inv & idem & contracts --> domains
@@ -179,12 +181,16 @@ flowchart TD
   plans --> quality & brain
   reviews --> quality
   quality --> plans & idem
+  salon --> reviews & quality & brain
 ```
 
 `modelling-domains-and-events` runs before code and decides where a concept lives;
 `modelling-domain-invariants` then decides what the store enforces inside that
 module. `weighing-quality-dimensions` is a sweep rather than a domain: planning and
 review skills defer the dimension check to it, and it owns no rule they restate.
+`running-design-salons` explores before any of them judges: its output is proposed
+until a review and the owner settle it, so it defers verification to the review
+skills and shaping with the owner to `brainstorming`.
 
 ## Upstream tracking
 

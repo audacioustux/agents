@@ -106,7 +106,12 @@ impl Board {
             ),
             jobs,
             accounts_head: format!(" {} ", accounts.head),
-            accounts: accounts.cells,
+            // An account's empty cell says `-`; a sub-row for another model leaves blank what it shares.
+            accounts: accounts
+                .cells
+                .into_iter()
+                .map(|r| if r.first().is_some_and(|c| c.starts_with("  ")) { r } else { dashed(r) })
+                .collect(),
             ready: accounts.ready,
             unreadable: if everywhere { m.unreadable.clone() } else { Vec::new() },
         }
@@ -130,11 +135,16 @@ fn entry(cfg: &Config, p: &Project, j: &Job, everywhere: bool, now: u64) -> Entr
     Entry {
         key: Key { project: p.name.clone(), name: j.name.clone() },
         status: j.status,
-        cells: cells.into_iter().map(|c| if c.is_empty() { "-".to_owned() } else { c }).collect(),
+        cells: dashed(cells),
         task: j.task.clone(),
         head: head(cfg, p, j, now),
         jobs_dir: p.jobs.clone(),
     }
+}
+
+/// The cells with `-` for each empty one, so a column never looks missing.
+fn dashed(cells: Vec<String>) -> Vec<String> {
+    cells.into_iter().map(|c| if c.is_empty() { "-".to_owned() } else { c }).collect()
 }
 
 /// What a job's pane says under its task: where it stands, what it runs as, why it waits or

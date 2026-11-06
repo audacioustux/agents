@@ -128,6 +128,7 @@ fn the_board_fits_80x24_and_120x40_with_headings_keys_and_a_zoned_clock() {
             assert!(keys.contains(hint), "{w}x{h}: {hint} missing from {keys}");
         }
         assert!(fr.iter().any(|l| l.contains("claude:a1")), "the accounts");
+        assert_eq!(b.accounts[0][3], "-", "an empty cell says so");
         let task = row_of(&fr, " build ");
         assert!(fr[usize::from(task) + 1].contains("Build the thing"), "the job pane starts with its task");
     }
@@ -263,6 +264,8 @@ fn every_shown_key_does_what_it_says() {
     let fr = frame(&b, &mut ui, 120, 40);
     assert!(fr.iter().any(|l| l.contains("hold Shift to select text")), "the help");
     assert_eq!(ui.action(&key(KeyCode::Esc)), Some(Action::Help), "a key closes the help, not the board");
+    let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_eq!(ui.action(&ctrl_c), Some(Action::Quit), "Ctrl-C always quits");
 }
 
 #[test]

@@ -159,7 +159,10 @@ impl Ui {
 
     pub fn action(&self, e: &Event) -> Option<Action> {
         match e {
-            // While the help shows, any key or click closes it.
+            Event::Key(k) if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::Quit)
+            }
+            // While the help shows, any other key or a click closes it.
             Event::Key(k) if k.kind == KeyEventKind::Press && self.help => Some(Action::Help),
             Event::Mouse(m) if self.help && matches!(m.kind, MouseEventKind::Down(_)) => Some(Action::Help),
             Event::Key(k) if k.kind == KeyEventKind::Press => key(k),

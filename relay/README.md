@@ -125,9 +125,9 @@ prepend it to your briefs, or have each brief point to it.
 | `relay decide list [--wait [--timeout S]]` / `relay decide answer ID --action A ...` | Decisions waiting for the orchestrator / answer one ([hooks](#hooks)) |
 | `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one. A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
-| `relay view status [--all]` | Jobs and accounts. With `--json`, the whole folded state |
+| `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends |
-| `relay view watch [--all]` | The status live in a terminal UI (ratatui): jobs, the selected job's latest output and answer, and accounts, redrawn as events land in any project. Click a job to select it, scroll a pane with the wheel, click a key hint; or ↑↓, PgUp/PgDn, `a` older jobs, `q` quit. A reinstalled relay takes the window over by itself (hold Shift to select text) |
+| `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)) |
 | `relay view events` | The merged event log |
 | `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it; a fresh reading; switches |
@@ -152,6 +152,38 @@ loads, it hands over to a new dispatcher that reads it; a file that does not loa
 (a half-saved edit) changes nothing until it changes again. An edit rings no bell,
 so it is noticed on the next pass, at most five minutes later; any queue command
 makes that pass at once.
+
+## The board
+
+`relay view watch` draws `view status` live, redrawn as events land in any
+project: the jobs, any decisions waiting, the selected job, and the accounts.
+
+- **Panes.** Each pane scrolls on its own and shows a scrollbar and its position
+  (`10-29 of 164`; the jobs say `14 of 47`) when it does not all fit. Tab and
+  Shift-Tab (or → ← and l h) move the focus, shown by a thick border; ↑ ↓ (k j),
+  PgUp PgDn (Space, Ctrl-U Ctrl-D) and Home End (g G) act on the focused pane, and
+  in the jobs pane move the selection. The wheel scrolls the pane under it; a
+  click selects a job or focuses a pane; each key in the bottom line can be clicked.
+  The job pane counts wrapped rows, so End shows the last line of any answer.
+- **The job pane** starts with the whole task, then where the job stands, what it
+  runs as, what it waits for or why it ended, its checks, reviews and notes, any
+  decision waiting on it, what its session is doing now, and its answer with
+  headings bold and markdown markers dropped. Enter hands it to `$PAGER` (`less` by
+  default) and takes the terminal back after. Only the selected job's log and
+  answer are read, the answer again only when its file changes.
+- **Every project.** `p` (or `--everywhere`) lists every project's jobs, with a
+  project column and each project's counts in the title; outside a project (no
+  `--config`, `$RELAY_CONFIG` or `relay.toml` above) the board shows every project.
+  Other projects are read, never written: a job's row and pane come from its own
+  project's fold and jobs directory, so only the profile hold that a queued job's
+  own config would name is left out.
+- **What stays put.** The selection follows a job by name as rows move; a failed
+  read keeps the last good board with the cause in red in the title, and the next
+  read retries; columns are a fixed set, each capped and cut with `…`; an empty list
+  says what `a` (older jobs) or `p` would show. `?` lists the keys and colours.
+- **The terminal.** `q`, Esc, Ctrl-C, SIGTERM, SIGHUP and SIGINT give it back; the
+  board takes the mouse, so hold Shift to select text. A reinstalled relay takes
+  the window over by itself.
 
 ## Policy and profiles
 

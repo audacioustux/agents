@@ -30,6 +30,9 @@ use crate::systems::view::machine::Scope;
 use crate::systems::view::{activity, job_cells};
 use crate::world::{Job, Status};
 
+#[allow(dead_code)]
+mod pane;
+
 /// What one frame shows, taken from the bus in one read.
 struct Board {
     project: String,

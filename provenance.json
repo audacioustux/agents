@@ -1898,6 +1898,17 @@
           }
         }
       }
+    },
+    "running-design-salons": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "2026-11-06: written test-first from six salons run on one project (multi-session design exploration over relay). RED: two pressure scenarios without the skill. With the project's records in reach, the agent copied their pattern; on a neutral problem it chose five premise seeds rather than lenses, asked for no models or failing variants, used no evidence tags, wrote no driver lean before round 1, and recorded summaries instead of the voices' text. Three of the baselines' ideas were adopted: the driver's lean written first and scored, the adversary attacking a neutral claims list before reading the voices, and the seed's 'already dead, do not repair' block (with a rebuttal's new mechanism counted as a concession plus redesign). GREEN: the same neutral scenario with the skill: lenses by mechanism, the driver's broken design labelled wild, lean first, models with failing variants, forks queued at once, a fresh adversary on a claims list, voices recorded verbatim as proposed.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "a240e45f2687066c4bed545cb1e94d4554fe206dd85507427a1366e87867be0b"
+        }
+      }
     }
   },
   "dispositionsRecorded": "2026-09-04",

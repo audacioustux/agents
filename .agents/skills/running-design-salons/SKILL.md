@@ -219,6 +219,7 @@ broke, which ideas are new. Then ask the questions, each with its trade-off.
 - Record: voices verbatim, README, proposed not ruled; owner told as a conversation.
 
 The `relay` skill owns the commands (`queue add`, `--fork`, `--after`, profiles,
-landing), and is the default runner. Without relay, any harness that can resume a
-session works for round 2; where none can, paste the voice's own round-1 output at
-the top of its round-2 brief.
+landing), and is the default runner. Round 2 needs a harness that can fork; relay
+refuses `--fork` on one that cannot (omp, for one). For such a voice, or with no
+relay at all, queue round 2 fresh and paste the voice's own round-1 output at the
+top of its round-2 brief.

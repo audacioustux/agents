@@ -69,8 +69,10 @@ enum System {
     #[command(subcommand)]
     Decide(systems::decide::Cmd),
     /// The job profiles: what `queue add --profile` fills in, each with its note.
+    /// Outside a project, the owner's policy alone.
     Profiles,
     /// The merged policy and project config, and where each part came from.
+    /// Outside a project, the owner's policy alone.
     #[command(subcommand)]
     Config(systems::profiles::Cmd),
     /// Self-test the sandbox. Starts no model session.
@@ -93,6 +95,11 @@ fn main() -> ExitCode {
 }
 
 fn run(config: Option<&std::path::Path>, json: bool, system: System) -> anyhow::Result<()> {
+    match system {
+        System::Profiles => return policy_views(config, json, None),
+        System::Config(c) => return policy_views(config, json, Some(c)),
+        _ => {}
+    }
     let (cfg, path) = config::Config::load(config)?;
     let ctx = ctx::Ctx::new(cfg, path, json)?;
     match system {
@@ -103,9 +110,27 @@ fn run(config: Option<&std::path::Path>, json: bool, system: System) -> anyhow::
         System::View(c) => systems::view::run(&ctx, c),
         System::Land(c) => systems::land::run(&ctx, c),
         System::Decide(c) => systems::decide::run(&ctx, c),
-        System::Profiles => systems::profiles::list(&ctx),
-        System::Config(c) => systems::profiles::run(&ctx, c),
         System::Probe { account } => systems::probe::run(&ctx, account.as_deref()),
-        System::Ask(_) => unreachable!("runs without a config"),
+        System::Ask(_) | System::Profiles | System::Config(_) => unreachable!("runs without a project context"),
+    }
+}
+
+/// `profiles` (`cmd` is `None`) and `config show` read the policy and touch no project
+/// state, so they need no relay.toml: outside a project they show the owner's policy alone.
+fn policy_views(
+    config: Option<&std::path::Path>,
+    json: bool,
+    cmd: Option<systems::profiles::Cmd>,
+) -> anyhow::Result<()> {
+    let (cfg, project) = match config::Config::locate(config)? {
+        Some(path) => {
+            let (cfg, path) = config::Config::load_at(&path)?;
+            (cfg, Some(path))
+        }
+        None => (config::Config::policy_only()?, None),
+    };
+    match cmd {
+        None => systems::profiles::list(&cfg, json),
+        Some(c) => systems::profiles::run(&cfg, project.as_deref(), json, c),
     }
 }

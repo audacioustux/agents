@@ -645,14 +645,23 @@ impl Config {
         self.origins.get(key).copied().unwrap_or(Origin::Project)
     }
 
-    /// `--config`, else `$RELAY_CONFIG`, else the nearest `relay.toml` at or above the current directory.
+    /// `--config`, else `$RELAY_CONFIG`, else the nearest `relay.toml` at or above the
+    /// current directory; `None` when there is none of these.
+    pub fn locate(explicit: Option<&Path>) -> Result<Option<PathBuf>> {
+        match explicit.map(Path::to_path_buf).or_else(|| std::env::var_os("RELAY_CONFIG").map(PathBuf::from)) {
+            Some(p) => Ok(Some(p)),
+            None => Ok(find_upwards(&std::env::current_dir()?)),
+        }
+    }
+
+    /// The project config [`Config::locate`] finds, merged with the owner's policy.
     pub fn load(explicit: Option<&Path>) -> Result<(Self, PathBuf)> {
-        let path = match explicit.map(Path::to_path_buf).or_else(|| std::env::var_os("RELAY_CONFIG").map(PathBuf::from))
-        {
-            Some(p) => p,
-            None => find_upwards(&std::env::current_dir()?)
-                .with_context(|| format!("no {FILE_NAME} here or above; pass --config"))?,
-        };
+        let path = Self::locate(explicit)?.with_context(|| format!("no {FILE_NAME} here or above; pass --config"))?;
+        Self::load_at(&path)
+    }
+
+    /// The project config at `path`, merged with the owner's policy.
+    pub fn load_at(path: &Path) -> Result<(Self, PathBuf)> {
         let path = path.canonicalize().with_context(|| format!("config {}", path.display()))?;
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let policy = Policy::load()?;
@@ -663,6 +672,32 @@ impl Config {
         )
         .with_context(|| format!("in {}", path.display()))?;
         Ok((cfg, path))
+    }
+
+    /// The owner's policy alone, for the read-only views outside any project. Its bans and
+    /// profiles are checked as a project's would be; it names no project or repository, so
+    /// it must never reach `Ctx::new` (an empty name would put job state at relay's roots).
+    pub fn policy_only() -> Result<Self> {
+        let policy = Policy::load()?;
+        let mut cfg = Self {
+            name: String::new(),
+            repo: PathBuf::new(),
+            limits: Limits::default(),
+            accounts: Accounts::default(),
+            harnesses: BTreeMap::new(),
+            session: Session::default(),
+            sandbox: Sandbox::default(),
+            gc: Gc::default(),
+            profiles: BTreeMap::new(),
+            hooks: Hooks::default(),
+            policy_path: None,
+            origins: BTreeMap::new(),
+        };
+        cfg.merge(policy.as_ref().map(|(p, from)| (p, from.as_path())));
+        if let Some((_, from)) = &policy {
+            cfg.validate_policy().with_context(|| format!("in policy {}", from.display()))?;
+        }
+        Ok(cfg)
     }
 
     fn validate(&self) -> Result<()> {
@@ -693,13 +728,7 @@ impl Config {
             ensure!(key.contains(':'), "accounts.exclude entries are harness:label, not {key:?}");
         }
         ensure!(self.session.max_hours > 0.0, "session.max_hours must be positive");
-        for re in self.session.banned_models.keys() {
-            regex::Regex::new(re).with_context(|| format!("session.banned_models key {re:?}"))?;
-        }
-        for (name, p) in &self.profiles {
-            p.validate(name)?;
-        }
-        self.validate_escalation()?;
+        self.validate_policy()?;
         let h = &self.hooks;
         for (point, chain) in [("cap", &h.cap), ("ended", &h.ended), ("held", &h.held), ("disk", &h.disk)] {
             for handler in chain.iter().flatten() {
@@ -727,8 +756,18 @@ impl Config {
         Ok(())
     }
 
-    /// The disk limits, `[gc]` and `[session] env`. A `gc.build_outputs` entry
-    /// names a place inside a clone, so it can never reach outside one.
+    /// What the policy can set, the bans and the profiles, checked alike inside a project
+    /// and outside one ([`Config::policy_only`]).
+    fn validate_policy(&self) -> Result<()> {
+        for re in self.session.banned_models.keys() {
+            regex::Regex::new(re).with_context(|| format!("session.banned_models key {re:?}"))?;
+        }
+        for (name, p) in &self.profiles {
+            p.validate(name)?;
+        }
+        self.validate_escalation()
+    }
+
     /// Every `escalate_to` names a profile, and following them never comes back round.
     fn validate_escalation(&self) -> Result<()> {
         for (name, p) in &self.profiles {
@@ -746,6 +785,8 @@ impl Config {
         Ok(())
     }
 
+    /// The disk limits, `[gc]` and `[session] env`. A `gc.build_outputs` entry
+    /// names a place inside a clone, so it can never reach outside one.
     fn validate_disk(&self) -> Result<()> {
         let (l, g) = (&self.limits, &self.gc);
         ensure!(l.job_disk_gb.is_finite() && l.job_disk_gb >= 0.0, "limits.job_disk_gb must not be negative");

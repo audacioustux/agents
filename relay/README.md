@@ -11,7 +11,7 @@ or afresh to another harness.
 in your own account ([the skill](../.agents/skills/relay/SKILL.md)).
 
 ```sh
-relay queue add fix-parser --prompt briefs/fix-parser.md --model claude=sonnet
+relay queue add fix-parser --prompt briefs/fix-parser.md --model claude=claude-sonnet-5-5
 relay view status                 # who is working on what, and each account's room
 relay view result fix-parser      # the session's final report, branch and cost (--wait: once it ends)
 relay land fetch fix-parser       # its branch, copied into your repository
@@ -30,7 +30,7 @@ Linux only. It replaces `lanes`, the Deno runner that was here before. See
 - Rust 1.99 to build it (the toolchain file pins it).
 
 ```sh
-cargo install --path relay --locked      # puts `relay` in ~/.cargo/bin
+cargo install --path relay --locked      # puts `relay` in ~/.cargo/bin (--root ~/.local: ~/.local/bin)
 cp relay/relay.example.toml ~/work/myproject/relay.toml   # then edit `name`
 cd ~/work/myproject && relay probe       # checks the sandbox; starts no model session
 ```
@@ -206,7 +206,10 @@ can take is held with every account's cause:
 
 `relay profiles [--json]` prints each resolved profile with its note, which is
 how a fresh orchestrator learns the policy. `relay config show` prints the merged
-bans and profiles with `[policy]` or `[project]` after each setting.
+bans and profiles with `[policy]` or `[project]` after each setting. Neither creates
+state, and both run anywhere: outside a project (no `--config`, `$RELAY_CONFIG` or
+`relay.toml` above) they show the policy alone, checked as a project would check it
+(`config show` prints `project  none`).
 `relay view status` and `view watch` show a job's profile where it has one, else
 the model it names; `--json` carries both (`profile`, `models`), and each job's `kind` (`build`, `read` or `review`), `readonly` and `acceptance` (`none`, a `check`, a `check-red-first` or the job it is a `review-of`).
 
@@ -681,7 +684,7 @@ the worker's where one is free:
 [limits]
 budget_growth = 2.0      # the next run's cap is the last one times this
 job_ceiling_usd = 120.0  # all runs and checks of one job; absent: unbounded
-checker = { harness = "claude", model = "sonnet", budget_usd = 1.0 }
+checker = { harness = "claude", model = "claude-sonnet-5-5", budget_usd = 1.0 }
 ```
 
 The check reads the brief, every earlier verdict, `git log --stat` since the

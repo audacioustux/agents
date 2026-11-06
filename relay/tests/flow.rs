@@ -138,6 +138,11 @@ fn relay(env: &Env, args: &[&str]) -> Output {
 }
 
 fn relay_cmd(env: &Env, cmd: &mut Command) -> Output {
+    prepared(env, cmd).output().unwrap()
+}
+
+/// `cmd` set up as every test runs relay; settings applied after this win.
+fn prepared<'c>(env: &Env, cmd: &'c mut Command) -> &'c mut Command {
     cmd.current_dir(&env.repo)
         .env("HOME", &env.home)
         .env("XDG_STATE_HOME", env.root.join("state"))
@@ -147,8 +152,6 @@ fn relay_cmd(env: &Env, cmd: &mut Command) -> Output {
         .envs(env.policy().map(|p| ("RELAY_POLICY", p)))
         .env_remove("OMP_PROFILE")
         .envs(identity())
-        .output()
-        .unwrap()
 }
 
 fn ok(out: &Output, what: &str) {
@@ -548,6 +551,63 @@ fn an_unknown_or_banned_profile_is_refused() {
     let out = relay(&env, &["queue", "add", "a", "--text", "x", "--profile", "mechanical", "--model", "sonnet"]);
     assert_eq!(out.status.code(), Some(5), "the policy's ban reaches the project: {}", stderr(&out));
     assert!(job(&env, "a").is_null(), "a refused job is not recorded");
+}
+
+#[test]
+fn profiles_and_config_show_need_no_project() {
+    let env = setup("profile-outside", false);
+    std::fs::remove_file(env.repo.join("relay.toml")).unwrap();
+    let out = relay(&env, &["profiles"]);
+    ok(&out, "profiles outside a project, without a policy");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no profiles"));
+    env.write_policy(POLICY);
+    let out = relay(&env, &["profiles", "--json"]);
+    ok(&out, "profiles outside a project");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["profiles"]["hunt"]["model"], "claude-opus-5-5", "the policy's profile");
+    assert_eq!(v["profiles"]["bad"]["banned"], "MiniMax is banned", "the policy's ban");
+    let out = relay(&env, &["config", "show", "--json"]);
+    ok(&out, "config show outside a project");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["project"].is_null(), "no project config was read: {v}");
+    assert_eq!(v["profiles"]["hunt"]["model"]["from"], "policy");
+    let text = String::from_utf8_lossy(&relay(&env, &["config", "show"]).stdout).into_owned();
+    assert!(text.contains("project  none"), "{text}");
+    let out = relay(&env, &["view", "status"]);
+    assert!(!out.status.success(), "everything else still needs a project");
+    assert!(stderr(&out).contains("no relay.toml here or above"), "{}", stderr(&out));
+    assert!(!env.root.join("state").exists(), "the policy views create no project state");
+    let missing = env.root.join("missing.toml");
+    let out = relay(&env, &["--config", missing.to_str().unwrap(), "profiles"]);
+    assert!(!out.status.success(), "a named config that is missing still fails");
+    let out = prepared(&env, Command::new(env!("CARGO_BIN_EXE_relay")).args(["config", "show"]))
+        .env("RELAY_CONFIG", &missing)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "so does a missing $RELAY_CONFIG");
+    env.write_policy("[session]\nbanned_models = { \"(\" = \"broken\" }\n");
+    let out = relay(&env, &["profiles"]);
+    assert!(!out.status.success(), "a broken policy is refused outside a project too");
+    assert!(stderr(&out).contains("in policy"), "{}", stderr(&out));
+}
+
+#[test]
+fn a_project_above_wins_over_the_policy_alone() {
+    let env = setup("profile-above", false);
+    env.write_policy(POLICY);
+    let mut conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    conf.push_str("[profiles.hunt]\neffort = \"medium\"\n");
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+    let sub = env.repo.join("deep/er");
+    std::fs::create_dir_all(&sub).unwrap();
+    let out = prepared(&env, Command::new(env!("CARGO_BIN_EXE_relay")).args(["config", "show", "--json"]))
+        .current_dir(&sub)
+        .output()
+        .unwrap();
+    ok(&out, "config show from a subdirectory");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["profiles"]["hunt"]["effort"]["from"], "project", "the relay.toml above was read: {v}");
+    assert!(v["project"].as_str().is_some_and(|p| p.ends_with("relay.toml")), "{v}");
 }
 
 #[test]

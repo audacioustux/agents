@@ -167,7 +167,7 @@ fn board_loop(
                     good_at = jiff::Timestamp::now().strftime("%H:%M:%SZ").to_string();
                 }
                 // The cause first: the path after it is the part a narrow title cuts.
-                Err(e) => ui.error = Some(format!("read failed (board as of {good_at}): {}: {e}", e.root_cause())),
+                Err(e) => ui.error = Some(format!("read failed (board as of {good_at}): {e:#}")),
             }
             ui.sync(&board);
             (read_at, changed) = (Instant::now(), true);
@@ -194,7 +194,7 @@ fn board_loop(
                 if let Some(text) = ui.detail(&board).page.clone()
                     && let Err(e) = page(terminal, &text, handoff)
                 {
-                    ui.error = Some(format!("{}: {e}", e.root_cause()));
+                    ui.error = Some(format!("{e:#}"));
                 }
             }
             a => ui.apply(a, &board),

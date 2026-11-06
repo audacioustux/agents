@@ -68,13 +68,18 @@ relay queue add fix-parser --profile build-open --task "Fix the parser" --prompt
   --check "cargo nextest run --no-tests=fail" --check-red-first
 relay queue add fix-parser-review --review-of fix-parser --profile review --prompt briefs/review.md
 relay queue add audit --text "Review src/auth for races." --readonly --harness omp
-relay view status          # jobs, and every account's room
+relay view status          # jobs, and every account's room (--everywhere: every project)
 relay view result fix-parser --wait --json   # blocks until it ends: no polling
 relay land fetch fix-parser
 ```
 
 Give every job a `--task`: the board otherwise shows the brief's first line, and
 briefs that share a preamble all look alike.
+
+For a person watching, `relay view watch` is the live board (`?` lists its keys,
+`p` shows every project); an agent reads `view status --json` and waits with
+`view result --wait`, never by watching the board. Outside a project both boards
+show every project on the machine.
 
 **Acceptance.** A build is judged by what it declares, not by its own report:
 

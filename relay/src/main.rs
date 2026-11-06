@@ -98,6 +98,10 @@ fn run(config: Option<&std::path::Path>, json: bool, system: System) -> anyhow::
     match system {
         System::Profiles => return policy_views(config, json, None),
         System::Config(c) => return policy_views(config, json, Some(c)),
+        // Outside a project the boards show every project on this machine.
+        System::View(c) if c.runs_anywhere() && config::Config::locate(config)?.is_none() => {
+            return systems::view::outside(json, &c);
+        }
         _ => {}
     }
     let (cfg, path) = config::Config::load(config)?;

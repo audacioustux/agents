@@ -52,6 +52,17 @@ impl Role {
 pub struct Doorbell(OwnedFd);
 
 impl Doorbell {
+    /// As [`Doorbell::watch`], leaving out each directory that cannot be watched (another
+    /// project's, unreadable), for a reader that names such projects itself.
+    pub fn watch_readable(dirs: &[impl AsRef<Path>]) -> Result<Self> {
+        let fd = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK).context("inotify")?;
+        let flags = inotify::WatchFlags::MODIFY | inotify::WatchFlags::CREATE | inotify::WatchFlags::MOVED_TO;
+        for dir in dirs.iter().map(AsRef::as_ref) {
+            let _ = inotify::add_watch(&fd, dir, flags);
+        }
+        Ok(Self(fd))
+    }
+
     pub fn watch(dirs: &[impl AsRef<Path>]) -> Result<Self> {
         let fd = inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK).context("inotify")?;
         let flags = inotify::WatchFlags::MODIFY | inotify::WatchFlags::CREATE | inotify::WatchFlags::MOVED_TO;

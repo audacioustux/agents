@@ -53,9 +53,57 @@ fn xdg(var: &str, fallback: &str) -> PathBuf {
         .unwrap_or_else(|| crate::accounts::home().join(fallback))
 }
 
+/// `$XDG_STATE_HOME/relay`: every project's state directory, by name.
+pub fn state_root() -> PathBuf {
+    xdg("XDG_STATE_HOME", ".local/state").join("relay")
+}
+
+/// Every project's state directory under `root`: each one with a bus. A listing that fails is
+/// none; for a reader that must tell the two apart, [`try_project_dirs`].
+pub fn project_dirs(root: &Path) -> impl Iterator<Item = PathBuf> {
+    try_project_dirs(root).unwrap_or_default().into_iter()
+}
+
+/// As [`project_dirs`], failing when `root` cannot be listed; a `root` that does not exist yet
+/// holds no projects. A directory whose bus cannot be looked at is listed, for its reader to fail on.
+pub fn try_project_dirs(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut dirs = Vec::new();
+    for entry in entries {
+        let d = entry?.path();
+        // An entry without a bus is no project; one whose bus cannot even be looked at (no search
+        // permission) is, and its reader is the one to say it cannot be read.
+        let project = match std::fs::metadata(d.join("bus")) {
+            Ok(m) => m.is_dir(),
+            Err(e) => !matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory),
+        };
+        if project {
+            dirs.push(d);
+        }
+    }
+    Ok(dirs)
+}
+
+/// Every project's event directories under `root`, for a doorbell.
+pub fn buses_in(root: &Path) -> Vec<PathBuf> {
+    project_dirs(root).flat_map(|d| [d.join("bus"), d.join("bus/session")]).filter(|d| d.is_dir()).collect()
+}
+
+/// A job's stream log in the jobs directory `jobs`, where it is now: the plain
+/// file while it is written, else the gzip gc made of it.
+pub fn log_in(jobs: &Path, job: &str, ext: &str) -> PathBuf {
+    let plain = jobs.join(format!("{job}.{ext}"));
+    let gz = jobs.join(format!("{job}.{ext}.gz"));
+    if !plain.exists() && gz.exists() { gz } else { plain }
+}
+
 impl Ctx {
     pub fn new(cfg: Config, cfg_path: PathBuf, json: bool) -> Result<Self> {
-        let state_root = xdg("XDG_STATE_HOME", ".local/state").join("relay");
+        let state_root = state_root();
         let data_root = xdg("XDG_DATA_HOME", ".local/share").join("relay");
         let state = state_root.join(&cfg.name);
         let data = data_root.join(&cfg.name);
@@ -129,17 +177,12 @@ impl Ctx {
 
     /// Every project's state directory on this machine, ours included.
     fn projects(&self) -> impl Iterator<Item = PathBuf> {
-        std::fs::read_dir(&self.state_root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|d| d.join("bus").is_dir())
+        project_dirs(&self.state_root)
     }
 
     /// Every project's event directories, for a doorbell.
     pub fn buses(&self) -> Vec<PathBuf> {
-        self.projects().flat_map(|d| [d.join("bus"), d.join("bus/session")]).filter(|d| d.is_dir()).collect()
+        buses_in(&self.state_root)
     }
 
     /// Rings on any project's events.
@@ -154,9 +197,7 @@ impl Ctx {
     /// A job's stream log (`log.ndjson`, `check.ndjson`) where it is now: the
     /// plain file while it is written, else the gzip gc made of it.
     pub fn job_log(&self, job: &str, ext: &str) -> PathBuf {
-        let plain = self.job_file(job, ext);
-        let gz = self.job_file(job, &format!("{ext}.gz"));
-        if !plain.exists() && gz.exists() { gz } else { plain }
+        log_in(&self.jobs, job, ext)
     }
 
     /// A job's log as text, whether gc gzipped (all or part of) it or not: the

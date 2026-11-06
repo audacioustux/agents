@@ -384,6 +384,30 @@ fn until(env: &Env, name: &str, want: &str) {
     panic!("{name} never became {want}: {}", job(env, name));
 }
 
+#[test]
+fn the_board_shows_every_project_with_everywhere_and_outside_any_project() {
+    let env = setup("everywhere", false);
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(env.repo.join("other.toml"), conf.replace("name = \"flow\"", "name = \"other\"")).unwrap();
+    // No account is signed in, so both jobs stay queued.
+    ok(&relay(&env, &["queue", "add", "ours", "--text", "our task"]), "flow queues");
+    ok(&relay(&env, &["--config", "other.toml", "queue", "add", "theirs", "--text", "their task"]), "other queues");
+    let text = board(&env);
+    assert!(text.contains("our task") && !text.contains("their task"), "one project by default: {text}");
+    let every = String::from_utf8_lossy(&relay(&env, &["view", "status", "--everywhere"]).stdout).into_owned();
+    let row = |name: &str| every.lines().find(|l| l.contains(name)).unwrap_or_default().trim().to_owned();
+    assert!(row("our task").starts_with("flow "), "each job with its project: {every}");
+    assert!(row("their task").starts_with("other "), "{every}");
+    let json = relay(&env, &["view", "status", "--everywhere", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert!(v["projects"]["other"]["jobs"]["theirs"].is_object(), "{v}");
+    std::fs::remove_file(env.repo.join("relay.toml")).unwrap();
+    let outside = relay(&env, &["view", "status"]);
+    ok(&outside, "outside a project");
+    let text = String::from_utf8_lossy(&outside.stdout).into_owned();
+    assert!(text.contains("our task") && text.contains("their task"), "every project: {text}");
+}
+
 fn board(env: &Env) -> String {
     String::from_utf8_lossy(&relay(env, &["view", "status"]).stdout).into_owned()
 }
@@ -573,9 +597,10 @@ fn profiles_and_config_show_need_no_project() {
     assert_eq!(v["profiles"]["hunt"]["model"]["from"], "policy");
     let text = String::from_utf8_lossy(&relay(&env, &["config", "show"]).stdout).into_owned();
     assert!(text.contains("project  none"), "{text}");
-    let out = relay(&env, &["view", "status"]);
+    let out = relay(&env, &["view", "events"]);
     assert!(!out.status.success(), "everything else still needs a project");
     assert!(stderr(&out).contains("no relay.toml here or above"), "{}", stderr(&out));
+    ok(&relay(&env, &["view", "status"]), "the board outside a project shows every project");
     assert!(!env.root.join("state").exists(), "the policy views create no project state");
     let missing = env.root.join("missing.toml");
     let out = relay(&env, &["--config", missing.to_str().unwrap(), "profiles"]);

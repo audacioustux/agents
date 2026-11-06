@@ -263,7 +263,9 @@ struct Answer {
 impl Answer {
     fn read(&mut self, path: PathBuf) -> Option<String> {
         let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        if path != self.path || modified != self.modified {
+        // A file there that could not be read is tried again: a permission put back keeps its mtime.
+        let failed = modified.is_some() && self.text.is_none();
+        if path != self.path || modified != self.modified || failed {
             self.text = modified.and_then(|_| std::fs::read_to_string(&path).ok());
             (self.path, self.modified) = (path, modified);
         }
@@ -292,4 +294,27 @@ fn key(k: &KeyEvent) -> Option<Action> {
         KeyCode::Char('?') => Action::Help,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::Answer;
+
+    #[test]
+    fn an_answer_that_could_not_be_read_is_read_again_though_unchanged() {
+        let d = crate::config::tempdir::Dir::new();
+        let path = d.path().join("j.result.md");
+        std::fs::write(&path, "the answer").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut cache = Answer::default();
+        let first = cache.read(path.clone());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // Root reads through the permission, so for it there was nothing to retry.
+        if first.is_none() {
+            assert_eq!(cache.read(path.clone()).as_deref(), Some("the answer"));
+        }
+        assert_eq!(cache.read(path).as_deref(), Some("the answer"), "and kept");
+    }
 }

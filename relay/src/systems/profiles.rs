@@ -1,12 +1,14 @@
 //! profiles: read-only. The owner's policy as relay resolved it: each profile's
 //! fields, and where every merged setting came from.
 
+use std::path::Path;
+
 use anyhow::Result;
 use clap::Subcommand;
 use serde_json::json;
 
 use crate::config::{Config, Profile};
-use crate::ctx::Ctx;
+use crate::reply::reply;
 use crate::systems::view::table;
 
 #[derive(Debug, Clone, Copy, Subcommand)]
@@ -15,9 +17,10 @@ pub enum Cmd {
     Show,
 }
 
-pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
+/// `project` is the config file read, `None` when only the owner's policy was.
+pub fn run(cfg: &Config, project: Option<&Path>, json: bool, cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Show => show(ctx),
+        Cmd::Show => show(cfg, project, json),
     }
 }
 
@@ -27,9 +30,8 @@ fn ban<'a>(cfg: &'a Config, p: &Profile) -> Option<&'a str> {
 }
 
 /// Each profile with its resolved fields and note, so an orchestrator can learn the policy.
-pub fn list(ctx: &Ctx) -> Result<()> {
-    let cfg = &ctx.cfg;
-    if ctx.json {
+pub fn list(cfg: &Config, json: bool) -> Result<()> {
+    if json {
         let profiles: serde_json::Map<_, _> = cfg
             .profiles
             .iter()
@@ -39,7 +41,7 @@ pub fn list(ctx: &Ctx) -> Result<()> {
                 (name.clone(), v)
             })
             .collect();
-        return ctx.reply(&json!({ "policy": cfg.policy_path, "profiles": profiles }), "");
+        return reply(true, &json!({ "policy": cfg.policy_path, "profiles": profiles }), "");
     }
     if cfg.profiles.is_empty() {
         out!("no profiles: add [profiles.NAME] to the project's relay.toml or to the policy file");
@@ -88,10 +90,9 @@ pub fn list(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-fn show(ctx: &Ctx) -> Result<()> {
-    let cfg = &ctx.cfg;
+fn show(cfg: &Config, project: Option<&Path>, json: bool) -> Result<()> {
     let from = |key: &str| cfg.origin(key).as_str();
-    if ctx.json {
+    if json {
         let banned: serde_json::Map<_, _> = cfg
             .session
             .banned_models
@@ -120,14 +121,14 @@ fn show(ctx: &Ctx) -> Result<()> {
             .collect();
         let doc = json!({
             "policy": cfg.policy_path,
-            "project": ctx.cfg_path,
+            "project": project,
             "banned_models": banned,
             "profiles": profiles,
         });
-        return ctx.reply(&doc, "");
+        return reply(true, &doc, "");
     }
     out!("policy   {}", cfg.policy_path.as_ref().map_or_else(|| "none".into(), |p| p.display().to_string()));
-    out!("project  {}", ctx.cfg_path.display());
+    out!("project  {}", project.map_or_else(|| "none".into(), |p| p.display().to_string()));
     if !cfg.session.banned_models.is_empty() {
         out!("banned models");
         for (re, why) in &cfg.session.banned_models {

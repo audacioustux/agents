@@ -31,7 +31,7 @@ exclude = []
 # [harness.claude]
 # enabled = true
 # program = "/path/to/claude"   # a different command; tests use a stub
-# model = "sonnet"              # for jobs that name none for this harness
+# model = "claude-sonnet-5-5"   # for jobs that name none for this harness; a full id, as aliases move
 # effort = "high"
 # extra_args = []
 #

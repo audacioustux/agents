@@ -16,7 +16,9 @@ described once.
 | Writes | nothing (read-only contract) | its own clone and branch `relay/<name>` |
 | Needs | the harness CLI | a `relay.toml` ([relay/README.md](../../../relay/README.md)) |
 
-Install once: `cargo install --path relay --locked`.
+Install once, from a checkout of this repository: `cargo install --path relay --locked`
+(into `~/.cargo/bin`; add `--root ~/.local` for `~/.local/bin`). Reinstall the same
+way after pulling a change.
 
 ## relay ask
 
@@ -62,13 +64,37 @@ anything else. Branch on the code; read `error` only to explain it.
 ## relay queue
 
 ```sh
-relay queue add fix-parser --prompt briefs/fix-parser.md
+relay queue add fix-parser --profile build-open --task "Fix the parser" --prompt briefs/fix-parser.md \
+  --check "cargo nextest run --no-tests=fail" --check-red-first
+relay queue add fix-parser-review --review-of fix-parser --profile review --prompt briefs/review.md
 relay queue add audit --text "Review src/auth for races." --readonly --harness omp
-relay queue add review --text "Review fix-parser." --readonly --after fix-parser   # starts once it is done
 relay view status          # jobs, and every account's room
 relay view result fix-parser --wait --json   # blocks until it ends: no polling
 relay land fetch fix-parser
 ```
+
+Give every job a `--task`: the board otherwise shows the brief's first line, and
+briefs that share a preamble all look alike.
+
+**Acceptance.** A build is judged by what it declares, not by its own report:
+
+- `--check CMD` runs on a fresh clone of the branch's committed tip, inside the
+  sandbox and without the session's account; a run whose check fails is resumed with
+  the output's tail, and is never `done` while the check is red. The clone holds
+  only committed files (no build output, no untracked dependencies), so the command
+  does its own installs and builds; `sandbox.caches` persist between runs. It is
+  bounded by `hooks.command_timeout_seconds` (default 120, which also bounds
+  `command:` hook handlers): raise it in the project's `relay.toml` for a long
+  suite, or check only what the job touches. A timeout is not resumed: the job ends
+  `failed` (`check-could-not-run`) for you to look at.
+- `--check-red-first` also runs the check at the base commit, where it must fail;
+  a check that passes without the change proves nothing.
+- `--review-of JOB` queues a read-only review after JOB with JOB's branch visible to
+  it. It ends `verdict: accept` or `verdict: reject`; a reject resumes the builder,
+  and the review runs again on the new commit when the builder's run ends `done`,
+  within `hooks.max_decisions` and the ceiling. Queue it fresh: never a fork.
+- A job with a check, a review or an escalating profile needs
+  `limits.job_ceiling_usd`. Details: README, *The bar* and *Reviews*.
 
 A job that reaches its spend cap stops (`failed`) unless `limits.budget_growth`
 is set: then it is `checking` while a read-only progress check on another
@@ -116,7 +142,8 @@ refuses a read-only fork of a build job). A build job queued after build jobs,
 directly or through a review, starts from their branch, and fails if they
 diverge.
 
-`relay profiles [--json]` lists the owner's named job kinds (harness, model,
+`relay profiles [--json]` (anywhere: outside a project it shows the owner's policy
+alone) lists the owner's named job kinds (harness, model,
 effort, budget, read-only, limits, and a note on when to use each);
 `relay queue add NAME --profile P` fills each field the command line leaves
 unset, and explicit flags win. Which profile a job is, is your judgment; relay

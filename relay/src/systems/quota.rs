@@ -16,7 +16,7 @@ use crate::harness::{Home, Identity, Meters, SignIn};
 use crate::os::Role;
 use crate::sandbox;
 use crate::systems::dispatch::{may_use, model_for, seats_taken};
-use crate::world::{AccountState, Status, World};
+use crate::world::{AccountState, Job, Status, World};
 
 /// The capability to write quota's port; only this module can make one.
 #[derive(Debug)]
@@ -302,12 +302,20 @@ pub fn accounts_among<'a>(
     world.hear_accounts(others.clone());
     let found = accounts::discover(cfg);
     accounts::settle(&mut world, &found);
-    view(cfg, &found, &world, &seats_taken(others), now_micros())
+    let others: Vec<&World> = others.into_iter().collect();
+    view(cfg, &found, &world, &others, &seats_taken(others.iter().copied()), now_micros())
 }
 
-/// The view of `found` in `world` (which has heard its neighbours), with the
-/// seats other projects hold (`elsewhere`), at `now` (bus time).
-fn view(cfg: &Config, found: &[Home], world: &World, elsewhere: &BTreeMap<String, usize>, now: u64) -> AccountsView {
+/// The view of `found` in `world` (which has heard its neighbours), with the models the other
+/// projects' jobs ask for (`others`) and the seats they hold (`elsewhere`), at `now` (bus time).
+fn view(
+    cfg: &Config,
+    found: &[Home],
+    world: &World,
+    others: &[&World],
+    elsewhere: &BTreeMap<String, usize>,
+    now: u64,
+) -> AccountsView {
     let limits = &cfg.limits;
     let twins = accounts::twins(found);
     let row = |a: &Home| {
@@ -316,15 +324,20 @@ fn view(cfg: &Config, found: &[Home], world: &World, elsewhere: &BTreeMap<String
         // The dispatcher's own judgment, for the configured model and every other one its jobs ask for.
         let model = cfg.harness(a.harness).model;
         let (state, tightest, floor, ready) = judge(a, st, model.as_deref(), limits, now);
+        let asks = |j: &&Job| match j.status {
+            Status::Queued => may_use(j, a),
+            Status::Running => j.account.as_ref() == Some(&key),
+            _ => false,
+        };
+        // Another project's job that names no model asks for its own config's, which is not known
+        // here; one that names a model asks for it on this machine's accounts like ours do.
+        let theirs = others.iter().flat_map(|w| w.jobs.values()).filter(asks).filter_map(|j| j.models.get(a.harness));
         let asked: BTreeSet<String> = world
             .jobs
             .values()
-            .filter(|j| match j.status {
-                Status::Queued => may_use(j, a),
-                Status::Running => j.account.as_ref() == Some(&key),
-                _ => false,
-            })
+            .filter(asks)
             .filter_map(|j| model_for(cfg, j, a.harness))
+            .chain(theirs.cloned())
             .filter(|m| Some(m) != model.as_ref())
             .collect();
         let by_model = asked
@@ -432,17 +445,27 @@ mod tests {
     fn the_configured_model_alone_renders_as_one_row() {
         let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
         let jobs = [queued("a", None), queued("b", Some("minimax-code/MiniMax-M3.1-Flash"))];
-        let v = view(&cfg, &[omp()], &world(&jobs), &BTreeMap::new(), NOW);
+        let v = view(&cfg, &[omp()], &world(&jobs), &[], &BTreeMap::new(), NOW);
         assert_eq!(crate::systems::view::table(&v.cells), ["omp:default  ready  4% minimax-code/General 7 Day"]);
         assert_eq!(v.ready, [true]);
         assert!(v.json["accounts"][0].get("byModel").is_none(), "{}", v.json);
     }
 
     #[test]
+    fn a_model_another_projects_job_asks_for_is_judged_too() {
+        let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
+        let theirs = world(&[queued("a", Some("openai-codex/gpt-6.1-sol")), queued("b", None)]);
+        let v = view(&cfg, &[omp()], &world(&[]), &[&theirs], &BTreeMap::new(), NOW);
+        assert_eq!(v.cells.len(), 2, "{:?}", v.cells);
+        assert_eq!((v.cells[1][0].as_str(), v.cells[1][2].as_str()), ("  for openai-codex/gpt-6.1-sol", "at floor"));
+        assert_eq!(v.ready, [true, false]);
+    }
+
+    #[test]
     fn a_model_judged_as_its_account_is_no_sub_row_of_its_own() {
         let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
         let jobs = [queued("a", Some("minimax-code/MiniMax-M3.5"))];
-        let v = view(&cfg, &[omp()], &world(&jobs), &BTreeMap::new(), NOW);
+        let v = view(&cfg, &[omp()], &world(&jobs), &[], &BTreeMap::new(), NOW);
         assert_eq!(v.cells.len(), 1, "the sub-row would repeat its account's row: {:?}", v.cells);
         assert_eq!(v.json["accounts"][0]["byModel"][0]["model"], "minimax-code/MiniMax-M3.5", "--json keeps it");
     }
@@ -451,7 +474,7 @@ mod tests {
     fn a_queued_jobs_model_at_floor_shows_the_hold() {
         let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
         let jobs = [queued("a", Some("openai-codex/gpt-6.1-sol")), queued("b", Some("openai-codex/gpt-6.1-sol"))];
-        let v = view(&cfg, &[omp()], &world(&jobs), &BTreeMap::new(), NOW);
+        let v = view(&cfg, &[omp()], &world(&jobs), &[], &BTreeMap::new(), NOW);
         let resets = accounts::fmt_time(secs(NOW) + 3_600);
         assert_eq!(
             crate::systems::view::table(&v.cells),
@@ -486,7 +509,7 @@ mod tests {
         }
         w.accounts.get_mut("claude:c").unwrap().signed_out = true;
         w.accounts.get_mut("claude:c").unwrap().signed_at = Some(NOW);
-        let v = view(&cfg, &found, &w, &BTreeMap::new(), NOW);
+        let v = view(&cfg, &found, &w, &[], &BTreeMap::new(), NOW);
         let table = v.text();
         let (first, third) = (v.json["accounts"][0]["identity"]["id"].as_str().unwrap(), &v.json["accounts"][2]);
         assert!(table.contains(&format!("claude:a  Ultra #{first}  ready")), "{table}");
@@ -502,7 +525,7 @@ mod tests {
     #[test]
     fn the_state_cell_does_not_repeat_the_meter() {
         let (_d, cfg) = cfg("openai-codex/gpt-6.1-sol");
-        let v = view(&cfg, &[omp()], &world(&[]), &BTreeMap::new(), NOW);
+        let v = view(&cfg, &[omp()], &world(&[]), &[], &BTreeMap::new(), NOW);
         let resets = accounts::fmt_time(secs(NOW) + 3_600);
         assert_eq!(v.cells[0][2], "at floor");
         assert_eq!(v.cells[0][4], format!("100% openai-codex/5 hours, resets {resets}"));

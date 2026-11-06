@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 use crate::config::Config;
 use crate::ctx::Ctx;
@@ -55,8 +55,9 @@ impl Machine {
             let world = ctx.world()?;
             m.projects.push(Project { name: ctx.cfg.name.clone(), jobs: ctx.jobs.clone(), world, own: true });
         }
-        let mut dirs: Vec<PathBuf> =
-            crate::ctx::project_dirs(root).filter(|d| home.is_none_or(|c| *d != c.state)).collect();
+        // A state root that cannot be listed fails the read, so a board keeps its last good one.
+        let mut dirs = crate::ctx::try_project_dirs(root).with_context(|| format!("listing {}", root.display()))?;
+        dirs.retain(|d| home.is_none_or(|c| *d != c.state));
         dirs.sort();
         for d in dirs {
             let name = d.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -74,10 +75,26 @@ impl Machine {
         self.projects.iter().filter(move |p| everywhere || p.own || !any_own)
     }
 
-    /// Every account's room, as all the projects know it.
+    /// Every account's room, as all the projects know it, for every model their jobs ask for.
     pub fn accounts(&self, cfg: &Config) -> AccountsView {
         let empty = World::default();
         let own = self.projects.iter().find(|p| p.own).map_or(&empty, |p| &p.world);
         accounts_among(cfg, own, self.projects.iter().filter(|p| !p.own).map(|p| &p.world))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_state_root_that_cannot_be_listed_fails_the_read_and_a_missing_one_is_empty() {
+        let d = crate::config::tempdir::Dir::new();
+        let missing = Machine::read(None, &d.path().join("none")).unwrap();
+        assert!(missing.projects.is_empty() && missing.unreadable.is_empty());
+        let file = d.path().join("not-a-dir");
+        std::fs::write(&file, "").unwrap();
+        let err = Machine::read(None, &file).unwrap_err();
+        assert!(format!("{err:#}").contains("listing"), "{err:#}");
     }
 }

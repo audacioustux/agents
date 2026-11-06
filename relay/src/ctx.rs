@@ -58,9 +58,28 @@ pub fn state_root() -> PathBuf {
     xdg("XDG_STATE_HOME", ".local/state").join("relay")
 }
 
-/// Every project's state directory under `root`: each one with a bus.
+/// Every project's state directory under `root`: each one with a bus. A listing that fails is
+/// none; for a reader that must tell the two apart, [`try_project_dirs`].
 pub fn project_dirs(root: &Path) -> impl Iterator<Item = PathBuf> {
-    std::fs::read_dir(root).into_iter().flatten().flatten().map(|e| e.path()).filter(|d| d.join("bus").is_dir())
+    try_project_dirs(root).unwrap_or_default().into_iter()
+}
+
+/// As [`project_dirs`], failing when `root` cannot be listed; a `root` that does not exist yet
+/// holds no projects.
+pub fn try_project_dirs(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut dirs = Vec::new();
+    for entry in entries {
+        let d = entry?.path();
+        if d.join("bus").is_dir() {
+            dirs.push(d);
+        }
+    }
+    Ok(dirs)
 }
 
 /// Every project's event directories under `root`, for a doorbell.

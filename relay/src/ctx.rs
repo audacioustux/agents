@@ -53,9 +53,27 @@ fn xdg(var: &str, fallback: &str) -> PathBuf {
         .unwrap_or_else(|| crate::accounts::home().join(fallback))
 }
 
+/// `$XDG_STATE_HOME/relay`: every project's state directory, by name.
+pub fn state_root() -> PathBuf {
+    xdg("XDG_STATE_HOME", ".local/state").join("relay")
+}
+
+/// Every project's state directory under `root`: each one with a bus.
+pub fn project_dirs(root: &Path) -> impl Iterator<Item = PathBuf> {
+    std::fs::read_dir(root).into_iter().flatten().flatten().map(|e| e.path()).filter(|d| d.join("bus").is_dir())
+}
+
+/// A job's stream log in the jobs directory `jobs`, where it is now: the plain
+/// file while it is written, else the gzip gc made of it.
+pub fn log_in(jobs: &Path, job: &str, ext: &str) -> PathBuf {
+    let plain = jobs.join(format!("{job}.{ext}"));
+    let gz = jobs.join(format!("{job}.{ext}.gz"));
+    if !plain.exists() && gz.exists() { gz } else { plain }
+}
+
 impl Ctx {
     pub fn new(cfg: Config, cfg_path: PathBuf, json: bool) -> Result<Self> {
-        let state_root = xdg("XDG_STATE_HOME", ".local/state").join("relay");
+        let state_root = state_root();
         let data_root = xdg("XDG_DATA_HOME", ".local/share").join("relay");
         let state = state_root.join(&cfg.name);
         let data = data_root.join(&cfg.name);
@@ -129,12 +147,7 @@ impl Ctx {
 
     /// Every project's state directory on this machine, ours included.
     fn projects(&self) -> impl Iterator<Item = PathBuf> {
-        std::fs::read_dir(&self.state_root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|d| d.join("bus").is_dir())
+        project_dirs(&self.state_root)
     }
 
     /// Every project's event directories, for a doorbell.
@@ -154,9 +167,7 @@ impl Ctx {
     /// A job's stream log (`log.ndjson`, `check.ndjson`) where it is now: the
     /// plain file while it is written, else the gzip gc made of it.
     pub fn job_log(&self, job: &str, ext: &str) -> PathBuf {
-        let plain = self.job_file(job, ext);
-        let gz = self.job_file(job, &format!("{ext}.gz"));
-        if !plain.exists() && gz.exists() { gz } else { plain }
+        log_in(&self.jobs, job, ext)
     }
 
     /// A job's log as text, whether gc gzipped (all or part of) it or not: the

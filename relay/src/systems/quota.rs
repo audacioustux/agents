@@ -206,7 +206,9 @@ impl Row<'_> {
             None => self.state.clone(),
         };
         let own = vec![self.account.clone(), who, state, running, self.tightest.clone()];
-        let others = self.by_model.iter().map(move |j| {
+        // A sub-row that says what its account's row says is left out.
+        let others = self.by_model.iter().filter(|j| (&j.state, &j.tightest) != (&self.state, &self.tightest));
+        let others = others.map(move |j| {
             (
                 vec![format!("  for {}", j.model), String::new(), j.state.clone(), String::new(), j.tightest.clone()],
                 j.ready,
@@ -286,12 +288,21 @@ impl AccountsView {
 }
 
 pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
-    let neighbours = ctx.neighbours();
+    accounts_among(&ctx.cfg, world, &ctx.neighbours())
+}
+
+/// As [`accounts_view`], for `world` among the other projects' folds, already read
+/// (outside any project, `world` is empty and `others` are all of them).
+pub fn accounts_among<'a>(
+    cfg: &Config,
+    world: &World,
+    others: impl IntoIterator<Item = &'a World> + Clone,
+) -> AccountsView {
     let mut world = world.clone();
-    world.hear_accounts(&neighbours);
-    let found = accounts::discover(&ctx.cfg);
+    world.hear_accounts(others.clone());
+    let found = accounts::discover(cfg);
     accounts::settle(&mut world, &found);
-    view(&ctx.cfg, &found, &world, &seats_taken(&neighbours), now_micros())
+    view(cfg, &found, &world, &seats_taken(others), now_micros())
 }
 
 /// The view of `found` in `world` (which has heard its neighbours), with the
@@ -425,6 +436,15 @@ mod tests {
         assert_eq!(crate::systems::view::table(&v.cells), ["omp:default  ready  4% minimax-code/General 7 Day"]);
         assert_eq!(v.ready, [true]);
         assert!(v.json["accounts"][0].get("byModel").is_none(), "{}", v.json);
+    }
+
+    #[test]
+    fn a_model_judged_as_its_account_is_no_sub_row_of_its_own() {
+        let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
+        let jobs = [queued("a", Some("minimax-code/MiniMax-M3.5"))];
+        let v = view(&cfg, &[omp()], &world(&jobs), &BTreeMap::new(), NOW);
+        assert_eq!(v.cells.len(), 1, "the sub-row would repeat its account's row: {:?}", v.cells);
+        assert_eq!(v.json["accounts"][0]["byModel"][0]["model"], "minimax-code/MiniMax-M3.5", "--json keeps it");
     }
 
     #[test]

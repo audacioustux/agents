@@ -279,9 +279,9 @@ pub fn seats_held(cfg: &Config, worlds: &[World]) -> Vec<(String, String)> {
 
 /// Sessions running on each account in `worlds`, counting only jobs their
 /// fold says run and whose runner is still alive.
-pub fn seats_taken(worlds: &[World]) -> BTreeMap<String, usize> {
+pub fn seats_taken<'a>(worlds: impl IntoIterator<Item = &'a World>) -> BTreeMap<String, usize> {
     let mut seats = BTreeMap::new();
-    for j in worlds.iter().flat_map(|w| w.jobs.values()) {
+    for j in worlds.into_iter().flat_map(|w| w.jobs.values()) {
         if j.status == Status::Running
             && let (Some(account), Some((pid, started))) = (&j.account, j.runner)
             && os::same_process(pid, started)

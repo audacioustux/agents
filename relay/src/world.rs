@@ -487,8 +487,8 @@ impl World {
 
     /// Takes in what other projects on this machine know about the accounts
     /// they share with this one (`merge_account`); their jobs stay theirs.
-    pub fn hear_accounts(&mut self, others: &[World]) {
-        for (key, theirs) in others.iter().flat_map(|w| &w.accounts) {
+    pub fn hear_accounts<'a>(&mut self, others: impl IntoIterator<Item = &'a World>) {
+        for (key, theirs) in others.into_iter().flat_map(|w| &w.accounts) {
             let ours = self.accounts.entry(key.clone()).or_default();
             *ours = merge_account(ours, theirs);
         }

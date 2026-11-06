@@ -1,8 +1,8 @@
 //! view: read-only. Who is working on what, and what each session said.
 
+pub mod machine;
 mod stats;
 
-use std::fmt::Write as _;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -12,20 +12,28 @@ use crate::bus::now_micros;
 use crate::config::Config;
 use crate::ctx::Ctx;
 use crate::world::{Job, Wait, World};
+use machine::{Machine, Scope};
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
     /// Jobs and accounts. With `--json`, the whole folded state.
+    /// Outside a project, every project on this machine.
     Status {
         /// Include jobs that ended more than a day ago.
         #[arg(long)]
         all: bool,
+        /// Every project on this machine, each job with its project.
+        #[arg(long)]
+        everywhere: bool,
     },
-    /// Live: the status, redrawn as events land, with each running session's
-    /// latest output. Ctrl-C ends it.
+    /// Live: the status in a terminal UI, redrawn as events land, with the
+    /// selected job's latest output and answer. `?` lists its keys; `q` ends it.
+    /// Outside a project, every project on this machine.
     Watch {
         #[arg(long)]
         all: bool,
+        #[arg(long)]
+        everywhere: bool,
     },
     /// A job's final answer, branch, spend and log.
     Result {
@@ -45,10 +53,18 @@ pub enum Cmd {
     },
 }
 
+impl Cmd {
+    /// The boards run outside a project too, over every project on this machine.
+    pub fn runs_anywhere(&self) -> bool {
+        matches!(self, Self::Status { .. } | Self::Watch { .. })
+    }
+}
+
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
+    let scope = Scope { cfg: &ctx.cfg, home: Some(ctx), root: &ctx.state_root };
     match cmd {
-        Cmd::Status { all } => status(ctx, all),
-        Cmd::Watch { all } => crate::systems::watch::run(ctx, all),
+        Cmd::Status { all, everywhere } => status(scope, ctx.json, all, everywhere),
+        Cmd::Watch { all, everywhere } => crate::systems::watch::run(scope, all, everywhere),
         Cmd::Result { name, wait } => result(ctx, &name, wait),
         Cmd::Stats { since } => stats::run(ctx, since.as_deref()),
         Cmd::Events => {
@@ -69,18 +85,44 @@ pub fn ago(now_us: u64, then_us: u64) -> String {
     }
 }
 
-fn status(ctx: &Ctx, all: bool) -> Result<()> {
-    let world = ctx.world()?;
-    if ctx.json {
-        let mut v = serde_json::to_value(&world)?;
-        for j in world.jobs.values() {
-            v["jobs"][&j.name]["pending"] = serde_json::to_value(world.waits(j))?;
-            v["jobs"][&j.name]["readonly"] = j.readonly().into();
-        }
+/// A board outside any project (`cmd` is one that [`Cmd::runs_anywhere`]): every project on
+/// this machine, judged by the owner's policy alone.
+pub fn outside(json: bool, cmd: &Cmd) -> Result<()> {
+    let cfg = Config::policy_only()?;
+    let root = crate::ctx::state_root();
+    let scope = Scope { cfg: &cfg, home: None, root: &root };
+    match cmd {
+        Cmd::Status { all, .. } => status(scope, json, *all, true),
+        Cmd::Watch { all, .. } => crate::systems::watch::run(scope, *all, true),
+        _ => unreachable!("only the boards run outside a project"),
+    }
+}
+
+/// The folded state, with what each job waits for.
+fn world_json(world: &World) -> Result<serde_json::Value> {
+    let mut v = serde_json::to_value(world)?;
+    for j in world.jobs.values() {
+        v["jobs"][&j.name]["pending"] = serde_json::to_value(world.waits(j))?;
+        v["jobs"][&j.name]["readonly"] = j.readonly().into();
+    }
+    Ok(v)
+}
+
+fn status(scope: Scope<'_>, json: bool, all: bool, everywhere: bool) -> Result<()> {
+    if json {
+        let v = match scope.home {
+            Some(ctx) if !everywhere => world_json(&ctx.world()?)?,
+            _ => {
+                let m = scope.read()?;
+                let projects: serde_json::Map<String, serde_json::Value> =
+                    m.projects.iter().map(|p| Ok((p.name.clone(), world_json(&p.world)?))).collect::<Result<_>>()?;
+                serde_json::json!({ "projects": projects, "unreadable": m.unreadable })
+            }
+        };
         out!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    let text = board(ctx, &world, all);
+    let text = board(scope.cfg, &scope.read()?, all, everywhere);
     // On a terminal, one screen line per line; piped, every line whole.
     let width = crate::os::terminal_size().map(|(cols, _)| cols);
     out!("{}", fit(&text, width));
@@ -114,12 +156,24 @@ fn fit(text: &str, width: Option<usize>) -> String {
     text.lines().map(cut).collect::<Vec<_>>().join("\n")
 }
 
-/// The jobs worth showing (live ones, those ended within a day, or all), in board order.
-pub fn listed(world: &crate::world::World, all: bool) -> Vec<&crate::world::Job> {
-    let day_ago = now_micros().saturating_sub(24 * 3600 * 1_000_000);
-    let mut jobs: Vec<_> =
-        world.jobs.values().filter(|j| all || j.status.is_live() || j.ended_at.is_some_and(|t| t > day_ago)).collect();
-    jobs.sort_by_key(|j| board_order(j));
+/// Whether a board lists `j` without `--all`: it is live or ended within a day.
+pub fn recent(j: &Job, now: u64) -> bool {
+    let day_ago = now.saturating_sub(24 * 3600 * 1_000_000);
+    j.status.is_live() || j.ended_at.is_some_and(|t| t > day_ago)
+}
+
+/// The jobs worth showing in `projects` (recent ones, or all), in board order, each with its project.
+pub fn listed<'a>(
+    projects: impl IntoIterator<Item = &'a machine::Project>,
+    all: bool,
+    now: u64,
+) -> Vec<(&'a machine::Project, &'a Job)> {
+    let mut jobs: Vec<_> = projects
+        .into_iter()
+        .flat_map(|p| p.world.jobs.values().map(move |j| (p, j)))
+        .filter(|(_, j)| all || recent(j, now))
+        .collect();
+    jobs.sort_by_key(|(_, j)| board_order(j));
     jobs
 }
 
@@ -156,20 +210,31 @@ fn profile_hold(cfg: &Config, world: &World, j: &Job, now: u64) -> Option<String
     crate::systems::dispatch::profile_hold(name, p, running, starts, now).map(|(why, _)| why)
 }
 
-/// A job's cells: name, status, account, profile (or model) with effort, since when, spend, and its
-/// task with any reason (a queued job also says what it waits for, or which profile limit holds it).
-pub fn job_cells(cfg: &Config, world: &World, j: &Job, now: u64) -> Vec<String> {
+/// What a job's row says after its task: why it waits or ended (a queued job, what it waits for or,
+/// with its project's `cfg`, which profile limit holds it), its latest checkpoint, check and review,
+/// and what gc took.
+pub fn notes(cfg: Option<&Config>, world: &World, j: &Job, now: u64) -> Vec<String> {
+    let queued = j.status == crate::world::Status::Queued;
+    let waits = if queued { Wait::summary(&world.waits(j)) } else { None };
+    let held = if queued && waits.is_none() { cfg.and_then(|c| profile_hold(c, world, j, now)) } else { None };
+    let mut notes: Vec<String> =
+        waits.or(held).or_else(|| j.reason.clone()).map(|r| format!("[{r}]")).into_iter().collect();
+    notes.extend(j.checkpoints.last().map(crate::bus::Check::summary));
+    notes.extend(overran(j));
+    notes.extend(declared(j));
+    notes.extend(collected(j).map(str::to_owned));
+    notes
+}
+
+/// A job's cells: name, status, account, profile (or model) with effort, since when, spend, disk,
+/// and its task with its [`notes`].
+pub fn job_cells(cfg: Option<&Config>, world: &World, j: &Job, now: u64) -> Vec<String> {
     let since = match j.status {
         crate::world::Status::Running | crate::world::Status::Checking => j.started_at,
         crate::world::Status::Queued => j.ended_at.or(Some(j.created_at)),
         _ => j.ended_at,
     };
-    let queued = j.status == crate::world::Status::Queued;
-    let waits = if queued { Wait::summary(&world.waits(j)) } else { None };
-    let held = if queued && waits.is_none() { profile_hold(cfg, world, j, now) } else { None };
-    let reason = waits.or(held).or_else(|| j.reason.clone()).map_or(String::new(), |r| format!("  [{r}]"));
-    let check = j.checkpoints.last().map_or(String::new(), |c| format!("  {}", c.summary()));
-    let check = format!("{check}{}{}", overran(j), declared(j));
+    let task = std::iter::once(j.task.clone()).chain(notes(cfg, world, j, now)).collect::<Vec<_>>().join("  ");
     vec![
         j.name.clone(),
         j.status.as_str().to_owned(),
@@ -178,65 +243,93 @@ pub fn job_cells(cfg: &Config, world: &World, j: &Job, now: u64) -> Vec<String> 
         since.map_or_else(|| "-".into(), |t| ago(now, t)),
         if j.cost_usd > 0.0 { format!("${:.2}", j.cost_usd) } else { String::new() },
         j.disk_bytes.filter(|_| j.status.has_runner()).map_or_else(String::new, crate::os::size_str),
-        format!("{}{reason}{check}{}", j.task, collected(j)),
+        task,
     ]
 }
 
 /// How far past its cap the job's finished run spent, for its board row.
-fn overran(j: &Job) -> String {
-    j.overran.map_or(String::new(), |(spent, cap)| format!("  over budget: ${spent:.2} of ${cap:.2}"))
+fn overran(j: &Job) -> Option<String> {
+    j.overran.map(|(spent, cap)| format!("over budget: ${spent:.2} of ${cap:.2}"))
 }
 
 /// The latest acceptance check and the latest review of a job, for its board row.
-fn declared(j: &Job) -> String {
-    let bar = j.bars.last().map_or(String::new(), |b| format!("  check {}", b.result.as_str()));
+fn declared(j: &Job) -> Vec<String> {
+    let left = j.unchained.as_ref().map_or(String::new(), |u| format!(" ({})", u.summary()));
+    let mut out: Vec<String> = j.review_of().map(|b| format!("reviews {b}{left}")).into_iter().collect();
+    out.extend(j.bars.last().map(|b| format!("check {}", b.result.as_str())));
     // Only the latest reviewed commit's verdicts: an earlier commit's reject is history, not the state.
     let latest = j.verdicts.last().map(|l| &l.commit);
-    let mut review = String::new();
     for (i, v) in j.verdicts.iter().enumerate() {
         if Some(&v.commit) == latest && !j.verdicts[i + 1..].iter().any(|n| n.reviewer == v.reviewer) {
-            let _ = write!(review, "  review by {}: {}", v.reviewer, v.summary());
+            out.push(format!("review by {}: {}", v.reviewer, v.summary()));
         }
     }
-    let left = j.unchained.as_ref().map_or(String::new(), |u| format!(" ({})", u.summary()));
-    let of = j.review_of().map_or(String::new(), |b| format!("  reviews {b}{left}"));
-    format!("{of}{bar}{review}")
+    out
 }
 
 /// What gc took from a job's clone, for its board row.
-fn collected(j: &Job) -> &'static str {
+fn collected(j: &Job) -> Option<&'static str> {
     match j.collected.as_deref() {
-        Some("clone") => "  (clone removed)",
-        Some(_) => "  (build outputs removed)",
-        None => "",
+        Some("clone") => Some("(clone removed)"),
+        Some(_) => Some("(build outputs removed)"),
+        None => None,
     }
 }
 
+/// A listed job's cells, its project's name first when the board shows every project.
+pub fn row_cells(cfg: &Config, p: &machine::Project, j: &Job, everywhere: bool, now: u64) -> Vec<String> {
+    let cells = job_cells(p.own.then_some(cfg), &p.world, j, now);
+    if everywhere { std::iter::once(p.name.clone()).chain(cells).collect() } else { cells }
+}
+
+/// The decisions waiting for the orchestrator in `projects`, oldest first: id, job, point and until
+/// when, the project first when the board shows every project.
+pub fn decision_cells<'a>(
+    projects: impl IntoIterator<Item = &'a machine::Project>,
+    everywhere: bool,
+    now: u64,
+) -> Vec<Vec<String>> {
+    let mut waiting: Vec<_> = projects
+        .into_iter()
+        .flat_map(|p| crate::systems::decide::pending(&p.world, now).into_iter().map(move |d| (p, d)))
+        .collect();
+    waiting.sort_by_key(|(_, d)| d.requested_at);
+    waiting
+        .into_iter()
+        .map(|(p, d)| {
+            let until = format!("until {}", crate::systems::decide::clock(d.parked_until.unwrap_or(0)));
+            let cells = [d.id.clone(), d.job.clone(), d.point.as_str().to_owned(), until];
+            everywhere.then(|| p.name.clone()).into_iter().chain(cells).collect()
+        })
+        .collect()
+}
+
 /// The jobs and accounts, as text.
-fn board(ctx: &Ctx, world: &crate::world::World, all: bool) -> String {
+fn board(cfg: &Config, m: &Machine, all: bool, everywhere: bool) -> String {
     let now = now_micros();
-    let jobs = listed(world, all);
-    let rows: Vec<Vec<String>> = jobs.iter().map(|j| job_cells(&ctx.cfg, world, j, now)).collect();
-    let mut lines = vec![format!("jobs (at most {} running)", ctx.cfg.limits.max_running)];
+    let everywhere = everywhere || !m.projects.iter().any(|p| p.own);
+    let jobs = listed(m.shown(everywhere), all, now);
+    let rows: Vec<Vec<String>> = jobs.iter().map(|(p, j)| row_cells(cfg, p, j, everywhere, now)).collect();
+    let mut lines = vec![if everywhere {
+        "jobs in every project".to_owned()
+    } else {
+        format!("jobs (at most {} running)", cfg.limits.max_running)
+    }];
     lines.extend(table(&rows).into_iter().map(|r| format!("  {r}")));
     if jobs.is_empty() {
         lines.push("  (none)".into());
     }
-    let waiting = crate::systems::decide::pending(world, crate::bus::now_micros());
+    let waiting = decision_cells(m.shown(everywhere), everywhere, now);
     if !waiting.is_empty() {
         lines.push(String::new());
         lines.push("decisions waiting (relay decide answer ID --action ...)".into());
-        let rows: Vec<Vec<String>> = waiting
-            .iter()
-            .map(|d| {
-                let until = format!("until {}", crate::systems::decide::clock(d.parked_until.unwrap_or(0)));
-                vec![d.id.clone(), d.job.clone(), d.point.as_str().to_owned(), until]
-            })
-            .collect();
-        lines.extend(table(&rows).into_iter().map(|r| format!("  {r}")));
+        lines.extend(table(&waiting).into_iter().map(|r| format!("  {r}")));
+    }
+    if everywhere {
+        lines.extend(m.unreadable.iter().map(|u| format!("  unreadable: {u}")));
     }
     lines.push(String::new());
-    lines.push(crate::systems::quota::accounts_view(ctx, world).text());
+    lines.push(m.accounts(cfg).text());
     lines.join("\n")
 }
 

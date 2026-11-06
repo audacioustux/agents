@@ -26,7 +26,8 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::bus::now_micros;
 use crate::ctx::Ctx;
-use crate::systems::view::{activity, job_cells, listed};
+use crate::systems::view::machine::Scope;
+use crate::systems::view::{activity, job_cells};
 use crate::world::{Job, Status};
 
 /// What one frame shows, taken from the bus in one read.
@@ -43,15 +44,15 @@ struct Board {
 
 impl Board {
     fn read(ctx: &Ctx, all: bool) -> Result<Self> {
-        let world = ctx.world()?;
+        let m = crate::systems::view::machine::Machine::read(Some(ctx), &ctx.state_root)?;
         let now = now_micros();
-        let jobs = listed(&world, all);
-        let accounts = crate::systems::quota::accounts_view(ctx, &world);
+        let jobs = crate::systems::view::listed(m.shown(false), all, now);
+        let accounts = m.accounts(&ctx.cfg);
         Ok(Self {
             project: ctx.cfg.name.clone(),
-            jobs: filled(jobs.iter().map(|j| job_cells(&ctx.cfg, &world, j, now)).collect()),
-            statuses: jobs.iter().map(|j| j.status).collect(),
-            details: jobs.iter().map(|j| (format!(" {} ", j.name), details(ctx, j))).collect(),
+            jobs: filled(jobs.iter().map(|(p, j)| job_cells(Some(&ctx.cfg), &p.world, j, now)).collect()),
+            statuses: jobs.iter().map(|(_, j)| j.status).collect(),
+            details: jobs.iter().map(|(p, j)| (format!(" {} ", j.name), details(ctx, &p.jobs, j))).collect(),
             accounts_head: format!(" {} ", accounts.head),
             accounts: filled(accounts.cells),
             ready: accounts.ready,
@@ -65,7 +66,7 @@ impl Board {
 
 /// What the job pane says: where the job stands, what its session is doing
 /// now, and its answer.
-fn details(ctx: &Ctx, j: &Job) -> Vec<String> {
+fn details(ctx: &Ctx, jobs: &std::path::Path, j: &Job) -> Vec<String> {
     let place = j.account.as_deref().map_or_else(|| "waiting for an account".to_owned(), |a| format!("on {a}"));
     let mut head = vec![format!("{} {place}", j.status.as_str())];
     if j.attempts > 1 {
@@ -83,7 +84,7 @@ fn details(ctx: &Ctx, j: &Job) -> Vec<String> {
     if j.status == Status::Running {
         d.push(activity(&ctx.job_log(&j.name, "log.ndjson")));
     }
-    if let Ok(answer) = std::fs::read_to_string(ctx.job_file(&j.name, "result.md")) {
+    if let Ok(answer) = std::fs::read_to_string(jobs.join(format!("{}.result.md", j.name))) {
         d.push(String::new());
         d.extend(answer.lines().map(str::to_owned));
     }
@@ -296,7 +297,8 @@ impl Drop for Mouse {
 
 /// Runs the board until a quit key. Redraws on every project's events (the
 /// accounts are shared), on any key, click or resize, and every few seconds for the clocks.
-pub fn run(ctx: &Ctx, all: bool) -> Result<()> {
+pub fn run(scope: Scope<'_>, all: bool, _everywhere: bool) -> Result<()> {
+    let ctx = scope.home.expect("a project");
     let bell = ctx.doorbell()?;
     let (tx, rang) = mpsc::channel();
     std::thread::spawn(move || while tx.send(bell.wait(Duration::from_secs(60))).is_ok() {});

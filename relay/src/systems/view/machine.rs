@@ -97,4 +97,24 @@ mod tests {
         let err = Machine::read(None, &file).unwrap_err();
         assert!(format!("{err:#}").contains("listing"), "{err:#}");
     }
+
+    #[test]
+    fn a_project_that_cannot_be_searched_is_named_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = crate::config::tempdir::Dir::new();
+        let shut = d.path().join("shut");
+        std::fs::create_dir_all(shut.join("bus")).unwrap();
+        std::fs::create_dir_all(d.path().join("not-a-project")).unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads through any permission; the case is then not one this test can make.
+        let denied = std::fs::metadata(shut.join("bus")).is_err();
+        let m = Machine::read(None, d.path());
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let m = m.unwrap();
+        if denied {
+            assert!(m.projects.is_empty(), "{m:?}");
+            assert_eq!(m.unreadable.len(), 1, "{m:?}");
+            assert!(m.unreadable[0].starts_with("shut: "), "{m:?}");
+        }
+    }
 }

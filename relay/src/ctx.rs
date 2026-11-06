@@ -65,7 +65,7 @@ pub fn project_dirs(root: &Path) -> impl Iterator<Item = PathBuf> {
 }
 
 /// As [`project_dirs`], failing when `root` cannot be listed; a `root` that does not exist yet
-/// holds no projects.
+/// holds no projects. A directory whose bus cannot be looked at is listed, for its reader to fail on.
 pub fn try_project_dirs(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
@@ -75,7 +75,13 @@ pub fn try_project_dirs(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut dirs = Vec::new();
     for entry in entries {
         let d = entry?.path();
-        if d.join("bus").is_dir() {
+        // An entry without a bus is no project; one whose bus cannot even be looked at (no search
+        // permission) is, and its reader is the one to say it cannot be read.
+        let project = match std::fs::metadata(d.join("bus")) {
+            Ok(m) => m.is_dir(),
+            Err(e) => !matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory),
+        };
+        if project {
             dirs.push(d);
         }
     }

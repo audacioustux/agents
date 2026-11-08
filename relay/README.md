@@ -139,11 +139,23 @@ prepend it to your briefs, or have each brief point to it.
 Every command takes `--json`: one JSON value on stdout, and a failure as
 `{"error", "kind"}` on stderr. The exit code says which kind it was, with or
 without `--json`: 2 usage, 3 not found, 4 the job is in the wrong state, 5
-refused by a rule (a banned model, a disabled harness, the `ask` contract), 1
+refused by a rule (a banned model, a disabled harness or one whose program is not found, the `ask` contract), 1
 anything else. An agent driving relay can branch on those, never on wording.
 
 Nothing needs starting by hand. Every command that changes something wakes the
 dispatcher, which exits on its own a minute after the queue empties.
+
+Whoever wakes it chooses nothing of its environment. The dispatcher, and everything it
+starts (runners, gc, the quota reader, hooks, sessions), gets one built from the config
+and this machine: `HOME`, the user and login shell from `/etc/passwd`, the state and data
+roots this relay serves, the policy file the config was merged with, `LANG=C.UTF-8`, a
+`PATH` (below), and `[session] env` over all of them. No `TZ`, `GIT_DIR`, token or other
+variable of the calling shell reaches it. With no `PATH` in `[session] env`, the `PATH` is
+relay's own directory, `~/.local/bin`, `~/bin`, `~/.cargo/bin`, mise's shims
+(`~/.local/share/mise/shims`), `~/.nix-profile/bin`, the system Nix profiles, each found
+harness program's directory, then `/usr/local/bin`, `/usr/bin` and `/bin` (those that
+exist). A job or `--check` that needs a tool from elsewhere, such as a devshell's, gets it
+from `session.env_shell` or a `PATH` in `[session] env`.
 
 A running dispatcher keeps the config it started with, so it checks the project's
 `relay.toml` and the policy file (the sources `relay config show` merges) on every
@@ -173,7 +185,10 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   answer are read, the answer again only when its file changes.
 - **Every project.** `p` (or `--everywhere`) lists every project's jobs, with a
   project column and each project's counts in the title; outside a project (no
-  `--config`, `$RELAY_CONFIG` or `relay.toml` above) the board shows every project.
+  `--config`, `$RELAY_CONFIG` or `relay.toml` above) the board shows every project, and
+  its accounts pane is machine-wide: every account on the machine, with what all projects
+  share (sign-in, limits, the latest reading, sessions running), and none called `ready`,
+  since the floor, seats, exclusions and `quota disable` that decide it are each project's.
   Other projects are read, never written: a job's row and pane come from its own
   project's fold and jobs directory, so only the profile hold that a queued job's
   own config would name is left out.
@@ -625,9 +640,11 @@ its clone and session kept: free some space (`land gc` first), then `queue
 resume`. `wait` lets it go on, and asks again only after an hour. Nothing is
 ever deleted inside a running job's clone.
 
-`[session] env` sets variables in every job's environment, over the caller's and
-the development environment's and under the harness's own account variables.
-relay hard-codes none: `CARGO_INCREMENTAL = "0"` is the suggestion above.
+`[session] env` sets variables in every job's environment (and the dispatcher's), over
+relay's own (see [What a job is](#what-a-job-is)) and the development environment's and under
+the harness's own account variables; a `PATH` there replaces relay's default. Nothing is
+taken from the shell that queued the job. relay hard-codes none: `CARGO_INCREMENTAL = "0"`
+is the suggestion above.
 
 ## Harnesses and accounts
 
@@ -645,6 +662,18 @@ An account is named `harness:label` (`claude:work`, `omp:default`).
 `[harness.<id>]` in the config sets a harness's `model`, `effort`,
 `extra_args` and `program`, or turns it off; `accounts.exclude` leaves out
 single accounts.
+
+A harness's program is `program` when set (a path, or a name), else its own name
+(`claude`, `omp`). A name is the absolute path relay recorded the first time it found
+it on a `PATH` (`$XDG_STATE_HOME/relay/programs.json`, kept while that file can be run),
+so a shell whose `PATH` lacks it (a dispatcher woken from cron, a bare `env -i` shell)
+still finds it, and a shell whose `PATH` names another does not replace it. Only an
+executable file counts. A harness is used when its program is found; one the config has
+a `[harness.<id>]` table for whose program is not found is shown on the board and in
+`quota show` as `program not found: omp` (`missing` in `--json`), and `queue add
+--harness omp` exits 5 saying so. To move relay to another copy (an upgrade into a new
+directory), set `program`, or delete its line from `programs.json` and run any relay
+command from a shell that has it.
 
 Who a claude directory is signed in as comes from its `.claude.json`
 (`oauthAccount`), read locally, never by a call. relay shows only the plan and
@@ -812,7 +841,8 @@ What is left open, by design or by necessity:
 The mounts are one declarative plan in layers ([`src/sandbox.rs`](src/sandbox.rs)),
 where the job's own mounts come last, so nothing above can hide them.
 
-Environment variables are cleared and passed back in, except those matching
+Environment variables are cleared and relay's own (built from the config, never the
+calling shell's) are passed in, except those matching
 `sandbox.env_deny` (tokens, secrets, keys, `AUTH`, cookies, sessions and
 `CLAUDE*`). The adapter then sets the one that selects the account. A
 project whose toolchain comes from a development environment that cannot

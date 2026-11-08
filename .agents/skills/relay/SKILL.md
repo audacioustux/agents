@@ -73,13 +73,20 @@ relay view result fix-parser --wait --json   # blocks until it ends: no polling
 relay land fetch fix-parser
 ```
 
+Nothing of your shell reaches a job: not its `PATH`, `TZ` or other variables. A job's
+environment, and which harnesses exist, come from the project's `relay.toml`
+(`[session] env`, `[harness.X] program`) and this machine, so a job queued from any
+shell runs the same. A harness whose program is not found is `program not found` in
+`relay quota show`, and `--harness` on it exits 5.
+
 Give every job a `--task`: the board otherwise shows the brief's first line, and
 briefs that share a preamble all look alike.
 
 For a person watching, `relay view watch` is the live board (`?` lists its keys,
 `p` shows every project); an agent reads `view status --json` and waits with
 `view result --wait`, never by watching the board. Outside a project both boards
-show every project on the machine. The board's `model` column (after `as`, the profile
+show every project on the machine, and their accounts machine-wide: none is called
+`ready`, since only a project's own rules can say that. The board's `model` column (after `as`, the profile
 and effort) is the model each job runs in short form, `opus-5.5` for `claude-opus-5-5`; a job
 with no account yet lists every harness's model, and `--model` or a fork can make it differ from
 its profile's. `view status --json` has the full ids (`models`) and `effort`.

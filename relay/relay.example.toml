@@ -27,10 +27,13 @@ max_retries = 1          # automatic retries for a session that died with no out
 exclude = []
 
 # One table per harness, all with the same keys. A harness is enabled by
-# default when it is installed; `enabled` overrides that.
+# default when its program is found: `program`, else the path relay recorded
+# the first time it found the harness on a PATH (in $XDG_STATE_HOME/relay/
+# programs.json). A harness with a table here whose program is not found is
+# shown as `program not found`. `enabled` overrides all of that.
 # [harness.claude]
 # enabled = true
-# program = "/path/to/claude"   # a different command; tests use a stub
+# program = "/path/to/claude"   # a path, or a name found as above; tests use a stub
 # model = "claude-sonnet-5-5"   # for jobs that name none for this harness; a full id, as aliases move
 # effort = "high"
 # extra_args = []
@@ -58,9 +61,12 @@ nice = 10
 # the sandbox, such as single-user Nix:
 # env_shell = ["nix", "develop", "-c"]
 env_shell = []
-# Variables set in every job's environment. For Rust projects, incremental
-# dirs are a large share of target/:
-# env = { CARGO_INCREMENTAL = "0" }
+# Variables set in every job's environment, and the dispatcher's: nothing comes
+# from the shell that woke it. PATH, when set here, replaces relay's default
+# (~/.local/bin, ~/bin, ~/.cargo/bin, mise's shims, the Nix profile, each
+# harness program's directory, then the system's). For Rust projects,
+# incremental dirs are a large share of target/:
+# env = { CARGO_INCREMENTAL = "0", PATH = "/home/me/.local/bin:/usr/bin:/bin" }
 # Appended to the system prompt. {workspace} says where the session is and
 # what it may change; {branch} is the job's branch.
 # briefing = "..."

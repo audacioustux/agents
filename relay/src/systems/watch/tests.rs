@@ -136,7 +136,12 @@ fn the_board_fits_80x24_and_120x40_with_headings_keys_and_a_zoned_clock() {
         ui.sync(&b);
         let fr = frame(&b, &mut ui, w, h);
         assert!(fr[0].contains("demo · 1 running"), "{w}x{h}: {}", fr[0]);
-        assert!(fr[0].trim_end_matches(['┓', '┐']).trim_end().ends_with('Z'), "the clock says its zone: {}", fr[0]);
+        let zone = crate::os::local(jiff::Timestamp::now()).strftime("%Z").to_string();
+        assert!(
+            fr[0].trim_end_matches(['┓', '┐']).trim_end().ends_with(&zone),
+            "the clock says its local zone: {}",
+            fr[0]
+        );
         assert!(fr[1].contains("job") && fr[1].contains("state") && fr[1].contains("task"), "headings: {}", fr[1]);
         assert!(!fr.iter().any(|l| l.contains("Their task")), "one project by default");
         let keys = &fr[usize::from(h) - 1];
@@ -355,7 +360,7 @@ fn decisions_waiting_are_a_badge_and_a_pane() {
         steps: Vec::new(),
         action: None,
     };
-    f.machine.projects[0].world.decisions.insert(d.id.clone(), d);
+    f.machine.projects[0].world.decisions.insert(d.id.clone(), d.clone());
     let mut ui = Ui::new(false, false, true);
     let b = f.board(&ui, 1);
     ui.sync(&b);
@@ -364,6 +369,14 @@ fn decisions_waiting_are_a_badge_and_a_pane() {
     assert!(fr.iter().any(|l| l.contains("decisions waiting · relay decide answer")));
     assert!(fr.iter().any(|l| l.contains("build-cap-1")));
     assert!(fr.iter().any(|l| l.contains("decision waiting at cap")), "the job's pane says so too");
+    // At 80 columns a long job name still leaves the deadline whole, zone included.
+    let long =
+        Decision { id: "a-rather-long-decision-id-0042".into(), job: "a-rather-long-job-name-x".into(), ..d.clone() };
+    f.machine.projects[0].world.decisions.insert(long.id.clone(), long);
+    let b80 = f.board(&ui, 1);
+    let at = crate::systems::decide::clock(NOW + 600_000_000);
+    let fr80 = frame(&b80, &mut ui, 80, 24);
+    assert!(fr80.iter().any(|l| l.contains("a-rather-long") && l.contains(&at)), "{at} whole at 80 columns: {fr80:#?}");
     ui.apply(Action::Cycle(1), &b);
     assert_eq!(ui.focus, Id::Decisions, "the pane takes focus in its turn");
 }

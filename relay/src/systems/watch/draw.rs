@@ -31,7 +31,7 @@ pub fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
     let focused = ui.focus;
     let frame = |id: Id, title: Line<'static>| framed(title, id == focused);
 
-    let clock = jiff::Timestamp::now().strftime(" %H:%M:%SZ ").to_string();
+    let clock = crate::os::local(jiff::Timestamp::now()).strftime(" %H:%M:%S %Z ").to_string();
     let jobs_block = frame(Id::Jobs, jobs_title(b, ui)).title(Line::from(clock).right_aligned());
     let rows: Vec<&[String]> = b.jobs.iter().map(|e| e.cells.as_slice()).collect();
     let selected = ui.selected.is_some().then_some(ui.index);

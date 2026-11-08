@@ -369,7 +369,8 @@ pub fn decision_cells<'a>(
     waiting
         .into_iter()
         .map(|(p, d)| {
-            let until = format!("until {}", crate::systems::decide::clock(d.parked_until.unwrap_or(0)));
+            // Bare: the board heads the column "until", and the text view says it in each row.
+            let until = crate::systems::decide::clock(d.parked_until.unwrap_or(0));
             let cells = [d.id.clone(), d.job.clone(), d.point.as_str().to_owned(), until];
             everywhere.then(|| p.name.clone()).into_iter().chain(cells).collect()
         })
@@ -395,6 +396,15 @@ fn board(cfg: &Config, m: &Machine, all: bool, everywhere: bool) -> String {
     if !waiting.is_empty() {
         lines.push(String::new());
         lines.push("decisions waiting (relay decide answer ID --action ...)".into());
+        let waiting: Vec<Vec<String>> = waiting
+            .into_iter()
+            .map(|mut r| {
+                if let Some(at) = r.last_mut() {
+                    *at = format!("until {at}");
+                }
+                r
+            })
+            .collect();
         lines.extend(table(&waiting).into_iter().map(|r| format!("  {r}")));
     }
     if everywhere {

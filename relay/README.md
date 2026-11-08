@@ -233,9 +233,12 @@ runner at once. `max_per_day` is the most of its sessions to start in a rolling
 24 hours, counted from `dispatched` events on the bus, so cleaning a job away
 gives nothing back (a retry on another account is a start too). A job they hold
 stays queued with the reason on the board and in the dispatcher's log:
-`profile bug-hunt: 3 started in 24h (max 3), next slot 14:02Z`. A job no account
+`profile bug-hunt: 3 started in 24h (max 3), next slot 20:02 +06`. A job no account
 can take is held with every account's cause:
-`no account has room (omp:default busy (1 of 1 seat on openai-codex), at floor: 100% openai-codex/5 hours, resets 13:36Z)`.
+`no account has room (omp:default busy (1 of 1 seat on openai-codex), at floor: 100% openai-codex/5 hours, resets 19:36 +06)`.
+
+Every time relay shows or logs is local time with its zone: `TZ` if set, else
+`/etc/localtime` (a container's is often UTC, so set `TZ` there, e.g. `TZ=Etc/GMT-6`).
 
 `relay profiles [--json]` prints each resolved profile with its note, which is
 how a fresh orchestrator learns the policy. `relay config show` prints the merged
@@ -673,9 +676,9 @@ For each meter whose `resetsAt` is within `within_hours` of now, the floor is
 `floor_near_reset.floor` instead of `limits.floor`; every other meter keeps
 `limits.floor` (it is per meter, not per account, and an unknown reset is never near).
 The new floor must be above `limits.floor` and at most 1. Absent, nothing changes.
-`relay quota show` states it where it applies (`91% seven_day, resets Nov 4 07:15Z
+`relay quota show` states it where it applies (`91% seven_day, resets Nov 4 13:15 +06
 (floor 98%, resets in 10h)`, and `floorWhy` in `--json`), and a held reason names it
-too: `at floor: 99% seven_day, resets Nov 4 07:15Z (floor 98%, resets in 10h)`.
+too: `at floor: 99% seven_day, resets Nov 4 13:15 +06 (floor 98%, resets in 10h)`.
 
 Of those, relay picks the one with the most room left per day until reset,
 because quota still unused at a reset is lost. A session that already ran

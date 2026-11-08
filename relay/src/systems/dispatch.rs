@@ -86,7 +86,7 @@ fn serve(ctx: &Ctx) -> Result<()> {
                     return ctx.wake_dispatch();
                 }
                 Err(e) => {
-                    eprintln!("{} config changed but does not load; keeping the old: {e:#}", jiff::Timestamp::now());
+                    eprintln!("{} config changed but does not load; keeping the old: {e:#}", crate::os::stamp());
                 }
             }
         }
@@ -94,7 +94,7 @@ fn serve(ctx: &Ctx) -> Result<()> {
         let gc_in = gc_pass(ctx);
         if held != last_held {
             for h in &held.0 {
-                eprintln!("{} held: {h}", jiff::Timestamp::now());
+                eprintln!("{} held: {h}", crate::os::stamp());
             }
             last_held = held;
         }
@@ -167,7 +167,7 @@ fn gc_pass(ctx: &Ctx) -> Duration {
         // Stamped now as well as when the pass ends, so a slow one is not started again.
         let _ = std::fs::write(&stamp, "");
         if let Err(e) = ctx.spawn_self(&["land", "gc"], &ctx.state.join("gc.log")) {
-            eprintln!("{} gc did not start: {e:#}", jiff::Timestamp::now());
+            eprintln!("{} gc did not start: {e:#}", crate::os::stamp());
         }
         return interval;
     }
@@ -331,7 +331,7 @@ pub fn profile_hold(
     let at = i64::try_from(slot)
         .ok()
         .and_then(|us| jiff::Timestamp::from_microsecond(us).ok())
-        .map_or_else(String::new, |t| format!(", next slot {}", t.strftime("%H:%MZ")));
+        .map_or_else(String::new, |t| format!(", next slot {}", crate::os::local(t).strftime("%H:%M %Z")));
     Some((format!("profile {name}: {count} started in 24h (max {max}){at}"), Some(slot)))
 }
 
@@ -541,7 +541,9 @@ mod tests {
         let at = |h: u64, m: u64| noon - DAY_MICROS + (h * 60 + m) * 60 * 1_000_000 - 12 * 3600 * 1_000_000;
         let starts = [at(14, 2), at(13, 0), at(15, 30)];
         let (why, until) = profile_hold("bug-hunt", &p, 0, &starts, noon).unwrap();
-        assert_eq!(why, "profile bug-hunt: 3 started in 24h (max 3), next slot 13:00Z");
+        let slot = jiff::Timestamp::from_microsecond(i64::try_from(at(13, 0) + DAY_MICROS).unwrap()).unwrap();
+        let local = crate::os::local(slot).strftime("%H:%M %Z");
+        assert_eq!(why, format!("profile bug-hunt: 3 started in 24h (max 3), next slot {local}"), "local time");
         assert_eq!(until, Some(at(13, 0) + DAY_MICROS));
         let later = at(13, 0) + DAY_MICROS;
         assert!(profile_hold("bug-hunt", &p, 0, &starts, later - 1).is_some(), "the window is still full");

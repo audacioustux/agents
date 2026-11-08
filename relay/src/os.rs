@@ -139,6 +139,17 @@ pub fn binary_version() -> Option<std::time::SystemTime> {
     own_binary().ok().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
 }
 
+/// A time in this machine's zone (`TZ`, else `/etc/localtime`): every time relay shows or logs is
+/// the reader's local time, labelled with its zone.
+pub fn local(t: jiff::Timestamp) -> jiff::Zoned {
+    t.to_zoned(jiff::tz::TimeZone::system())
+}
+
+/// Now, as a log line's local stamp.
+pub fn stamp() -> String {
+    local(jiff::Timestamp::now()).strftime("%Y-%m-%dT%H:%M:%S%:z").to_string()
+}
+
 /// The terminal's columns and rows, when stdout is one.
 pub fn terminal_size() -> Option<(usize, usize)> {
     let w = rustix::termios::tcgetwinsize(std::io::stdout()).ok()?;

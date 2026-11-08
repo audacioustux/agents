@@ -817,12 +817,12 @@ fn list(ctx: &Ctx, wait: bool, timeout: Option<u64>) -> Result<()> {
     Ok(())
 }
 
-/// `HH:MMZ`, from bus time.
+/// `HH:MM` and the zone, local, from bus time.
 pub fn clock(us: u64) -> String {
     i64::try_from(us)
         .ok()
         .and_then(|us| jiff::Timestamp::from_microsecond(us).ok())
-        .map_or_else(String::new, |t| t.strftime("%H:%MZ").to_string())
+        .map_or_else(String::new, |t| crate::os::local(t).strftime("%H:%M %Z").to_string())
 }
 
 /// The action an answer's flags name.

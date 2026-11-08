@@ -13,7 +13,7 @@
 //! | 5 | `sandbox.caches`: relay's own directory for each, never the host's | writable |
 //! | 6 | `sandbox.hide_home` (credential stores) | hidden |
 //! | 7 | relay's own state and clones | hidden |
-//! | 8 | the job's own clone and directory | writable |
+//! | 8 | the job's own clone and directory; its inbox (what relay writes for it) | writable; read-only |
 //!
 //! `/tmp` is not a layer: it is the job's scratch directory on disk (`Ctx::job_tmp`), bound there,
 //! never a RAM tmpfs. A hidden directory is an empty tmpfs made read-only once everything inside it
@@ -35,8 +35,11 @@ use crate::ctx::Ctx;
 pub struct Mounts<'a> {
     pub home: &'a crate::harness::Home,
     pub workdir: Option<&'a Path>,
-    /// The job's private directory (prompt file, session store).
+    /// The session's own directory (its session store), writable: relay writes nothing in it.
     pub scratch: &'a Path,
+    /// What relay wrote for the session (its prompt file), read-only: a session that could write
+    /// there could plant a symlink for relay's next write to follow.
+    pub inbox: Option<&'a Path>,
     /// A directory on disk, bound at `/tmp` (and named by `TMPDIR`); never RAM.
     pub tmp: &'a Path,
     pub cwd: &'a Path,
@@ -71,7 +74,10 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
         cfg.sandbox.caches.iter().map(|r| (user_home.join(r), Mount::From(ctx.caches.join(r)))).collect(),
         all(cfg.sandbox.hide_home.iter().map(|r| user_home.join(r)).collect(), Mount::Hidden),
         all(vec![ctx.state_root.clone(), ctx.data_root.clone()], Mount::Hidden),
-        all(m.workdir.into_iter().chain([m.scratch]).map(Path::to_path_buf).collect(), Mount::Writable),
+        all(m.workdir.into_iter().chain([m.scratch]).map(Path::to_path_buf).collect(), Mount::Writable)
+            .into_iter()
+            .chain(all(m.inbox.map(Path::to_path_buf).into_iter().collect(), Mount::ReadOnly))
+            .collect(),
     ];
     layers
         .into_iter()

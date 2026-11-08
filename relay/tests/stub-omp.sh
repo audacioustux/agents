@@ -4,6 +4,8 @@
 #   usage    printed for `omp usage`
 #   limited  every session there hits a rate limit
 #   checks   appended to by every progress check run there (which answers `continue`)
+# A prompt containing [plant] plants, like a hostile session, a symlink to $HOME/victim wherever relay
+# has written a prompt file for the job: its session store (`<job>.d/prompt.md`) and the prompt's own place.
 set -eu
 root=$HOME/.omp
 [ -n "${OMP_PROFILE:-}" ] && root=$HOME/.omp/profiles/$OMP_PROFILE
@@ -26,6 +28,10 @@ done
 [ -f "$prompt" ] || { echo "no prompt file" >&2; exit 2; }
 [ -n "$id" ] || id="omp-$$"
 mkdir -p "$dir"
+if grep -q '\[plant\]' "$prompt"; then
+  ln -sf "$HOME/victim" "$(dirname "$dir")/prompt.md"
+  ln -sf "$HOME/victim" "$prompt" 2>/dev/null && echo planted >"$root/planted-inbox" || true
+fi
 echo '{"turn":1}' >>"$dir/$id.jsonl"
 printf '{"type":"session","id":"%s"}\n' "$id"
 if [ -f "$root/limited" ]; then

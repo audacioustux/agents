@@ -121,8 +121,11 @@ pub struct Task<'a> {
     /// Leave out MCP servers, plugins, skill listings and user settings, which
     /// cost context on every turn. For unattended tasks that do not use them.
     pub lean: bool,
-    /// A private directory for this task: the prompt file, a session store.
+    /// A private directory for this task that the session writes: its session store.
     pub scratch: &'a Path,
+    /// Where the host puts the files it hands the session (a prompt file): a [`crate::hostdir::HostDir`],
+    /// which the session can at most read.
+    pub inbox: &'a Path,
 }
 
 /// A command ready to run.
@@ -134,7 +137,8 @@ pub struct Invocation {
     pub env: Vec<(OsString, Option<OsString>)>,
     /// Written to the child's stdin, then closed.
     pub stdin: Option<String>,
-    /// Written before the run. The prompt goes here for a CLI that reads it from a file.
+    /// Written before the run, each directly inside the task's [`Task::inbox`] (and refused anywhere
+    /// else). The prompt goes here for a CLI that reads it from a file.
     pub files: Vec<(PathBuf, String)>,
 }
 
@@ -153,13 +157,22 @@ impl Invocation {
         self
     }
 
-    /// Writes [`Self::files`], creating their directories.
-    pub fn write_files(&self) -> std::io::Result<()> {
+    /// Writes [`Self::files`] into `inbox`, through its handle: a file named anywhere but directly
+    /// inside it is refused, so no file of an invocation is ever written through a path a session controls.
+    pub fn write_files(&self, inbox: &crate::hostdir::HostDir) -> std::io::Result<()> {
         for (path, text) in &self.files {
-            if let Some(d) = path.parent() {
-                std::fs::create_dir_all(d)?;
-            }
-            std::fs::write(path, text)?;
+            let name = path
+                .strip_prefix(inbox.path())
+                .ok()
+                .and_then(|rest| rest.to_str())
+                .filter(|n| !n.is_empty() && !n.contains('/'))
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{} is not in the task's inbox {}", path.display(), inbox.path().display()),
+                    )
+                })?;
+            inbox.write(name, text.as_bytes())?;
         }
         Ok(())
     }
@@ -297,6 +310,7 @@ pub(crate) mod testing {
             events: true,
             lean: true,
             scratch,
+            inbox: Path::new("/inbox"),
         }
     }
 

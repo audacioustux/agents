@@ -5,6 +5,10 @@
 //! The checkout is a fresh clone with a configuration of its own. The check runs in it inside the
 //! session's sandbox plan, with the clone and the session's account out of sight, and a development
 //! environment entered from the project's repository, not from files the session could have changed.
+//!
+//! Its working directory (`<job>.bar.d`: the checkout and its `/tmp`) is made fresh for each run, outside
+//! anything the session could write, and its output goes to the job's inbox, which the check cannot write.
+//! A session that planted a symlink in its own directories has nothing relay follows.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -16,6 +20,7 @@ use super::{command, layer_env, port};
 use crate::bus::{BarResult, SessionEvent};
 use crate::ctx::{Ctx, SessionRepo};
 use crate::harness::{Home, Invocation};
+use crate::hostdir::{self, HostDir};
 use crate::sandbox::Mounts;
 use crate::systems::checkpoint;
 use crate::systems::decide::CheckRun;
@@ -55,11 +60,12 @@ struct Ran {
 
 /// Runs the job's check on its branch tip (and, for a revert control, at its base), and records
 /// `bar-checked` for the commit it read, which is read once and checked as it was.
-pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, scratch: &Path) -> Result<CheckRun> {
+pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, inbox: &HostDir) -> Result<CheckRun> {
     let command = job.check().context("a check was asked of a job that declares none")?.to_owned();
     let tip = dir.rev("HEAD");
+    let place = Place { inbox, work: &ctx.job_scratch(&format!("{}.bar", job.name)) };
     let head = match &tip {
-        Some(tip) => at(ctx, home, &command, dir, tip, scratch),
+        Some(tip) => at(ctx, home, &command, dir, tip, &place),
         None => broke("the clone has no commit to check"),
     };
     let red_first = matches!(job.acceptance, crate::bus::Acceptance::CheckRedFirst(_));
@@ -69,7 +75,7 @@ pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, scratch:
         Said::Failed => BarResult::Fail,
         Said::Passed if !red_first => BarResult::Pass,
         Said::Passed => {
-            let base = at_base(ctx, job, home, &command, dir, scratch);
+            let base = at_base(ctx, job, home, &command, dir, &place);
             base_exit = Some(base.code);
             match base.said {
                 Said::Failed => BarResult::Pass,
@@ -98,9 +104,9 @@ pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, scratch:
 }
 
 /// The check at the commit the branch started from.
-fn at_base(ctx: &Ctx, job: &Job, home: &Home, command: &str, dir: &SessionRepo, scratch: &Path) -> Ran {
+fn at_base(ctx: &Ctx, job: &Job, home: &Home, command: &str, dir: &SessionRepo, place: &Place<'_>) -> Ran {
     match job.base.clone().or_else(|| checkpoint::base(dir, &[]).head) {
-        Some(base) => at(ctx, home, command, dir, &base, scratch),
+        Some(base) => at(ctx, home, command, dir, &base, place),
         None => broke("no base commit is known for the revert control"),
     }
 }
@@ -109,15 +115,22 @@ fn broke(why: &str) -> Ran {
     Ran { said: Said::Broke, code: -1, text: why.to_owned() }
 }
 
+/// Where a check runs: its working directory, made fresh for each run in a place only relay writes,
+/// and the job's inbox, where its output goes.
+struct Place<'a> {
+    inbox: &'a HostDir,
+    work: &'a Path,
+}
+
 /// Runs `command` on a clean checkout of `rev` from the clone `source`.
-fn at(ctx: &Ctx, home: &Home, command: &str, source: &SessionRepo, rev: &str, scratch: &Path) -> Ran {
-    let tree = scratch.join("check-tree");
-    let _ = std::fs::remove_dir_all(&tree);
-    let ran = match checkout(source, rev, &tree) {
-        Ok(()) => exec(ctx, home, command, &tree, scratch),
-        Err(e) => broke(&format!("could not check out {rev} for the check: {e:#}")),
-    };
-    let _ = std::fs::remove_dir_all(&tree);
+fn at(ctx: &Ctx, home: &Home, command: &str, source: &SessionRepo, rev: &str, place: &Place<'_>) -> Ran {
+    let tree = place.work.join("tree");
+    let ran =
+        match hostdir::fresh_dir(place.work).map_err(anyhow::Error::from).and_then(|()| checkout(source, rev, &tree)) {
+            Ok(()) => exec(ctx, home, command, &tree, place),
+            Err(e) => broke(&format!("could not check out {rev} for the check: {e:#}")),
+        };
+    let _ = std::fs::remove_dir_all(place.work);
     ran
 }
 
@@ -140,24 +153,23 @@ fn checkout(source: &SessionRepo, rev: &str, into: &Path) -> Result<()> {
 
 /// Runs `sh -c command` in `tree`, bounded by `hooks.command_timeout_seconds` (killed 5 s later if it
 /// ignores the TERM), in the session's sandbox plan without the session's account or clone.
-fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, scratch: &Path) -> Ran {
+fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, place: &Place<'_>) -> Ran {
     let go = || -> Result<Ran> {
         let mut inv = Invocation::new("timeout");
         let secs = ctx.cfg.hooks.command_timeout_seconds.max(1).to_string();
         inv.args = ["-k", "5", &secs, "sh", "-c", command].map(OsString::from).to_vec();
         // The project's own development environment, entered where the session cannot have edited it.
         layer_env(ctx, &mut inv, &ctx.cfg.repo)?;
-        let out = scratch.join("check.out");
-        let file = std::fs::File::create(&out)?;
-        let tmp = scratch.join("check-tmp");
-        std::fs::create_dir_all(&tmp)?;
-        let mounts = Mounts { home, workdir: None, scratch, tmp: &tmp, cwd: tree, account: false };
+        let file = place.inbox.create("check.out")?;
+        let tmp = place.work.join("tmp");
+        std::fs::create_dir(&tmp)?;
+        let mounts =
+            Mounts { home, workdir: None, scratch: place.work, inbox: None, tmp: &tmp, cwd: tree, account: false };
         let mut c = self::command(ctx, &inv, &mounts);
         c.stdin(Stdio::null()).stdout(file.try_clone()?).stderr(file);
         let status = c.status().context("running the acceptance check")?;
-        let text = tail_text(&out, 2 * TAIL as u64);
-        let _ = std::fs::remove_file(&out);
-        let _ = std::fs::remove_dir_all(&tmp);
+        let text = place.inbox.read("check.out").map(|f| tail_text(f, 2 * TAIL as u64)).unwrap_or_default();
+        let _ = place.inbox.remove("check.out");
         let code = status.code();
         Ok(Ran { said: said(code), code: code.unwrap_or(-1), text })
     };
@@ -174,9 +186,8 @@ fn tail_of(text: &str, max: usize) -> String {
 }
 
 /// The last `max` bytes of a file, as text.
-fn tail_text(path: &Path, max: u64) -> String {
+fn tail_text(mut f: std::fs::File, max: u64) -> String {
     use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else { return String::new() };
     let len = f.metadata().map_or(0, |m| m.len());
     let _ = f.seek(SeekFrom::Start(len.saturating_sub(max)));
     let mut buf = Vec::new();

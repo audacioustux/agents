@@ -773,6 +773,14 @@ Each session runs under `bwrap`. It sees the machine read-only, except for:
   what in it the host later runs or obeys (claude's settings, hooks, plugins,
   skills and scripts; omp's config, agents, extensions and natives), which is
   mounted back read-only.
+- **Read-only: the job's inbox** (`<job>.in` in the jobs directory), where relay
+  writes what it hands the session, such as omp's prompt file. relay never writes
+  in a directory a session can write, since a symlink planted there would take the
+  write wherever it points: its own files go in an inbox, opened once without
+  following a symlink and written through that handle, each file created afresh.
+  A decision's agent session gets a directory and an inbox of its own
+  (`<job>.check.d`, `<job>.check.in`), and the acceptance check a directory made
+  fresh for each run (`<job>.bar.d`), never one the worker could have written.
 - **`/tmp`**: a directory on disk, never RAM. Each job gets its own scratch
   directory, `<data dir>/<project>/scratch/<job>`, bound at `/tmp` (`TMPDIR` stays
   `/tmp`), created when the job starts. A read-only job (a review) cannot write its

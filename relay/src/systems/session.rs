@@ -21,6 +21,7 @@ use crate::config::HarnessConf;
 use crate::ctx::{Ctx, SessionRepo};
 use crate::harness::report::{Ending, Report, Verdict, verdict};
 use crate::harness::{Harness, Home, Invocation, Permissions, Reader, Session, Task};
+use crate::hostdir::HostDir;
 use crate::os;
 use crate::sandbox::{self, Mounts};
 use crate::systems::checkpoint::{self, Next};
@@ -147,12 +148,13 @@ struct Seat<'a> {
     model: Option<String>,
 }
 
-/// The job's workspace: its clone (a build job), where the session stands, its scratch directory,
-/// and its `/tmp` (on disk).
+/// The job's workspace: its clone (a build job), where the session stands, its session store, its
+/// inbox (what relay writes for it), and its `/tmp` (on disk).
 struct Workspace {
     clone: Option<SessionRepo>,
     cwd: PathBuf,
     scratch: PathBuf,
+    inbox: HostDir,
     tmp: PathBuf,
 }
 
@@ -209,7 +211,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     let ran = Ran {
         report: &report,
         dir: work.clone.as_ref(),
-        scratch: &work.scratch,
+        inbox: &work.inbox,
         brief: &launch.brief,
         reviewing: launch.reviewing.as_ref(),
         model: seat.model.as_deref(),
@@ -269,9 +271,10 @@ fn workspace(ctx: &Ctx, job: &Job) -> Result<Step<Workspace>> {
     };
     let scratch = ctx.job_scratch(&job.name);
     std::fs::create_dir_all(&scratch)?;
+    let inbox = HostDir::open(&ctx.job_inbox(&job.name))?;
     let tmp = ctx.job_tmp(&job.name);
     std::fs::create_dir_all(&tmp)?;
-    Ok(ControlFlow::Continue(Workspace { clone: clone_dir, cwd, scratch, tmp }))
+    Ok(ControlFlow::Continue(Workspace { clone: clone_dir, cwd, scratch, inbox, tmp }))
 }
 
 /// Chooses the session (new, resumed or forked), records that it started, and builds its command.
@@ -317,11 +320,12 @@ fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home
         Err(refusal) => return Ok(ControlFlow::Break((Outcome::Failed, Some(refusal)))),
     };
     layer_env(ctx, &mut inv, &work.cwd)?;
-    inv.write_files().context("writing the prompt file")?;
+    inv.write_files(&work.inbox).context("writing the prompt file")?;
     let mounts = Mounts {
         home: seat.home,
         workdir: work.clone.as_ref().map(SessionRepo::path),
         scratch: &work.scratch,
+        inbox: Some(work.inbox.path()),
         tmp: &work.tmp,
         cwd: &work.cwd,
         account: true,
@@ -358,6 +362,7 @@ fn invocation(
         events: true,
         lean: true,
         scratch: &work.scratch,
+        inbox: work.inbox.path(),
     };
     let mut inv = seat.conf.locate(seat.harness.invocation(seat.home, &task).map_err(|r| r.0)?);
     inv.args.extend(seat.conf.extra_args.iter().map(OsString::from));
@@ -378,7 +383,8 @@ fn forkable(job: &Job, found: &[Home], home: &Home, cwd: &Path) -> Option<Ended>
 struct Ran<'a> {
     report: &'a Report,
     dir: Option<&'a SessionRepo>,
-    scratch: &'a Path,
+    /// The job's inbox, for what relay writes beside the run (a scratch git index, the check's output).
+    inbox: &'a HostDir,
     brief: &'a str,
     /// For a review: the branch it read.
     reviewing: Option<&'a Reviewing>,
@@ -425,7 +431,7 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
     let port = port(ctx, job);
     let n = u32::try_from(job.checkpoints.len()).unwrap_or(u32::MAX).saturating_add(1);
     let from = checkpoint::base(dir, &job.checkpoints);
-    let now = checkpoint::point(dir, &run.scratch.join("checkpoint.index"));
+    let now = checkpoint::point(dir, &run.inbox.join("checkpoint.index"));
     let progressed = checkpoint::progressed(&from, &now);
     let (mut req, _) = request(ctx, job, run, Point::Cap)?;
     req.next_cap_usd = cap;
@@ -493,8 +499,13 @@ pub fn consult(
     let run = || -> Result<(Report, Ending)> {
         let harness = harness_of(&home);
         let conf = ctx.cfg.harness(harness.id());
-        let scratch = ctx.job_scratch(&job.name).join("check");
-        std::fs::create_dir_all(&scratch)?;
+        // Its own directories, never inside the worker's (whose session could have planted a symlink
+        // there): a working directory made fresh, its store and `/tmp`, and an inbox of its own.
+        let scratch = ctx.job_scratch(&format!("{}.check", job.name));
+        crate::hostdir::fresh_dir(&scratch)?;
+        let tmp = scratch.join("tmp");
+        std::fs::create_dir(&tmp)?;
+        let inbox = HostDir::open(&ctx.job_inbox(&format!("{}.check", job.name)))?;
         let id = uuid::Uuid::now_v7().to_string();
         let name = format!("relay-{}-check", job.name);
         let task = Task {
@@ -509,14 +520,20 @@ pub fn consult(
             events: true,
             lean: true,
             scratch: &scratch,
+            inbox: inbox.path(),
         };
         let mut inv = conf.locate(harness.invocation(&home, &task).map_err(|r| anyhow::anyhow!(r.0))?);
         inv.args.extend(conf.extra_args.iter().map(OsString::from));
-        inv.write_files().context("writing the prompt file")?;
-        let tmp = ctx.job_tmp(&job.name).join("check");
-        std::fs::create_dir_all(&tmp)?;
-        let mounts =
-            Mounts { home: &home, workdir: None, scratch: &scratch, tmp: &tmp, cwd: &ctx.cfg.repo, account: true };
+        inv.write_files(&inbox).context("writing the prompt file")?;
+        let mounts = Mounts {
+            home: &home,
+            workdir: None,
+            scratch: &scratch,
+            inbox: Some(inbox.path()),
+            tmp: &tmp,
+            cwd: &ctx.cfg.repo,
+            account: true,
+        };
         let mut cmd = command(ctx, &inv, &mounts);
         let run = Run {
             session_id: None,
@@ -525,8 +542,10 @@ pub fn consult(
             stderr: "check-stderr.log",
             measure: Vec::new(),
         };
-        drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader())
-            .map(|(report, ending, _)| (report, ending))
+        let ran = drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader())
+            .map(|(report, ending, _)| (report, ending));
+        let _ = std::fs::remove_dir_all(&scratch);
+        ran
     };
     let (report, ending) = match run() {
         Ok(r) => r,

@@ -89,6 +89,7 @@ struct Probe<'a> {
     clone: PathBuf,
     neighbour: PathBuf,
     scratch: PathBuf,
+    inbox: PathBuf,
     tmp: PathBuf,
 }
 
@@ -101,9 +102,10 @@ impl<'a> Probe<'a> {
             clone: ctx.clones.join(format!("probe-{id}")),
             neighbour: ctx.clones.join(format!("probe-other-{id}")),
             scratch: ctx.job_scratch(&format!("probe-{id}")),
+            inbox: ctx.job_inbox(&format!("probe-{id}")),
             tmp: ctx.job_scratch(&format!("probe-{id}")).join("tmp"),
         };
-        for d in [&p.clone, &p.neighbour, &p.scratch, &p.tmp] {
+        for d in [&p.clone, &p.neighbour, &p.scratch, &p.inbox, &p.tmp] {
             std::fs::create_dir_all(d)?;
         }
         std::fs::write(p.neighbour.join("secret"), "x")?;
@@ -125,6 +127,7 @@ impl<'a> Probe<'a> {
             events: true,
             lean: true,
             scratch: &self.scratch,
+            inbox: &self.inbox,
         };
         let inv = harness_of(self.home).invocation(self.home, &task).map_err(|e| anyhow::anyhow!(e.0))?;
         Ok(self.ctx.cfg.harness(self.home.harness).locate(inv))
@@ -224,6 +227,7 @@ impl<'a> Probe<'a> {
             home: self.home,
             workdir: Some(&self.clone),
             scratch: &self.scratch,
+            inbox: Some(&self.inbox),
             tmp: &self.tmp,
             cwd: &self.clone,
             account: true,
@@ -276,7 +280,7 @@ impl<'a> Probe<'a> {
 
 impl Drop for Probe<'_> {
     fn drop(&mut self) {
-        for d in [&self.clone, &self.neighbour, &self.scratch, &self.tmp] {
+        for d in [&self.clone, &self.neighbour, &self.scratch, &self.inbox, &self.tmp] {
             let _ = std::fs::remove_dir_all(d);
         }
     }

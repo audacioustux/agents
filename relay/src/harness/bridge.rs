@@ -24,7 +24,7 @@ pub struct Call<'a> {
     pub new_session_id: &'a str,
     /// Session display name, such as `relay-ask-claude-ask-<stamp>`.
     pub name: &'a str,
-    /// Where a prompt file may be written.
+    /// Where a prompt file may be written: a [`crate::hostdir::HostDir`] made new for the call.
     pub scratch: &'a Path,
 }
 
@@ -48,6 +48,7 @@ impl Call<'_> {
             events: false,
             lean: false,
             scratch: self.scratch,
+            inbox: self.scratch,
         };
         let ambient = Home { harness: self.harness.id(), label: "ambient".into(), dir: self.scratch.to_path_buf() };
         let mut inv = self.harness.invocation(&ambient, &task)?;

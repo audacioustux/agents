@@ -213,10 +213,16 @@ impl Ctx {
         String::from_utf8_lossy(&text).into_owned()
     }
 
-    /// The job's private directory: its prompt file and, for harnesses that
-    /// keep sessions with the task, its session store. Mounted writable in the sandbox.
+    /// The job's session store, for harnesses that keep sessions with the task. Mounted writable in
+    /// the sandbox, so it is the session's: relay never writes in it.
     pub fn job_scratch(&self, job: &str) -> PathBuf {
         self.jobs.join(format!("{job}.d"))
+    }
+
+    /// The job's inbox: what relay writes for its session or beside it (a prompt file, a check's output,
+    /// a scratch git index), a [`crate::hostdir::HostDir`] the session sees read-only at most.
+    pub fn job_inbox(&self, job: &str) -> PathBuf {
+        self.jobs.join(format!("{job}.in"))
     }
 
     /// The job's `/tmp`: a directory on disk (never RAM), bound there in its sandbox. It is counted in

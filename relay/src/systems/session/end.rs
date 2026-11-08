@@ -29,7 +29,7 @@ pub(super) fn at_end(ctx: &Ctx, job: &Job, home: &Home, run: &Ran<'_>, ended: En
     }
     // The bar, before anyone judges: every handler hears of it.
     let check = match (ended.0, run.dir, job.check()) {
-        (Outcome::Done, Some(dir), Some(_)) => Some(bar::run(ctx, job, home, dir, run.scratch)?),
+        (Outcome::Done, Some(dir), Some(_)) => Some(bar::run(ctx, job, home, dir, run.inbox)?),
         _ => None,
     };
     let req = ask(ctx, job, run, &ended, check.as_ref())?;
@@ -56,7 +56,7 @@ fn ask(ctx: &Ctx, job: &Job, run: &Ran<'_>, ended: &Ended, check: Option<&CheckR
     let how = if ended.0 == Outcome::Done { "done" } else { "failed" };
     req.situation = format!("The run ended {how}{}.", ended.1.as_deref().map(|r| format!(": {r}")).unwrap_or_default());
     if let Some(dir) = run.dir {
-        let now = checkpoint::point(dir, &run.scratch.join("checkpoint.index"));
+        let now = checkpoint::point(dir, &run.inbox.join("checkpoint.index"));
         req.evidence = checkpoint::evidence(dir, &checkpoint::base(dir, &[]), &now);
     }
     req.check = check.cloned();

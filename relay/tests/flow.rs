@@ -305,6 +305,52 @@ fn an_omp_session_runs_and_resumes_in_its_own_store() {
     assert!(r.contains("ran on omp:default with 2 transcript turns"), "{r}");
 }
 
+/// Audit finding 1: relay wrote omp's prompt file in the job's session store, which the session can
+/// write, and wrote it by path. A session that leaves a symlink there had the next attempt's brief (or
+/// a resume message) written wherever it points. Now the prompt goes in the job's inbox, which the
+/// session sees read-only, written through a held handle that never follows a symlink.
+#[test]
+fn a_symlink_a_session_plants_is_never_written_through() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("omp-plant", true);
+    omp_default(&env.home, 20, false);
+    let victim = env.home.join("victim");
+    std::fs::write(&victim, "precious").unwrap();
+    ok(&relay(&env, &["queue", "add", "o", "--text", "[plant] Look.", "--readonly", "--harness", "omp"]), "queue");
+    assert_eq!(wait_for(&env, "o")["status"], "done");
+    let planted = records(&env, "o", "d/prompt.md");
+    assert!(planted.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()), "the session planted its link");
+
+    ok(&relay(&env, &["queue", "resume", "o", "--message", "overwrite it"]), "resume");
+    let j = wait_for(&env, "o");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious", "relay wrote through the planted symlink");
+    assert_eq!(j["status"], "done", "{j}");
+    assert!(!env.home.join(".omp/planted-inbox").exists(), "the session could write where its prompt is");
+}
+
+/// The acceptance check's output and its `/tmp` were in the session's store too: a link planted there
+/// had the host truncate and write the file it named, and bind the directory it named as the check's
+/// writable `/tmp`. Now the check works in a directory of its own made fresh, and writes to the inbox.
+#[test]
+fn a_check_follows_nothing_the_session_planted() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("bar-plant", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "[hooks]\nmax_decisions = 1\n");
+    claude_account(&env.home, "a", 10, false);
+    let victim = env.home.join(".claude.a/victim");
+    std::fs::write(&victim, "precious").unwrap();
+    let check = "echo checked; touch /tmp/escaped";
+    let j = wait_for_build(&env, "planted", &["--check", check], "[plant-check] ");
+    assert_eq!(j["status"], "done", "{j}");
+    assert!(env.home.join(".claude.a/planted-check").exists(), "the session planted its links");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious", "the check's output went through the link");
+    assert!(!env.home.join("escaped").exists(), "the check's /tmp was the home the session linked to");
+}
+
 #[test]
 fn projects_on_one_machine_share_what_they_read_of_an_account() {
     let env = setup("shared", false);

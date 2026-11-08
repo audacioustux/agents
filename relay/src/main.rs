@@ -17,6 +17,7 @@ mod bus;
 mod config;
 mod ctx;
 mod harness;
+mod host;
 mod hostdir;
 mod os;
 mod sandbox;
@@ -100,7 +101,7 @@ fn run(config: Option<&std::path::Path>, json: bool, system: System) -> anyhow::
         System::Profiles => return policy_views(config, json, None),
         System::Config(c) => return policy_views(config, json, Some(c)),
         // Outside a project the boards show every project on this machine.
-        System::View(c) if c.runs_anywhere() && config::Config::locate(config)?.is_none() => {
+        System::View(c) if c.runs_anywhere() && config::Config::find(config)?.is_none() => {
             return systems::view::outside(json, &c);
         }
         _ => {}
@@ -127,7 +128,7 @@ fn policy_views(
     json: bool,
     cmd: Option<systems::profiles::Cmd>,
 ) -> anyhow::Result<()> {
-    let (cfg, project) = match config::Config::locate(config)? {
+    let (cfg, project) = match config::Config::find(config)? {
         Some(path) => {
             let (cfg, path) = config::Config::load_at(&path)?;
             (cfg, Some(path))

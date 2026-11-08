@@ -219,7 +219,7 @@ pub trait Reader: Send {
 
 /// One harness. Implement it and add it to [`ALL`] to plug a CLI in.
 pub trait Harness: Sync + fmt::Debug {
-    /// Also its command name on `PATH`.
+    /// Also its program's name, as [`crate::config::Config::harness_programs`] looks it up.
     fn id(&self) -> &'static str;
     fn caps(&self) -> Caps;
     /// How a prompt addresses the model ("You are Claude").
@@ -277,11 +277,6 @@ pub fn by_id(id: &str) -> Result<&'static dyn Harness, Refusal> {
         let names: Vec<_> = ALL.iter().map(|h| h.id()).collect();
         Refusal(format!("unknown agent: {id}. Supported: {}", names.join(", ")))
     })
-}
-
-/// Whether the harness's command is on `PATH`.
-pub fn installed(h: &dyn Harness) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(h.id()).is_file()))
 }
 
 /// Control characters replaced, so a value cannot forge log lines or terminal escapes.

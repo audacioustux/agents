@@ -2666,3 +2666,78 @@ fn a_head_that_moves_during_a_review_makes_its_verdict_stale_and_the_new_head_is
     let r = events(&env).into_iter().find(|e| e["type"] == "reviewed").unwrap();
     assert_eq!(r["stale_head"], new_head, "{r}");
 }
+
+/// A caller's `PATH`: `dirs`, then the system's own (git, bwrap and the rest relay itself runs).
+fn caller_path(dirs: &[&Path]) -> std::ffi::OsString {
+    let system = ["/usr/bin", "/bin"].map(PathBuf::from);
+    std::env::join_paths(dirs.iter().map(|d| d.to_path_buf()).chain(system)).unwrap()
+}
+
+/// relay run as every test runs it, from a shell whose `PATH` is `path`, with `extra` variables.
+fn relay_from(env: &Env, path: &std::ffi::OsStr, extra: &[(&str, &str)], args: &[&str]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_relay"));
+    prepared(env, cmd.args(args)).env("PATH", path).envs(extra.iter().copied()).output().unwrap()
+}
+
+/// The harnesses `quota show --json` says relay may use, and those it names as missing their program.
+fn harnesses_seen(out: &Output) -> (Vec<String>, Vec<String>) {
+    ok(out, "quota show");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let names = |key: &str| -> Vec<String> {
+        v[key].as_array().into_iter().flatten().filter_map(|h| h.as_str().map(str::to_owned)).collect()
+    };
+    (names("harnesses"), names("missing"))
+}
+
+/// The project's `[harness.omp]` says only its model: relay must find the program itself.
+fn omp_by_name(env: &Env) {
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    let conf = conf.replace("[harness.omp]\nenabled = false\n", "[harness.omp]\nmodel = \"stub/m1\"\n");
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+}
+
+#[test]
+fn a_harness_found_once_is_found_from_a_shell_whose_path_lacks_it() {
+    let env = setup("programs", false);
+    omp_by_name(&env);
+    // omp lives where a version manager puts it, on the operator's PATH and nowhere else.
+    let bin = env.root.join("mise/installs/omp/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::copy(env.repo.join(".stub/omp"), bin.join("omp")).unwrap();
+    let (full, bare) = (caller_path(&[&bin]), caller_path(&[]));
+    let both = vec!["claude".to_owned(), "omp".to_owned()];
+    assert_eq!(harnesses_seen(&relay_from(&env, &full, &[], &["--json", "quota", "show"])).0, both);
+    // From a shell without it, relay still knows where omp is: the board, the queue and the
+    // dispatcher it wakes all see both harnesses.
+    assert_eq!(harnesses_seen(&relay_from(&env, &bare, &[], &["--json", "quota", "show"])), (both, vec![]));
+    let held = relay_from(&env, &bare, &[], &["queue", "add", "held", "--text", "x", "--readonly", "--harness", "omp"]);
+    ok(&held, "a job held to omp, queued from a shell without omp");
+    // A bare model has two harnesses to belong to, whichever shell names it.
+    let vague = relay_from(&env, &bare, &[], &["queue", "add", "vague", "--text", "x", "--model", "m2"]);
+    assert!(!vague.status.success() && stderr(&vague).contains("harness=model"), "{}", stderr(&vague));
+}
+
+#[test]
+fn a_configured_harness_whose_program_is_missing_is_shown_as_such_and_never_dropped() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = setup("no-program", false);
+    omp_by_name(&env);
+    let bin = env.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = caller_path(&[&bin]);
+    let look = |what: &str| {
+        let (usable, missing) = harnesses_seen(&relay_from(&env, &path, &[], &["--json", "quota", "show"]));
+        assert_eq!((usable, missing), (vec!["claude".to_owned()], vec!["omp".to_owned()]), "{what}");
+        let text = String::from_utf8_lossy(&relay_from(&env, &path, &[], &["quota", "show"]).stdout).into_owned();
+        assert!(text.lines().any(|l| l.contains("omp") && l.contains("program not found")), "{what}: {text}");
+    };
+    look("nowhere on this machine");
+    // A file of that name that cannot be run is not the program either.
+    std::fs::write(bin.join("omp"), "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(bin.join("omp"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    look("not executable");
+    // A job held to it is refused, and says why.
+    let out = relay_from(&env, &path, &[], &["queue", "add", "o", "--text", "x", "--readonly", "--harness", "omp"]);
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert!(stderr(&out).contains("program not found"), "{}", stderr(&out));
+}

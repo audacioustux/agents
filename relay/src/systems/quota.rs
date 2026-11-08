@@ -127,7 +127,7 @@ fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
 }
 
 fn read(ctx: &Ctx, home: &Home) -> Option<String> {
-    let inv = ctx.cfg.harness(home.harness).locate(harness_of(home).quota(home)?);
+    let inv = ctx.cfg.locate(home.harness, harness_of(home).quota(home)?).ok()?;
     let out = Command::new("timeout")
         .arg("90")
         .arg(&inv.program)
@@ -303,7 +303,21 @@ pub fn accounts_among<'a>(
     let found = accounts::discover(cfg);
     accounts::settle(&mut world, &found);
     let others: Vec<&World> = others.into_iter().collect();
-    view(cfg, &found, &world, &others, &seats_taken(others.iter().copied()), now_micros())
+    let mut v = view(cfg, &found, &world, &others, &seats_taken(others.iter().copied()), now_micros());
+    v.missing(&cfg.missing_harnesses());
+    v
+}
+
+impl AccountsView {
+    /// A row for each harness the project expects whose program is not found, never called ready.
+    fn missing(&mut self, missing: &[(&str, String)]) {
+        for (id, what) in missing {
+            let state = format!("program not found: {what}");
+            self.cells.push(vec![(*id).to_owned(), String::new(), state, String::new(), String::new()]);
+            self.ready.push(false);
+        }
+        self.json["missing"] = missing.iter().map(|(id, _)| *id).collect::<Vec<_>>().into();
+    }
 }
 
 /// The view of `found` in `world` (which has heard its neighbours), with the models the other

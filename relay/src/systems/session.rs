@@ -364,7 +364,8 @@ fn invocation(
         scratch: &work.scratch,
         inbox: work.inbox.path(),
     };
-    let mut inv = seat.conf.locate(seat.harness.invocation(seat.home, &task).map_err(|r| r.0)?);
+    let inv = seat.harness.invocation(seat.home, &task).map_err(|r| r.0)?;
+    let mut inv = ctx.cfg.locate(seat.harness.id(), inv).map_err(|r| r.0)?;
     inv.args.extend(seat.conf.extra_args.iter().map(OsString::from));
     Ok(inv)
 }
@@ -522,7 +523,8 @@ pub fn consult(
             scratch: &scratch,
             inbox: inbox.path(),
         };
-        let mut inv = conf.locate(harness.invocation(&home, &task).map_err(|r| anyhow::anyhow!(r.0))?);
+        let inv = harness.invocation(&home, &task).map_err(|r| anyhow::anyhow!(r.0))?;
+        let mut inv = ctx.cfg.locate(harness.id(), inv).map_err(|r| anyhow::anyhow!(r.0))?;
         inv.args.extend(conf.extra_args.iter().map(OsString::from));
         inv.write_files(&inbox).context("writing the prompt file")?;
         let mounts = Mounts {

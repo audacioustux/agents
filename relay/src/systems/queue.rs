@@ -538,7 +538,11 @@ fn dependencies(name: &str, asked: Vec<String>, jobs: &BTreeMap<String, Job>) ->
 /// pinned account's, or none (meaning any enabled harness).
 fn allowed_harnesses(ctx: &Ctx, asked: Vec<String>, account: Option<&str>) -> Result<Vec<String>> {
     let enabled: Vec<&str> = ctx.cfg.harnesses().iter().map(|h| h.id()).collect();
+    let missing = ctx.cfg.missing_harnesses();
     for h in &asked {
+        if let Some((_, what)) = missing.iter().find(|(id, _)| id == h) {
+            fail!(Refused, "harness {h}: program not found: {what} (set [harness.{h}] program to its path)");
+        }
         if !enabled.contains(&h.as_str()) {
             fail!(Refused, "harness {h} is not enabled here (enabled: {})", enabled.join(", "));
         }

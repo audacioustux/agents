@@ -130,7 +130,7 @@ impl<'a> Probe<'a> {
             inbox: &self.inbox,
         };
         let inv = harness_of(self.home).invocation(self.home, &task).map_err(|e| anyhow::anyhow!(e.0))?;
-        Ok(self.ctx.cfg.harness(self.home.harness).locate(inv))
+        self.ctx.cfg.locate(self.home.harness, inv).map_err(|e| anyhow::anyhow!(e.0))
     }
 
     fn checks(&self, plan: &[(PathBuf, Mount)], inv: &Invocation) -> Vec<Check> {

@@ -2808,3 +2808,19 @@ fn whoever_wakes_the_dispatcher_chooses_none_of_its_environment_nor_a_jobs() {
         std::fs::read_to_string(env.home.join(".claude.a/env")).unwrap().lines().map(str::to_owned).collect();
     leaked(&job, "the job");
 }
+
+#[test]
+fn outside_a_project_the_accounts_pane_is_machine_wide_and_calls_no_account_ready() {
+    let env = setup("machine-wide", false);
+    claude_account(&env.home, "solo", 40, false);
+    ok(&relay(&env, &["quota", "refresh"]), "a reading");
+    ok(&relay(&env, &["quota", "disable", "claude:solo"]), "disabled in the one project that uses it");
+    let inside = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
+    assert!(inside.lines().any(|l| l.contains("claude:solo") && l.contains("disabled")), "{inside}");
+    std::fs::remove_file(env.repo.join("relay.toml")).unwrap();
+    let outside = board(&env);
+    let accounts = outside.split_once("accounts").map(|(_, a)| a).unwrap_or_default();
+    assert!(accounts.contains("machine-wide"), "{outside}");
+    assert!(accounts.lines().any(|l| l.contains("claude:solo") && l.contains("40%")), "the shared reading: {outside}");
+    assert!(!accounts.contains("ready"), "no project's rules judged it: {outside}");
+}

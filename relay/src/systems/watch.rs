@@ -138,7 +138,7 @@ impl Handoff {
 
 fn read(scope: Scope<'_>, ui: &Ui) -> Result<Board> {
     let m = scope.read()?;
-    Ok(Board::new(scope.cfg, &m, m.accounts(scope.cfg), ui.shown.all, ui.shown.everywhere, now_micros()))
+    Ok(Board::new(scope.cfg, &m, m.accounts(scope.home), ui.shown.all, ui.shown.everywhere, now_micros()))
 }
 
 fn board_loop(

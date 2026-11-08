@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result};
 
 use crate::config::Config;
 use crate::ctx::Ctx;
-use crate::systems::quota::{AccountsView, accounts_among};
+use crate::systems::quota::{AccountsView, Rules, accounts_among};
 use crate::world::World;
 
 /// Where a board reads: the project relay runs in, if any, among every project on this machine.
@@ -75,11 +75,12 @@ impl Machine {
         self.projects.iter().filter(move |p| everywhere || p.own || !any_own)
     }
 
-    /// Every account's room, as all the projects know it, for every model their jobs ask for.
-    pub fn accounts(&self, cfg: &Config) -> AccountsView {
+    /// Every account's room, as all the projects know it, for every model their jobs ask for: judged
+    /// by the rules of the project relay runs in (`home`), or by none outside every project.
+    pub fn accounts(&self, home: Option<&Ctx>) -> AccountsView {
         let empty = World::default();
         let own = self.projects.iter().find(|p| p.own).map_or(&empty, |p| &p.world);
-        accounts_among(cfg, own, self.projects.iter().filter(|p| !p.own).map(|p| &p.world))
+        accounts_among(Rules::of(home), own, self.projects.iter().filter(|p| !p.own).map(|p| &p.world))
     }
 }
 

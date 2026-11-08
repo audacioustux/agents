@@ -201,6 +201,73 @@ pub fn kind(j: &Job) -> String {
     }
 }
 
+/// The model a job runs, as (harness, full id).
+///
+/// Which harnesses: the one of its account while it runs on it (running or checking), or after,
+/// while that harness is still among the job's (an empty list allows any); otherwise every one
+/// it may run on, which is all the enabled harnesses when it names none. A requeue or reroute
+/// that moves a job off its old account's harness thus shows the new harness at once.
+///
+/// Which model: [`crate::systems::dispatch::model_for`], the rule dispatch runs by, so a harness
+/// the job sets no model on shows the configured one. That needs the project's config (`cfg`),
+/// which only the project relay runs in has loaded: without it (another project's job in the
+/// every-project view) only the models the job itself names show, the defaults being unknown.
+pub fn models(cfg: Option<&Config>, j: &Job) -> Vec<(String, String)> {
+    let ran = j.account.as_deref().and_then(|a| a.split(':').next());
+    let narrowed =
+        ran.filter(|r| j.status.has_runner() || j.harnesses.is_empty() || j.harnesses.iter().any(|h| h == r));
+    let eligible: Vec<String> = match (narrowed, cfg) {
+        (Some(r), _) => vec![r.to_owned()],
+        (None, _) if !j.harnesses.is_empty() => j.harnesses.clone(),
+        (None, Some(cfg)) => cfg.harnesses().iter().map(|h| h.id().to_owned()).collect(),
+        (None, None) => j.models.keys().cloned().collect(),
+    };
+    eligible
+        .into_iter()
+        .filter_map(|h| {
+            let model = match cfg {
+                Some(cfg) => crate::systems::dispatch::model_for(cfg, j, &h),
+                None => j.models.get(&h).cloned(),
+            };
+            model.map(|m| (h, m))
+        })
+        .collect()
+}
+
+/// A model id short enough for a table, its version kept: the provider (`openai-codex/`) and a
+/// leading `claude-` dropped and a version's numbers joined by dots, so `claude-opus-5-5` is
+/// `opus-5.5`. An id that is a codename after `gpt-N-` is the codename, so `gpt-6-luna` is `luna`.
+pub fn short_model(id: &str) -> String {
+    let id = id.rsplit('/').next().unwrap_or(id);
+    let id = id.strip_prefix("claude-").unwrap_or(id);
+    if let Some((version, name)) = id.strip_prefix("gpt-").and_then(|r| r.split_once('-'))
+        && !version.is_empty()
+        && version.bytes().all(|b| b.is_ascii_digit())
+        && !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_alphabetic())
+    {
+        return name.to_owned();
+    }
+    let mut out = String::new();
+    let mut prev_number = false;
+    for part in id.split('-') {
+        let number = part.len() <= 2 && !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+        if !out.is_empty() {
+            out.push(if number && prev_number { '.' } else { '-' });
+        }
+        out.push_str(part);
+        prev_number = number;
+    }
+    out
+}
+
+/// A job's model cell: each model's short form, comma-separated.
+fn model_cell(cfg: Option<&Config>, j: &Job) -> String {
+    let mut shorts: Vec<String> = models(cfg, j).into_iter().map(|(_, m)| short_model(&m)).collect();
+    shorts.dedup();
+    shorts.join(",")
+}
+
 /// Why a queued job's profile holds it back now, by `max_running` or `max_per_day`.
 fn profile_hold(cfg: &Config, world: &World, j: &Job, now: u64) -> Option<String> {
     let name = j.profile.as_deref()?;
@@ -229,8 +296,8 @@ pub fn notes(j: &Job) -> Vec<String> {
     notes
 }
 
-/// A job's cells: name, status, account, profile (or model) with effort, since when, spend, disk,
-/// and its task with its [`reason`] and [`notes`].
+/// A job's cells: name, status, account, profile (or model) with effort, its model (short form),
+/// since when, spend, disk, and its task with its [`reason`] and [`notes`].
 pub fn job_cells(cfg: Option<&Config>, world: &World, j: &Job, now: u64) -> Vec<String> {
     let since = match j.status {
         crate::world::Status::Running | crate::world::Status::Checking => j.started_at,
@@ -244,6 +311,7 @@ pub fn job_cells(cfg: Option<&Config>, world: &World, j: &Job, now: u64) -> Vec<
         j.status.as_str().to_owned(),
         j.account.as_deref().or(j.pinned.as_deref()).unwrap_or("-").to_owned(),
         kind(j),
+        model_cell(cfg, j),
         since.map_or_else(|| "-".into(), |t| ago(now, t)),
         if j.cost_usd > 0.0 { format!("${:.2}", j.cost_usd) } else { String::new() },
         j.disk_bytes.filter(|_| j.status.has_runner()).map_or_else(String::new, crate::os::size_str),
@@ -469,7 +537,93 @@ fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
 
 #[cfg(test)]
 mod tests {
-    use super::{answer_in, board_order, fit, table};
+    use super::{answer_in, board_order, fit, models, short_model, table};
+
+    #[test]
+    fn a_model_id_is_short_and_keeps_its_version() {
+        for (id, short) in [
+            ("claude-opus-5-5", "opus-5.5"),
+            ("claude-sonnet-5-5", "sonnet-5.5"),
+            ("claude-haiku-4-5-20251001", "haiku-4.5-20251001"),
+            ("claude-3-5-sonnet", "3.5-sonnet"),
+            ("openai-codex/gpt-6-luna", "luna"),
+            ("gpt-6-luna", "luna"),
+            ("openai-codex/gpt-5.1-codex-max", "gpt-5.1-codex-max"),
+            ("gpt-4o", "gpt-4o"),
+            ("some-model", "some-model"),
+            ("", ""),
+        ] {
+            assert_eq!(short_model(id), short, "{id}");
+        }
+    }
+
+    /// A project config with both harnesses on, each with a default model.
+    fn both() -> (crate::config::tempdir::Dir, crate::config::Config) {
+        let dir = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let toml = "name = \"demo\"\n[harness.claude]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\n\
+                    [harness.omp]\nenabled = true\nmodel = \"openai-codex/gpt-6-luna\"\n";
+        let cfg = crate::config::Config::parse(toml, dir.path()).unwrap();
+        (dir, cfg)
+    }
+
+    fn pairs(v: Vec<(String, String)>) -> Vec<(&'static str, &'static str)> {
+        v.into_iter().map(|(h, m)| (&*h.leak(), &*m.leak())).collect()
+    }
+
+    #[test]
+    fn a_job_shows_every_model_it_may_run_on_until_an_account_is_the_one_that_ran() {
+        use crate::world::{Job, Status};
+        let mut j = Job::default();
+        j.models.insert("claude".into(), "claude-opus-5-5".into());
+        j.models.insert("omp".into(), "openai-codex/gpt-6-luna".into());
+        assert_eq!(pairs(models(None, &j)), [("claude", "claude-opus-5-5"), ("omp", "openai-codex/gpt-6-luna")]);
+        j.account = Some("omp:work".into());
+        j.status = Status::Running;
+        assert_eq!(pairs(models(None, &j)), [("omp", "openai-codex/gpt-6-luna")]);
+    }
+
+    #[test]
+    fn a_requeue_that_changes_harness_shows_the_new_models_not_the_old_accounts() {
+        use crate::world::{Job, Status};
+        // Ran on claude, then requeued onto omp: the old account stays on the job until dispatch.
+        let mut j = Job { status: Status::Queued, account: Some("claude:a".into()), ..Job::default() };
+        j.harnesses = vec!["omp".into()];
+        j.models.insert("omp".into(), "openai-codex/gpt-6-luna".into());
+        assert_eq!(pairs(models(None, &j)), [("omp", "openai-codex/gpt-6-luna")]);
+        assert_eq!(short_model(&models(None, &j)[0].1), "luna");
+        // While it is still running on that account, the account's harness is the one.
+        j.status = Status::Running;
+        j.harnesses = vec!["omp".into(), "claude".into()];
+        j.models.insert("claude".into(), "claude-opus-5-5".into());
+        assert_eq!(pairs(models(None, &j)), [("claude", "claude-opus-5-5")]);
+        // Ended with its harness still among the job's: that one ran.
+        j.status = Status::Done;
+        assert_eq!(pairs(models(None, &j)), [("claude", "claude-opus-5-5")]);
+    }
+
+    #[test]
+    fn a_harness_the_job_sets_no_model_on_shows_the_configured_one() {
+        use crate::world::{Job, Status};
+        let (_dir, cfg) = both();
+        // No overrides at all: every enabled harness's configured model.
+        let mut j = Job { status: Status::Queued, ..Job::default() };
+        assert_eq!(
+            pairs(models(Some(&cfg), &j)),
+            [("claude", "claude-sonnet-5-5"), ("omp", "openai-codex/gpt-6-luna")]
+        );
+        // A partial override leaves the other harness at its default.
+        j.harnesses = vec!["claude".into(), "omp".into()];
+        j.models.insert("claude".into(), "claude-opus-5-5".into());
+        assert_eq!(pairs(models(Some(&cfg), &j)), [("claude", "claude-opus-5-5"), ("omp", "openai-codex/gpt-6-luna")]);
+        // Without the project's config (another project's job), only the overrides show.
+        assert_eq!(pairs(models(None, &j)), [("claude", "claude-opus-5-5")]);
+        // The same rule as dispatch's, for the one that runs.
+        j.account = Some("omp:w".into());
+        j.status = Status::Running;
+        let want = crate::systems::dispatch::model_for(&cfg, &j, "omp").unwrap();
+        assert_eq!(models(Some(&cfg), &j), [("omp".to_owned(), want)]);
+    }
 
     #[test]
     fn the_board_sorts_by_status_then_the_latest_first() {

@@ -135,7 +135,7 @@ fn table_pane<R: AsRef<[String]>, S: Fn(usize) -> Style>(
     let bar = usize::from(pane.rows > pane.view);
     let mark = if selected.is_some() { MARK.chars().count() } else { 0 };
     let w = widths(cols, rows, usize::from(inner.width).saturating_sub(bar + mark), GAP.into());
-    let heading = Row::new(cols.iter().zip(&w).map(|(c, &w)| cut(c.head, w))).style(Style::new().bold().underlined());
+    let heading = Row::new(cols.iter().zip(&w).map(|(c, &w)| cut(c.head, w))).style(Style::new().bold());
     let shown = rows.iter().enumerate().skip(pane.offset).take(view).map(|(i, r)| {
         let st = if Some(i) == selected { style(i).add_modifier(Modifier::REVERSED) } else { style(i) };
         Row::new(r.as_ref().iter().zip(&w).map(|(s, &w)| cut(s, w))).style(st)

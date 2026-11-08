@@ -351,6 +351,34 @@ fn a_check_follows_nothing_the_session_planted() {
     assert!(!env.home.join("escaped").exists(), "the check's /tmp was the home the session linked to");
 }
 
+/// Audit finding 4: protected config an account does not have yet was not mounted at all, so its
+/// session could create it: a `settings.json` with a hook, a `hooks/` script, or a new omp profile that
+/// relay would then discover as an account. Each now gets a read-only placeholder.
+#[test]
+fn protected_config_an_account_lacks_cannot_be_created_by_its_session() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("plant-config", true);
+    omp_default(&env.home, 20, false);
+    claude_account(&env.home, "a", 50, false);
+    let acct = env.home.join(".claude.a");
+    assert!(!acct.join("settings.json").exists() && !acct.join("hooks").exists(), "the account has neither");
+    ok(&relay(&env, &["probe"]), "probe");
+    let text = "[plant-config] Look.";
+    ok(&relay(&env, &["queue", "add", "c", "--text", text, "--readonly", "--harness", "claude"]), "queue");
+    assert_eq!(wait_for(&env, "c")["status"], "done");
+    let settings = std::fs::read_to_string(acct.join("settings.json")).unwrap_or_default();
+    assert!(!settings.contains("hooks"), "the session wrote the account's settings.json: {settings}");
+    assert!(!acct.join("hooks/pwn.sh").exists(), "the session wrote a hook");
+
+    ok(&relay(&env, &["queue", "add", "o", "--text", "[plant-profile] Look.", "--readonly", "--harness", "omp"]), "q");
+    assert_eq!(wait_for(&env, "o")["status"], "done");
+    assert!(!env.home.join(".omp/profiles/evil").exists(), "the session made a profile");
+    let quota = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
+    assert!(!quota.contains("omp:evil"), "{quota}");
+}
+
 #[test]
 fn projects_on_one_machine_share_what_they_read_of_an_account() {
     let env = setup("shared", false);

@@ -85,7 +85,10 @@ impl Harness for Omp {
             "natives",
             "security",
         ];
-        CONFIG.iter().map(|c| home.dir.join(c)).collect()
+        // The default profile is `~/.omp`, which holds every other profile: a session there that could
+        // make `profiles/<name>` would have relay discover it as an account.
+        let profiles = (home.label == "default").then(|| home.dir.join("profiles"));
+        CONFIG.iter().map(|c| home.dir.join(c)).chain(profiles).collect()
     }
 
     fn invocation(&self, home: &Home, task: &Task<'_>) -> Result<Invocation, Refusal> {

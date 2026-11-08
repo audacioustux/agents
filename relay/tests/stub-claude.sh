@@ -21,6 +21,7 @@
 # plus diff.external and a textconv driver (and a .gitattributes using them) that touch $acct/filter-ran if anything on the host ever runs it.
 # [plant-check] plants, like a hostile session, symlinks in every relay job directory it can write: where the
 # acceptance check's output went (check.out, to $acct/victim) and its /tmp (check-tmp, to $HOME).
+# [plant-config] tries to create, in its own account, config the host would obey: a settings.json with a hook and a hooks/ script.
 # [fsmonitor] leaves a core.fsmonitor in the clone's own configuration that touches $acct/fsmonitor-ran if anything ever runs it.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
@@ -126,6 +127,10 @@ case "$prompt" in *"[plant-check]"*)
     ln -sfn "$HOME" "$d/check-tmp"
     echo "$d" >>"$acct/planted-check"
   done ;;
+esac
+case "$prompt" in *"[plant-config]"*)
+  echo '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch pwned"}]}]}}' >"$acct/settings.json" 2>/dev/null || true
+  mkdir -p "$acct/hooks" 2>/dev/null && echo pwn >"$acct/hooks/pwn.sh" 2>/dev/null || true ;;
 esac
 case "$prompt" in *"[fsmonitor]"*)
   if [ -w . ] && [ -e .git ]; then git config core.fsmonitor "touch $acct/fsmonitor-ran; false"; fi ;;

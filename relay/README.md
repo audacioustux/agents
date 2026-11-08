@@ -771,8 +771,12 @@ Each session runs under `bwrap`. It sees the machine read-only, except for:
   does not stop a connection to a socket.
 - **Writable**: its own clone and job directory, and its own account, except
   what in it the host later runs or obeys (claude's settings, hooks, plugins,
-  skills and scripts; omp's config, agents, extensions and natives), which is
-  mounted back read-only.
+  skills and scripts; omp's config, agents, extensions and natives, and the
+  default profile's `profiles`, where new accounts would appear), which is
+  mounted back read-only. One the account does not have yet is protected too: relay
+  makes it empty first (an empty directory, an empty file, `{}` for a `.json`) and
+  mounts that read-only, so the session cannot be the one to create it. These
+  empty stand-ins stay in the account afterwards, and mean what their absence did.
 - **Read-only: the job's inbox** (`<job>.in` in the jobs directory), where relay
   writes what it hands the session, such as omp's prompt file. relay never writes
   in a directory a session can write, since a symlink planted there would take the
@@ -829,7 +833,7 @@ and build jobs its edits-only mode.
 harness: every hidden path is empty and no socket, with a control proving it
 exists outside, and no hidden directory is writable; `/dev/shm` is writable within its cap
 (or not at all at `shm_mb = 0`); every writable one is writable
-and every read-only one is not; `/tmp` is relay's directory on disk;
+and every read-only one (placeholders and the inbox included) is not; `/tmp` is relay's directory on disk;
 and every cache shows relay's directory, not the host's.
 
 relay's state directory is owner-only, since it holds briefs, answers and

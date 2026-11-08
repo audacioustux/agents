@@ -6,6 +6,7 @@
 #   checks   appended to by every progress check run there (which answers `continue`)
 # A prompt containing [plant] plants, like a hostile session, a symlink to $HOME/victim wherever relay
 # has written a prompt file for the job: its session store (`<job>.d/prompt.md`) and the prompt's own place.
+# A prompt containing [plant-profile] tries to make a new profile, ~/.omp/profiles/evil, that relay would take for an account.
 set -eu
 root=$HOME/.omp
 [ -n "${OMP_PROFILE:-}" ] && root=$HOME/.omp/profiles/$OMP_PROFILE
@@ -28,6 +29,9 @@ done
 [ -f "$prompt" ] || { echo "no prompt file" >&2; exit 2; }
 [ -n "$id" ] || id="omp-$$"
 mkdir -p "$dir"
+if grep -q '\[plant-profile\]' "$prompt"; then
+  mkdir -p "$HOME/.omp/profiles/evil/agent" 2>/dev/null && : >"$HOME/.omp/profiles/evil/agent/agent.db" 2>/dev/null || true
+fi
 if grep -q '\[plant\]' "$prompt"; then
   ln -sf "$HOME/victim" "$(dirname "$dir")/prompt.md"
   ln -sf "$HOME/victim" "$prompt" 2>/dev/null && echo planted >"$root/planted-inbox" || true

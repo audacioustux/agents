@@ -148,7 +148,9 @@ impl<'a> Probe<'a> {
         }
         let paths = |want: fn(&Mount) -> bool| plan.iter().filter(move |(_, k)| want(k)).map(|(p, _)| p);
         let writable = paths(|k| matches!(k, Mount::Writable | Mount::From(_))).map(|p| format!("test -w {}", q(p)));
-        let read_only = paths(|k| *k == Mount::ReadOnly).map(|p| format!("! test -w {}", q(p)));
+        // A placeholder is read-only too: protected config the account does not have yet stays uncreatable.
+        let read_only =
+            paths(|k| matches!(k, Mount::ReadOnly | Mount::Placeholder { .. })).map(|p| format!("! test -w {}", q(p)));
         // Each cache shows relay's directory, which holds the marker, not the host's.
         let caches = plan.iter().filter_map(|(p, k)| match k {
             Mount::From(_) => Some(format!("test -e {}", q(&p.join(cache_marker())))),

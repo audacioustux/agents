@@ -166,7 +166,7 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   click selects a job or focuses a pane; each key in the bottom line can be clicked.
   The job pane counts wrapped rows, so End shows the last line of any answer.
 - **The job pane** starts with the whole task, then where the job stands, what it
-  runs as, what it waits for or why it ended, its checks, reviews and notes, any
+  runs as (the profile, the full model id and the effort), what it waits for or why it ended, its checks, reviews and notes, any
   decision waiting on it, what its session is doing now, and its answer with
   headings bold and markdown markers dropped. Enter hands it to `$PAGER` (`less` by
   default) and takes the terminal back after. Only the selected job's log and
@@ -179,7 +179,8 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   own config would name is left out.
 - **What stays put.** The selection follows a job by name as rows move; a failed
   read keeps the last good board with the cause in red in the title, and the next
-  read retries; columns are a fixed set, each capped and cut with `…`; an empty list
+  read retries; columns are a fixed set (project when every project shows, job, state,
+  account, as, **model**, since, spent, disk, task), each capped and cut with `…`; an empty list
   says what `a` (older jobs) or `p` would show. `?` lists the keys and colours.
 - **The terminal.** `q`, Esc, Ctrl-C, SIGTERM, SIGHUP and SIGINT give it back; the
   board takes the mouse, so hold Shift to select text. A reinstalled relay takes
@@ -243,7 +244,10 @@ state, and both run anywhere: outside a project (no `--config`, `$RELAY_CONFIG` 
 `relay.toml` above) they show the policy alone, checked as a project would check it
 (`config show` prints `project  none`).
 `relay view status` and `view watch` show a job's profile where it has one, else
-the model it names; `--json` carries both (`profile`, `models`), and each job's `kind` (`build`, `read` or `review`), `readonly` and `acceptance` (`none`, a `check`, a `check-red-first` or the job it is a `review-of`).
+the model it names, and in a `model` column after it the model the job runs, short
+(`claude-opus-5-5` is `opus-5.5`, `openai-codex/gpt-6-luna` is `luna`): the harness
+of its account once it has one, else every harness it may run on, comma-separated;
+the job pane has the full id and the effort. `--json` carries both (`profile`, `models`), and each job's `kind` (`build`, `read` or `review`), `readonly` and `acceptance` (`none`, a `check`, a `check-red-first` or the job it is a `review-of`).
 
 ## Hooks
 

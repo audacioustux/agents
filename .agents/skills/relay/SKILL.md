@@ -79,7 +79,10 @@ briefs that share a preamble all look alike.
 For a person watching, `relay view watch` is the live board (`?` lists its keys,
 `p` shows every project); an agent reads `view status --json` and waits with
 `view result --wait`, never by watching the board. Outside a project both boards
-show every project on the machine.
+show every project on the machine. The board's `model` column (after `as`, the profile
+and effort) is the model each job runs in short form, `opus-5.5` for `claude-opus-5-5`; a job
+with no account yet lists every harness's model, and `--model` or a fork can make it differ from
+its profile's. `view status --json` has the full ids (`models`) and `effort`.
 
 **Acceptance.** A build is judged by what it declares, not by its own report:
 

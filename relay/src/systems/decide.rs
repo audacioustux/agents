@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -634,7 +634,8 @@ pub fn decide(
         Handler::Agent(a) => ask_agent(ctx, job, a, req),
         Handler::Command(argv) => {
             let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
-            ask_command(argv, req, Duration::from_secs(ctx.cfg.hooks.command_timeout_seconds), &deny)
+            let env = ctx.environ().without(&deny);
+            ask_command(argv, req, Duration::from_secs(ctx.cfg.hooks.command_timeout_seconds), &env)
         }
         Handler::Orchestrator => ask_orchestrator(ctx, req),
     };
@@ -691,18 +692,13 @@ fn ask_agent(ctx: &Ctx, job: &Job, a: &Agent, req: &Request) -> Said {
 const COMMAND_ANSWER_BYTES: u64 = 64 * 1024;
 
 /// Runs an external handler with the request on stdin, bounded by `timeout`
-/// (then killed 5 s later if it ignores the TERM), with no variable `deny`
-/// matches and at most `COMMAND_ANSWER_BYTES` of answer. A cost it reports is
-/// counted, never below zero.
-fn ask_command(argv: &[String], req: &Request, timeout: Duration, deny: &regex::Regex) -> Said {
+/// (then killed 5 s later if it ignores the TERM), in `env` and nothing else
+/// (relay's own, less what `sandbox.env_deny` matches) and with at most
+/// `COMMAND_ANSWER_BYTES` of answer. A cost it reports is counted, never below zero.
+fn ask_command(argv: &[String], req: &Request, timeout: Duration, env: &crate::host::Environ) -> Said {
     let run = || -> Result<String> {
-        let mut cmd = Command::new("timeout");
+        let mut cmd = env.command("timeout");
         cmd.args(["-k", "5"]).arg(timeout.as_secs().max(1).to_string()).args(argv);
-        for (k, _) in std::env::vars_os() {
-            if deny.is_match(&k.to_string_lossy()) {
-                cmd.env_remove(k);
-            }
-        }
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -994,6 +990,7 @@ pub fn earlier(world: &World, job: &Job) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::process::Command;
 
     use super::*;
 
@@ -1273,7 +1270,8 @@ mod tests {
             vec![p.display().to_string()]
         };
         let r = req(Point::Cap, 0.0, 1.0);
-        let none = regex::Regex::new("^$").unwrap();
+        let full = crate::host::Environ::of([("PATH", "/usr/bin:/bin"), ("HOME", "/h")]);
+        let none = full.without(&regex::Regex::new("^$").unwrap());
         let t = Duration::from_secs(1);
         let neg = script("neg", r#"echo '{"action": "stop", "why": "w", "cost_usd": -5}'"#);
         let s = ask_command(&neg, &r, t, &none);
@@ -1281,7 +1279,8 @@ mod tests {
         let big = script("big", "yes '{}' | head -c 200000");
         assert!(ask_command(&big, &r, t, &none).why.contains("more than"));
         let env = script("env", r#"echo "{\"action\": \"stop\", \"why\": \"[$HOME]\"}""#);
-        assert_eq!(ask_command(&env, &r, t, &regex::Regex::new("^HOME$").unwrap()).why, "[]");
+        assert_eq!(ask_command(&env, &r, t, &none).why, "[/h]", "the environment it is given");
+        assert_eq!(ask_command(&env, &r, t, &full.without(&regex::Regex::new("^HOME$").unwrap())).why, "[]");
         let stubborn = script("stubborn", "trap '' TERM\nwhile :; do sleep 1; done");
         let started = std::time::Instant::now();
         assert_eq!(ask_command(&stubborn, &r, t, &none).action, Action::Defer);

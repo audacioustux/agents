@@ -13,6 +13,7 @@ use crate::world::{AccountState, World};
 /// A reading older than this is refreshed before it is trusted.
 pub const STALE_MICROS: u64 = 10 * 60 * 1_000_000;
 
+#[allow(clippy::disallowed_methods, reason = "whose home is the caller's choice; children are told it")]
 pub fn home() -> PathBuf {
     std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }

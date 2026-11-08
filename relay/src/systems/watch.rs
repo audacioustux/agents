@@ -204,6 +204,7 @@ fn board_loop(
 /// Hands `text` to `$PAGER` (else `less`) with the terminal given back for as long as it runs,
 /// then takes the terminal again, whatever the pager did.
 fn page(terminal: &mut DefaultTerminal, text: &str, handoff: &Handoff) -> Result<()> {
+    #[allow(clippy::disallowed_methods, reason = "the person at the terminal chooses their pager")]
     let pager = std::env::var("PAGER").ok().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "less".into());
     execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;

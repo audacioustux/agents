@@ -196,8 +196,13 @@ impl Policy {
     pub fn path() -> Option<(PathBuf, bool)> {
         match std::env::var_os("RELAY_POLICY").filter(|p| !p.is_empty()) {
             Some(p) => Some((PathBuf::from(p), true)),
-            None => std::env::var_os("HOME").map(|h| (PathBuf::from(h).join(POLICY_FILE), false)),
+            None => std::env::var_os("HOME").map(|h| (Self::default_in(Path::new(&h)), false)),
         }
+    }
+
+    /// Where the policy is when `$RELAY_POLICY` names none, for a user whose home is `home`.
+    pub fn default_in(home: &Path) -> PathBuf {
+        home.join(POLICY_FILE)
     }
 
     /// The policy file, optional unless `$RELAY_POLICY` names it.
@@ -642,6 +647,7 @@ impl Config {
 
     /// `--config`, else `$RELAY_CONFIG`, else the nearest `relay.toml` at or above the
     /// current directory; `None` when there is none of these.
+    #[allow(clippy::disallowed_methods, reason = "which project is the caller's choice")]
     pub fn find(explicit: Option<&Path>) -> Result<Option<PathBuf>> {
         match explicit.map(Path::to_path_buf).or_else(|| std::env::var_os("RELAY_CONFIG").map(PathBuf::from)) {
             Some(p) => Ok(Some(p)),

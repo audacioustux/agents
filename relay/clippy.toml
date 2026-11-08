@@ -1,0 +1,10 @@
+# The caller's environment is not a machine fact (audit finding 5): whoever woke the dispatcher
+# used to choose every job's PATH, TZ and GIT_DIR. Children get `host::Environ`; a read of the
+# caller's own variables is allowed only where that choice is the point, each with its reason.
+disallowed-methods = [
+    { path = "std::env::var", reason = "the caller's environment: build from config with host::Environ, or allow it with a reason" },
+    { path = "std::env::var_os", reason = "the caller's environment: build from config with host::Environ, or allow it with a reason" },
+    { path = "std::env::vars", reason = "the caller's environment: build from config with host::Environ" },
+    { path = "std::env::vars_os", reason = "the caller's environment: build from config with host::Environ" },
+    { path = "std::env::home_dir", reason = "use accounts::home(), the one reading of the caller's home" },
+]

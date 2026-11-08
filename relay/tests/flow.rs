@@ -3,6 +3,8 @@
 //! (with its history on the same harness, afresh across harnesses), a build
 //! job committing on its own branch, and landing that branch.
 
+#![allow(clippy::disallowed_methods, reason = "a test reads its own switches and passes its PATH on by config")]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
@@ -125,8 +127,13 @@ fn setup(tag: &str, omp: bool) -> Env {
         repo.join("relay.toml"),
         format!(
             "name = \"flow\"\n[limits]\nmin_free_disk_gb = 0\n[session]\nnice = 0\n\
-             [harness.claude]\nprogram = \"{}\"\n{omp_conf}",
-            stub("claude")
+             [harness.claude]\nprogram = \"{}\"\n{omp_conf}\
+             [session.env]\nPATH = {:?}\n{}",
+            stub("claude"),
+            // Where this machine keeps bwrap and the rest, and who commits, is config, never the
+            // caller's: this runner's PATH, and the test identity (the sandbox hides the test home).
+            std::env::var("PATH").unwrap(),
+            identity().map(|(k, v)| format!("{k} = {v:?}\n")).concat(),
         ),
     )
     .unwrap();
@@ -887,6 +894,16 @@ fn a_home_with_no_sign_in_is_never_chosen() {
 fn configure(env: &Env, limits: &str, extra: &str) {
     let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
     let conf = conf.replace("[limits]\n", &format!("[limits]\n{limits}"));
+    // `[session.env]` is already there (PATH): its variables go under that one header.
+    let header = "[session.env]\n";
+    let (extra, vars) = match extra.split_once(header) {
+        Some((before, after)) => {
+            let end = after.find("\n[").map_or(after.len(), |i| i + 1);
+            (format!("{before}{}", &after[end..]), &after[..end])
+        }
+        None => (extra.to_owned(), ""),
+    };
+    let conf = conf.replace(header, &format!("{header}{vars}"));
     std::fs::write(env.repo.join("relay.toml"), format!("{conf}{extra}")).unwrap();
 }
 
@@ -2740,4 +2757,54 @@ fn a_configured_harness_whose_program_is_missing_is_shown_as_such_and_never_drop
     let out = relay_from(&env, &path, &[], &["queue", "add", "o", "--text", "x", "--readonly", "--harness", "omp"]);
     assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
     assert!(stderr(&out).contains("program not found"), "{}", stderr(&out));
+}
+
+/// The environment of the dispatcher serving `env`'s project, once one runs (bounded).
+fn dispatcher_environ(env: &Env) -> Vec<String> {
+    let config = env.repo.join("relay.toml").canonicalize().unwrap();
+    let wanted = |cmdline: &[u8]| {
+        let args: Vec<&[u8]> = cmdline.split(|&b| b == 0).collect();
+        args.windows(2).any(|w| w == [b"dispatch".as_slice(), b"serve".as_slice()])
+            && args.iter().any(|a| *a == config.as_os_str().as_encoded_bytes())
+    };
+    for _ in 0..100 {
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            let dir = entry.path();
+            if std::fs::read(dir.join("cmdline")).is_ok_and(|c| wanted(&c)) {
+                let environ = std::fs::read(dir.join("environ")).unwrap_or_default();
+                return environ.split(|&b| b == 0).map(|v| String::from_utf8_lossy(v).into_owned()).collect();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("no dispatcher for {}", config.display());
+}
+
+#[test]
+fn whoever_wakes_the_dispatcher_chooses_none_of_its_environment_nor_a_jobs() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("environ", false);
+    configure(&env, "", "[session.env]\nFROM_CONFIG = \"yes\"\n");
+    claude_account(&env.home, "a", 10, false);
+    let theirs = env.root.join("callers-own-bin");
+    std::fs::create_dir_all(&theirs).unwrap();
+    let caller = [("RELAY_LEAK", "1"), ("TZ", "Pacific/Kiritimati"), ("GIT_WORK_TREE", "/nonexistent")];
+    let out =
+        relay_from(&env, &caller_path(&[&theirs]), &caller, &["queue", "add", "env", "--text", "[env]", "--readonly"]);
+    ok(&out, "queue from an odd shell");
+    let leaked = |vars: &[String], what: &str| {
+        for v in vars {
+            let name = v.split('=').next().unwrap_or_default();
+            assert!(!["RELAY_LEAK", "TZ", "GIT_WORK_TREE"].contains(&name), "{what} inherited {v}");
+            assert!(!v.contains("callers-own-bin"), "{what} inherited {v}");
+        }
+        assert!(vars.iter().any(|v| v == "FROM_CONFIG=yes"), "{what} lacks session.env: {vars:?}");
+    };
+    leaked(&dispatcher_environ(&env), "the dispatcher");
+    assert_eq!(wait_for(&env, "env")["status"], "done");
+    let job: Vec<String> =
+        std::fs::read_to_string(env.home.join(".claude.a/env")).unwrap().lines().map(str::to_owned).collect();
+    leaked(&job, "the job");
 }

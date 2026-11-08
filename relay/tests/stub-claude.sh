@@ -15,6 +15,7 @@
 #   tmp-fs, hidden-write, shm-write, shm-over  written by a brief containing [tmpcheck]: /tmp's filesystem type, whether a write into a hidden directory worked, and whether /dev/shm takes a small write and refuses 5 MiB
 #   rereview  the verdict (accept|reject) of a review that relay resumed after its reject (default accept)
 #   cargo    appended to with every session's CARGO_INCREMENTAL (`unset` when it has none)
+#   env      the session's whole environment, sorted, written by a brief containing [env]
 # A brief containing [idle] makes no commit; one containing [status-done] reports status: done;
 # [verdict-accept] and [verdict-reject] also give a review's verdict; [uncommitted] leaves a changed tracked
 # file and an untracked one behind after its commit; [filter] leaves a clean filter in the clone's own configuration
@@ -101,6 +102,7 @@ case "$prompt" in
 *"Judge its branch again"*) final="FINAL\\nstatus: done\\nverdict: $(cat "$acct/rereview" 2>/dev/null || echo accept)" ;;
 esac
 printf '%s\n--\n' "$prompt" >>"$acct/prompts"
+case "$prompt" in *"[env]"*) env | sort >"$acct/env" ;; esac
 case "$prompt" in *"[idle]"*) ;; *)
 if [ -w . ] && [ -e .git ]; then
   echo "work $sid $turns" >relay-output.txt

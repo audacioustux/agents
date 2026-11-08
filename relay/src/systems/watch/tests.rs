@@ -162,6 +162,33 @@ fn the_board_fits_80x24_and_120x40_with_headings_keys_and_a_zoned_clock() {
     }
 }
 
+/// The heading row is bold and not underlined (an underline breaks at the column gaps), and the rows
+/// are neither, so without colour bold alone tells them apart.
+#[test]
+fn the_heading_is_bold_without_an_underline_and_the_rows_are_plain() {
+    use ratatui::style::Modifier;
+    let f = two_jobs();
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    let mut t = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    t.draw(|fr| draw(fr, &b, &mut ui)).unwrap();
+    let buf = t.backend().buffer().clone();
+    let at = |y: u16, x: u16| buf[(x, y)].modifier;
+    let fr = frame(&b, &mut ui, 120, 40);
+    let head = row_of(&fr, "state");
+    let x = u16::try_from(fr[usize::from(head)].find("state").unwrap()).unwrap();
+    assert!(at(head, x).contains(Modifier::BOLD), "the heading is bold");
+    for y in [head, row_of(&fr, "Build the thing")] {
+        for x in 0..120 {
+            assert!(!at(y, x).contains(Modifier::UNDERLINED), "no underline at {x},{y}");
+        }
+    }
+    let row = row_of(&fr, "Look at it");
+    let x = u16::try_from(fr[usize::from(row)].find("done").unwrap()).unwrap();
+    assert!(!at(row, x).contains(Modifier::BOLD), "a row is not bold");
+}
+
 #[test]
 fn every_project_adds_a_column_and_each_projects_counts() {
     let f = two_jobs();

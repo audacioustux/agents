@@ -158,7 +158,7 @@ pub fn run(a: &Args, json: bool) -> Result<u8> {
 
     let resume = a.resume();
     let new_session_id = if resume.is_some() { String::new() } else { uuid::Uuid::now_v7().to_string() };
-    let stamp = jiff::Timestamp::now().strftime("%Y-%m-%dT%H-%M-%S").to_string();
+    let stamp = crate::os::local(jiff::Timestamp::now()).strftime("%Y-%m-%dT%H-%M-%S%z").to_string();
     let name = session_name(a.agent, a.mode.as_str(), &stamp);
     // A private dir for a prompt file, removed when the call ends.
     let scratch = std::env::temp_dir().join(format!("relay-ask-{}-{}", std::process::id(), new_session_id));

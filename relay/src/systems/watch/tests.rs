@@ -360,7 +360,7 @@ fn decisions_waiting_are_a_badge_and_a_pane() {
         steps: Vec::new(),
         action: None,
     };
-    f.machine.projects[0].world.decisions.insert(d.id.clone(), d);
+    f.machine.projects[0].world.decisions.insert(d.id.clone(), d.clone());
     let mut ui = Ui::new(false, false, true);
     let b = f.board(&ui, 1);
     ui.sync(&b);
@@ -369,6 +369,14 @@ fn decisions_waiting_are_a_badge_and_a_pane() {
     assert!(fr.iter().any(|l| l.contains("decisions waiting · relay decide answer")));
     assert!(fr.iter().any(|l| l.contains("build-cap-1")));
     assert!(fr.iter().any(|l| l.contains("decision waiting at cap")), "the job's pane says so too");
+    // At 80 columns a long job name still leaves the deadline whole, zone included.
+    let long =
+        Decision { id: "a-rather-long-decision-id-0042".into(), job: "a-rather-long-job-name-x".into(), ..d.clone() };
+    f.machine.projects[0].world.decisions.insert(long.id.clone(), long);
+    let b80 = f.board(&ui, 1);
+    let at = crate::systems::decide::clock(NOW + 600_000_000);
+    let fr80 = frame(&b80, &mut ui, 80, 24);
+    assert!(fr80.iter().any(|l| l.contains("a-rather-long") && l.contains(&at)), "{at} whole at 80 columns: {fr80:#?}");
     ui.apply(Action::Cycle(1), &b);
     assert_eq!(ui.focus, Id::Decisions, "the pane takes focus in its turn");
 }

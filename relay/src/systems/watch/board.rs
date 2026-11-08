@@ -67,12 +67,13 @@ const fn col(head: &'static str, cap: usize) -> Column {
 }
 
 /// The jobs' columns, the project's first when the board shows every project.
-const JOBS: [Column; 9] = [
+const JOBS: [Column; 10] = [
     col("project", 16),
     col("job", 28),
     col("state", 8),
     col("account", 20),
     col("as", 18),
+    col("model", 16),
     col("since", 5),
     col("spent", 8),
     col("disk", 7),
@@ -182,10 +183,7 @@ fn head(cfg: &Config, p: &Project, j: &Job, waiting: &[&Decision], now: u64) -> 
     }
     stand.extend(j.branch.clone());
     let mut head = vec![stand.join(" · ")];
-    let kind = view::kind(j);
-    if !kind.is_empty() {
-        head.push(format!("as {kind}"));
-    }
+    head.extend(runs_as(j));
     if let Some(r) = view::reason(p.own.then_some(cfg), &p.world, j, now) {
         head.push(if j.status == Status::Queued { r } else { format!("why: {r}") });
     }
@@ -199,6 +197,20 @@ fn head(cfg: &Config, p: &Project, j: &Job, waiting: &[&Decision], now: u64) -> 
         ));
     }
     head
+}
+
+/// What a job runs as, for its pane: its profile (else nothing, the model says it), the full model
+/// id (with its harness when several are still possible) and the effort.
+fn runs_as(j: &Job) -> Option<String> {
+    let models = view::models(j);
+    let model = match models.as_slice() {
+        [] => None,
+        [(_, m)] => Some(format!("model {m}")),
+        many => Some(format!("model {}", many.iter().map(|(h, m)| format!("{h}: {m}")).collect::<Vec<_>>().join(", "))),
+    };
+    let parts: Vec<String> =
+        j.profile.iter().cloned().chain(model).chain(j.effort.as_ref().map(|e| format!("effort {e}"))).collect();
+    (!parts.is_empty()).then(|| format!("as {}", parts.join(" · ")))
 }
 
 /// `2 running, 1 queued`, or for every project each one's counts after its name.

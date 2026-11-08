@@ -201,6 +201,51 @@ pub fn kind(j: &Job) -> String {
     }
 }
 
+/// The model a job runs, as (harness, full id): the one on the harness of its account once it has
+/// one, else every harness it may still run on.
+pub fn models(j: &Job) -> Vec<(&str, &str)> {
+    let ran = j.account.as_deref().and_then(|a| a.split(':').next());
+    j.models
+        .iter()
+        .filter(|(h, _)| ran.is_none_or(|r| r == h.as_str()))
+        .map(|(h, m)| (h.as_str(), m.as_str()))
+        .collect()
+}
+
+/// A model id short enough for a table, its version kept: the provider (`openai-codex/`) and a
+/// leading `claude-` dropped and a version's numbers joined by dots, so `claude-opus-5-5` is
+/// `opus-5.5`. An id that is a codename after `gpt-N-` is the codename, so `gpt-6-luna` is `luna`.
+pub fn short_model(id: &str) -> String {
+    let id = id.rsplit('/').next().unwrap_or(id);
+    let id = id.strip_prefix("claude-").unwrap_or(id);
+    if let Some((version, name)) = id.strip_prefix("gpt-").and_then(|r| r.split_once('-'))
+        && !version.is_empty()
+        && version.bytes().all(|b| b.is_ascii_digit())
+        && !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_alphabetic())
+    {
+        return name.to_owned();
+    }
+    let mut out = String::new();
+    let mut prev_number = false;
+    for part in id.split('-') {
+        let number = part.len() <= 2 && !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+        if !out.is_empty() {
+            out.push(if number && prev_number { '.' } else { '-' });
+        }
+        out.push_str(part);
+        prev_number = number;
+    }
+    out
+}
+
+/// A job's model cell: each model's short form, comma-separated.
+fn model_cell(j: &Job) -> String {
+    let mut shorts: Vec<String> = models(j).into_iter().map(|(_, m)| short_model(m)).collect();
+    shorts.dedup();
+    shorts.join(",")
+}
+
 /// Why a queued job's profile holds it back now, by `max_running` or `max_per_day`.
 fn profile_hold(cfg: &Config, world: &World, j: &Job, now: u64) -> Option<String> {
     let name = j.profile.as_deref()?;
@@ -229,8 +274,8 @@ pub fn notes(j: &Job) -> Vec<String> {
     notes
 }
 
-/// A job's cells: name, status, account, profile (or model) with effort, since when, spend, disk,
-/// and its task with its [`reason`] and [`notes`].
+/// A job's cells: name, status, account, profile (or model) with effort, its model (short form),
+/// since when, spend, disk, and its task with its [`reason`] and [`notes`].
 pub fn job_cells(cfg: Option<&Config>, world: &World, j: &Job, now: u64) -> Vec<String> {
     let since = match j.status {
         crate::world::Status::Running | crate::world::Status::Checking => j.started_at,
@@ -244,6 +289,7 @@ pub fn job_cells(cfg: Option<&Config>, world: &World, j: &Job, now: u64) -> Vec<
         j.status.as_str().to_owned(),
         j.account.as_deref().or(j.pinned.as_deref()).unwrap_or("-").to_owned(),
         kind(j),
+        model_cell(j),
         since.map_or_else(|| "-".into(), |t| ago(now, t)),
         if j.cost_usd > 0.0 { format!("${:.2}", j.cost_usd) } else { String::new() },
         j.disk_bytes.filter(|_| j.status.has_runner()).map_or_else(String::new, crate::os::size_str),
@@ -469,7 +515,36 @@ fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
 
 #[cfg(test)]
 mod tests {
-    use super::{answer_in, board_order, fit, table};
+    use super::{answer_in, board_order, fit, models, short_model, table};
+
+    #[test]
+    fn a_model_id_is_short_and_keeps_its_version() {
+        for (id, short) in [
+            ("claude-opus-5-5", "opus-5.5"),
+            ("claude-sonnet-5-5", "sonnet-5.5"),
+            ("claude-haiku-4-5-20251001", "haiku-4.5-20251001"),
+            ("claude-3-5-sonnet", "3.5-sonnet"),
+            ("openai-codex/gpt-6-luna", "luna"),
+            ("gpt-6-luna", "luna"),
+            ("openai-codex/gpt-5.1-codex-max", "gpt-5.1-codex-max"),
+            ("gpt-4o", "gpt-4o"),
+            ("some-model", "some-model"),
+            ("", ""),
+        ] {
+            assert_eq!(short_model(id), short, "{id}");
+        }
+    }
+
+    #[test]
+    fn a_job_shows_every_model_it_may_run_on_until_an_account_is_the_one_that_ran() {
+        use crate::world::Job;
+        let mut j = Job::default();
+        j.models.insert("claude".into(), "claude-opus-5-5".into());
+        j.models.insert("omp".into(), "openai-codex/gpt-6-luna".into());
+        assert_eq!(models(&j), [("claude", "claude-opus-5-5"), ("omp", "openai-codex/gpt-6-luna")]);
+        j.account = Some("omp:work".into());
+        assert_eq!(models(&j), [("omp", "openai-codex/gpt-6-luna")]);
+    }
 
     #[test]
     fn the_board_sorts_by_status_then_the_latest_first() {

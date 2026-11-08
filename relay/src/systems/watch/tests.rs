@@ -31,6 +31,15 @@ fn job(name: &str, status: Status, ago_s: u64, task: &str) -> Job {
     }
 }
 
+/// `j` as the profile `build-critical` at effort `high`, on claude's opus and omp's luna.
+fn modelled(mut j: Job) -> Job {
+    j.profile = Some("build-critical".into());
+    j.effort = Some("high".into());
+    j.models.insert("claude".into(), "claude-opus-5-5".into());
+    j.models.insert("omp".into(), "openai-codex/gpt-6-luna".into());
+    j
+}
+
 fn world(jobs: &[Job]) -> World {
     let mut w = World::default();
     for j in jobs {
@@ -113,7 +122,13 @@ fn two_jobs() -> Fixture {
 
 #[test]
 fn the_board_fits_80x24_and_120x40_with_headings_keys_and_a_zoned_clock() {
-    let f = two_jobs();
+    let f = fixture(
+        &[
+            modelled(job("build", Status::Running, 180, "Build the thing")),
+            modelled(Job { account: None, ..job("look", Status::Done, 7200, "Look at it") }),
+        ],
+        &[job("theirs", Status::Queued, 60, "Their task")],
+    );
     for (w, h) in [(80, 24), (120, 40)] {
         let mut ui = Ui::new(false, false, true);
         let b = f.board(&ui, 2);
@@ -129,7 +144,20 @@ fn the_board_fits_80x24_and_120x40_with_headings_keys_and_a_zoned_clock() {
         }
         assert!(fr.iter().any(|l| l.contains("claude:a1")), "the accounts");
         assert_eq!(b.accounts[0][3], "-", "an empty cell says so");
+        // The model column follows `as`; the short form shows in the row, and the harness that ran
+        // (claude) narrows a job with an account, while one without shows both.
+        let heading = fr[1].find("as ").expect("as");
+        assert!(fr[1][heading..].contains("model"), "{w}x{h}: {}", fr[1]);
+        let run = &fr[row_of(&fr, "Build the") as usize];
+        assert!(run.contains("opus-5.5") && !run.contains("luna"), "{w}x{h}: {run}");
+        let ended = &fr[row_of(&fr, "Look at") as usize];
+        // Where space is tight the cell is cut with `…`, as every column is; the cell itself is whole.
+        assert!(ended.contains(if w == 80 { "opus-5.5,l…" } else { "opus-5.5,luna" }), "{w}x{h}: {ended}");
+        assert!(b.jobs.iter().any(|e| e.cells[4] == "opus-5.5,luna"), "{:?}", b.jobs);
+        assert!(run.find("build-crit").unwrap() < run.find("opus-5.5").unwrap());
         let task = row_of(&fr, "┌ build ");
+        let pane = fr[usize::from(task)..].join("\n");
+        assert!(pane.contains("as build-critical · model claude-opus-5-5 · effort high"), "{w}x{h}: {pane}");
         assert!(fr[usize::from(task) + 1].contains("Build the thing"), "the job pane starts with its task");
     }
 }
@@ -337,7 +365,7 @@ fn the_selected_row_is_marked_without_colour() {
     let b = f.board(&ui, 1);
     ui.sync(&b);
     let fr = frame(&b, &mut ui, 80, 24);
-    assert!(fr[row_of(&fr, "Build the thing") as usize].contains("› build"), "{fr:#?}");
+    assert!(fr[row_of(&fr, "Build the") as usize].contains("› build"), "{fr:#?}");
     assert!(!fr[row_of(&fr, "Look at it") as usize].contains('›'));
 }
 

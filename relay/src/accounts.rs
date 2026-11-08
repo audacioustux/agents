@@ -136,7 +136,8 @@ fn fmt_left(secs: i64) -> String {
 }
 
 pub fn fmt_time(unix_s: i64) -> String {
-    jiff::Timestamp::from_second(unix_s).map_or_else(|_| "?".into(), |t| t.strftime("%b %-d %H:%MZ").to_string())
+    jiff::Timestamp::from_second(unix_s)
+        .map_or_else(|_| "?".into(), |t| crate::os::local(t).strftime("%b %-d %H:%M %Z").to_string())
 }
 
 /// Higher is better: room left per day until reset, for the tightest meter,

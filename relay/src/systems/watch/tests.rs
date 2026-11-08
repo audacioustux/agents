@@ -136,7 +136,12 @@ fn the_board_fits_80x24_and_120x40_with_headings_keys_and_a_zoned_clock() {
         ui.sync(&b);
         let fr = frame(&b, &mut ui, w, h);
         assert!(fr[0].contains("demo · 1 running"), "{w}x{h}: {}", fr[0]);
-        assert!(fr[0].trim_end_matches(['┓', '┐']).trim_end().ends_with('Z'), "the clock says its zone: {}", fr[0]);
+        let zone = crate::os::local(jiff::Timestamp::now()).strftime("%Z").to_string();
+        assert!(
+            fr[0].trim_end_matches(['┓', '┐']).trim_end().ends_with(&zone),
+            "the clock says its local zone: {}",
+            fr[0]
+        );
         assert!(fr[1].contains("job") && fr[1].contains("state") && fr[1].contains("task"), "headings: {}", fr[1]);
         assert!(!fr.iter().any(|l| l.contains("Their task")), "one project by default");
         let keys = &fr[usize::from(h) - 1];

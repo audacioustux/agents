@@ -164,7 +164,7 @@ fn board_loop(
             match read(scope, ui) {
                 Ok(b) => {
                     (board, ui.error) = (b, None);
-                    good_at = jiff::Timestamp::now().strftime("%H:%M:%SZ").to_string();
+                    good_at = crate::os::local(jiff::Timestamp::now()).strftime("%H:%M:%S %Z").to_string();
                 }
                 Err(e) => ui.error = Some(format!("read failed (board as of {good_at}): {e:#}")),
             }

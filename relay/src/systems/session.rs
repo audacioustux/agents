@@ -243,7 +243,7 @@ fn seat<'a>(ctx: &Ctx, job: &Job, found: &'a [Home]) -> Step<Seat<'a>> {
     };
     let harness = harness_of(home);
     let conf = ctx.cfg.harness(harness.id());
-    let model = job.models.get(harness.id()).cloned().or_else(|| conf.model.clone());
+    let model = crate::systems::dispatch::model_for(&ctx.cfg, job, harness.id());
     if let Some(reason) = model.as_deref().and_then(|m| ctx.cfg.session.banned(m)) {
         return ControlFlow::Break((Outcome::Failed, Some(format!("model banned: {reason}"))));
     }

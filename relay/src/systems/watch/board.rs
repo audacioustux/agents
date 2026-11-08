@@ -183,7 +183,7 @@ fn head(cfg: &Config, p: &Project, j: &Job, waiting: &[&Decision], now: u64) -> 
     }
     stand.extend(j.branch.clone());
     let mut head = vec![stand.join(" · ")];
-    head.extend(runs_as(j));
+    head.extend(runs_as(p.own.then_some(cfg), j));
     if let Some(r) = view::reason(p.own.then_some(cfg), &p.world, j, now) {
         head.push(if j.status == Status::Queued { r } else { format!("why: {r}") });
     }
@@ -201,8 +201,8 @@ fn head(cfg: &Config, p: &Project, j: &Job, waiting: &[&Decision], now: u64) -> 
 
 /// What a job runs as, for its pane: its profile (else nothing, the model says it), the full model
 /// id (with its harness when several are still possible) and the effort.
-fn runs_as(j: &Job) -> Option<String> {
-    let models = view::models(j);
+fn runs_as(cfg: Option<&Config>, j: &Job) -> Option<String> {
+    let models = view::models(cfg, j);
     let model = match models.as_slice() {
         [] => None,
         [(_, m)] => Some(format!("model {m}")),

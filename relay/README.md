@@ -246,7 +246,7 @@ state, and both run anywhere: outside a project (no `--config`, `$RELAY_CONFIG` 
 `relay view status` and `view watch` show a job's profile where it has one, else
 the model it names, and in a `model` column after it the model the job runs, short
 (`claude-opus-5-5` is `opus-5.5`, `openai-codex/gpt-6-luna` is `luna`): the harness
-of its account once it has one, else every harness it may run on, comma-separated;
+of its account while it runs (or once it has run, while that harness is still one of the job's), else every harness it may run on, comma-separated; a harness the job names no model on shows its configured one (another project's job shows only the models it names);
 the job pane has the full id and the effort. `--json` carries both (`profile`, `models`), and each job's `kind` (`build`, `read` or `review`), `readonly` and `acceptance` (`none`, a `check`, a `check-red-first` or the job it is a `review-of`).
 
 ## Hooks

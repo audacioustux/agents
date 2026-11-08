@@ -35,6 +35,7 @@ fn job(name: &str, status: Status, ago_s: u64, task: &str) -> Job {
 fn modelled(mut j: Job) -> Job {
     j.profile = Some("build-critical".into());
     j.effort = Some("high".into());
+    j.harnesses = vec!["claude".into(), "omp".into()];
     j.models.insert("claude".into(), "claude-opus-5-5".into());
     j.models.insert("omp".into(), "openai-codex/gpt-6-luna".into());
     j

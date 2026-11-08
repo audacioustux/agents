@@ -349,7 +349,11 @@ impl Ctx {
     /// user's global configuration included (so git-lfs does not run either). Diff drivers
     /// (`diff.external`, textconv) are not neutralised here: a caller that shows a diff passes
     /// `--no-ext-diff --no-textconv`.
-    pub fn git_untrusted(dir: &Path) -> Command {
+    ///
+    /// It takes a [`SessionRepo`], and a [`SessionRepo`] gives git to nothing else: holding a session's
+    /// repository is what makes this the only way to run git in it.
+    pub fn git_untrusted(repo: &SessionRepo) -> Command {
+        let dir = repo.path();
         let mut c = Self::git(dir);
         c.args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]).env("GIT_CONFIG_NOSYSTEM", "1");
         // Every filter the repository's configuration defines is emptied (an empty command is no filter),
@@ -370,6 +374,37 @@ impl Ctx {
 }
 
 use std::os::unix::process::CommandExt;
+
+/// A repository a session could write: a build job's clone, or a tree checked out from one. Its
+/// configuration, hooks and attributes are the session's, so the host runs git in it only through
+/// [`SessionRepo::git`] ([`Ctx::git_untrusted`]), never [`Ctx::git`], which obeys them (a `git status`
+/// runs `core.fsmonitor`, outside the sandbox). Recorded as a plain path.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SessionRepo(PathBuf);
+
+impl SessionRepo {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self(dir.into())
+    }
+
+    /// Where it is, for what is not git run in it: a mount, a size, a removal, the source of a fetch run
+    /// in a repository relay trusts.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// git, run in it as [`Ctx::git_untrusted`] runs it.
+    pub fn git(&self) -> Command {
+        Ctx::git_untrusted(self)
+    }
+
+    /// The commit `rev` names in it.
+    pub fn rev(&self, rev: &str) -> Option<String> {
+        let out = self.git().args(["rev-parse", "--verify", "--quiet", rev]).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|s| !s.is_empty())
+    }
+}
 
 #[cfg(test)]
 mod git_tests {
@@ -414,7 +449,7 @@ mod git_tests {
         });
         // ... the untrusted one does not, and still adds the file.
         run({
-            let mut c = Ctx::git_untrusted(&dir);
+            let mut c = SessionRepo::new(&dir).git();
             c.args(["add", "-A"]);
             c
         });

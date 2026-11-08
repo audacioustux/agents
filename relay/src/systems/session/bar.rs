@@ -12,9 +12,9 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
-use super::{checkpoint_rev, command, layer_env, port};
+use super::{command, layer_env, port};
 use crate::bus::{BarResult, SessionEvent};
-use crate::ctx::Ctx;
+use crate::ctx::{Ctx, SessionRepo};
 use crate::harness::{Home, Invocation};
 use crate::sandbox::Mounts;
 use crate::systems::checkpoint;
@@ -55,9 +55,9 @@ struct Ran {
 
 /// Runs the job's check on its branch tip (and, for a revert control, at its base), and records
 /// `bar-checked` for the commit it read, which is read once and checked as it was.
-pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &Path, scratch: &Path) -> Result<CheckRun> {
+pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, scratch: &Path) -> Result<CheckRun> {
     let command = job.check().context("a check was asked of a job that declares none")?.to_owned();
-    let tip = checkpoint_rev(dir, "HEAD");
+    let tip = dir.rev("HEAD");
     let head = match &tip {
         Some(tip) => at(ctx, home, &command, dir, tip, scratch),
         None => broke("the clone has no commit to check"),
@@ -98,7 +98,7 @@ pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &Path, scratch: &Path)
 }
 
 /// The check at the commit the branch started from.
-fn at_base(ctx: &Ctx, job: &Job, home: &Home, command: &str, dir: &Path, scratch: &Path) -> Ran {
+fn at_base(ctx: &Ctx, job: &Job, home: &Home, command: &str, dir: &SessionRepo, scratch: &Path) -> Ran {
     match job.base.clone().or_else(|| checkpoint::base(dir, &[]).head) {
         Some(base) => at(ctx, home, command, dir, &base, scratch),
         None => broke("no base commit is known for the revert control"),
@@ -110,7 +110,7 @@ fn broke(why: &str) -> Ran {
 }
 
 /// Runs `command` on a clean checkout of `rev` from the clone `source`.
-fn at(ctx: &Ctx, home: &Home, command: &str, source: &Path, rev: &str, scratch: &Path) -> Ran {
+fn at(ctx: &Ctx, home: &Home, command: &str, source: &SessionRepo, rev: &str, scratch: &Path) -> Ran {
     let tree = scratch.join("check-tree");
     let _ = std::fs::remove_dir_all(&tree);
     let ran = match checkout(source, rev, &tree) {
@@ -122,17 +122,18 @@ fn at(ctx: &Ctx, home: &Home, command: &str, source: &Path, rev: &str, scratch: 
 }
 
 /// A fresh clone of `source` at `rev` in `into`: its history, its objects, none of its configuration,
-/// hooks or working tree.
-fn checkout(source: &Path, rev: &str, into: &Path) -> Result<()> {
+/// hooks or working tree. The tree checked out is the session's work, attributes and all, so it is a
+/// [`SessionRepo`] too.
+fn checkout(source: &SessionRepo, rev: &str, into: &Path) -> Result<()> {
     let git = |mut c: Command, what: &str| -> Result<()> {
         let out = c.output().with_context(|| what.to_owned())?;
         anyhow::ensure!(out.status.success(), "{what}: {}", String::from_utf8_lossy(&out.stderr).trim());
         Ok(())
     };
-    let mut clone = Ctx::git_untrusted(source);
-    clone.args(["clone", "--quiet", "--local", "--no-checkout"]).arg(source).arg(into);
+    let mut clone = source.git();
+    clone.args(["clone", "--quiet", "--local", "--no-checkout"]).arg(source.path()).arg(into);
     git(clone, "git clone")?;
-    let mut switch = Ctx::git_untrusted(into);
+    let mut switch = SessionRepo::new(into).git();
     switch.args(["checkout", "--quiet", "--detach", rev]);
     git(switch, "git checkout")
 }

@@ -19,6 +19,7 @@
 # [verdict-accept] and [verdict-reject] also give a review's verdict; [uncommitted] leaves a changed tracked
 # file and an untracked one behind after its commit; [filter] leaves a clean filter in the clone's own configuration
 # plus diff.external and a textconv driver (and a .gitattributes using them) that touch $acct/filter-ran if anything on the host ever runs it.
+# [fsmonitor] leaves a core.fsmonitor in the clone's own configuration that touches $acct/fsmonitor-ran if anything ever runs it.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
 case " $* " in
@@ -116,6 +117,9 @@ case "$prompt" in *"[filter]"*)
     printf '*.txt filter=evil diff=x\n' >.gitattributes
     echo y >extra.txt
   fi ;;
+esac
+case "$prompt" in *"[fsmonitor]"*)
+  if [ -w . ] && [ -e .git ]; then git config core.fsmonitor "touch $acct/fsmonitor-ran; false"; fi ;;
 esac
 # printf, not echo: dash's echo turns \n into a real newline and splits the JSON line.
 printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"ran on %s with %s transcript turns\\n%s","num_turns":1,"total_cost_usd":%s}\n' "$sid" "$(basename "$acct")" "$turns" "$final" "$cost"

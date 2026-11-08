@@ -1251,6 +1251,30 @@ fn a_done_clone_is_removed_with_its_unfetched_commits_rescued_and_the_job_can_re
     assert_eq!(log.matches("stub work").count(), 2, "the resumed clone started from the rescued work: {log}");
 }
 
+/// Audit finding 2: gc reads a clone the session wrote, configuration and all, so it must not run
+/// what that configuration names. The session plants a `core.fsmonitor`; gc's pass over its clone
+/// (`git status` before it removes it) must not run it on the host.
+#[test]
+fn gc_never_runs_a_program_the_sessions_clone_names() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("gc-fsmonitor", false);
+    configure(&env, "", "[gc]\nclones_after_days = 0\n");
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "planted", "--text", "[fsmonitor] Make a change."]), "queue");
+    assert_eq!(wait_for(&env, "planted")["status"], "done");
+    let dir = workdir(&env, "planted");
+    let fsmonitor = Command::new("git").arg("-C").arg(&dir).args(["config", "core.fsmonitor"]).output().unwrap();
+    assert!(out_of(&fsmonitor).contains("fsmonitor-ran"), "the session planted its fsmonitor");
+    let ran = env.home.join(".claude.a/fsmonitor-ran");
+    assert!(!ran.exists(), "nothing ran it before gc");
+
+    let text = out_of(&relay(&env, &["land", "gc"]));
+    assert!(text.contains("gc: removed") && !dir.exists(), "gc still checks and removes the clone: {text}");
+    assert!(!ran.exists(), "gc ran the clone's core.fsmonitor on the host");
+}
+
 #[test]
 fn an_old_log_is_gzipped_and_still_read_by_view_result() {
     if !have_bwrap() {

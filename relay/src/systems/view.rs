@@ -505,7 +505,7 @@ fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
         out!("review by {} at {}: {}", v.reviewer, v.commit.get(..12).unwrap_or(&v.commit), v.summary());
     }
     if let (Some(b), Some(w)) = (&j.branch, &j.workdir) {
-        out!("branch {b} in {}   bring it here: relay land fetch {name}", w.display());
+        out!("branch {b} in {}   bring it here: relay land fetch {name}", w.path().display());
     }
     out!("log {}\n", log.display());
     out!("{}", answer.as_deref().map_or("(no result yet)", str::trim_end));

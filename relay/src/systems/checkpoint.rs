@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::bus::{Check, CheckVerdict};
 use crate::config::Limits;
-use crate::ctx::Ctx;
+use crate::ctx::SessionRepo;
 
 /// The largest diff the check is shown whole.
 const MAX_DIFF: usize = 12 * 1024;
@@ -48,8 +48,8 @@ pub struct Point {
 /// The clone is the worker's to write, so this runs git as [`Ctx::git_untrusted`] does (no hooks, fsmonitor or
 /// filter drivers); the commands that show diffs also pass `--no-ext-diff --no-textconv`, since a diff
 /// driver (`diff.external`, `diff.<name>.textconv`) is a program the clone's configuration could name.
-fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Option<String> {
-    let mut c = Ctx::git_untrusted(dir);
+fn git(dir: &SessionRepo, args: &[&str], index: Option<&Path>) -> Option<String> {
+    let mut c = dir.git();
     c.args(args);
     if let Some(i) = index {
         c.env("GIT_INDEX_FILE", i);
@@ -60,7 +60,7 @@ fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Option<String> {
 
 /// The clone in `dir` now, its uncommitted and untracked files included,
 /// read through a scratch `index` so the clone's own index is untouched.
-pub fn point(dir: &Path, index: &Path) -> Point {
+pub fn point(dir: &SessionRepo, index: &Path) -> Point {
     let head = git(dir, &["rev-parse", "HEAD"], None);
     let _ = std::fs::remove_file(index);
     let tree = git(dir, &["read-tree", "HEAD"], Some(index))
@@ -71,7 +71,7 @@ pub fn point(dir: &Path, index: &Path) -> Point {
 }
 
 /// Where the last checkpoint left the clone, or where its branch forked.
-pub fn base(dir: &Path, earlier: &[Check]) -> Point {
+pub fn base(dir: &SessionRepo, earlier: &[Check]) -> Point {
     if let Some(c) = earlier.last() {
         return Point { head: c.head.clone(), tree: c.tree.clone() };
     }
@@ -96,7 +96,7 @@ pub fn bounded(text: &str, max: usize) -> String {
 }
 
 /// The branch's log since `from`, with its diff when that is small.
-pub fn evidence(dir: &Path, from: &Point, now: &Point) -> String {
+pub fn evidence(dir: &SessionRepo, from: &Point, now: &Point) -> String {
     let range = from.head.as_deref().map(|h| format!("{h}..HEAD"));
     let mut args = vec!["log", "--stat", "--no-ext-diff", "--no-textconv", "--format=commit %h %s"];
     args.push(range.as_deref().unwrap_or("-20"));

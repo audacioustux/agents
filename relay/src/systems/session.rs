@@ -18,7 +18,7 @@ use clap::Subcommand;
 use crate::accounts::{self, harness_of};
 use crate::bus::{Action, Check, CheckVerdict, Outcome, Point, SessionEvent, now_micros, secs};
 use crate::config::HarnessConf;
-use crate::ctx::Ctx;
+use crate::ctx::{Ctx, SessionRepo};
 use crate::harness::report::{Ending, Report, Verdict, verdict};
 use crate::harness::{Harness, Home, Invocation, Permissions, Reader, Session, Task};
 use crate::os;
@@ -150,7 +150,7 @@ struct Seat<'a> {
 /// The job's workspace: its clone (a build job), where the session stands, its scratch directory,
 /// and its `/tmp` (on disk).
 struct Workspace {
-    clone: Option<PathBuf>,
+    clone: Option<SessionRepo>,
     cwd: PathBuf,
     scratch: PathBuf,
     tmp: PathBuf,
@@ -194,7 +194,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         budget_usd: job.budget_usd,
         log: "log.ndjson",
         stderr: "stderr.log",
-        measure: work.clone.iter().chain([&work.tmp]).map(PathBuf::as_path).collect(),
+        measure: work.clone.iter().map(SessionRepo::path).chain([work.tmp.as_path()]).collect(),
     };
     let (report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader())?;
@@ -208,7 +208,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     }
     let ran = Ran {
         report: &report,
-        dir: work.clone.as_deref(),
+        dir: work.clone.as_ref(),
         scratch: &work.scratch,
         brief: &launch.brief,
         reviewing: launch.reviewing.as_ref(),
@@ -262,7 +262,11 @@ fn workspace(ctx: &Ctx, job: &Job) -> Result<Step<Workspace>> {
         port(ctx, job).emit(SessionEvent::Cloned { job: job.name.clone(), workdir: dir.clone(), branch, base })?;
         clone_dir = Some(dir);
     }
-    let cwd = if job.readonly() { ctx.cfg.repo.clone() } else { clone_dir.clone().unwrap_or_default() };
+    let cwd = if job.readonly() {
+        ctx.cfg.repo.clone()
+    } else {
+        clone_dir.as_ref().map(|c| c.path().to_path_buf()).unwrap_or_default()
+    };
     let scratch = ctx.job_scratch(&job.name);
     std::fs::create_dir_all(&scratch)?;
     let tmp = ctx.job_tmp(&job.name);
@@ -316,7 +320,7 @@ fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home
     inv.write_files().context("writing the prompt file")?;
     let mounts = Mounts {
         home: seat.home,
-        workdir: work.clone.as_deref(),
+        workdir: work.clone.as_ref().map(SessionRepo::path),
         scratch: &work.scratch,
         tmp: &work.tmp,
         cwd: &work.cwd,
@@ -373,7 +377,7 @@ fn forkable(job: &Job, found: &[Home], home: &Home, cwd: &Path) -> Option<Ended>
 /// What a finished run left, for the decision that follows it.
 struct Ran<'a> {
     report: &'a Report,
-    dir: Option<&'a Path>,
+    dir: Option<&'a SessionRepo>,
     scratch: &'a Path,
     brief: &'a str,
     /// For a review: the branch it read.
@@ -884,7 +888,7 @@ pub fn bases(world: &World, job: &Job) -> Vec<(String, PathBuf, String)> {
         if j.readonly() {
             todo.extend(&j.after);
         } else if let (Some(dir), Some(branch)) = (&j.workdir, &j.branch) {
-            out.push((n.clone(), dir.clone(), branch.clone()));
+            out.push((n.clone(), dir.path().to_path_buf(), branch.clone()));
         }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -922,7 +926,8 @@ fn clone(
     name: &str,
     bases: &[(String, PathBuf, String)],
     ran: bool,
-) -> Result<(PathBuf, String, Option<String>)> {
+) -> Result<(SessionRepo, String, Option<String>)> {
+    // Relay's own until the session starts, so plain git; from then on the session's (`SessionRepo`).
     let dir = ctx.clones.join(name);
     let branch = format!("{}{name}", ctx.cfg.session.branch_prefix);
     std::fs::create_dir_all(&ctx.clones)?;
@@ -971,10 +976,10 @@ fn clone(
     if made.is_err() {
         let _ = std::fs::remove_dir_all(&dir);
     }
-    made.map(|base| (dir, branch, base))
+    made.map(|base| (SessionRepo::new(dir), branch, base))
 }
 
-/// The commit `rev` names in `dir`.
+/// The commit `rev` names in `dir`, a repository relay trusts (for a session's, [`SessionRepo::rev`]).
 fn checkpoint_rev(dir: &Path, rev: &str) -> Option<String> {
     let out = Ctx::git(dir).args(["rev-parse", "--verify", rev]).output().ok().filter(|o| o.status.success())?;
     Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
@@ -1006,7 +1011,7 @@ mod disk_tests {
 
 #[cfg(test)]
 mod base_tests {
-    use std::path::PathBuf;
+    use crate::ctx::SessionRepo;
 
     use super::{bases, pick_base};
     use crate::world::{Job, World};
@@ -1016,7 +1021,7 @@ mod base_tests {
         let build = |n: &str, after: &[&str]| Job {
             name: n.into(),
             after: after.iter().map(|a| (*a).to_owned()).collect(),
-            workdir: Some(PathBuf::from(format!("/c/{n}"))),
+            workdir: Some(SessionRepo::new(format!("/c/{n}"))),
             branch: Some(format!("job/{n}")),
             ..Job::default()
         };

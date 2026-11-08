@@ -593,6 +593,9 @@ a totals line, and a `collected` event per clone removed or emptied:
   into `refs/relay/rescue/<job>` and says so. A clone with uncommitted work
   (build outputs aside) is kept, and the line says why. A job whose clone is gone
   is resumed from that rescue ref (else its fetched branch).
+  The session wrote the clone's `.git/config`, so gc reads it as relay reads every
+  clone after its session starts: with no hooks, `core.fsmonitor` or filter drivers,
+  so nothing the clone names runs on the host.
 - **Logs**: `<job>.log.ndjson` of a job that is not live, older than
   `logs_gzip_after_days`, becomes `.log.ndjson.gz` (a later run's output is
   appended as another gzip member). `view result`, `view watch` and every

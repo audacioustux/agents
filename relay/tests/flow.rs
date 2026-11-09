@@ -1104,6 +1104,84 @@ fn the_orchestrator_answers_a_parked_decision_and_its_silence_falls_through() {
     assert_eq!(steps, [("orchestrator", "defer"), ("rule", "accept")], "{d}");
 }
 
+/// The id of the decision parked for `name`, by `decide list --wait` (bounded), with what else is listed.
+fn parked(env: &Env, name: &str) -> (String, serde_json::Value) {
+    for _ in 0..50 {
+        let mut cmd = Command::new("timeout");
+        cmd.args(["60", env!("CARGO_BIN_EXE_relay"), "decide", "list", "--wait", "--timeout", "50", "--json"]);
+        let out = relay_cmd(env, &mut cmd);
+        ok(&out, "decide list --wait");
+        let listed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let found = listed["pending"].as_array().unwrap().iter().find(|p| p["job"] == name).cloned();
+        if let Some(p) = found {
+            return (p["id"].as_str().unwrap().to_owned(), listed);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    panic!("no decision parked for {name}");
+}
+
+/// Whether a process holds the flock at `path` (`flock -n` cannot take it).
+fn locked(path: &Path) -> bool {
+    !Command::new("flock").arg("-n").arg(path).arg("true").status().unwrap().success()
+}
+
+/// Audit findings 8 and 18: a parked decision is answerable only while the attempt it asks about
+/// is the job's current one and the runner waiting for it is alive; a job whose runner died while
+/// parked keeps the dispatcher awake until it is reaped.
+#[test]
+fn a_decision_for_a_resumed_job_or_a_dead_runner_is_refused_and_the_job_is_reaped() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("stale-decision", false);
+    let hooks = "[hooks]\nended = [\"orchestrator\"]\norchestrator_timeout_minutes = 5.0\n";
+    configure(&env, "job_ceiling_usd = 5.0\n", hooks);
+    claude_account(&env.home, "a", 10, false);
+
+    // Resumed by hand while parked: the follow-up would be queued for an attempt that is gone.
+    ok(&relay(&env, &["queue", "add", "moved", "--text", "Make a change."]), "queue");
+    let (stale, _) = parked(&env, "moved");
+    ok(&relay(&env, &["queue", "resume", "moved", "--message", "Go on."]), "resume");
+    let out = relay(&env, &["decide", "answer", &stale, "--action", "follow-up", "--brief", "More."]);
+    // Refused as stale, or as closed once the old runner noticed and stopped waiting.
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    // The resumed run parks a decision of its own; the stale one is never listed again.
+    let (fresh, listed) = loop {
+        let (id, listed) = parked(&env, "moved");
+        if id != stale {
+            break (id, listed);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(!listed.to_string().contains(&format!("\"{stale}\"")), "{listed}");
+    ok(&relay(&env, &["decide", "answer", &fresh, "--action", "accept"]), "answer the current one");
+    assert_eq!(wait_for(&env, "moved")["status"], "done");
+    assert!(job(&env, "moved-next").is_null(), "no follow-up was queued");
+
+    // The runner dies while parked: nothing would carry an answer out.
+    ok(&relay(&env, &["queue", "add", "orphan", "--text", "Make a change."]), "queue");
+    let (id, _) = parked(&env, "orphan");
+    assert_eq!(job(&env, "orphan")["status"], "checking");
+    let pid = job(&env, "orphan")["runner"][0].as_u64().unwrap();
+    assert!(Command::new("kill").args(["-9", &pid.to_string()]).status().unwrap().success());
+    let out = relay(&env, &["decide", "answer", &id, "--action", "accept"]);
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    // Refused for the dead runner, or, once the dispatcher reaped it, for the failed job.
+    let why = stderr(&out);
+    assert!(why.contains("runner has died") || why.contains("now failed (attempt 1)"), "{why}");
+    let listed = relay(&env, &["decide", "list", "--json"]);
+    assert!(!out_of(&listed).contains(&id), "{}", out_of(&listed));
+    // Past the dispatcher's idle minute the job is reaped, or a dispatcher is still there to reap it.
+    std::thread::sleep(Duration::from_secs(65));
+    let reaped = job(&env, "orphan")["status"] == "failed";
+    assert!(reaped || locked(&env.root.join("state/relay/flow/dispatch.lock")), "checking with no dispatcher");
+    // Any event wakes it; it reaps the job and the one queued after it is blocked.
+    ok(&relay(&env, &["queue", "add", "poke", "--text", "After.", "--readonly", "--after", "orphan"]), "queue");
+    until(&env, "orphan", "failed");
+    assert_eq!(job(&env, "orphan")["reason"], "session runner died without reporting");
+}
+
 #[test]
 fn a_command_decides_at_a_cap_a_bad_answer_defers_and_a_big_budget_is_bounded() {
     if !have_bwrap() {

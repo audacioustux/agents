@@ -205,10 +205,10 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
         port.emit(DispatchEvent::Dispatched { job, account, runner_pid: pid, runner_started: started })?;
         drop(gate);
     }
-    // A job blocked on a dependency that ended badly waits for the operator, not for the dispatcher.
     let held_due = ask_held(ctx, &world, &held)?;
-    let busy =
-        world.jobs.values().any(|j| j.status == Status::Running || j.status == Status::Queued && !world.blocked(j));
+    // A job blocked on a dependency that ended badly waits for the operator, not for the dispatcher;
+    // one held by a runner (checking too) is watched until it ends or is reaped.
+    let busy = world.jobs.values().any(|j| world.moves_on_its_own(j));
     let waiting = world.jobs.values().any(|j| world.startable(j));
     let states: Vec<_> = found.iter().map(|a| (harness_of(a), world.accounts.get(&a.key()))).collect();
     let due = next_due(&states, waiting, now_micros());

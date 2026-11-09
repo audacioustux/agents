@@ -150,7 +150,9 @@ refused by a rule (a banned model, a disabled harness or one whose program is no
 anything else. An agent driving relay can branch on those, never on wording.
 
 Nothing needs starting by hand. Every command that changes something wakes the
-dispatcher, which exits on its own a minute after the queue empties.
+dispatcher, which exits on its own a minute after the queue empties and no
+runner holds a job (a job `checking` at a parked decision counts: if its runner
+dies there, the dispatcher is still awake to reap it).
 
 Whoever wakes it chooses nothing of its environment. The dispatcher, and everything it
 starts (runners, gc, the quota reader, hooks, sessions), gets one built from the config
@@ -348,8 +350,12 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   each with its full request); `relay decide answer ID --action A [--message M]
   [--budget USD] [--profile P] [--brief TEXT] [--why W] ...` answers it. Past
   `orchestrator_timeout_minutes` the chain moves on, and an answer recorded
-  later is refused (exit 4) and changes nothing. A runner waiting for an
-  answer shows `checking` and holds no seat. `relay view status` lists waiting
+  later is refused (exit 4) and changes nothing. A decision is about one attempt
+  of its job: once that attempt has moved on (`queue resume`, a new run, the job
+  reaped or ended) or the process waiting for the answer (the job's runner, or
+  `decide held`) has died, an answer is refused (exit 4, saying which), `decide
+  list` no longer shows it, and the runner stops waiting and asks no further
+  handler. A runner waiting for an answer shows `checking` and holds no seat. `relay view status` lists waiting
   decisions in their own section, so a human sees them too.
 
 **Safety.** A worker's report and diff reach an `agent` or `command` handler,
@@ -916,7 +922,8 @@ own process, and owns one output port:
   only a doorbell. A runner's exit rings it too. Otherwise the dispatcher
   sleeps until the next moment the plan could change by itself (a limit
   lifting, a meter resetting, a reading going stale), with a 5-minute
-  backstop, and exits after a minute with nothing to do.
+  backstop, and exits after a minute with nothing to do: nothing queued that can
+  start, and no job held by a runner, running or checking.
 - **Single roles:** the dispatcher and the quota reader each hold a `flock`,
   which the kernel releases if the holder dies.
 

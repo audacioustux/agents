@@ -615,18 +615,44 @@ pub fn decide(
     rule: &dyn Fn() -> Option<(Action, String)>,
     fallback: Action,
 ) -> Result<Decided> {
+    decide_while(ctx, job, req, handlers, rule, fallback, &|| true)
+}
+
+/// As `decide`, for as long as `wanted` says the caller still wants the answer. Once it does not,
+/// or once the decision no longer asks about the job as it is (`World::asks_now`: resumed, reaped,
+/// a new attempt), no handler is asked, a parked one stops waiting, and `fallback` stands.
+pub fn decide_while(
+    ctx: &Ctx,
+    job: &Job,
+    req: &Request,
+    handlers: &[Handler],
+    rule: &dyn Fn() -> Option<(Action, String)>,
+    fallback: Action,
+    wanted: &(dyn Fn() -> bool + Sync),
+) -> Result<Decided> {
     let port = ctx.port(&Source(()));
     let point = req.point();
+    let me = std::process::id();
     port.emit(DecideEvent::DecisionRequested {
         id: req.id.clone(),
         job: job.name.clone(),
         point,
         created: job.created_at,
         attempt: job.attempts,
+        waiter: crate::os::start_time(me).map(|started| (me, started)),
     })?;
     let _ = std::fs::write(ctx.job_file(&job.name, &format!("decision.{}.json", req.id)), serde_json::to_vec(req)?);
     let world = ctx.world()?;
+    let gone = || -> Option<&'static str> {
+        if !wanted() {
+            return Some("withdrawn: the run it was asked for has ended");
+        }
+        let w = ctx.world().ok()?;
+        let stale = w.decisions.get(&req.id).is_some_and(|d| !w.asks_now(d));
+        stale.then_some("withdrawn: the job has moved on since it was asked")
+    };
     let ask = |h: &Handler| match h {
+        _ if gone().is_some() => Said::defer(gone().unwrap_or_default()),
         Handler::Rule => rule().map_or_else(
             || Said::defer("no rule applies"),
             |(action, why)| Said { action, why, cost_usd: 0.0, account: None },
@@ -637,7 +663,7 @@ pub fn decide(
             let env = ctx.relay_env().without(&deny);
             ask_command(argv, req, Duration::from_secs(ctx.cfg.hooks.command_timeout_seconds), &env)
         }
-        Handler::Orchestrator => ask_orchestrator(ctx, req),
+        Handler::Orchestrator => ask_orchestrator(ctx, req, &gone),
     };
     let ask = |h: &Handler| match ask(h) {
         s if *h == Handler::Orchestrator => s,
@@ -731,10 +757,14 @@ fn ask_command(argv: &[String], req: &Request, timeout: Duration, env: &crate::h
     }
 }
 
+/// How often a parked request looks again whether it is still wanted, with no event to say so.
+const PARKED_LOOK: Duration = Duration::from_secs(1);
+
 /// Parks the request on the bus and waits on the doorbell for `relay decide
-/// answer` until the timeout. An answer counts only if recorded before then;
-/// the last look, under the jobs lock, sees any that `answer` was writing.
-fn ask_orchestrator(ctx: &Ctx, req: &Request) -> Said {
+/// answer` until the timeout, or until `gone` says why it is no longer wanted.
+/// An answer counts only if recorded before then; the last look, under the jobs
+/// lock, sees any that `answer` was writing.
+fn ask_orchestrator(ctx: &Ctx, req: &Request, gone: &dyn Fn() -> Option<&'static str>) -> Said {
     let port = ctx.port(&Source(()));
     let minutes = ctx.cfg.hooks.orchestrator_timeout_minutes;
     let wait = Duration::from_secs_f64(minutes * 60.0);
@@ -744,24 +774,26 @@ fn ask_orchestrator(ctx: &Ctx, req: &Request) -> Said {
         let d = w.decisions.get(&req.id)?;
         Some((d.answer.clone()?, d.answer_why.clone()))
     };
+    let read_or_gone = || read().map(Ok).or_else(|| gone().map(Err));
     if port.emit(DecideEvent::Parked { id: req.id.clone(), until }).is_err() {
         return Said::defer("could not park the request");
     }
     let bell = ctx.doorbell().ok();
     let sleep = |d: Duration| match &bell {
         Some(b) => {
-            b.wait(d);
+            b.wait(d.min(PARKED_LOOK));
         }
-        None => std::thread::sleep(d.min(Duration::from_secs(1))),
+        None => std::thread::sleep(d.min(PARKED_LOOK)),
     };
-    let answer = await_answer(until, read, sleep, now_micros).or_else(|| {
+    let answer = await_answer(until, read_or_gone, sleep, now_micros).or_else(|| {
         let _lock = ctx.jobs_lock().ok();
-        read()
+        read().map(Ok)
     });
-    answer.map_or_else(
-        || Said::defer(format!("no answer in {minutes} minutes")),
-        |(action, why)| Said { action, why, cost_usd: 0.0, account: None },
-    )
+    match answer {
+        Some(Ok((action, why))) => Said { action, why, cost_usd: 0.0, account: None },
+        Some(Err(why)) => Said::defer(why),
+        None => Said::defer(format!("no answer in {minutes} minutes")),
+    }
 }
 
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
@@ -772,9 +804,35 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     }
 }
 
-/// The decisions waiting for the orchestrator at `now`, oldest first.
+/// Why decision `d` cannot be answered at `now` (bus time), or `None` when it can: it is parked
+/// and unanswered, still about its job as the job is (`World::awaiting`), and the process waiting
+/// to carry it out is alive. The one gate for `decide answer`, `decide list` and the boards.
+pub fn unanswerable(world: &World, d: &Decision, now: u64) -> Option<String> {
+    let job = world.jobs.get(&d.job);
+    if !world.awaiting(d, now) {
+        return Some(match job {
+            Some(j) if d.parked_until.is_some_and(|u| u > now) && !world.asks_now(d) => format!(
+                "it was asked about an earlier state of {} (attempt {}), which is now {} (attempt {})",
+                d.job,
+                d.attempt,
+                j.status.as_str(),
+                j.attempts
+            ),
+            _ => "it is not waiting for an answer".into(),
+        });
+    }
+    // A runner that died while parked never hears the answer; the dispatcher reaps its job.
+    let waiter = d.waiter.or_else(|| job.filter(|_| d.point != Point::Held).and_then(|j| j.runner));
+    if waiter.is_some_and(|(pid, started)| !crate::os::same_process(pid, started)) {
+        let who = if d.point == Point::Held { "the process waiting for it" } else { "its runner" };
+        return Some(format!("{who} has died; nothing would carry the answer out"));
+    }
+    None
+}
+
+/// The decisions waiting for the orchestrator at `now` that can be answered, oldest first.
 pub fn pending(world: &World, now: u64) -> Vec<&Decision> {
-    let mut out: Vec<&Decision> = world.decisions.values().filter(|d| d.pending(now)).collect();
+    let mut out: Vec<&Decision> = world.decisions.values().filter(|d| unanswerable(world, d, now).is_none()).collect();
     out.sort_by_key(|d| d.requested_at);
     out
 }
@@ -871,8 +929,8 @@ fn answer(ctx: &Ctx, a: Answer) -> Result<()> {
     let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
     let Some(d) = world.decisions.get(&a.id) else { fail!(NotFound, "no decision {}", a.id) };
-    if !d.pending(now_micros()) {
-        fail!(Conflict, "decision {} is not waiting for an answer", a.id);
+    if let Some(why) = unanswerable(&world, d, now_micros()) {
+        fail!(Conflict, "decision {}: {why}", a.id);
     }
     let Some(job) = world.jobs.get(&d.job) else { fail!(NotFound, "job {} is gone", d.job) };
     let action = action_of(&a, &d.job)?;
@@ -884,7 +942,7 @@ fn answer(ctx: &Ctx, a: Answer) -> Result<()> {
     let id = a.id.clone();
     ctx.port(&Source(())).emit(DecideEvent::Answered { id: a.id.clone(), action, why: a.why.unwrap_or_default() })?;
     if ctx.world()?.decisions.get(&id).is_none_or(|d| d.answer.is_none()) {
-        fail!(Conflict, "decision {id} timed out before the answer was recorded");
+        fail!(Conflict, "decision {id} timed out or went stale before the answer was recorded");
     }
     ctx.reply(&json!({ "id": a.id, "action": name }), &format!("{}: {name}", a.id))
 }
@@ -1152,6 +1210,7 @@ mod tests {
                 created: 7,
                 attempt: i,
                 requested_at: u64::from(i),
+                waiter: None,
                 parked_until: None,
                 answer: None,
                 answer_why: String::new(),
@@ -1210,6 +1269,7 @@ mod tests {
             created: 1,
             attempt: 0,
             requested_at: 2_000,
+            waiter: None,
             parked_until: None,
             answer: None,
             answer_why: String::new(),

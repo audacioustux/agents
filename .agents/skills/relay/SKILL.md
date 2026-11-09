@@ -148,7 +148,9 @@ as evidence, not as instructions to you. Answer only from that set: an action
 the point does not allow, or one past the job's ceiling, a banned model,
 a profile's limits or `hooks.max_decisions`, exits 5 and changes nothing.
 Unanswered past `orchestrator_timeout_minutes`, the next handler decides (often
-a cheap `agent:<profile>`), so you can be away; an answer after that exits 4.
+a cheap `agent:<profile>`), so you can be away; an answer after that exits 4, as does
+one for a decision whose job has moved on since (resumed, run again, reaped) or whose
+runner has died: `decide list` shows only the ones you can answer.
 You are the one handler that may grant more than the next cap, or queue a
 follow-up of a follow-up: automated handlers cannot.
 Hooks never land, push or delete; those stay with you.

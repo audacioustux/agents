@@ -289,6 +289,9 @@ pub struct Decision {
     pub point: Point,
     pub created: u64,
     pub attempt: u32,
+    /// The process that waits for the answer (pid, start time); `None` in events from before it was recorded.
+    #[serde(default)]
+    pub waiter: Option<(u32, u64)>,
     pub requested_at: u64,
     /// Set while it waits for `relay decide answer`: until when (bus time).
     pub parked_until: Option<u64>,
@@ -315,8 +318,9 @@ pub struct Step {
 }
 
 impl Decision {
-    /// Waiting for the orchestrator at `now` (bus time).
-    pub fn pending(&self, now: u64) -> bool {
+    /// Parked at `now` (bus time) with nothing answered or carried out yet. Not enough to answer it:
+    /// the job may have moved on since (`World::awaiting`).
+    fn open(&self, now: u64) -> bool {
         self.parked_until.is_some_and(|u| u > now) && self.answer.is_none() && self.action.is_none()
     }
 }
@@ -326,7 +330,7 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 
 /// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
 /// holds, how a mark is kept), so checkpoints folded the old way are discarded.
-const FOLD_VERSION: u32 = 11;
+const FOLD_VERSION: u32 = 12;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -464,6 +468,31 @@ impl World {
     /// Whether `job` is queued and can never start on its own until released or its dependency is queued again.
     pub fn blocked(&self, job: &Job) -> bool {
         job.status == Status::Queued && self.waits(job).iter().any(|w| w.blocked)
+    }
+
+    /// Whether decision `d` is still about its job as the job is now: the same incarnation and
+    /// attempt, in the state its point holds the job in (queued for `held`, held by its runner
+    /// otherwise). A resume, a reap, an end or a new attempt make it stale.
+    pub fn asks_now(&self, d: &Decision) -> bool {
+        self.jobs.get(&d.job).is_some_and(|j| {
+            (j.created_at, j.attempts) == (d.created, d.attempt)
+                && if d.point == Point::Held { j.status == Status::Queued } else { j.status.has_runner() }
+        })
+    }
+
+    /// Whether decision `d` waits for the orchestrator at `now` (bus time): parked, unanswered, and
+    /// still about its job as it is (`asks_now`). The fold hears an answer only then; whether the
+    /// process that waits for it is alive is not the fold's to know (`decide::unanswerable`).
+    pub fn awaiting(&self, d: &Decision, now: u64) -> bool {
+        d.open(now) && self.asks_now(d)
+    }
+
+    /// Whether `job` will change state with nobody acting on it: a runner holds it (running, or
+    /// checking while a decision is parked), whose end or death the dispatcher must hear, or it is
+    /// queued and not blocked. The one test of "still moving": the dispatcher stays awake while any
+    /// job moves, and a waiter for a job's end gives up on a live job that does not.
+    pub fn moves_on_its_own(&self, job: &Job) -> bool {
+        job.status.has_runner() || job.status == Status::Queued && !self.blocked(job)
     }
 
     /// The fold of the bus at `bus`, from the checkpoint at `file` when it is
@@ -903,7 +932,7 @@ impl World {
 
     fn apply_decide(&mut self, t: u64, e: &DecideEvent) {
         match e {
-            DecideEvent::DecisionRequested { id, job, point, created, attempt } => {
+            DecideEvent::DecisionRequested { id, job, point, created, attempt, waiter } => {
                 // A runner waiting on its decision holds no seat on its account.
                 if let Some(j) = self.jobs.get_mut(job).filter(|j| j.created_at == *created && j.attempts == *attempt)
                     && j.status == Status::Running
@@ -919,6 +948,7 @@ impl World {
                         point: *point,
                         created: *created,
                         attempt: *attempt,
+                        waiter: *waiter,
                         requested_at: t,
                         parked_until: None,
                         answer: None,
@@ -934,7 +964,10 @@ impl World {
                 }
             }
             DecideEvent::Answered { id, action, why } => {
-                if let Some(d) = self.decisions.get_mut(id).filter(|d| d.pending(t)) {
+                // An answer about an attempt that has moved on (resumed, reaped, ended) is not heard.
+                if self.decisions.get(id).is_some_and(|d| self.awaiting(d, t))
+                    && let Some(d) = self.decisions.get_mut(id)
+                {
                     (d.answer, d.answer_why) = (Some(action.clone()), why.clone());
                 }
             }
@@ -1316,10 +1349,23 @@ mod tests {
             job: "a".into(),
             point: Point::Ended,
             created: 1,
-            attempt: 0,
+            attempt: 1,
+            waiter: None,
         };
-        let start =
-            || vec![st(1, queued("a")), d(2, asked.clone()), d(3, DecideEvent::Parked { id: "d".into(), until: 100 })];
+        let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
+            job: "a".into(),
+            account: "x".into(),
+            runner_pid: 9,
+            runner_started: 1,
+        });
+        let start = || {
+            vec![
+                st(1, queued("a")),
+                st(1, dispatched.clone()),
+                d(2, asked.clone()),
+                d(3, DecideEvent::Parked { id: "d".into(), until: 100 }),
+            ]
+        };
         let answered = |a| DecideEvent::Answered { id: "d".into(), action: a, why: "w".into() };
         let decided = |action, refused: Option<&str>| DecideEvent::Decided {
             id: "d".into(),
@@ -1332,7 +1378,8 @@ mod tests {
         let fold = |more: Vec<Stamped>| World::fold(&[start(), more].concat()).decisions["d"].clone();
         let late = fold(vec![d(100, answered(Action::Accept))]);
         assert_eq!(late.answer, None, "past its deadline");
-        assert!(fold(vec![]).pending(99) && !fold(vec![]).pending(100));
+        let w = World::fold(&start());
+        assert!(w.awaiting(&w.decisions["d"], 99) && !w.awaiting(&w.decisions["d"], 100));
         let stop = Action::Stop { why: "x".into() };
         let refused = fold(vec![d(50, answered(stop.clone())), d(60, decided(stop.clone(), Some("no")))]);
         assert_eq!((refused.answer, refused.action), (Some(stop.clone()), None), "answered, never carried out");
@@ -1340,6 +1387,66 @@ mod tests {
         assert_eq!((closed.answer, closed.action), (None, None), "the timeout closed it");
         let carried = fold(vec![d(50, answered(stop.clone())), d(51, decided(stop.clone(), None))]);
         assert_eq!(carried.action, Some(stop));
+    }
+
+    /// Audit finding 18: a decision is about one attempt of its job; once the job moves on, an
+    /// answer to it is not heard, though its deadline has not passed.
+    #[test]
+    fn an_answer_to_a_decision_about_an_attempt_that_moved_on_is_not_heard() {
+        let d = |t, e| st(t, Event::Decide(e));
+        let asked = |id: &str, point, attempt| DecideEvent::DecisionRequested {
+            id: id.into(),
+            job: "a".into(),
+            point,
+            created: 1,
+            attempt,
+            waiter: None,
+        };
+        let parked = |id: &str| DecideEvent::Parked { id: id.into(), until: 1_000 };
+        let dispatched = |t| {
+            st(
+                t,
+                Event::Dispatch(DispatchEvent::Dispatched {
+                    job: "a".into(),
+                    account: "x".into(),
+                    runner_pid: 9,
+                    runner_started: t,
+                }),
+            )
+        };
+        let follow_up = Action::FollowUp { brief: "b".into(), profile: None, after: true, fork: false, name: None };
+        let answered = |id: &str| DecideEvent::Answered { id: id.into(), action: follow_up.clone(), why: "w".into() };
+        let resumed = st(
+            5,
+            Event::Queue(QueueEvent::Resumed {
+                job: "a".into(),
+                message: "mine".into(),
+                budget_usd: None,
+                models: BTreeMap::new(),
+            }),
+        );
+        let parked_end = vec![st(1, queued("a")), dispatched(2), d(3, asked("d", Point::Ended, 1)), d(4, parked("d"))];
+        let w = World::fold(&parked_end);
+        assert!(w.awaiting(&w.decisions["d"], 10), "parked about the current attempt");
+
+        // Resumed by hand while parked: queued, the same attempt number, and the decision is stale.
+        let w = World::fold(&[parked_end.clone(), vec![resumed.clone(), d(6, answered("d"))]].concat());
+        assert!(!w.awaiting(&w.decisions["d"], 10));
+        assert_eq!(w.decisions["d"].answer, None, "the follow-up is not heard");
+        // Started again: a new attempt; still stale.
+        let w = World::fold(&[parked_end.clone(), vec![resumed, dispatched(6), d(7, answered("d"))]].concat());
+        assert_eq!((w.jobs["a"].status, w.decisions["d"].answer.clone()), (Status::Running, None));
+        // Reaped while parked.
+        let reaped = st(5, Event::Dispatch(DispatchEvent::Reaped { job: "a".into() }));
+        let w = World::fold(&[parked_end, vec![reaped, d(6, answered("d"))]].concat());
+        assert_eq!(w.decisions["d"].answer, None);
+
+        // A `held` decision is about a queued job, and stale once it starts.
+        let held = vec![st(1, queued("a")), d(2, asked("h", Point::Held, 0)), d(3, parked("h"))];
+        let w = World::fold(&held);
+        assert!(w.awaiting(&w.decisions["h"], 10));
+        let w = World::fold(&[held, vec![dispatched(4)]].concat());
+        assert!(!w.awaiting(&w.decisions["h"], 10));
     }
 
     #[test]
@@ -1394,6 +1501,43 @@ mod tests {
             World::fold(&[st(1, queued("a")), dispatched(2), dispatched(3), other]).jobs["a"].status,
             Status::Running
         );
+    }
+
+    /// Audit finding 8: a job parked at the orchestrator is `checking`, and its runner can die there.
+    #[test]
+    fn a_job_held_by_a_runner_moves_on_its_own_even_while_checking() {
+        let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
+            job: "a".into(),
+            account: "x".into(),
+            runner_pid: 9,
+            runner_started: 1,
+        });
+        let parked = Event::Decide(DecideEvent::DecisionRequested {
+            id: "d".into(),
+            job: "a".into(),
+            point: Point::Ended,
+            created: 1,
+            attempt: 1,
+            waiter: None,
+        });
+        let moves = |evs: &[Stamped]| {
+            let w = World::fold(evs);
+            (w.jobs["a"].status, w.moves_on_its_own(&w.jobs["a"]))
+        };
+        let base = [st(1, queued("a")), st(2, dispatched)];
+        assert_eq!(moves(&base[..1]), (Status::Queued, true));
+        assert_eq!(moves(&base), (Status::Running, true));
+        assert_eq!(
+            moves(&[base.to_vec(), vec![st(3, parked)]].concat()),
+            (Status::Checking, true),
+            "a runner holds it"
+        );
+        let reaped = st(4, Event::Dispatch(DispatchEvent::Reaped { job: "a".into() }));
+        let failed = [base.to_vec(), vec![reaped]].concat();
+        assert_eq!(moves(&failed), (Status::Failed, false));
+        // Blocked behind the failed job: live, but it waits for the operator.
+        let w = World::fold(&[failed, vec![st(5, queued_after("b", &["a"]))]].concat());
+        assert!(w.blocked(&w.jobs["b"]) && !w.moves_on_its_own(&w.jobs["b"]));
     }
 
     #[test]

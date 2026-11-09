@@ -347,12 +347,19 @@ fn empty_states_say_what_is_hidden_and_how_to_show_it() {
 #[test]
 fn decisions_waiting_are_a_badge_and_a_pane() {
     let mut f = two_jobs();
+    // The decision is about the job's current attempt, and its runner (this process) is alive.
+    let me = std::process::id();
+    let runner = crate::os::start_time(me).map(|started| (me, started));
+    let build = f.machine.projects[0].world.jobs.get_mut("build").unwrap();
+    (build.attempts, build.runner) = (1, runner);
+    let created = build.created_at;
     let d = Decision {
         id: "build-cap-1".into(),
         job: "build".into(),
         point: crate::bus::Point::Cap,
-        created: NOW,
+        created,
         attempt: 1,
+        waiter: runner,
         requested_at: NOW,
         parked_until: Some(NOW + 600_000_000),
         answer: None,
@@ -372,7 +379,10 @@ fn decisions_waiting_are_a_badge_and_a_pane() {
     // At 80 columns a long job name still leaves the deadline whole, zone included.
     let long =
         Decision { id: "a-rather-long-decision-id-0042".into(), job: "a-rather-long-job-name-x".into(), ..d.clone() };
-    f.machine.projects[0].world.decisions.insert(long.id.clone(), long);
+    let world = &mut f.machine.projects[0].world;
+    let long_job = Job { name: long.job.clone(), ..world.jobs["build"].clone() };
+    world.jobs.insert(long_job.name.clone(), long_job);
+    world.decisions.insert(long.id.clone(), long);
     let b80 = f.board(&ui, 1);
     let at = crate::systems::decide::clock(NOW + 600_000_000);
     let fr80 = frame(&b80, &mut ui, 80, 24);

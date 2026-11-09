@@ -5,6 +5,7 @@
 
 #![allow(clippy::disallowed_methods, reason = "a test reads its own switches and passes its PATH on by config")]
 
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
@@ -117,6 +118,10 @@ fn setup(tag: &str, omp: bool) -> Env {
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
+    // A dispatcher's first gc pass would race a test's own `land gc`: stamp one as just run.
+    let state = root.join("state/relay/flow");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&state).unwrap();
+    std::fs::write(state.join("gc.last"), "").unwrap();
     let stub = |h: &str| repo.join(".stub").join(h).display().to_string();
     let omp_conf = if omp {
         format!("[harness.omp]\nenabled = true\nprogram = \"{}\"\nmodel = \"stub/m1\"\n", stub("omp"))
@@ -694,6 +699,8 @@ fn an_unknown_or_banned_profile_is_refused() {
 fn profiles_and_config_show_need_no_project() {
     let env = setup("profile-outside", false);
     std::fs::remove_file(env.repo.join("relay.toml")).unwrap();
+    // No project here: not even the gc stamp `setup` leaves for one.
+    std::fs::remove_dir_all(env.root.join("state")).unwrap();
     let out = relay(&env, &["profiles"]);
     ok(&out, "profiles outside a project, without a policy");
     assert!(String::from_utf8_lossy(&out.stdout).contains("no profiles"));
@@ -1127,6 +1134,14 @@ fn parked(env: &Env, name: &str) -> (String, serde_json::Value) {
     panic!("no decision parked for {name}");
 }
 
+/// Whether `pid` is still the process that started at `started` (field 22 of /proc/<pid>/stat).
+fn alive(pid: u64, started: u64) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
+    let after = &stat[stat.rfind(')').unwrap() + 2..];
+    let fields: Vec<&str> = after.split_whitespace().collect();
+    fields[0] != "Z" && fields.get(19).and_then(|f| f.parse().ok()) == Some(started)
+}
+
 /// Whether a process holds the flock at `path` (`flock -n` cannot take it).
 fn locked(path: &Path) -> bool {
     !Command::new("flock").arg("-n").arg(path).arg("true").status().unwrap().success()
@@ -1486,7 +1501,27 @@ fn an_old_log_is_gzipped_and_still_read_by_view_result() {
     claude_account(&env.home, "a", 10, false);
     ok(&relay(&env, &["queue", "add", "talk", "--text", "Look.", "--readonly"]), "queue");
     assert_eq!(wait_for(&env, "talk")["status"], "done");
+    // The wait ends with the runner, so gc does not skip the job as live.
+    let runner = &job(&env, "talk")["runner"];
+    assert!(!alive(runner[0].as_u64().unwrap(), runner[1].as_u64().unwrap()), "its runner has exited: {runner}");
     let plain = std::fs::read_to_string(records(&env, "talk", "log.ndjson")).unwrap();
+
+    // A pass that finds another running does nothing, and says so with exit 4.
+    let lock = env.root.join("state/relay/flow/gc.lock");
+    let mut holder = Command::new("flock").arg("-o").arg(&lock).args(["sleep", "60"]).spawn().unwrap();
+    for _ in 0..100 {
+        if locked(&lock) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let busy = relay(&env, &["land", "gc"]);
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert_eq!(busy.status.code(), Some(4), "{}", stderr(&busy));
+    assert!(stderr(&busy).contains("another pass is running"), "{}", stderr(&busy));
+    assert!(records(&env, "talk", "log.ndjson").exists(), "the busy pass did nothing");
+
     ok(&relay(&env, &["land", "gc"]), "gc");
     assert!(!records(&env, "talk", "log.ndjson").exists());
     let gz = records(&env, "talk", "log.ndjson.gz");

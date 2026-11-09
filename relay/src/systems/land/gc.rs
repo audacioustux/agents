@@ -104,7 +104,7 @@ fn scratches(ctx: &Ctx, world: &World, gc: &Gc, now_us: u64) -> Vec<Item> {
             continue;
         }
         let go = match world.jobs.get(&name) {
-            Some(j) => !runner_alive(j) && scratch_due(world, j, gc, now_us),
+            Some(j) => !j.runner_alive() && scratch_due(world, j, gc, now_us),
             None => true,
         };
         if go {
@@ -137,17 +137,12 @@ fn is_clone(ctx: &Ctx, dir: &Path) -> bool {
         && dir.symlink_metadata().is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
 }
 
-/// Whether the job's runner is still alive, whatever the fold says.
-fn runner_alive(j: &Job) -> bool {
-    j.runner.is_some_and(|(pid, started)| os::same_process(pid, started))
-}
-
 /// Every place a pass would act on at `now_us`, in job order.
 pub fn plan(ctx: &Ctx, world: &World, now_us: u64) -> Vec<Item> {
     let gc = &ctx.cfg.gc;
     let log_age = micros(gc.logs_gzip_after_days * 86_400.0);
     let mut items = Vec::new();
-    for j in world.jobs.values().filter(|j| !j.status.is_live() && !runner_alive(j)) {
+    for j in world.jobs.values().filter(|j| !j.status.is_live() && !j.runner_alive()) {
         let log = ctx.job_file(&j.name, "log.ndjson");
         let old =
             log.symlink_metadata().ok().filter(std::fs::Metadata::is_file).and_then(|m| m.modified().ok()).is_some_and(
@@ -190,7 +185,7 @@ fn review_refs(ctx: &Ctx, world: &World, gc: &Gc, now_us: u64) -> Vec<Item> {
         .filter_map(|r| r.strip_prefix(PREFIX).map(|job| (job, r)))
         .filter(|(job, _)| {
             world.jobs.get(*job).is_none_or(|j| {
-                !j.status.is_live() && !runner_alive(j) && j.ended_at.is_some_and(|t| now_us.saturating_sub(t) >= wait)
+                !j.status.is_live() && !j.runner_alive() && j.ended_at.is_some_and(|t| now_us.saturating_sub(t) >= wait)
             })
         })
         .map(|(job, r)| Item { job: job.to_owned(), kind: Kind::ReviewRef, path: PathBuf::from(r) })
@@ -319,9 +314,10 @@ impl Action {
 /// A pass: `relay land gc`. With `dry_run` it changes nothing. It stops once
 /// `gc.pass_seconds` have passed, and says what is left for the next pass.
 pub fn run(ctx: &Ctx, dry_run: bool) -> Result<()> {
-    // One pass at a time; the dispatcher may ask again while one is slow.
+    // One pass at a time; the dispatcher may ask again while one is slow. A pass that did nothing
+    // is not a success: the caller is told, and may try again once the other is done.
     let Some(_role) = os::Role::try_take(&ctx.state.join("gc.lock"))? else {
-        return ctx.reply(&serde_json::json!({ "busy": true }), "gc: another pass is running");
+        fail!(Conflict, "gc: another pass is running; this one did nothing");
     };
     let end = Instant::now() + Duration::from_secs(ctx.cfg.gc.pass_seconds);
     let items = plan(ctx, &ctx.world()?, now_micros());

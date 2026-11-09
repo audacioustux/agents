@@ -177,7 +177,7 @@ removes `target/`, `node_modules/` and `.venv/` of ended jobs after 6 hours,
 old clones after 7 days (their commits rescued into `refs/relay/rescue/NAME`) and
 gzips old logs; a running job whose clone passes `limits.job_disk_gb` (40) is
 stopped, `disk: clone 52G over 40G`, and `queue resume` goes on after cleanup.
-`relay land gc --dry-run` says what it would do. Details: README, Disk.
+`relay land gc --dry-run` says what it would do; `land gc` exits 4 when another pass is running. Details: README, Disk.
 
 The brief is the session's only context. See
 [relay/README.md](../../../relay/README.md) for accounts, quota, the sandbox

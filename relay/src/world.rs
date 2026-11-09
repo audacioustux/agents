@@ -220,6 +220,13 @@ impl Job {
         self.acceptance.review_of()
     }
 
+    /// Whether the process that last ran it is still alive, whatever the fold says: a runner
+    /// goes on after its job's `ended` (a re-review, waking the dispatcher), and that work is
+    /// the job's until it exits.
+    pub fn runner_alive(&self) -> bool {
+        self.runner.is_some_and(|(pid, started)| crate::os::same_process(pid, started))
+    }
+
     /// Resumed by hand during its check: what its runner still says changes
     /// only what was spent, and the owner's instruction stands.
     fn let_go(&self) -> bool {

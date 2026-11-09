@@ -528,11 +528,16 @@ fn job(world: &World, name: &str) -> Result<Job> {
     Ok(j.clone())
 }
 
-/// The job once it has ended. Sleeps on the doorbell between reads, and wakes
-/// the dispatcher whenever the bus has been quiet, so the wait cannot outlive it.
+/// The job once it has ended and its runner has exited (`Job::runner_alive`), so
+/// nothing of that run is still at work on its files. Sleeps on the doorbell
+/// between reads, and wakes the dispatcher whenever the bus has been quiet, so
+/// the wait cannot outlive it.
 /// A live job that does not move on its own (`World::moves_on_its_own`: queued
 /// behind a dependency that will never be done) would never end: that is a
 /// conflict (exit 4), naming what it waits for.
+/// How often a wait looks again for an ended job's runner to exit.
+const RUNNER_EXIT_LOOK: Duration = Duration::from_millis(100);
+
 fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
     let bell = ctx.doorbell()?;
     let mut quiet = true;
@@ -540,7 +545,12 @@ fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
         let world = ctx.world()?;
         let j = job(&world, name)?;
         if !j.status.is_live() {
-            return Ok(j);
+            if !j.runner_alive() {
+                return Ok(j);
+            }
+            // A runner's exit rings no bell: look again shortly.
+            bell.wait(RUNNER_EXIT_LOOK);
+            continue;
         }
         if !world.moves_on_its_own(&j) {
             let why = Wait::summary(&world.waits(&j)).unwrap_or_else(|| "cannot start on its own".into());

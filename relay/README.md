@@ -134,7 +134,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one. A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
-| `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends, and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |
+| `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends and its runner has exited (it may re-review or wake the dispatcher after the end), and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |
 | `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)) |
 | `relay view events` | The merged event log |
 | `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |
@@ -646,7 +646,9 @@ a totals line, and a `collected` event per clone removed or emptied:
 The dispatcher runs a pass at most every `interval_minutes` while it is awake
 (a stamp in the state directory keeps that across restarts), and at once when
 free disk falls under `min_free_disk_gb` (not again within five minutes). A pass
-stops cleanly at `pass_seconds` and the next goes on; only one runs at a time.
+stops cleanly at `pass_seconds` and the next goes on; only one runs at a time:
+`relay land gc` while another pass runs does nothing and exits 4 (`gc: another
+pass is running`), so try again once it is done.
 
 **A ceiling for running jobs.** The runner measures a build job's clone when it
 starts and every `disk_sample_minutes` (a recursive stat walk, bounded in time,

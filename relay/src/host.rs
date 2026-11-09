@@ -290,13 +290,20 @@ pub fn default_path(cfg: &Config, home: &Path) -> OsString {
         "/bin",
     ]
     .map(PathBuf::from);
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    for d in own.into_iter().chain(user).chain(harnesses).chain(system) {
-        if d.is_absolute() && d.is_dir() && !dirs.contains(&d) {
-            dirs.push(d);
+    path_of(own.into_iter().chain(user).chain(harnesses).chain(system).filter(|d| d.is_absolute() && d.is_dir()))
+}
+
+/// A `PATH` of `dirs` in order, without repeats. A directory whose name holds `:` cannot be written in a
+/// Unix `PATH`, so it is left out, never the whole list with it.
+fn path_of(dirs: impl IntoIterator<Item = PathBuf>) -> OsString {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for d in dirs {
+        if !d.as_os_str().as_bytes().contains(&b':') && !kept.contains(&d) {
+            kept.push(d);
         }
     }
-    std::env::join_paths(dirs).unwrap_or_default()
+    std::env::join_paths(kept).expect("no directory left in holds a ':'")
 }
 
 #[cfg(test)]
@@ -309,6 +316,12 @@ mod tests {
         std::fs::write(&p, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
         p
+    }
+
+    #[test]
+    fn a_directory_a_path_cannot_hold_is_left_out_not_the_whole_path() {
+        let dirs = ["/opt/omp:beta/bin", "/usr/bin", "/bin", "/usr/bin"].map(PathBuf::from);
+        assert_eq!(path_of(dirs), OsString::from("/usr/bin:/bin"));
     }
 
     #[test]

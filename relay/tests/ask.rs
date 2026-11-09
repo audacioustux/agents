@@ -23,6 +23,36 @@ fn installed_help(bin: &str) -> Result<String, String> {
     Isolated::new(bin.rsplit('/').next().unwrap_or(bin)).ask(bin, &["--help"]).map(|(_, help)| help)
 }
 
+/// Review of #40 (round 6): parallel tests in one process shared one `(tag, pid)` home, and a new
+/// or dropped instance removed another's live home.
+#[test]
+fn each_throwaway_home_is_its_own_and_outlives_another_dropped() {
+    let a = Isolated::new("same-tag");
+    let b = Isolated::new("same-tag");
+    assert_ne!(a.home(), b.home(), "two instances with one tag get distinct homes");
+    std::fs::write(a.home().join("mine"), "a").unwrap();
+    let a_home = a.home().to_path_buf();
+    drop(b);
+    assert!(a_home.join("mine").exists(), "dropping one instance leaves the other's home alone");
+    drop(a);
+    assert!(!a_home.exists(), "an instance removes its own home");
+}
+
+/// Review of #40 (round 6): stdout was read only after the CLI exited, so help longer than a
+/// pipe's buffer blocked it until the 20 s deadline and the check was skipped as "did not answer".
+#[test]
+fn a_cli_with_long_help_is_read_while_it_writes() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = Isolated::new("long-help");
+    let cli = d.home().join("verbose-cli");
+    std::fs::write(&cli, "#!/bin/sh\nhead -c 300000 /dev/zero | tr '\\0' a\n").unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let started = std::time::Instant::now();
+    let help = installed_help(cli.to_str().unwrap()).expect("a verbose CLI still answers");
+    assert_eq!(help.len(), 300_000, "the whole help is read");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "well inside the deadline");
+}
+
 /// Review of #40: the installed-CLI checks probed `puku-cli --version` with the caller's own
 /// `HOME`, `PUKU_CONFIG_DIR` and `APP_NAME`, and puku renews an expired sign-in on start, so a test
 /// run could refresh the developer's real one. A stand-in CLI records what each probe gives it.

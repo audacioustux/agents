@@ -18,12 +18,22 @@ pub struct Isolated {
 }
 
 impl Isolated {
-    /// A new, empty home in the temporary directory.
+    /// A new, empty home in the temporary directory, its own: parallel tests in one process each
+    /// get a distinct one, and none ever removes a directory it did not create.
     pub fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("relay-isolated-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("a throwaway home");
-        Self { root, owned: true }
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let pid = std::process::id();
+        loop {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!("relay-isolated-{tag}-{pid}-{n}"));
+            match std::fs::create_dir(&root) {
+                Ok(()) => return Self { root, owned: true },
+                // Left by an earlier process with the same pid: take the next number.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("a throwaway home at {}: {e}", root.display()),
+            }
+        }
     }
 
     /// `dir` (a test's own temporary directory, which it removes) as the home.
@@ -100,21 +110,39 @@ impl Isolated {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("{name} does not start: {e}"))?;
+        // Both pipes are drained while the deadline runs: a CLI whose help is longer than a pipe's
+        // buffer would otherwise block writing it and be killed as if it did not answer.
+        let drain = |r: Option<Box<dyn std::io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut r) = r {
+                    let _ = r.read_to_end(&mut buf);
+                }
+                buf
+            })
+        };
+        let stdout = drain(child.stdout.take().map(|r| Box::new(r) as Box<dyn std::io::Read + Send>));
+        let stderr = drain(child.stderr.take().map(|r| Box::new(r) as Box<dyn std::io::Read + Send>));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while child.try_wait().map_err(|e| format!("{name}: {e}"))?.is_none() {
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(|e| format!("{name}: {e}"))? {
+                break status;
+            }
             if std::time::Instant::now() > deadline {
                 let _ = child.kill();
                 let _ = child.wait();
+                // The readers are left behind: something the CLI started may still hold its pipes.
                 return Err(format!("{name} did not answer within 20 s"));
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let out = child.wait_with_output().map_err(|e| format!("{name}: {e}"))?;
-        if !out.status.success() && out.stdout.is_empty() {
-            let why = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        };
+        let stdout = stdout.join().unwrap_or_default();
+        let stderr = stderr.join().unwrap_or_default();
+        if !status.success() && stdout.is_empty() {
+            let why = String::from_utf8_lossy(&stderr).trim().to_owned();
             return Err(format!("{name} is on PATH but does not run: {why}"));
         }
-        Ok((program, String::from_utf8_lossy(&out.stdout).into_owned()))
+        Ok((program, String::from_utf8_lossy(&stdout).into_owned()))
     }
 }
 

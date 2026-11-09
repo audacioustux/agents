@@ -881,10 +881,9 @@ impl Config {
         self.harness_programs().into_iter().filter(|p| p.missing().is_none()).map(|p| p.harness).collect()
     }
 
-    /// The harnesses this config expects with a program not found, each with what was looked for.
-    pub fn missing_harnesses(&self) -> Vec<(&'static str, String)> {
-        let all = self.harness_programs().into_iter();
-        all.filter_map(|p| Some((p.harness.id(), p.missing()?.to_string_lossy().into_owned()))).collect()
+    /// The harnesses this config expects with a program or helper not found, each with what it lacks.
+    pub fn missing_harnesses(&self) -> Vec<(&'static str, Missing)> {
+        self.harness_programs().into_iter().filter_map(|p| Some((p.harness.id(), p.missing()?))).collect()
     }
 
     /// `inv` run by its harness's program as this machine has it ([`Config::harness_programs`]):
@@ -903,8 +902,13 @@ impl Config {
             ))),
         };
         let resolve = |name: &std::ffi::OsStr| found(crate::host::resolve(self.programs.as_deref(), name));
-        // A helper is never a mise shim ([`crate::host::resolve_helper`]).
-        let helper = |name: &std::ffi::OsStr| found(crate::host::resolve_helper(self.programs.as_deref(), name));
+        // A helper is never a mise shim ([`crate::host::resolve_helper`]), and one not found says so.
+        let helper = |name: &'static str| match crate::host::resolve_helper(self.programs.as_deref(), name.as_ref()) {
+            crate::host::Program::Found(p) => Ok(p.into_os_string()),
+            crate::host::Program::Missing(_) => {
+                Err(crate::harness::Refusal(Missing::Helper { name }.refusal(harness, self.programs.as_deref())))
+            }
+        };
         // The harness's own program: what runs, or what a script that runs hands over to (puku's quota).
         let at = inv.command_arg;
         let slot = match at {
@@ -920,20 +924,19 @@ impl Config {
         // script's interpreter, what that script's `puku-cli` launcher runs on, and a session's.
         let helpers = crate::harness::by_id(harness)?.helpers();
         for name in helpers {
-            if let Some(dir) = PathBuf::from(helper(name.as_ref())?).parent() {
+            if let Some(dir) = PathBuf::from(helper(name)?).parent() {
                 inv.path_first.push(dir.to_path_buf());
             }
         }
         // Such a script's interpreter is one of the harness's helpers, found as its program is.
         if at.is_some() {
-            let declared = helpers.iter().any(|n| inv.program == **n);
-            if !declared {
+            let Some(name) = helpers.iter().find(|n| inv.program == **n) else {
                 return Err(crate::harness::Refusal(format!(
                     "harness {harness}: {} is not one of its helper programs",
                     inv.program.to_string_lossy()
                 )));
-            }
-            inv.program = helper(&inv.program)?;
+            };
+            inv.program = helper(name)?;
         }
         Ok(inv)
     }
@@ -964,12 +967,56 @@ impl HarnessPrograms {
         std::iter::once(&self.program).chain(self.helpers.iter().map(|(_, p)| p))
     }
 
-    /// The first program not found, by what was looked for: the harness is usable only with none.
-    pub fn missing(&self) -> Option<&std::ffi::OsStr> {
-        self.all().find_map(|p| match p {
-            crate::host::Program::Missing(what) => Some(what.as_os_str()),
+    /// What it lacks first, its own program before a helper: the harness is usable only with none.
+    pub fn missing(&self) -> Option<Missing> {
+        if let crate::host::Program::Missing(what) = &self.program {
+            return Some(Missing::Program(what.clone()));
+        }
+        self.helpers.iter().find_map(|(name, p)| match p {
+            crate::host::Program::Missing(_) => Some(Missing::Helper { name }),
             crate::host::Program::Found(_) => None,
         })
+    }
+}
+
+/// What a harness lacks to run here ([`HarnessPrograms::missing`]). The two are kept apart because
+/// their remedies differ: `[harness.<id>] program` names the harness's own command, never a helper
+/// it runs on, so a missing `bun` set there would replace omp with its interpreter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Missing {
+    /// Its own command: what was looked for (a configured path, or its name).
+    Program(std::ffi::OsString),
+    /// A helper its command runs on ([`crate::harness::Harness::helpers`]: `bun` for omp), by name.
+    Helper { name: &'static str },
+}
+
+impl Missing {
+    /// The board's cell: `program not found: /opt/x/omp`, `helper not found: bun`.
+    pub fn cell(&self) -> String {
+        match self {
+            Self::Program(what) => format!("program not found: {}", what.to_string_lossy()),
+            Self::Helper { name } => format!("helper not found: {name}"),
+        }
+    }
+
+    /// Why harness `id` cannot run, and how to make what it lacks available. `record` is this
+    /// machine's record of programs (`programs.json`), where a helper's path is kept.
+    pub fn refusal(&self, id: &str, record: Option<&Path>) -> String {
+        match self {
+            Self::Program(what) => format!(
+                "harness {id}: program not found: {} (set [harness.{id}] program to its path)",
+                what.to_string_lossy()
+            ),
+            Self::Helper { name } => {
+                let record = record.map_or_else(|| "relay's programs.json".to_owned(), |r| r.display().to_string());
+                format!(
+                    "harness {id}: helper not found: {name}, which {id}'s command runs on. Put a real {name} on \
+                     PATH (an installed binary, not a mise shim, which fails where no mise config pins it) and run \
+                     any relay command from that shell, or set \"{name}\" in {record} to its absolute path. \
+                     [harness.{id}] program names {id}'s own command, never {name}."
+                )
+            }
+        }
     }
 }
 
@@ -1050,7 +1097,7 @@ mod tests {
         assert!(!gone.harnesses().iter().any(|h| h.id() == "omp"), "not usable");
         // (Only omp's row: a harness this machine has with a helper missing is shown too.)
         let omp_rows = |c: &Config| c.missing_harnesses().into_iter().filter(|(h, _)| *h == "omp").collect::<Vec<_>>();
-        assert_eq!(omp_rows(&gone), [("omp", "/opt/x/omp".to_owned())], "but shown");
+        assert_eq!(omp_rows(&gone), [("omp", Missing::Program("/opt/x/omp".into()))], "but shown");
         // A relative path is the config directory's (`pinned` is there), wherever relay runs from; a bare
         // name stays a name.
         let rel = Config::parse(
@@ -1098,6 +1145,21 @@ mod tests {
         assert!(format!("{:#}", Config::parse(own, d.path()).unwrap_err()).contains("^SECRET_"));
         let kept = "name = \"x\"\n[session.env]\nGIT_AUTHOR_NAME = \"a\"\nPATH = \"/bin\"\n";
         assert_eq!(Config::parse(kept, d.path()).unwrap().session.env.len(), 2);
+    }
+
+    /// Review of #40: a missing helper is not fixed by `[harness.<id>] program` (that would replace
+    /// omp with bun); its refusal says how to make the helper available instead.
+    #[test]
+    fn a_missing_helper_is_refused_with_its_own_remedy() {
+        let record = Path::new("/s/relay/programs.json");
+        let helper = Missing::Helper { name: "bun" }.refusal("omp", Some(record));
+        assert!(helper.starts_with("harness omp: helper not found: bun"), "{helper}");
+        assert!(helper.contains("not a mise shim") && helper.contains("on PATH"), "{helper}");
+        assert!(helper.contains("\"bun\" in /s/relay/programs.json"), "how to repair its record: {helper}");
+        assert!(!helper.contains("set [harness.omp] program"), "never the command's remedy: {helper}");
+        let program = Missing::Program("/opt/x/omp".into()).refusal("omp", Some(record));
+        assert_eq!(program, "harness omp: program not found: /opt/x/omp (set [harness.omp] program to its path)");
+        assert_eq!(Missing::Helper { name: "bun" }.cell(), "helper not found: bun");
     }
 
     fn repo() -> tempdir::Dir {

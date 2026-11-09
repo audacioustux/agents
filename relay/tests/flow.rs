@@ -1268,6 +1268,32 @@ fn omp_runs_on_the_recorded_bun_never_on_a_mise_shim() {
     assert_eq!((j["status"].as_str(), j["account"].as_str()), (Some("done"), Some("omp:default")), "{j}");
 }
 
+/// Review of #40: a job asked of a harness whose helper is missing is refused with the helper's own
+/// remedy, never `[harness.omp] program` (which would replace omp with bun), and the board says which.
+#[test]
+fn a_harness_missing_its_helper_is_refused_with_how_to_provide_it() {
+    if ["/usr/bin/bun", "/bin/bun"].iter().any(|p| Path::new(p).exists()) {
+        eprintln!("skipped: this machine's /usr/bin has a bun");
+        return;
+    }
+    let env = setup("no-helper", false);
+    let omp = env.repo.join(".stub/omp").display().to_string();
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap().replace(
+        "[harness.omp]\nenabled = false\n",
+        &format!("[harness.omp]\nprogram = {omp:?}\nmodel = \"stub/m1\"\n"),
+    );
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+    // A first run, from a shell with no bun at all.
+    let bare = caller_path(&[]);
+    let out = relay_from(&env, &bare, &[], &["queue", "add", "o", "--text", "x", "--readonly", "--harness", "omp"]);
+    assert_eq!(out.status.code(), Some(5), "refused: {}", stderr(&out));
+    let why = stderr(&out);
+    assert!(why.contains("helper not found: bun") && why.contains("not a mise shim"), "{why}");
+    assert!(why.contains("programs.json") && !why.contains("set [harness.omp] program"), "{why}");
+    let board = String::from_utf8_lossy(&relay_from(&env, &bare, &[], &["quota", "show"]).stdout).into_owned();
+    assert!(board.contains("helper not found: bun"), "{board}");
+}
+
 /// Adds `limits` under `[limits]` and appends `extra` to the project's config.
 fn configure(env: &Env, limits: &str, extra: &str) {
     let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();

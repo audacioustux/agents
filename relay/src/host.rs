@@ -475,9 +475,9 @@ mod tests {
         std::fs::remove_file(&node).unwrap();
         std::fs::write(&record, serde_json::json!({ "node": node }).to_string()).unwrap();
         let without = cfg.harness_programs().into_iter().find(|p| p.harness.id() == "puku").unwrap();
-        if let (_, Program::Missing(what)) = &without.helpers[0] {
+        if let (_, Program::Missing(_)) = &without.helpers[0] {
             let rows: Vec<_> = cfg.missing_harnesses().into_iter().filter(|(h, _)| *h == "puku").collect();
-            assert_eq!(rows, [("puku", what.to_string_lossy().into_owned())]);
+            assert_eq!(rows, [("puku", crate::config::Missing::Helper { name: "node" })]);
             assert!(!cfg.harnesses().iter().any(|h| h.id() == "puku"));
         }
     }

@@ -745,7 +745,8 @@ config of the directory it runs in, and fails (`No version is set for shim: bun`
 pins it, which is where sessions run. Run the first relay command from a shell where mise has put
 the real binary on `PATH` (an activated mise does), or delete the helper's line from
 `programs.json` to find it again. A harness whose helper is not found is not used: one the
-config names (`[harness.omp]`) is shown as `program not found: bun`, one it does not name is left
+config names (`[harness.omp]`) is shown as `helper not found: bun`, and a job asked of it is
+refused saying how to provide one (never by setting `program`, which names omp itself), one it does not name is left
 out, as one whose program is not found is.
 
 Who a claude directory is signed in as comes from its `.claude.json`
@@ -782,7 +783,7 @@ records `node` too, from that caller's `PATH`, so the dispatcher and its quota r
 on a narrower one, use the same file. That `node` also comes first on the `PATH` of every puku
 run, whatever `session.env` names, since `puku-cli` starts through `#!/usr/bin/env node`: the quota
 script, the `puku-cli` it renews through and every session all run the one interpreter. A `node`
-not found is shown as `program not found: node`, and puku is not used. In the same way every puku
+not found is shown as `helper not found: node`, and puku is not used. In the same way every puku
 run is told `HOME` (the user's home) and `APP_NAME`, which puku finds its sign-in by, so a job whose
 `session.env` names another `HOME` still uses the sign-in relay found the account by.
 

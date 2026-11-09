@@ -488,15 +488,9 @@ pub fn accounts_in(rules: Rules<'_>, room: &Room, world: &World, others: &[&Worl
 
 impl AccountsView {
     /// A row for each harness the project expects whose program is not found, never called ready.
-    fn missing(&mut self, missing: &[(&str, String)]) {
-        for (id, what) in missing {
-            self.cells.push(vec![
-                (*id).to_owned(),
-                String::new(),
-                format!("program not found: {what}"),
-                String::new(),
-                String::new(),
-            ]);
+    fn missing(&mut self, missing: &[(&str, crate::config::Missing)]) {
+        for (id, lacks) in missing {
+            self.cells.push(vec![(*id).to_owned(), String::new(), lacks.cell(), String::new(), String::new()]);
             self.ready.push(false);
         }
         self.json["missing"] = missing.iter().map(|(id, _)| *id).collect::<Vec<_>>().into();

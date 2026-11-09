@@ -292,7 +292,13 @@ mod tests {
         assert!(!a[1].contains("process.env.PUKU"), "no variable can send the token elsewhere");
     }
 
-    /// One HTTP reply on a local port; the request it answered comes back from the handle.
+    /// `p` as one shell word: single-quoted, each `'` in it closed, escaped and reopened.
+    fn sh_quote(p: &Path) -> String {
+        format!("'{}'", p.to_string_lossy().replace('\'', r"'\''"))
+    }
+
+    /// One HTTP reply on a local port; the request it answered comes back from the handle. A request
+    /// that does not come within 10 s fails the handle's join, rather than hang the suite in `accept`.
     fn serve(status: &str, body: &str) -> (String, std::thread::JoinHandle<String>) {
         use std::io::{Read, Write};
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -302,7 +308,19 @@ mod tests {
             body.len()
         );
         let h = std::thread::spawn(move || {
-            let (mut c, _) = l.accept().unwrap();
+            l.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut c = loop {
+                match l.accept() {
+                    Ok((c, _)) => break c,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("no request reached the local server within 10 s: {e}"),
+                }
+            };
+            c.set_nonblocking(false).unwrap();
+            c.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
             let mut buf = [0u8; 8192];
             let n = c.read(&mut buf).unwrap();
             c.write_all(reply.as_bytes()).unwrap();
@@ -318,7 +336,8 @@ mod tests {
             eprintln!("skipped: node is not installed");
             return;
         }
-        let d = tmp("script");
+        // A temporary directory holding a space and a quote, as a TMPDIR may.
+        let d = tmp("script dir 'q'");
         let run = |url: &str, cli: &Path, app: Option<&str>| {
             let mut cmd = std::process::Command::new("node");
             cmd.args(["-e", USAGE_SCRIPT, url]).arg(cli).env("HOME", &d.0).env_remove("APP_NAME");
@@ -342,7 +361,7 @@ mod tests {
             &cli,
             format!(
                 "#!/bin/sh\n[ \"$*\" = 'auth status --json' ] || exit 1\nsed -i 's/\"expiresAt\":1,/\"expiresAt\":99999999999999,/' {}\necho '{{\"email\":\"x@y.invalid\"}}'\n",
-                file.display()
+                sh_quote(&file)
             ),
         )
         .unwrap();

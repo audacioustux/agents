@@ -9,6 +9,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -725,11 +726,23 @@ struct Run<'a> {
 }
 
 /// What the runner hears while it drives a session: a line of output, the
-/// end of the output, or the clone's measured size.
+/// end of the output, the clone's measured size, or the `disk` chain's answer.
 enum Heard {
     Line(std::io::Result<String>),
     End,
     Disk(u64),
+    /// `Some(reason)` stops the job; `None` lets it go on.
+    DiskDecided(Result<Option<String>>),
+}
+
+/// What a measured clone asks of the runner. Deciding is not among them: a
+/// chain can wait for the orchestrator for many minutes, so it runs on a
+/// thread of its own while the drive loop goes on enforcing every limit.
+enum DiskStep {
+    Go,
+    Stop(String),
+    /// Ask the `disk` chain this request, with the reason that stands if every handler defers.
+    Ask(Box<Request>, Vec<decide::Handler>, String),
 }
 
 /// The longest one measurement of a clone may take.
@@ -755,12 +768,13 @@ pub fn disk_reason(limits: &crate::config::Limits, bytes: u64, free_gb: Option<f
     Some(format!("disk: {} free, under {}", gb(free), gb(limits.min_free_disk_gb)))
 }
 
-/// A measured clone: records its size, and when it is a reason to stop,
-/// asks the `disk` chain (none set: stop). `Some(reason)` stops the job; `None` lets it go on.
-fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: &mut Option<Instant>) -> Result<Option<String>> {
+/// A measured clone: records its size, and when it is a reason to stop, says
+/// to ask the `disk` chain (none set: stop). Nothing is asked while `asking`
+/// (a decision is already out) or before `quiet_until`.
+fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: Option<Instant>, asking: bool) -> Result<DiskStep> {
     port(ctx, job).emit(SessionEvent::Disk { job: job.name.clone(), bytes })?;
-    if quiet_until.is_some_and(|t| Instant::now() < t) {
-        return Ok(None);
+    if asking || quiet_until.is_some_and(|t| Instant::now() < t) {
+        return Ok(DiskStep::Go);
     }
     let world = ctx.world()?;
     let largest = world
@@ -769,8 +783,8 @@ fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: &mut Option<Instant>) 
         .filter(|o| o.name != job.name && o.status.has_runner())
         .all(|o| o.disk_bytes.unwrap_or(0) <= bytes);
     let free = os::free_disk_gb(&ctx.clones);
-    let Some(why) = disk_reason(&ctx.cfg.limits, bytes, free, largest) else { return Ok(None) };
-    let Some(handlers) = decide::chain(&ctx.cfg, Point::Disk) else { return Ok(Some(why)) };
+    let Some(why) = disk_reason(&ctx.cfg.limits, bytes, free, largest) else { return Ok(DiskStep::Go) };
+    let Some(handlers) = decide::chain(&ctx.cfg, Point::Disk) else { return Ok(DiskStep::Stop(why)) };
     let mut req = Request::new(job, Point::Disk);
     req.brief = std::fs::read_to_string(ctx.job_file(&job.name, "prompt.md")).unwrap_or_default();
     req.situation = format!(
@@ -778,12 +792,67 @@ fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: &mut Option<Instant>) 
     );
     req.spent_usd = job.cost_usd;
     req.earlier = decide::earlier(&world, job);
-    let d = decide::decide(ctx, job, &req, &handlers, &|| None, Action::Stop { why: why.clone() })?;
-    if d.action == Action::Wait {
-        *quiet_until = Some(Instant::now() + DISK_REASK);
-        return Ok(None);
+    Ok(DiskStep::Ask(Box::new(req), handlers, why))
+}
+
+/// Runs the `disk` chain for as long as `wanted` holds: `Some(why)` stops the job, `None` (`wait`) lets it go on.
+fn decide_disk(
+    ctx: &Ctx,
+    job: &Job,
+    req: &Request,
+    handlers: &[decide::Handler],
+    why: String,
+    wanted: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<String>> {
+    let fallback = Action::Stop { why: why.clone() };
+    let d = decide::decide_while(ctx, job, req, handlers, &|| None, fallback, wanted)?;
+    Ok((d.action != Action::Wait).then_some(why))
+}
+
+/// Withdraws an outstanding decision when dropped, however the drive loop ends.
+struct Withdraw<'a>(&'a AtomicBool);
+
+impl Drop for Withdraw<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
     }
-    Ok(Some(why))
+}
+
+/// What the drive loop hears from: the session's output, line by line, and the clone's size, now
+/// and every `limits.disk_sample_minutes` until the returned stop sender is dropped. The first
+/// sender is for answers the loop asks for itself.
+fn listen(
+    ctx: &Ctx,
+    run: &Run<'_>,
+    stdout: std::process::ChildStdout,
+) -> (mpsc::Sender<Heard>, mpsc::Receiver<Heard>, mpsc::Sender<()>) {
+    let (tx, rx) = mpsc::channel();
+    let lines = tx.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if lines.send(Heard::Line(line)).is_err() {
+                return;
+            }
+        }
+        let _ = lines.send(Heard::End);
+    });
+    let (stop, stopped) = mpsc::channel::<()>();
+    if !run.measure.is_empty() {
+        let dirs: Vec<PathBuf> = run.measure.iter().map(|p| (*p).to_path_buf()).collect();
+        let every = Duration::from_secs_f64(ctx.cfg.limits.disk_sample_minutes * 60.0);
+        let sizes = tx.clone();
+        std::thread::spawn(move || {
+            loop {
+                if sizes.send(Heard::Disk(os::dirs_size(&dirs, DISK_WALK))).is_err() {
+                    return;
+                }
+                if !matches!(stopped.recv_timeout(every), Err(mpsc::RecvTimeoutError::Timeout)) {
+                    return;
+                }
+            }
+        });
+    }
+    (tx, rx, stop)
 }
 
 /// Runs the agent, feeding its stdin and teeing its stream to the job's log.
@@ -811,32 +880,7 @@ fn drive(
         std::thread::spawn(move || pipe.write_all(text.as_bytes()));
     }
     let stdout = child.stdout.take().context("stdout")?;
-    let (tx, rx) = mpsc::channel();
-    let lines = tx.clone();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            if lines.send(Heard::Line(line)).is_err() {
-                return;
-            }
-        }
-        let _ = lines.send(Heard::End);
-    });
-    // Measures the clone now and every `limits.disk_sample_minutes`, until `_stop` is dropped.
-    let (_stop, stopped) = mpsc::channel::<()>();
-    if !run.measure.is_empty() {
-        let dirs: Vec<PathBuf> = run.measure.iter().map(|p| (*p).to_path_buf()).collect();
-        let every = Duration::from_secs_f64(ctx.cfg.limits.disk_sample_minutes * 60.0);
-        std::thread::spawn(move || {
-            loop {
-                if tx.send(Heard::Disk(os::dirs_size(&dirs, DISK_WALK))).is_err() {
-                    return;
-                }
-                if !matches!(stopped.recv_timeout(every), Err(mpsc::RecvTimeoutError::Timeout)) {
-                    return;
-                }
-            }
-        });
-    }
+    let (answers, rx, _stop) = listen(ctx, run, stdout);
 
     let silent_after = Duration::from_secs(ctx.cfg.limits.silent_minutes * 60);
     let deadline = Instant::now() + Duration::from_secs_f64(ctx.cfg.session.max_hours * 3600.0);
@@ -845,49 +889,76 @@ fn drive(
     let mut quiet_until = None;
     let mut heard_at = Instant::now();
     let mut named = run.session_id.map(str::to_owned);
-    loop {
-        let wait =
-            silent_after.saturating_sub(heard_at.elapsed()).min(deadline.saturating_duration_since(Instant::now()));
-        match rx.recv_timeout(wait) {
-            Ok(Heard::Line(Ok(line))) => {
-                heard_at = Instant::now();
-                if reader.keep(&line) {
-                    writeln!(log, "{line}")?;
+    // A `disk` decision runs beside the loop; it is withdrawn when the loop ends, and joined here.
+    let wanted = AtomicBool::new(true);
+    let mut asking = false;
+    std::thread::scope(|scope| -> Result<()> {
+        let _withdraw = Withdraw(&wanted);
+        loop {
+            let wait =
+                silent_after.saturating_sub(heard_at.elapsed()).min(deadline.saturating_duration_since(Instant::now()));
+            match rx.recv_timeout(wait) {
+                Ok(Heard::Line(Ok(line))) => {
+                    heard_at = Instant::now();
+                    if reader.keep(&line) {
+                        writeln!(log, "{line}")?;
+                    }
+                    if let Some(meters) = reader.line(&line) {
+                        port.emit(SessionEvent::Rate { account: account.to_owned(), meters })?;
+                    }
+                    let r = reader.report();
+                    if let (Some(named), Some(id)) = (named.as_mut(), r.session_id.as_deref())
+                        && id != named
+                    {
+                        port.emit(SessionEvent::Identified { job: job.name.clone(), session_id: id.to_owned() })?;
+                        id.clone_into(named);
+                    }
+                    if r.cost_usd > run.budget_usd {
+                        ending.over_budget = true;
+                        let _ = child.kill();
+                        break;
+                    }
                 }
-                if let Some(meters) = reader.line(&line) {
-                    port.emit(SessionEvent::Rate { account: account.to_owned(), meters })?;
-                }
-                let r = reader.report();
-                if let (Some(named), Some(id)) = (named.as_mut(), r.session_id.as_deref())
-                    && id != named
-                {
-                    port.emit(SessionEvent::Identified { job: job.name.clone(), session_id: id.to_owned() })?;
-                    id.clone_into(named);
-                }
-                if r.cost_usd > run.budget_usd {
-                    ending.over_budget = true;
+                Ok(Heard::Disk(bytes)) => match on_disk(ctx, job, bytes, quiet_until, asking)? {
+                    DiskStep::Go => {}
+                    DiskStep::Stop(why) => {
+                        disk = Some(why);
+                        // bwrap's --die-with-parent and pid namespace take everything inside with it.
+                        let _ = child.kill();
+                        break;
+                    }
+                    DiskStep::Ask(req, handlers, why) => {
+                        asking = true;
+                        let (answers, wanted) = (answers.clone(), &wanted);
+                        scope.spawn(move || {
+                            let still = || wanted.load(Ordering::Relaxed);
+                            let _ =
+                                answers.send(Heard::DiskDecided(decide_disk(ctx, job, &req, &handlers, why, &still)));
+                        });
+                    }
+                },
+                Ok(Heard::DiskDecided(answer)) => {
+                    asking = false;
+                    let Some(why) = answer? else {
+                        quiet_until = Some(Instant::now() + DISK_REASK);
+                        continue;
+                    };
+                    disk = Some(why);
                     let _ = child.kill();
                     break;
                 }
-            }
-            Ok(Heard::Disk(bytes)) => {
-                disk = on_disk(ctx, job, bytes, &mut quiet_until)?;
-                if disk.is_some() {
+                Ok(Heard::Line(Err(_)) | Heard::End) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    (ending.silent, ending.timed_out) =
+                        if Instant::now() >= deadline { (false, true) } else { (true, false) };
                     // bwrap's --die-with-parent and pid namespace take everything inside with it.
                     let _ = child.kill();
                     break;
                 }
             }
-            Ok(Heard::Line(Err(_)) | Heard::End) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                (ending.silent, ending.timed_out) =
-                    if Instant::now() >= deadline { (false, true) } else { (true, false) };
-                // bwrap's --die-with-parent and pid namespace take everything inside with it.
-                let _ = child.kill();
-                break;
-            }
         }
-    }
+        Ok(())
+    })?;
     ending.exit_ok = child.wait()?.success();
     Ok((reader.report().clone(), ending, disk))
 }

@@ -657,7 +657,11 @@ read-only job has too. The size is on the board (`12G`) and in `--json`
 point is reached. With no `disk` chain, or every handler deferring, the job is
 stopped with the reason `disk: clone 52G over 40G` or `disk: 8G free, under 20G`,
 its clone and session kept: free some space (`land gc` first), then `queue
-resume`. `wait` lets it go on, and asks again only after an hour. Nothing is
+resume`. `wait` lets it go on, and asks again only after an hour. While the
+chain decides (an orchestrator can take `orchestrator_timeout_minutes`), the run
+goes on under all its limits: its spend cap, silence limit and time limit still
+end it, and a decision still waiting then is withdrawn (`decided` by
+`orchestrator`, `defer`, `withdrawn: ...`) and refused if answered. Nothing is
 ever deleted inside a running job's clone.
 
 `[session] env` sets variables in every job's environment (and the dispatcher's), over

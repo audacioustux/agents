@@ -1547,6 +1547,40 @@ fn a_disk_hook_may_let_a_job_go_on() {
     assert_eq!((d["point"].as_str(), d["action"]["action"].as_str()), (Some("disk"), Some("wait")), "{d}");
 }
 
+/// Audit finding 9: a `disk` decision parked at the orchestrator leaves the run's own limits on.
+#[test]
+fn a_disk_decision_parked_at_the_orchestrator_does_not_suspend_the_runs_limits() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("disk-parked", false);
+    // 10 KB: any clone is over it. The orchestrator would be waited for half an hour.
+    let hooks = "[hooks]\ndisk = [\"orchestrator\"]\norchestrator_timeout_minutes = 30.0\n";
+    configure(&env, "job_disk_gb = 0.00001\njob_ceiling_usd = 5.0\n", hooks);
+    // A session that holds forever, and a time limit of about 7 seconds.
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(env.repo.join("relay.toml"), conf.replace("[session]\n", "[session]\nmax_hours = 0.002\n")).unwrap();
+    claude_account(&env.home, "a", 10, false);
+    std::fs::write(env.home.join(".claude.a/hold"), "").unwrap();
+    ok(&relay(&env, &["queue", "add", "grows", "--text", "Make a change."]), "queue");
+    let (id, _) = parked(&env, "grows");
+    let j = wait_for(&env, "grows");
+    assert_eq!(j["status"], "failed", "{j}");
+    assert_eq!(j["reason"], "ran past its time limit; ended", "{j}");
+    // The decision went with its run: withdrawn, and no longer answerable.
+    let out = relay(&env, &["decide", "answer", &id, "--action", "wait"]);
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    let d = &decisions(&env, "grows")[0];
+    assert_eq!(d["point"], "disk", "{d}");
+    let steps = d["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1, "{d}");
+    assert_eq!(
+        (steps[0]["handler"].as_str(), steps[0]["action"]["action"].as_str()),
+        (Some("orchestrator"), Some("defer"))
+    );
+    assert!(steps[0]["why"].as_str().unwrap().starts_with("withdrawn"), "{d}");
+}
+
 fn events(env: &Env) -> Vec<serde_json::Value> {
     let out = relay(env, &["view", "events"]);
     String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| serde_json::from_str(l).ok()).collect()

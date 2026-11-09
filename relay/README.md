@@ -152,7 +152,10 @@ roots this relay serves, the policy file the config was merged with, `LANG=C.UTF
 `PATH` (below), and `[session] env` over all of them, except that relay's own processes
 keep this relay's `HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `RELAY_POLICY` and
 `RELAY_CONFIG` whatever `[session] env` says (a session does get the ones set there), so a
-dispatcher always serves the queue it was woken for. No `TZ`, `GIT_DIR`, token or other
+dispatcher always serves the queue it was woken for. `RELAY_CONFIG` is always the config that
+relay serves (the one each child is also given as `--config`), so a `command:` hook that calls
+`relay` back without `--config` reaches the same project, even one whose config lives away from
+its repository. No `TZ`, `GIT_DIR`, token or other
 variable of the calling shell reaches it. With no `PATH` in `[session] env`, the `PATH` is
 relay's own directory, `~/.local/bin`, `~/bin`, `~/.cargo/bin`, mise's shims
 (`~/.local/share/mise/shims`), `~/.nix-profile/bin`, the system Nix profiles, each found

@@ -181,12 +181,26 @@ fn without(env: &BTreeMap<OsString, OsString>, deny: &regex::Regex) -> BTreeMap<
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayEnv(BTreeMap<OsString, OsString>);
 
+/// Which relay a process is: the project config it serves and its state and data roots. Every way
+/// relay starts relay takes them from one of these ([`crate::ctx::Ctx::selectors`]): `--config`, and
+/// `RELAY_CONFIG`, `XDG_STATE_HOME` and `XDG_DATA_HOME` in [`RelayEnv`], so a child, or a hook that
+/// calls relay back without `--config`, reaches the same project and queue.
+#[derive(Debug, Clone, Copy)]
+pub struct Selectors<'a> {
+    pub config: &'a Path,
+    pub state_root: &'a Path,
+    pub data_root: &'a Path,
+}
+
 impl RelayEnv {
-    pub fn new(cfg: &Config, state_root: &Path, data_root: &Path) -> Self {
-        let mut env = base(cfg, state_root, data_root);
+    /// [`base`] for `cfg`, `session.env` over it except the [`SELECTORS`], then `RELAY_CONFIG` as
+    /// `which` names it.
+    pub fn new(cfg: &Config, which: Selectors<'_>) -> Self {
+        let mut env = base(cfg, which.state_root, which.data_root);
         for (k, v) in cfg.session.env.iter().filter(|(k, _)| !SELECTORS.contains(&k.as_str())) {
             env.insert(k.into(), v.into());
         }
+        env.insert("RELAY_CONFIG".into(), which.config.into());
         Self(env)
     }
 
@@ -375,7 +389,18 @@ mod tests {
         let expected =
             ["FROM_CONFIG", "HOME", "LANG", "LOGNAME", "PATH", "SHELL", "USER", "XDG_DATA_HOME", "XDG_STATE_HOME"];
         assert!(names.iter().all(|n| expected.contains(&n.as_str())), "only what relay sets: {names:?}");
-        assert_eq!(RelayEnv::new(&cfg, Path::new("/s/relay"), Path::new("/d/relay")).0, env.0, "the same, here");
+        let which = Selectors {
+            config: Path::new("/p/relay.toml"),
+            state_root: Path::new("/s/relay"),
+            data_root: Path::new("/d/relay"),
+        };
+        let mut ours = RelayEnv::new(&cfg, which).0;
+        assert_eq!(
+            ours.remove(OsStr::new("RELAY_CONFIG")),
+            Some("/p/relay.toml".into()),
+            "relay's own know their project"
+        );
+        assert_eq!(ours, env.0, "and otherwise the same, here");
         // session.env wins, PATH included.
         let cfg =
             Config::parse("name = \"x\"\n[session.env]\nPATH = \"/only\"\nLANG = \"en_GB.UTF-8\"\n", d.path()).unwrap();
@@ -395,12 +420,13 @@ mod tests {
                     PATH = \"/job/bin\"\n";
         let cfg = Config::parse(text, d.path()).unwrap();
         let (state, data) = (Path::new("/s/relay"), Path::new("/d/relay"));
-        let ours = RelayEnv::new(&cfg, state, data);
+        let ours =
+            RelayEnv::new(&cfg, Selectors { config: Path::new("/p/relay.toml"), state_root: state, data_root: data });
         let job = JobEnv::new(&cfg, state, data);
         let home = crate::accounts::home();
         assert_eq!(ours.get("HOME"), Some(&home.into_os_string()));
         assert_eq!((ours.get("XDG_STATE_HOME"), ours.get("XDG_DATA_HOME")), (Some(&"/s".into()), Some(&"/d".into())));
-        assert_eq!((ours.get("RELAY_POLICY"), ours.get("RELAY_CONFIG")), (None, None));
+        assert_eq!((ours.get("RELAY_POLICY"), ours.get("RELAY_CONFIG")), (None, Some(&"/p/relay.toml".into())));
         assert_eq!(ours.get("PATH"), Some(&"/job/bin".into()), "not a selector: the config's PATH runs relay too");
         for k in SELECTORS {
             assert!(job.get(k).is_some_and(|v| v.to_string_lossy().starts_with("/job")), "the job gets its {k}");

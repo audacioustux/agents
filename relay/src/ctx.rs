@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::bus::{self, Owned, Port, Stamped};
 use crate::config::Config;
-use crate::host::{JobEnv, RelayEnv};
+use crate::host::{JobEnv, RelayEnv, Selectors};
 use crate::os::{Doorbell, Role};
 use crate::world::World;
 
@@ -301,7 +301,12 @@ impl Ctx {
     /// The environment relay's own children run in ([`RelayEnv`]): never the caller's, and with this
     /// relay's home, state and data roots and policy whatever `session.env` says.
     pub fn relay_env(&self) -> RelayEnv {
-        RelayEnv::new(&self.cfg, &self.state_root, &self.data_root)
+        RelayEnv::new(&self.cfg, self.selectors())
+    }
+
+    /// Which relay this is: the config it serves (as `--config` names it to every child) and its roots.
+    pub fn selectors(&self) -> Selectors<'_> {
+        Selectors { config: &self.cfg_path, state_root: &self.state_root, data_root: &self.data_root }
     }
 
     /// The environment a session starts from ([`JobEnv`]): never the caller's, `session.env` over it.
@@ -318,7 +323,7 @@ impl Ctx {
         let out = Self::append_private(log)?;
         env.command(crate::os::own_binary()?)
             .arg("--config")
-            .arg(&self.cfg_path)
+            .arg(self.selectors().config)
             .args(args)
             .stdin(stdin)
             .stdout(out.try_clone()?)
@@ -354,7 +359,7 @@ impl Ctx {
     /// As [`Ctx::wake_dispatch`], in the environment `cfg` makes: a dispatcher handing over to one
     /// that reads an edited config gives it that config's environment, not its own.
     pub fn wake_dispatch_under(&self, cfg: &Config) -> Result<()> {
-        let env = RelayEnv::new(cfg, &self.state_root, &self.data_root);
+        let env = RelayEnv::new(cfg, self.selectors());
         let child = self.spawn_in(&env, &["dispatch", "serve"], &self.state.join("dispatch.log"), Stdio::null())?;
         self.reap(child);
         Ok(())

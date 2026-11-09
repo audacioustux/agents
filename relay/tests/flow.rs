@@ -2852,3 +2852,50 @@ fn a_jobs_own_state_root_in_session_env_does_not_move_relay_itself() {
     let job = std::fs::read_to_string(env.home.join(".claude.a/env")).unwrap();
     assert!(job.lines().any(|l| l == format!("XDG_STATE_HOME={}", theirs.display())), "{job}");
 }
+
+#[test]
+fn a_command_hook_that_calls_relay_back_reaches_the_same_project_from_a_config_named_by_relay_config() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("relay-config", false);
+    let script = env.root.join("decide.sh");
+    let (code, said) = (env.root.join("hook-code"), env.root.join("hook-said"));
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n{} --json view result go >{} 2>&1; echo $? >{}\n\
+             echo '{{\"action\": \"continue\", \"budget\": 0.03, \"why\": \"go\"}}'\n",
+            env!("CARGO_BIN_EXE_relay"),
+            said.display(),
+            code.display()
+        ),
+    )
+    .unwrap();
+    Command::new("chmod").arg("755").arg(&script).status().unwrap();
+    configure(
+        &env,
+        "job_ceiling_usd = 1.0\nbudget_growth = 2.0\n",
+        &format!("[hooks]\ncap = [\"command:{}\"]\n", script.display()),
+    );
+    // The project's config lives away from its repository, named by RELAY_CONFIG, as the agents project's does.
+    let conf_dir = env.root.join("conf");
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    let named = conf_dir.join("agents.toml");
+    let text = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(&named, format!("repo = {:?}\n{text}", env.repo.display().to_string())).unwrap();
+    std::fs::remove_file(env.repo.join("relay.toml")).unwrap();
+    claude_account(&env.home, "a", 10, false);
+    let path = std::env::var_os("PATH").unwrap();
+    let by_name = [("RELAY_CONFIG", named.to_str().unwrap())];
+    let queued =
+        relay_from(&env, &path, &by_name, &["queue", "add", "go", "--text", "Make a change.", "--budget", "0.015"]);
+    ok(&queued, "queue");
+    let mut cmd = Command::new("timeout");
+    cmd.args(["90", env!("CARGO_BIN_EXE_relay"), "view", "result", "go", "--wait", "--json"]);
+    let out = prepared(&env, &mut cmd).env("RELAY_CONFIG", &named).output().unwrap();
+    ok(&out, "waiting for go");
+    let said = std::fs::read_to_string(&said).unwrap_or_default();
+    assert_eq!(std::fs::read_to_string(&code).unwrap_or_default().trim(), "0", "the hook's relay call failed: {said}");
+    assert!(said.contains("\"go\""), "it reached the project: {said}");
+}

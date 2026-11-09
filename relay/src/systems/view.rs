@@ -112,15 +112,32 @@ fn world_json(world: &World) -> Result<serde_json::Value> {
 
 fn status(scope: Scope<'_>, json: bool, all: bool, everywhere: bool) -> Result<()> {
     if json {
-        let v = match scope.home {
-            Some(ctx) if !everywhere => world_json(&ctx.world()?)?,
+        let (mut v, refreshing) = match scope.home {
+            Some(ctx) if !everywhere => {
+                let world = ctx.world()?;
+                let neighbours = ctx.neighbours();
+                let refreshing = refresh_shown(ctx, &world, &neighbours.iter().collect::<Vec<_>>())?;
+                (world_json(&world)?, refreshing)
+            }
             _ => {
                 let m = scope.read()?;
                 let projects: serde_json::Map<String, serde_json::Value> =
                     m.projects.iter().map(|p| Ok((p.name.clone(), world_json(&p.world)?))).collect::<Result<_>>()?;
-                serde_json::json!({ "projects": projects, "unreadable": m.unreadable })
+                let refreshing = match scope.home {
+                    Some(ctx) => refresh_shown(
+                        ctx,
+                        m.own(),
+                        &m.projects.iter().filter(|p| !p.own).map(|p| &p.world).collect::<Vec<_>>(),
+                    )?,
+                    None => Vec::new(),
+                };
+                (serde_json::json!({ "projects": projects, "unreadable": m.unreadable }), refreshing)
             }
         };
+        // Beside the folded state, never in it: the accounts whose reading was asked for, as `quota show --json` says.
+        if !refreshing.is_empty() {
+            v["refreshing"] = refreshing.into();
+        }
         out!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
@@ -132,6 +149,15 @@ fn status(scope: Scope<'_>, json: bool, all: bool, everywhere: bool) -> Result<(
     let width = crate::os::terminal_size().map(|(cols, _)| cols);
     out!("{}", fit(&text, width));
     Ok(())
+}
+
+/// Asks for a reading of each stale account of the project relay runs in (`ctx`), judged by its
+/// rules among `others` (`quota::start_refresh`, which reads one at most once per staleness
+/// window), and returns those whose reading was asked for. What every view of the accounts does,
+/// `view status --json` included: an orchestrator that only polls that still gets fresh readings.
+fn refresh_shown(ctx: &Ctx, world: &World, others: &[&World]) -> Result<Vec<String>> {
+    let room = crate::systems::quota::room_for(crate::systems::quota::Rules::Project(ctx), world, others);
+    crate::systems::quota::start_refresh(ctx, &room, world, false)
 }
 
 /// The accounts as a board shows them; in a project, a reading of each stale one is started

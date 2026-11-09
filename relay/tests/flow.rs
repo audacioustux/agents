@@ -442,6 +442,39 @@ fn showing_a_stale_account_starts_a_reading_and_says_so() {
     assert!(!board.contains("refreshing") && !board.contains("stale"), "{board}");
 }
 
+/// Copilot review of PR #41 (second round): an orchestrator that only polls `view status --json`
+/// in an idle project (no job, so no dispatcher) still gets readings taken, and is told which
+/// accounts are being read in a `refreshing` field beside the folded state, whose shape is unchanged.
+#[test]
+fn json_status_starts_a_reading_with_no_dispatcher_and_says_so() {
+    let env = setup("json-status-reads", false);
+    claude_account(&env.home, "solo", 40, false);
+    let status = || -> serde_json::Value {
+        let out = relay(&env, &["view", "status", "--json"]);
+        ok(&out, "view status --json");
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let v = status();
+    assert_eq!(v["refreshing"], serde_json::json!(["claude:solo"]), "{v}");
+    for key in ["jobs", "accounts", "profile_starts", "decisions"] {
+        assert!(v.get(key).is_some(), "the folded state keeps {key}: {v}");
+    }
+    let mut read = serde_json::Value::Null;
+    for _ in 0..100 {
+        read = status();
+        if read["accounts"]["claude:solo"]["read_at"].is_u64() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(read["accounts"]["claude:solo"]["read_at"].is_u64(), "the reading landed: {read}");
+    assert!(read.get("refreshing").is_none(), "a fresh reading is not asked for again: {read}");
+    let state = env.root.join("state/relay/flow");
+    assert!(!state.join("bus/dispatch.ndjson").exists(), "nothing was dispatched");
+    let lock = state.join("dispatch.lock");
+    assert!(!lock.exists() || !locked(&lock), "no dispatcher ran");
+}
+
 /// Copilot review of PR #41, finding 2: a reader already at work (here one holding the machine's
 /// reader lock and reading nothing of ours, as a dispatch reading only another account would) does
 /// not swallow a request: every account `quota show` says it is refreshing is read once that

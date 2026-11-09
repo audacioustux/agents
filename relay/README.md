@@ -217,7 +217,8 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   column says `-` and its model column lists every harness it may run on.
 - **Readings.** Showing the accounts in a project (`view status`, `view watch`, `quota
   show`) starts a reading of each stale one in the background, and the accounts title
-  says `refreshing claude:a, …` until it lands. The machine-wide pane outside every
+  says `refreshing claude:a, …` until it lands. `view status --json` does too, with the
+  accounts in a top-level `refreshing` list beside the folded state (absent when none). The machine-wide pane outside every
   project starts none: a reading is taken by a project's rules.
 - **What stays put.** The selection follows a job by name as rows move; a failed
   read keeps the last good board with the cause in red in the title, and the next
@@ -744,8 +745,8 @@ omp keeps no identity relay can read, so it shows none.
 Quota readings cost no model call. One is taken again after 10 minutes, or
 once a reset it names has passed; a reading that fails is not retried for the
 same 10 minutes. The dispatcher reads the accounts a queued job may use; showing
-the accounts (`quota show`, `view status`, `view watch`) starts a reading of every
-stale one and says `refreshing` (`refreshing` in `--json`), so an idle machine's
+the accounts (`quota show`, `view status` with or without `--json`, `view watch`) starts
+a reading of every stale one and says `refreshing` (`refreshing` in `--json`), so an idle machine's
 board does not go stale. There is one reader on the machine: `relay quota refresh`
 that finds a reading under way (any project's) waits for it, then reads only what
 it did not. A reading relay asks for itself joins the project's pending set

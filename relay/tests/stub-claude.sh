@@ -19,6 +19,10 @@
 # [verdict-accept] and [verdict-reject] also give a review's verdict; [uncommitted] leaves a changed tracked
 # file and an untracked one behind after its commit; [filter] leaves a clean filter in the clone's own configuration
 # plus diff.external and a textconv driver (and a .gitattributes using them) that touch $acct/filter-ran if anything on the host ever runs it.
+# [plant-check] plants, like a hostile session, symlinks in every relay job directory it can write: where the
+# acceptance check's output went (check.out, to $acct/victim) and its /tmp (check-tmp, to $HOME).
+# [plant-config] tries to create, in its own account, config the host would obey: a settings.json with a hook and a hooks/ script.
+# [fsmonitor] leaves a core.fsmonitor in the clone's own configuration that touches $acct/fsmonitor-ran if anything ever runs it.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
 case " $* " in
@@ -116,6 +120,20 @@ case "$prompt" in *"[filter]"*)
     printf '*.txt filter=evil diff=x\n' >.gitattributes
     echo y >extra.txt
   fi ;;
+esac
+case "$prompt" in *"[plant-check]"*)
+  for d in "$XDG_STATE_HOME"/relay/*/jobs/*.d; do
+    ln -sf "$acct/victim" "$d/check.out"
+    ln -sfn "$HOME" "$d/check-tmp"
+    echo "$d" >>"$acct/planted-check"
+  done ;;
+esac
+case "$prompt" in *"[plant-config]"*)
+  echo '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch pwned"}]}]}}' >"$acct/settings.json" 2>/dev/null || true
+  mkdir -p "$acct/hooks" 2>/dev/null && echo pwn >"$acct/hooks/pwn.sh" 2>/dev/null || true ;;
+esac
+case "$prompt" in *"[fsmonitor]"*)
+  if [ -w . ] && [ -e .git ]; then git config core.fsmonitor "touch $acct/fsmonitor-ran; false"; fi ;;
 esac
 # printf, not echo: dash's echo turns \n into a real newline and splits the JSON line.
 printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"ran on %s with %s transcript turns\\n%s","num_turns":1,"total_cost_usd":%s}\n' "$sid" "$(basename "$acct")" "$turns" "$final" "$cost"

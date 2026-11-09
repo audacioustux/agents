@@ -81,7 +81,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             };
             let st = Ctx::git(&ctx.cfg.repo)
                 .args(["fetch", "--quiet"])
-                .arg(dir)
+                .arg(dir.path())
                 .arg(format!("{branch}:refs/heads/{branch}"))
                 .status()?;
             if !st.success() {
@@ -103,9 +103,9 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             if j.status.is_live() {
                 fail!(Conflict, "{name} is {}; stop it first", j.status.as_str());
             }
-            if let Some(dir) = j.workdir.as_ref().filter(|d| d.exists()) {
+            if let Some(dir) = j.workdir.as_ref().map(crate::ctx::SessionRepo::path).filter(|d| d.exists()) {
                 // Only ever a directory relay made.
-                if !dir.starts_with(&ctx.clones) || dir == &ctx.clones {
+                if !dir.starts_with(&ctx.clones) || dir == ctx.clones {
                     bail!("{} is outside relay's clones; refusing", dir.display());
                 }
                 std::fs::remove_dir_all(dir).with_context(|| format!("removing {}", dir.display()))?;

@@ -18,9 +18,10 @@ use clap::Subcommand;
 use crate::accounts::{self, harness_of};
 use crate::bus::{Action, Check, CheckVerdict, Outcome, Point, SessionEvent, now_micros, secs};
 use crate::config::HarnessConf;
-use crate::ctx::Ctx;
+use crate::ctx::{Ctx, SessionRepo};
 use crate::harness::report::{Ending, Report, Verdict, verdict};
 use crate::harness::{Harness, Home, Invocation, Permissions, Reader, Session, Task};
+use crate::hostdir::HostDir;
 use crate::os;
 use crate::sandbox::{self, Mounts};
 use crate::systems::checkpoint::{self, Next};
@@ -147,12 +148,13 @@ struct Seat<'a> {
     model: Option<String>,
 }
 
-/// The job's workspace: its clone (a build job), where the session stands, its scratch directory,
-/// and its `/tmp` (on disk).
+/// The job's workspace: its clone (a build job), where the session stands, its session store, its
+/// inbox (what relay writes for it), and its `/tmp` (on disk).
 struct Workspace {
-    clone: Option<PathBuf>,
+    clone: Option<SessionRepo>,
     cwd: PathBuf,
     scratch: PathBuf,
+    inbox: HostDir,
     tmp: PathBuf,
 }
 
@@ -194,7 +196,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         budget_usd: job.budget_usd,
         log: "log.ndjson",
         stderr: "stderr.log",
-        measure: work.clone.iter().chain([&work.tmp]).map(PathBuf::as_path).collect(),
+        measure: work.clone.iter().map(SessionRepo::path).chain([work.tmp.as_path()]).collect(),
     };
     let (report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader())?;
@@ -208,8 +210,8 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     }
     let ran = Ran {
         report: &report,
-        dir: work.clone.as_deref(),
-        scratch: &work.scratch,
+        dir: work.clone.as_ref(),
+        inbox: &work.inbox,
         brief: &launch.brief,
         reviewing: launch.reviewing.as_ref(),
         model: seat.model.as_deref(),
@@ -262,12 +264,17 @@ fn workspace(ctx: &Ctx, job: &Job) -> Result<Step<Workspace>> {
         port(ctx, job).emit(SessionEvent::Cloned { job: job.name.clone(), workdir: dir.clone(), branch, base })?;
         clone_dir = Some(dir);
     }
-    let cwd = if job.readonly() { ctx.cfg.repo.clone() } else { clone_dir.clone().unwrap_or_default() };
+    let cwd = if job.readonly() {
+        ctx.cfg.repo.clone()
+    } else {
+        clone_dir.as_ref().map(|c| c.path().to_path_buf()).unwrap_or_default()
+    };
     let scratch = ctx.job_scratch(&job.name);
     std::fs::create_dir_all(&scratch)?;
+    let inbox = HostDir::open(&ctx.job_inbox(&job.name))?;
     let tmp = ctx.job_tmp(&job.name);
     std::fs::create_dir_all(&tmp)?;
-    Ok(ControlFlow::Continue(Workspace { clone: clone_dir, cwd, scratch, tmp }))
+    Ok(ControlFlow::Continue(Workspace { clone: clone_dir, cwd, scratch, inbox, tmp }))
 }
 
 /// Chooses the session (new, resumed or forked), records that it started, and builds its command.
@@ -313,11 +320,12 @@ fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home
         Err(refusal) => return Ok(ControlFlow::Break((Outcome::Failed, Some(refusal)))),
     };
     layer_env(ctx, &mut inv, &work.cwd)?;
-    inv.write_files().context("writing the prompt file")?;
+    inv.write_files(&work.inbox).context("writing the prompt file")?;
     let mounts = Mounts {
         home: seat.home,
-        workdir: work.clone.as_deref(),
+        workdir: work.clone.as_ref().map(SessionRepo::path),
         scratch: &work.scratch,
+        inbox: Some(work.inbox.path()),
         tmp: &work.tmp,
         cwd: &work.cwd,
         account: true,
@@ -354,6 +362,7 @@ fn invocation(
         events: true,
         lean: true,
         scratch: &work.scratch,
+        inbox: work.inbox.path(),
     };
     let mut inv = seat.conf.locate(seat.harness.invocation(seat.home, &task).map_err(|r| r.0)?);
     inv.args.extend(seat.conf.extra_args.iter().map(OsString::from));
@@ -373,8 +382,9 @@ fn forkable(job: &Job, found: &[Home], home: &Home, cwd: &Path) -> Option<Ended>
 /// What a finished run left, for the decision that follows it.
 struct Ran<'a> {
     report: &'a Report,
-    dir: Option<&'a Path>,
-    scratch: &'a Path,
+    dir: Option<&'a SessionRepo>,
+    /// The job's inbox, for what relay writes beside the run (a scratch git index, the check's output).
+    inbox: &'a HostDir,
     brief: &'a str,
     /// For a review: the branch it read.
     reviewing: Option<&'a Reviewing>,
@@ -421,7 +431,7 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
     let port = port(ctx, job);
     let n = u32::try_from(job.checkpoints.len()).unwrap_or(u32::MAX).saturating_add(1);
     let from = checkpoint::base(dir, &job.checkpoints);
-    let now = checkpoint::point(dir, &run.scratch.join("checkpoint.index"));
+    let now = checkpoint::point(dir, &run.inbox.join("checkpoint.index"));
     let progressed = checkpoint::progressed(&from, &now);
     let (mut req, _) = request(ctx, job, run, Point::Cap)?;
     req.next_cap_usd = cap;
@@ -489,8 +499,13 @@ pub fn consult(
     let run = || -> Result<(Report, Ending)> {
         let harness = harness_of(&home);
         let conf = ctx.cfg.harness(harness.id());
-        let scratch = ctx.job_scratch(&job.name).join("check");
-        std::fs::create_dir_all(&scratch)?;
+        // Its own directories, never inside the worker's (whose session could have planted a symlink
+        // there): a working directory made fresh, its store and `/tmp`, and an inbox of its own.
+        let scratch = ctx.job_scratch(&format!("{}.check", job.name));
+        crate::hostdir::fresh_dir(&scratch)?;
+        let tmp = scratch.join("tmp");
+        std::fs::create_dir(&tmp)?;
+        let inbox = HostDir::open(&ctx.job_inbox(&format!("{}.check", job.name)))?;
         let id = uuid::Uuid::now_v7().to_string();
         let name = format!("relay-{}-check", job.name);
         let task = Task {
@@ -505,14 +520,20 @@ pub fn consult(
             events: true,
             lean: true,
             scratch: &scratch,
+            inbox: inbox.path(),
         };
         let mut inv = conf.locate(harness.invocation(&home, &task).map_err(|r| anyhow::anyhow!(r.0))?);
         inv.args.extend(conf.extra_args.iter().map(OsString::from));
-        inv.write_files().context("writing the prompt file")?;
-        let tmp = ctx.job_tmp(&job.name).join("check");
-        std::fs::create_dir_all(&tmp)?;
-        let mounts =
-            Mounts { home: &home, workdir: None, scratch: &scratch, tmp: &tmp, cwd: &ctx.cfg.repo, account: true };
+        inv.write_files(&inbox).context("writing the prompt file")?;
+        let mounts = Mounts {
+            home: &home,
+            workdir: None,
+            scratch: &scratch,
+            inbox: Some(inbox.path()),
+            tmp: &tmp,
+            cwd: &ctx.cfg.repo,
+            account: true,
+        };
         let mut cmd = command(ctx, &inv, &mounts);
         let run = Run {
             session_id: None,
@@ -521,8 +542,10 @@ pub fn consult(
             stderr: "check-stderr.log",
             measure: Vec::new(),
         };
-        drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader())
-            .map(|(report, ending, _)| (report, ending))
+        let ran = drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader())
+            .map(|(report, ending, _)| (report, ending));
+        let _ = std::fs::remove_dir_all(&scratch);
+        ran
     };
     let (report, ending) = match run() {
         Ok(r) => r,
@@ -884,7 +907,7 @@ pub fn bases(world: &World, job: &Job) -> Vec<(String, PathBuf, String)> {
         if j.readonly() {
             todo.extend(&j.after);
         } else if let (Some(dir), Some(branch)) = (&j.workdir, &j.branch) {
-            out.push((n.clone(), dir.clone(), branch.clone()));
+            out.push((n.clone(), dir.path().to_path_buf(), branch.clone()));
         }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -922,7 +945,8 @@ fn clone(
     name: &str,
     bases: &[(String, PathBuf, String)],
     ran: bool,
-) -> Result<(PathBuf, String, Option<String>)> {
+) -> Result<(SessionRepo, String, Option<String>)> {
+    // Relay's own until the session starts, so plain git; from then on the session's (`SessionRepo`).
     let dir = ctx.clones.join(name);
     let branch = format!("{}{name}", ctx.cfg.session.branch_prefix);
     std::fs::create_dir_all(&ctx.clones)?;
@@ -971,10 +995,10 @@ fn clone(
     if made.is_err() {
         let _ = std::fs::remove_dir_all(&dir);
     }
-    made.map(|base| (dir, branch, base))
+    made.map(|base| (SessionRepo::new(dir), branch, base))
 }
 
-/// The commit `rev` names in `dir`.
+/// The commit `rev` names in `dir`, a repository relay trusts (for a session's, [`SessionRepo::rev`]).
 fn checkpoint_rev(dir: &Path, rev: &str) -> Option<String> {
     let out = Ctx::git(dir).args(["rev-parse", "--verify", rev]).output().ok().filter(|o| o.status.success())?;
     Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
@@ -1006,7 +1030,7 @@ mod disk_tests {
 
 #[cfg(test)]
 mod base_tests {
-    use std::path::PathBuf;
+    use crate::ctx::SessionRepo;
 
     use super::{bases, pick_base};
     use crate::world::{Job, World};
@@ -1016,7 +1040,7 @@ mod base_tests {
         let build = |n: &str, after: &[&str]| Job {
             name: n.into(),
             after: after.iter().map(|a| (*a).to_owned()).collect(),
-            workdir: Some(PathBuf::from(format!("/c/{n}"))),
+            workdir: Some(SessionRepo::new(format!("/c/{n}"))),
             branch: Some(format!("job/{n}")),
             ..Job::default()
         };

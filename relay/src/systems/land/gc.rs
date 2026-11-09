@@ -26,7 +26,7 @@ use serde::Serialize;
 
 use crate::bus::{LandEvent, now_micros};
 use crate::config::Gc;
-use crate::ctx::Ctx;
+use crate::ctx::{Ctx, SessionRepo};
 use crate::os::{self, size_str};
 use crate::world::{Job, World};
 
@@ -162,9 +162,9 @@ pub fn plan(ctx: &Ctx, world: &World, now_us: u64) -> Vec<Item> {
             items.push(Item { job: j.name.clone(), kind: Kind::Log, path: log });
         }
         let due = due(world, j, gc, now_us);
-        let Some(dir) = j.workdir.as_ref().filter(|d| is_clone(ctx, d)) else { continue };
+        let Some(dir) = j.workdir.as_ref().map(SessionRepo::path).filter(|d| is_clone(ctx, d)) else { continue };
         if due.clone && j.branch.is_some() {
-            items.push(Item { job: j.name.clone(), kind: Kind::Clone, path: dir.clone() });
+            items.push(Item { job: j.name.clone(), kind: Kind::Clone, path: dir.to_path_buf() });
         } else if due.outputs {
             for rel in &gc.build_outputs {
                 if let Some(path) = inside(dir, rel) {
@@ -197,15 +197,9 @@ fn review_refs(ctx: &Ctx, world: &World, gc: &Gc, now_us: u64) -> Vec<Item> {
         .collect()
 }
 
-/// The branch tip of `branch` in `dir`.
-fn tip(dir: &Path, branch: &str) -> Result<String> {
-    let out = Ctx::git(dir)
-        .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}^{{commit}}")])
-        .output()?;
-    if !out.status.success() {
-        bail!("branch {branch} is not in the clone");
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+/// The branch tip of `branch` in the clone `dir`.
+fn tip(dir: &SessionRepo, branch: &str) -> Result<String> {
+    dir.rev(&format!("refs/heads/{branch}^{{commit}}")).with_context(|| format!("branch {branch} is not in the clone"))
 }
 
 /// Whether the repository holds `commit` under some ref.
@@ -223,10 +217,11 @@ fn in_repo(ctx: &Ctx, commit: &str) -> bool {
 /// Makes sure every commit of the job's branch is in the repository before
 /// its clone goes: `Some(ref)` when it had to fetch it into a rescue ref.
 /// Refuses a clone whose work is not all committed (build outputs aside).
-fn secure(ctx: &Ctx, j: &Job, dir: &Path) -> Result<Option<String>> {
+fn secure(ctx: &Ctx, j: &Job, dir: &SessionRepo) -> Result<Option<String>> {
     let branch = j.branch.as_deref().context("the job has no branch")?;
     let tip = tip(dir, branch)?;
-    let mut status = Ctx::git(dir);
+    // The session wrote this clone's configuration: plain git here would run its `core.fsmonitor` on the host.
+    let mut status = dir.git();
     status.args(["status", "--porcelain", "--", "."]);
     status.args(ctx.cfg.gc.build_outputs.iter().map(|o| format!(":(exclude){o}")));
     let dirty = status.output().context("git status")?;
@@ -239,7 +234,7 @@ fn secure(ctx: &Ctx, j: &Job, dir: &Path) -> Result<Option<String>> {
     let rescue = format!("refs/relay/rescue/{}", j.name);
     let out = Ctx::git(&ctx.cfg.repo)
         .args(["fetch", "--quiet"])
-        .arg(dir)
+        .arg(dir.path())
         .arg(format!("+refs/heads/{branch}:{rescue}"))
         .output()?;
     if !out.status.success() {
@@ -387,7 +382,7 @@ pub fn run(ctx: &Ctx, dry_run: bool) -> Result<()> {
 fn rescue_needed(ctx: &Ctx, item: &Item) -> Option<String> {
     let world = ctx.world().ok()?;
     let j = world.jobs.get(&item.job)?;
-    let tip = tip(&item.path, j.branch.as_deref()?).ok()?;
+    let tip = tip(j.workdir.as_ref()?, j.branch.as_deref()?).ok()?;
     (!in_repo(ctx, &tip)).then(|| format!("refs/relay/rescue/{}", j.name))
 }
 
@@ -420,7 +415,8 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
             collected(ctx, &item.job, "outputs", a.bytes)
         }
         Kind::Clone => {
-            a.rescued = secure(ctx, j, &item.path)?;
+            let clone = j.workdir.as_ref().filter(|d| d.path() == item.path).context("the job's clone moved")?;
+            a.rescued = secure(ctx, j, clone)?;
             if let Some(r) = a.rescued.as_ref().filter(|_| !ctx.json) {
                 println!("gc: rescued {}'s unfetched commits into {r}", item.job);
             }

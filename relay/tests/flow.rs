@@ -305,6 +305,80 @@ fn an_omp_session_runs_and_resumes_in_its_own_store() {
     assert!(r.contains("ran on omp:default with 2 transcript turns"), "{r}");
 }
 
+/// Audit finding 1: relay wrote omp's prompt file in the job's session store, which the session can
+/// write, and wrote it by path. A session that leaves a symlink there had the next attempt's brief (or
+/// a resume message) written wherever it points. Now the prompt goes in the job's inbox, which the
+/// session sees read-only, written through a held handle that never follows a symlink.
+#[test]
+fn a_symlink_a_session_plants_is_never_written_through() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("omp-plant", true);
+    omp_default(&env.home, 20, false);
+    let victim = env.home.join("victim");
+    std::fs::write(&victim, "precious").unwrap();
+    ok(&relay(&env, &["queue", "add", "o", "--text", "[plant] Look.", "--readonly", "--harness", "omp"]), "queue");
+    assert_eq!(wait_for(&env, "o")["status"], "done");
+    let planted = records(&env, "o", "d/prompt.md");
+    assert!(planted.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()), "the session planted its link");
+
+    ok(&relay(&env, &["queue", "resume", "o", "--message", "overwrite it"]), "resume");
+    let j = wait_for(&env, "o");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious", "relay wrote through the planted symlink");
+    assert_eq!(j["status"], "done", "{j}");
+    assert!(!env.home.join(".omp/planted-inbox").exists(), "the session could write where its prompt is");
+}
+
+/// The acceptance check's output and its `/tmp` were in the session's store too: a link planted there
+/// had the host truncate and write the file it named, and bind the directory it named as the check's
+/// writable `/tmp`. Now the check works in a directory of its own made fresh, and writes to the inbox.
+#[test]
+fn a_check_follows_nothing_the_session_planted() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("bar-plant", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "[hooks]\nmax_decisions = 1\n");
+    claude_account(&env.home, "a", 10, false);
+    let victim = env.home.join(".claude.a/victim");
+    std::fs::write(&victim, "precious").unwrap();
+    let check = "echo checked; touch /tmp/escaped";
+    let j = wait_for_build(&env, "planted", &["--check", check], "[plant-check] ");
+    assert_eq!(j["status"], "done", "{j}");
+    assert!(env.home.join(".claude.a/planted-check").exists(), "the session planted its links");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious", "the check's output went through the link");
+    assert!(!env.home.join("escaped").exists(), "the check's /tmp was the home the session linked to");
+}
+
+/// Audit finding 4: protected config an account does not have yet was not mounted at all, so its
+/// session could create it: a `settings.json` with a hook, a `hooks/` script, or a new omp profile that
+/// relay would then discover as an account. Each now gets a read-only placeholder.
+#[test]
+fn protected_config_an_account_lacks_cannot_be_created_by_its_session() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("plant-config", true);
+    omp_default(&env.home, 20, false);
+    claude_account(&env.home, "a", 50, false);
+    let acct = env.home.join(".claude.a");
+    assert!(!acct.join("settings.json").exists() && !acct.join("hooks").exists(), "the account has neither");
+    ok(&relay(&env, &["probe"]), "probe");
+    let text = "[plant-config] Look.";
+    ok(&relay(&env, &["queue", "add", "c", "--text", text, "--readonly", "--harness", "claude"]), "queue");
+    assert_eq!(wait_for(&env, "c")["status"], "done");
+    let settings = std::fs::read_to_string(acct.join("settings.json")).unwrap_or_default();
+    assert!(!settings.contains("hooks"), "the session wrote the account's settings.json: {settings}");
+    assert!(!acct.join("hooks/pwn.sh").exists(), "the session wrote a hook");
+
+    ok(&relay(&env, &["queue", "add", "o", "--text", "[plant-profile] Look.", "--readonly", "--harness", "omp"]), "q");
+    assert_eq!(wait_for(&env, "o")["status"], "done");
+    assert!(!env.home.join(".omp/profiles/evil").exists(), "the session made a profile");
+    let quota = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
+    assert!(!quota.contains("omp:evil"), "{quota}");
+}
+
 #[test]
 fn projects_on_one_machine_share_what_they_read_of_an_account() {
     let env = setup("shared", false);
@@ -1249,6 +1323,30 @@ fn a_done_clone_is_removed_with_its_unfetched_commits_rescued_and_the_job_can_re
     assert_eq!(wait_for(&env, "lost")["status"], "done");
     let log = commits(&job(&env, "lost")["workdir"]);
     assert_eq!(log.matches("stub work").count(), 2, "the resumed clone started from the rescued work: {log}");
+}
+
+/// Audit finding 2: gc reads a clone the session wrote, configuration and all, so it must not run
+/// what that configuration names. The session plants a `core.fsmonitor`; gc's pass over its clone
+/// (`git status` before it removes it) must not run it on the host.
+#[test]
+fn gc_never_runs_a_program_the_sessions_clone_names() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("gc-fsmonitor", false);
+    configure(&env, "", "[gc]\nclones_after_days = 0\n");
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "planted", "--text", "[fsmonitor] Make a change."]), "queue");
+    assert_eq!(wait_for(&env, "planted")["status"], "done");
+    let dir = workdir(&env, "planted");
+    let fsmonitor = Command::new("git").arg("-C").arg(&dir).args(["config", "core.fsmonitor"]).output().unwrap();
+    assert!(out_of(&fsmonitor).contains("fsmonitor-ran"), "the session planted its fsmonitor");
+    let ran = env.home.join(".claude.a/fsmonitor-ran");
+    assert!(!ran.exists(), "nothing ran it before gc");
+
+    let text = out_of(&relay(&env, &["land", "gc"]));
+    assert!(text.contains("gc: removed") && !dir.exists(), "gc still checks and removes the clone: {text}");
+    assert!(!ran.exists(), "gc ran the clone's core.fsmonitor on the host");
 }
 
 #[test]

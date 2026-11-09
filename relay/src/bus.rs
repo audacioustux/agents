@@ -155,7 +155,7 @@ pub enum Outcome {
 pub enum SessionEvent {
     Cloned {
         job: String,
-        workdir: PathBuf,
+        workdir: crate::ctx::SessionRepo,
         branch: String,
         /// The commit the branch started from, for a fresh start: where a revert-control check runs.
         #[serde(default, skip_serializing_if = "Option::is_none")]

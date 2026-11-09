@@ -593,6 +593,9 @@ a totals line, and a `collected` event per clone removed or emptied:
   into `refs/relay/rescue/<job>` and says so. A clone with uncommitted work
   (build outputs aside) is kept, and the line says why. A job whose clone is gone
   is resumed from that rescue ref (else its fetched branch).
+  The session wrote the clone's `.git/config`, so gc reads it as relay reads every
+  clone after its session starts: with no hooks, `core.fsmonitor` or filter drivers,
+  so nothing the clone names runs on the host.
 - **Logs**: `<job>.log.ndjson` of a job that is not live, older than
   `logs_gzip_after_days`, becomes `.log.ndjson.gz` (a later run's output is
   appended as another gzip member). `view result`, `view watch` and every
@@ -768,8 +771,20 @@ Each session runs under `bwrap`. It sees the machine read-only, except for:
   does not stop a connection to a socket.
 - **Writable**: its own clone and job directory, and its own account, except
   what in it the host later runs or obeys (claude's settings, hooks, plugins,
-  skills and scripts; omp's config, agents, extensions and natives), which is
-  mounted back read-only.
+  skills and scripts; omp's config, agents, extensions and natives, and the
+  default profile's `profiles`, where new accounts would appear), which is
+  mounted back read-only. One the account does not have yet is protected too: relay
+  makes it empty first (an empty directory, an empty file, `{}` for a `.json`) and
+  mounts that read-only, so the session cannot be the one to create it. These
+  empty stand-ins stay in the account afterwards, and mean what their absence did.
+- **Read-only: the job's inbox** (`<job>.in` in the jobs directory), where relay
+  writes what it hands the session, such as omp's prompt file. relay never writes
+  in a directory a session can write, since a symlink planted there would take the
+  write wherever it points: its own files go in an inbox, opened once without
+  following a symlink and written through that handle, each file created afresh.
+  A decision's agent session gets a directory and an inbox of its own
+  (`<job>.check.d`, `<job>.check.in`), and the acceptance check a directory made
+  fresh for each run (`<job>.bar.d`), never one the worker could have written.
 - **`/tmp`**: a directory on disk, never RAM. Each job gets its own scratch
   directory, `<data dir>/<project>/scratch/<job>`, bound at `/tmp` (`TMPDIR` stays
   `/tmp`), created when the job starts. A read-only job (a review) cannot write its
@@ -818,7 +833,7 @@ and build jobs its edits-only mode.
 harness: every hidden path is empty and no socket, with a control proving it
 exists outside, and no hidden directory is writable; `/dev/shm` is writable within its cap
 (or not at all at `shm_mb = 0`); every writable one is writable
-and every read-only one is not; `/tmp` is relay's directory on disk;
+and every read-only one (placeholders and the inbox included) is not; `/tmp` is relay's directory on disk;
 and every cache shows relay's directory, not the host's.
 
 relay's state directory is owner-only, since it holds briefs, answers and

@@ -17,6 +17,7 @@ mod bus;
 mod config;
 mod ctx;
 mod harness;
+mod hostdir;
 mod os;
 mod sandbox;
 mod systems;

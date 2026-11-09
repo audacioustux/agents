@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -85,7 +85,8 @@ pub struct Job {
     pub attempts: u32,
     /// The session runner's pid and start time, together naming one process.
     pub runner: Option<(u32, u64)>,
-    pub workdir: Option<PathBuf>,
+    /// The build job's clone: the session's to write, so git runs in it only as [`crate::ctx::SessionRepo`] allows.
+    pub workdir: Option<crate::ctx::SessionRepo>,
     pub branch: Option<String>,
     pub created_at: u64,
     pub started_at: Option<u64>,
@@ -1077,7 +1078,7 @@ mod tests {
 
     #[test]
     fn a_collected_clone_leaves_the_branch_and_the_size_is_kept() {
-        let dir = std::path::PathBuf::from("/c/a");
+        let dir = crate::ctx::SessionRepo::new("/c/a");
         let events = [
             st(1, queued("a")),
             st(
@@ -1573,6 +1574,7 @@ mod tests {
     mod checkpoint {
         use super::super::*;
         use crate::config::tempdir::Dir;
+        use std::path::PathBuf;
 
         struct Fixture {
             _dir: Dir,

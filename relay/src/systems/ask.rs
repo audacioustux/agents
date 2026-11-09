@@ -200,7 +200,12 @@ pub fn run(a: &Args, json: bool) -> Result<u8> {
         let note = serde_json::json!({ "newSessionId": new_session_id });
         if json { eprintln!("{note}") } else { eprintln!("relay ask: new session id = {new_session_id}") }
     }
-    built.write_files().map_err(|e| anyhow::anyhow!("writing the prompt file: {e}"))?;
+    // Made new (nothing already there, a symlink included), and written through its handle.
+    if !built.files.is_empty() {
+        crate::hostdir::HostDir::create_new(&scratch)
+            .and_then(|inbox| built.write_files(&inbox))
+            .map_err(|e| anyhow::anyhow!("writing the prompt file: {e}"))?;
+    }
     let result = spawn_and_wait(&built, &cwd, a.agent.id());
     let _ = std::fs::remove_dir_all(&scratch);
     result.map_err(anyhow::Error::msg)

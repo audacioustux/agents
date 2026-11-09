@@ -85,7 +85,10 @@ impl Harness for Omp {
             "natives",
             "security",
         ];
-        CONFIG.iter().map(|c| home.dir.join(c)).collect()
+        // The default profile is `~/.omp`, which holds every other profile: a session there that could
+        // make `profiles/<name>` would have relay discover it as an account.
+        let profiles = (home.label == "default").then(|| home.dir.join("profiles"));
+        CONFIG.iter().map(|c| home.dir.join(c)).chain(profiles).collect()
     }
 
     fn invocation(&self, home: &Home, task: &Task<'_>) -> Result<Invocation, Refusal> {
@@ -127,8 +130,9 @@ impl Harness for Omp {
                 )));
             }
         }
-        // The prompt is a file the message names (`@file`): never argv.
-        let file = task.scratch.join("prompt.md");
+        // The prompt is a file the message names (`@file`): never argv. It is the host's, so it goes in
+        // the inbox, never the session store the session writes.
+        let file = task.inbox.join("prompt.md");
         i.arg(format!("@{}", file.display()));
         i.files.push((file, task.prompt.to_owned()));
         let profile = (home.label != "default").then(|| home.label.clone().into());
@@ -273,9 +277,9 @@ mod tests {
         assert_eq!(
             argv(&i),
             "-p --no-title --mode json --session-dir /s/sessions --no-extensions --no-skills --auto-approve --model m \
-             --thinking high --append-system-prompt b --resume abc @/s/prompt.md"
+             --thinking high --append-system-prompt b --resume abc @/inbox/prompt.md"
         );
-        assert_eq!(i.files, vec![(PathBuf::from("/s/prompt.md"), "brief".to_owned())]);
+        assert_eq!(i.files, vec![(PathBuf::from("/inbox/prompt.md"), "brief".to_owned())]);
         assert!(i.env.contains(&("OMP_PROFILE".into(), Some("work".into()))));
         let d =
             Omp.invocation(&home("omp", "default"), &task("p", Session::New("x"), Permissions::ReadOnly, s)).unwrap();

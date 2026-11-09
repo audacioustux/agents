@@ -53,11 +53,11 @@ fn independent(ctx: &Ctx, builder: &Job, model: Option<&str>) -> Result<(), Stri
 /// or `land fetch` left its work.
 fn fetch(ctx: &Ctx, builder: &Job, reference: &str) -> Result<(), String> {
     let repo = &ctx.cfg.repo;
-    let live = builder.workdir.as_ref().zip(builder.branch.as_ref()).filter(|(d, _)| d.exists());
+    let live = builder.workdir.as_ref().zip(builder.branch.as_ref()).filter(|(d, _)| d.path().exists());
     if let Some((dir, branch)) = live {
         let out = Ctx::git(repo)
             .args(["fetch", "--quiet"])
-            .arg(dir)
+            .arg(dir.path())
             .arg(format!("+{branch}:{reference}"))
             .output()
             .map_err(|e| e.to_string())?;
@@ -186,8 +186,8 @@ pub(super) fn carry_out(
 
 /// The commit a build job's branch is at in its clone, when it still has one.
 fn tip(b: &Job) -> Option<String> {
-    let dir = b.workdir.as_ref().filter(|d| d.exists())?;
-    checkpoint_rev(dir, &format!("refs/heads/{}", b.branch.as_ref()?))
+    let dir = b.workdir.as_ref().filter(|d| d.path().exists())?;
+    dir.rev(&format!("refs/heads/{}", b.branch.as_ref()?))
 }
 
 /// After a reviewed job's run ended done: resumes the chained reviewer whose latest verdict on it was a reject

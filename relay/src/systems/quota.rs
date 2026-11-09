@@ -30,7 +30,7 @@ impl crate::bus::Source for Source {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
-    /// Each account's room.
+    /// Each account's room. Starts a reading of any that is stale, and says so.
     Show,
     /// Read every account's quota now (or only stale readings).
     Refresh {
@@ -48,7 +48,7 @@ pub enum Cmd {
 
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Show => show(ctx, &ctx.world()?),
+        Cmd::Show => show(ctx, &ctx.world()?, true),
         Cmd::Refresh { stale, wanted } => refresh(ctx, stale, wanted),
         Cmd::Enable { account } => toggle(ctx, account, true),
         Cmd::Disable { account } => toggle(ctx, account, false),
@@ -61,33 +61,64 @@ fn toggle(ctx: &Ctx, account: String, enabled: bool) -> Result<()> {
     }
     ctx.port(&Source(())).emit(QuotaEvent::AccountEnabled { account, enabled })?;
     ctx.wake_dispatch()?;
-    show(ctx, &ctx.world()?)
+    show(ctx, &ctx.world()?, false)
 }
 
-fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
-    // One reader at a time: overlapping requests from dispatch passes collapse into this one.
-    let Some(_role) = Role::try_take(&ctx.state.join("quota.lock"))? else {
-        return ctx.reply(&serde_json::json!({ "skipped": "a reading is already being taken" }), "");
-    };
-    // A reading another project took recently is as good as one of ours.
-    let mut world = ctx.world()?;
-    world.hear_accounts(&ctx.neighbours());
-    let found = accounts::discover(&ctx.cfg);
-    accounts::settle(&mut world, &found);
-    let now = now_micros();
-    let state = |a: &Home| world.accounts.get(&a.key());
-    let mut todo: Vec<Home> = found
+/// The quota reader's role. Accounts belong to the machine, so there is one reader on it, whichever
+/// project asks: two projects never read one account at once.
+fn reader_lock(ctx: &Ctx) -> std::path::PathBuf {
+    ctx.state_root.join("quota.lock")
+}
+
+/// The accounts in `room` a reading would be taken of: those that report quota and are signed in;
+/// with `only_stale`, only those whose reading is due; with `only_wanted`, only those a queued job
+/// of `world` may run on. One home of each sign-in, preferring one not known signed out.
+fn to_read(room: &Room, world: &World, only_stale: bool, only_wanted: bool, now: u64) -> Vec<Home> {
+    let state = |a: &Home| room.account(&a.key());
+    let mut todo: Vec<Home> = room
+        .found()
         .iter()
         .filter(|a| harness_of(a).caps().quota && !state(a).is_some_and(|s| s.unsigned))
         .filter(|a| !only_stale || accounts::due(harness_of(a), state(a), now))
-        .filter(|a| !only_wanted || wanted(&world, a))
+        .filter(|a| !only_wanted || wanted(world, a))
         .cloned()
         .collect();
-    // Homes signed in as one account share a reading: one of them is read, preferring one not known signed out.
+    // Homes signed in as one account share a reading: one of them is read.
     todo.sort_by_key(|a| state(a).is_some_and(|s| s.signed_out));
-    let twins = accounts::twins(&found);
     let mut seen = BTreeSet::new();
-    todo.retain(|a| seen.insert(accounts::seat(&twins, &a.key()).to_owned()));
+    todo.retain(|a| seen.insert(room.twin_of(&a.key()).cloned().unwrap_or_else(|| a.key())));
+    todo
+}
+
+/// Starts `quota refresh --stale` in the background when any account's reading in `room` is due
+/// (with `wanted`, only of accounts a queued job of `world` may run on), unless a reading is already
+/// being taken; returns the accounts whose reading is due, which that reading takes. The one way
+/// relay starts a reading on its own: the dispatcher, a checker waiting for a seat, and every
+/// command that shows the accounts.
+pub fn start_refresh(ctx: &Ctx, room: &Room, world: &World, wanted: bool) -> Result<Vec<String>> {
+    let due: Vec<String> = to_read(room, world, true, wanted, now_micros()).iter().map(Home::key).collect();
+    // A reader already at work takes them, or its result makes them fresh; a second would only wait for it.
+    if !due.is_empty() && Role::try_take(&reader_lock(ctx))?.is_some() {
+        let args: &[&str] =
+            if wanted { &["quota", "refresh", "--stale", "--wanted"] } else { &["quota", "refresh", "--stale"] };
+        ctx.spawn_self(args, &ctx.state.join("quota.log"))?;
+    }
+    Ok(due)
+}
+
+fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
+    // One reader on the machine at a time. One that finds another at work waits for it, then
+    // takes only what that one did not: a refresh never ends without the readings it was asked for.
+    let asked = now_micros();
+    let _role = Role::take(&reader_lock(ctx))?;
+    // A reading another project took recently is as good as one of ours.
+    let world = ctx.world()?;
+    let neighbours = ctx.neighbours();
+    let room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
+    let now = now_micros();
+    let meanwhile = |a: &Home| room.account(&a.key()).and_then(|s| s.read_at).is_some_and(|t| t >= asked);
+    let (taken, todo): (Vec<Home>, Vec<Home>) =
+        to_read(&room, &world, only_stale, only_wanted, now).into_iter().partition(meanwhile);
     let port = ctx.port(&Source(()));
     // In parallel: one reading can take a minute and a half.
     let readings: Vec<_> = std::thread::scope(|s| {
@@ -95,7 +126,8 @@ fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
         handles.into_iter().filter_map(|h| h.join().ok()).collect()
     });
     let now_s = secs(now);
-    let (mut read, mut unreadable, mut signed_out) = (Vec::new(), Vec::new(), Vec::new());
+    let mut read: Vec<String> = taken.iter().map(Home::key).collect();
+    let (mut unreadable, mut signed_out) = (Vec::new(), Vec::new());
     for (home, text) in readings {
         let h = harness_of(home);
         let meters = text.as_deref().map(|t| h.parse_quota(t, now_s)).unwrap_or_default();
@@ -266,11 +298,15 @@ pub fn wanted(world: &World, account: &Home) -> bool {
     world.jobs().values().any(|j| world.startable(j) && may_use(j, account))
 }
 
-pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
+/// Every account's room; with `refresh`, a reading of each stale one is started first, and the view says so.
+pub fn show(ctx: &Ctx, world: &World, refresh: bool) -> Result<()> {
     let neighbours = ctx.neighbours();
     let others: Vec<&World> = neighbours.iter().collect();
     let room = room_for(Rules::Project(ctx), world, &others);
-    let v = accounts_in(Rules::Project(ctx), &room, world, &others);
+    let mut v = accounts_in(Rules::Project(ctx), &room, world, &others);
+    if refresh {
+        v.refreshing(start_refresh(ctx, &room, world, false)?);
+    }
     ctx.reply(&v.json, &v.text())
 }
 
@@ -287,6 +323,14 @@ pub struct AccountsView {
 }
 
 impl AccountsView {
+    /// Says that a reading of `accounts` is being taken, in the head and in `--json` (`refreshing`).
+    pub fn refreshing(&mut self, accounts: Vec<String>) {
+        if !accounts.is_empty() {
+            self.head = format!("{}; refreshing {}", self.head, accounts.join(", "));
+            self.json["refreshing"] = accounts.into();
+        }
+    }
+
     pub fn text(&self) -> String {
         let lines = crate::systems::view::table(&self.cells).into_iter().map(|l| format!("  {l}"));
         std::iter::once(self.head.clone()).chain(lines).collect::<Vec<_>>().join("\n")

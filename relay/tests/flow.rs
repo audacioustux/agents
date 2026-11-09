@@ -398,8 +398,9 @@ fn projects_on_one_machine_share_what_they_read_of_an_account() {
     let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
     std::fs::write(env.repo.join("other.toml"), conf.replace("name = \"flow\"", "name = \"other\"")).unwrap();
     let other = |args: &[&str]| relay(&env, &[&["--config", "other.toml", "--json"], args].concat());
-    // Before anyone has read it, the other project has nothing to go on.
-    let shown: serde_json::Value = serde_json::from_slice(&other(&["quota", "show"]).stdout).unwrap();
+    // Before anyone has read it, there is nothing to go on. (Showing it starts a reading, in the
+    // project that shows it: here flow, so that the other project's own bus stays without one.)
+    let shown: serde_json::Value = serde_json::from_slice(&relay(&env, &["--json", "quota", "show"]).stdout).unwrap();
     assert!(shown["accounts"][0]["readAt"].is_null(), "{shown}");
     ok(&relay(&env, &["quota", "refresh"]), "flow reads the account");
     // The other project takes that reading as its own, and does not read again.
@@ -413,6 +414,60 @@ fn projects_on_one_machine_share_what_they_read_of_an_account() {
     assert_eq!(account["state"], "ready", "{shown}");
     // It took no reading of its own.
     assert!(!env.root.join("state/relay/other/bus/quota.ndjson").exists());
+}
+
+/// Audit finding 16: a reading is taken when the accounts are shown, with no job waiting and no
+/// dispatcher, and the view says it is being taken.
+#[test]
+fn showing_a_stale_account_starts_a_reading_and_says_so() {
+    let env = setup("show-reads", false);
+    claude_account(&env.home, "solo", 40, false);
+    let shown = relay(&env, &["quota", "show"]);
+    ok(&shown, "show");
+    let text = String::from_utf8_lossy(&shown.stdout).into_owned();
+    assert!(text.lines().next().unwrap_or_default().contains("; refreshing claude:solo"), "{text}");
+    assert!(text.contains("not read yet"), "what it knows now: {text}");
+    let mut account = serde_json::Value::Null;
+    for _ in 0..100 {
+        let v: serde_json::Value = serde_json::from_slice(&relay(&env, &["--json", "quota", "show"]).stdout).unwrap();
+        account = v["accounts"][0].clone();
+        if account["readAt"].is_u64() {
+            assert!(v.get("refreshing").is_none(), "a fresh reading is not taken again: {v}");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(account["state"], "ready", "the reading landed: {account}");
+    let board = board(&env);
+    assert!(!board.contains("refreshing") && !board.contains("stale"), "{board}");
+}
+
+/// Audit finding 16: the quota reader is one per machine, and a refresh that finds a reading under
+/// way (here another project's, holding the machine's reader lock) waits for it rather than
+/// exiting 0 with nothing read.
+#[test]
+fn a_refresh_waits_for_the_machines_one_reader() {
+    let env = setup("one-reader", false);
+    claude_account(&env.home, "solo", 40, false);
+    let lock = env.root.join("state/relay/quota.lock");
+    let mut holder = Command::new("flock").arg(&lock).args(["sleep", "3"]).spawn().unwrap();
+    for _ in 0..100 {
+        if lock.exists() && locked(&lock) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(locked(&lock), "the planted reader holds the lock");
+    let started = std::time::Instant::now();
+    let out = relay(&env, &["--json", "quota", "refresh"]);
+    let waited = started.elapsed();
+    ok(&out, "refresh");
+    holder.wait().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v.get("skipped").is_none(), "{v}");
+    assert_eq!(v["read"], serde_json::json!(["claude:solo"]), "{v}");
+    assert!(waited >= Duration::from_secs(2), "it read while another reader held the machine's lock ({waited:?})");
+    assert!(!env.root.join("state/relay/flow/quota.lock").exists(), "no lock of the project's own");
 }
 
 #[test]

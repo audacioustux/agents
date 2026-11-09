@@ -196,7 +196,7 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     let neighbours = ctx.neighbours();
     let others: Vec<&World> = neighbours.iter().collect();
     let mut room = Room::new(&ctx.cfg, &world, &others, disk_ok(&ctx.cfg.limits, &ctx.clones));
-    refresh_stale(ctx, &room, &world)?;
+    crate::systems::quota::start_refresh(ctx, &room, &world, true)?;
     let mut held = Held::default();
     for Start { job, account, model, provider } in plan(&ctx.cfg, &mut room, &world, now_micros(), &mut held) {
         let (pid, gate) = ctx.spawn_gated(&["session", "run", &job], &ctx.job_file(&job, "runner.log"))?;
@@ -252,7 +252,7 @@ fn ask_held(ctx: &Ctx, world: &World, held: &Held) -> Result<Option<u64>> {
 /// The next moment (bus time, after `now_us`) at which the plan could change
 /// with no event to announce it: a limit lifts, a meter resets, or, while a
 /// job waits, a reading goes stale or a failed read stops backing off (so
-/// `refresh_stale` starts a new one). `None` if nothing is pending.
+/// `quota::start_refresh` starts a new one). `None` if nothing is pending.
 fn next_due(accounts: &[(&dyn Harness, Option<&AccountState>)], waiting: bool, now_us: u64) -> Option<u64> {
     let from_secs = |s: i64| u64::try_from(s).ok().map(|s| s.saturating_mul(1_000_000));
     let mut times = Vec::new();
@@ -268,20 +268,6 @@ fn next_due(accounts: &[(&dyn Harness, Option<&AccountState>)], waiting: bool, n
         }
     }
     times.into_iter().filter(|&t| t > now_us).min()
-}
-
-/// Starts a quota reading for accounts whose reading is old and that a
-/// waiting job may run on: `claude /usage` is not free to call, and a job
-/// pinned to one harness says nothing about another's accounts.
-fn refresh_stale(ctx: &Ctx, room: &Room, world: &World) -> Result<()> {
-    let now = now_micros();
-    if room.found().iter().any(|a| {
-        crate::systems::quota::wanted(world, a) && crate::accounts::due(harness_of(a), room.account(&a.key()), now)
-    }) {
-        // `quota refresh` holds its own role, so overlapping passes start it once.
-        ctx.spawn_self(&["quota", "refresh", "--stale", "--wanted"], &ctx.state.join("quota.log"))?;
-    }
-    Ok(())
 }
 
 /// Whether free disk under the clones (`clones`) lets a build job start: unmeasured is not enough.

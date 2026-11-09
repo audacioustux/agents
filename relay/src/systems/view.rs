@@ -126,12 +126,22 @@ fn status(scope: Scope<'_>, json: bool, all: bool, everywhere: bool) -> Result<(
     }
     let m = scope.read()?;
     let room = m.room(scope.home);
-    let accounts = m.accounts(scope.home, &room);
+    let accounts = shown_accounts(scope, &m, &room)?;
     let text = board(scope.cfg, &m, &room, &accounts, all, everywhere);
     // On a terminal, one screen line per line; piped, every line whole.
     let width = crate::os::terminal_size().map(|(cols, _)| cols);
     out!("{}", fit(&text, width));
     Ok(())
+}
+
+/// The accounts as a board shows them; in a project, a reading of each stale one is started
+/// first (`quota::start_refresh`), and the view says so: a reading is taken when it is shown.
+pub fn shown_accounts(scope: Scope<'_>, m: &Machine, room: &Room) -> Result<AccountsView> {
+    let mut v = m.accounts(scope.home, room);
+    if let Some(ctx) = scope.home {
+        v.refreshing(crate::systems::quota::start_refresh(ctx, room, m.own(), false)?);
+    }
+    Ok(v)
 }
 
 /// Rows as aligned text: each column as wide as its widest cell, a column

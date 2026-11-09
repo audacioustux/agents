@@ -620,8 +620,11 @@ fn await_seat(
         }
         if stale && asked.is_none_or(|t| t.elapsed() >= SEAT_REREAD) {
             asked = Some(Instant::now());
-            // `quota refresh` holds its own role, so overlapping requests start one reading.
-            let _ = ctx.spawn_self(&["quota", "refresh", "--stale"], &ctx.state.join("quota.log"));
+            if let Ok(world) = ctx.world() {
+                let neighbours = ctx.neighbours();
+                let room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
+                let _ = crate::systems::quota::start_refresh(ctx, &room, &world, false);
+            }
         }
         let left = wait.saturating_sub(started.elapsed());
         if !live() {

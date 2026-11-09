@@ -139,7 +139,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)) |
 | `relay view events` | The merged event log |
 | `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |
-| `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it, judged as the dispatcher judges it (a full account is `busy`, not `ready`); a fresh reading; switches |
+| `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it, judged as the dispatcher judges it (a full account is `busy`, not `ready`); `show` starts a reading of each stale account and says `refreshing`. A fresh reading (one under way anywhere on the machine is waited for); switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout), noting when no review has accepted its tip / delete its clone and records |
 | `relay land gc [--dry-run]` | Remove what finished jobs no longer need: build outputs, old clones, old logs ([disk](#disk)) |
 | `relay probe [--account H:L]` | Sandbox self-test for one account of each harness, with controls |
@@ -215,6 +215,10 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   (`no account has room (claude:a busy (1 of 1 seat); claude:b reading is stale)`).
   A retried or requeued job has no account until its next start, so its account
   column says `-` and its model column lists every harness it may run on.
+- **Readings.** Showing the accounts in a project (`view status`, `view watch`, `quota
+  show`) starts a reading of each stale one in the background, and the accounts title
+  says `refreshing claude:a, …` until it lands. The machine-wide pane outside every
+  project starts none: a reading is taken by a project's rules.
 - **What stays put.** The selection follows a job by name as rows move; a failed
   read keeps the last good board with the cause in red in the title, and the next
   read retries; columns are a fixed set (project when every project shows, job, state,
@@ -739,7 +743,12 @@ omp keeps no identity relay can read, so it shows none.
 
 Quota readings cost no model call. One is taken again after 10 minutes, or
 once a reset it names has passed; a reading that fails is not retried for the
-same 10 minutes. An account is used only when:
+same 10 minutes. The dispatcher reads the accounts a queued job may use; showing
+the accounts (`quota show`, `view status`, `view watch`) starts a reading of every
+stale one and says `refreshing` (`refreshing` in `--json`), so an idle machine's
+board does not go stale. There is one reader on the machine: `relay quota refresh`
+that finds a reading under way (any project's) waits for it, then reads only what
+it did not. An account is used only when:
 
 - it has a reading, and not a stale one (unread or stale is not the same as
   having room; a job waits while a fresh one is taken);
@@ -963,8 +972,9 @@ own process, and owns one output port:
   lifting, a meter resetting, a reading going stale), with a 5-minute
   backstop, and exits after a minute with nothing to do: nothing queued that can
   start, and no job held by a runner, running or checking.
-- **Single roles:** the dispatcher and the quota reader each hold a `flock`,
-  which the kernel releases if the holder dies.
+- **Single roles:** the dispatcher (one per project) and the quota reader (one per
+  machine, since accounts are the machine's) each hold a `flock`, which the kernel
+  releases if the holder dies.
 
 | System | Responsibility | Emits |
 | --- | --- | --- |
@@ -974,7 +984,7 @@ own process, and owns one output port:
 | decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); takes the orchestrator's answers | decision-requested, parked, decided |
 | quota | account readings and switches | reading, unreadable, signed-out, account-enabled |
 | land | brings branches back; cleans up, and gc | forgotten, collected |
-| view, probe | read-only (`view stats` folds the bus; it writes nothing) | — |
+| view, probe | read-only (`view stats` folds the bus; it writes nothing). Showing the accounts may start a quota reading, which quota writes | — |
 
 A runner is identified by its pid together with its start time, so a reused
 pid is never mistaken for it or signalled. It starts behind a gate (a pipe on

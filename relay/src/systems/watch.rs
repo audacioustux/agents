@@ -139,7 +139,7 @@ impl Handoff {
 fn read(scope: Scope<'_>, ui: &Ui) -> Result<Board> {
     let m = scope.read()?;
     let room = m.room(scope.home);
-    let accounts = m.accounts(scope.home, &room);
+    let accounts = crate::systems::view::shown_accounts(scope, &m, &room)?;
     Ok(Board::new(scope.cfg, &m, &room, accounts, ui.shown.all, ui.shown.everywhere, now_micros()))
 }
 

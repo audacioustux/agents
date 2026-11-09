@@ -267,7 +267,7 @@ fn refusal_cell(r: &accounts::Refusal, st: Option<&AccountState>) -> String {
 
 /// Whether a queued job may run on `account`, so its reading decides something.
 pub fn wanted(world: &World, account: &Home) -> bool {
-    world.jobs.values().any(|j| world.startable(j) && may_use(j, account))
+    world.jobs().values().any(|j| world.startable(j) && may_use(j, account))
 }
 
 pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
@@ -433,9 +433,9 @@ fn view(
         };
         // Another project's job that names no model asks for its own config's, which is not known
         // here; one that names a model asks for it on this machine's accounts like ours do.
-        let theirs = others.iter().flat_map(|w| w.jobs.values()).filter(asks).filter_map(|j| j.models.get(a.harness));
+        let theirs = others.iter().flat_map(|w| w.jobs().values()).filter(asks).filter_map(|j| j.models.get(a.harness));
         let asked: BTreeSet<String> = world
-            .jobs
+            .jobs()
             .values()
             .filter(asks)
             .filter_map(|j| model_for(cfg, j, a.harness))
@@ -453,7 +453,7 @@ fn view(
         let seat = accounts::seat(&twins, &key);
         let here = |k: &str| accounts::seat(&twins, k) == seat;
         let running =
-            world.jobs.values().filter(|j| j.status == Status::Running && j.account.as_deref().is_some_and(here));
+            world.jobs().values().filter(|j| j.status == Status::Running && j.account.as_deref().is_some_and(here));
         let identity = match accounts::sign_in(a) {
             SignIn::As(id) => Some(id),
             SignIn::Out | SignIn::Unknown => None,
@@ -521,7 +521,7 @@ mod tests {
         let mut w = World::default();
         w.accounts.insert(omp().key(), st);
         for j in jobs {
-            w.jobs.insert(j.name.clone(), j.clone());
+            w.jobs_mut().insert(j.name.clone(), j.clone());
         }
         w
     }

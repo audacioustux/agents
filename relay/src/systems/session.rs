@@ -63,7 +63,7 @@ fn port(ctx: &Ctx, job: &Job) -> crate::bus::Port<SessionEvent> {
 
 pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
     Ctx::wait_for_gate();
-    let job = ctx.world()?.jobs.remove(&name).with_context(|| format!("no job named {name}"))?;
+    let job = ctx.world()?.jobs_mut().remove(&name).with_context(|| format!("no job named {name}"))?;
     let port = port(ctx, &job);
     let mut spend = (0.0, 0);
     let (outcome, reason) =
@@ -797,7 +797,7 @@ fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: Option<Instant>, askin
     }
     let world = ctx.world()?;
     let largest = world
-        .jobs
+        .jobs()
         .values()
         .filter(|o| o.name != job.name && o.status.has_runner())
         .all(|o| o.disk_bytes.unwrap_or(0) <= bytes);
@@ -1026,7 +1026,7 @@ pub fn bases(world: &World, job: &Job) -> Vec<(String, PathBuf, String)> {
             continue;
         }
         seen.push(n);
-        let Some(j) = world.jobs.get(n) else { continue };
+        let Some(j) = world.jobs().get(n) else { continue };
         if j.readonly() {
             todo.extend(&j.after);
         } else if let (Some(dir), Some(branch)) = (&j.workdir, &j.branch) {
@@ -1175,7 +1175,7 @@ mod base_tests {
         };
         let mut w = World::default();
         for j in [build("one", &[]), review("look", &["one"]), review("loop", &["loop"]), build("other", &[])] {
-            w.jobs.insert(j.name.clone(), j);
+            w.jobs_mut().insert(j.name.clone(), j);
         }
         let names = |j: &Job| bases(&w, j).into_iter().map(|b| b.0).collect::<Vec<_>>();
         assert_eq!(names(&build("two", &["look"])), ["one"], "build, review, build");

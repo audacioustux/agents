@@ -44,7 +44,7 @@ fn modelled(mut j: Job) -> Job {
 fn world(jobs: &[Job]) -> World {
     let mut w = World::default();
     for j in jobs {
-        w.jobs.insert(j.name.clone(), j.clone());
+        w.jobs_mut().insert(j.name.clone(), j.clone());
     }
     w
 }
@@ -241,19 +241,19 @@ fn the_selection_follows_its_job_by_name() {
     ui.apply(Action::Wheel(Id::Job, 3), &b);
     assert_eq!(ui.selected.as_ref().map(|k| k.name.as_str()), Some("a"));
     let newer = job("c", Status::Queued, 1, "C");
-    f.machine.projects[0].world.jobs.insert("c".into(), newer);
+    f.machine.projects[0].world.jobs_mut().insert("c".into(), newer);
     let b = f.board(&ui, 0);
     ui.sync(&b);
     assert_eq!((ui.selected.as_ref().map(|k| k.name.as_str()), ui.index), (Some("a"), 2), "a new row moves it");
-    f.machine.projects[0].world.jobs.remove("a");
+    f.machine.projects[0].world.jobs_mut().remove("a");
     let b = f.board(&ui, 0);
     ui.sync(&b);
     assert_eq!(ui.selected.as_ref().map(|k| k.name.as_str()), Some("b"), "its row's job, once it is gone");
-    f.machine.projects[0].world.jobs.clear();
+    f.machine.projects[0].world.jobs_mut().clear();
     let b = f.board(&ui, 0);
     ui.sync(&b);
     assert_eq!(ui.selected, None);
-    f.machine.projects[0].world.jobs.insert("d".into(), job("d", Status::Queued, 1, "D"));
+    f.machine.projects[0].world.jobs_mut().insert("d".into(), job("d", Status::Queued, 1, "D"));
     let b = f.board(&ui, 0);
     ui.sync(&b);
     assert_eq!(ui.selected.as_ref().map(|k| k.name.as_str()), Some("d"), "after an empty list, the first again");
@@ -350,7 +350,7 @@ fn decisions_waiting_are_a_badge_and_a_pane() {
     // The decision is about the job's current attempt, and its runner (this process) is alive.
     let me = std::process::id();
     let runner = crate::os::start_time(me).map(|started| (me, started));
-    let build = f.machine.projects[0].world.jobs.get_mut("build").unwrap();
+    let build = f.machine.projects[0].world.jobs_mut().get_mut("build").unwrap();
     (build.attempts, build.runner) = (1, runner);
     let created = build.created_at;
     let d = Decision {
@@ -380,8 +380,8 @@ fn decisions_waiting_are_a_badge_and_a_pane() {
     let long =
         Decision { id: "a-rather-long-decision-id-0042".into(), job: "a-rather-long-job-name-x".into(), ..d.clone() };
     let world = &mut f.machine.projects[0].world;
-    let long_job = Job { name: long.job.clone(), ..world.jobs["build"].clone() };
-    world.jobs.insert(long_job.name.clone(), long_job);
+    let long_job = Job { name: long.job.clone(), ..world.jobs()["build"].clone() };
+    world.jobs_mut().insert(long_job.name.clone(), long_job);
     world.decisions.insert(long.id.clone(), long);
     let b80 = f.board(&ui, 1);
     let at = crate::systems::decide::clock(NOW + 600_000_000);

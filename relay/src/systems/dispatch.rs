@@ -182,7 +182,7 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     let _seats = Role::take(&ctx.state_root.join("seats.lock"))?;
     let port = ctx.port(&Source(()));
     let mut world = ctx.world()?;
-    for j in world.jobs.values_mut().filter(|j| j.status.has_runner()) {
+    for j in world.jobs_mut().values_mut().filter(|j| j.status.has_runner()) {
         if !j.runner.is_some_and(|(pid, started)| os::same_process(pid, started)) {
             port.emit(DispatchEvent::Reaped { job: j.name.clone() })?;
             j.status = Status::Failed;
@@ -208,8 +208,8 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     let held_due = ask_held(ctx, &world, &held)?;
     // A job blocked on a dependency that ended badly waits for the operator, not for the dispatcher;
     // one held by a runner (checking too) is watched until it ends or is reaped.
-    let busy = world.jobs.values().any(|j| world.moves_on_its_own(j));
-    let waiting = world.jobs.values().any(|j| world.startable(j));
+    let busy = world.jobs().values().any(|j| world.moves_on_its_own(j));
+    let waiting = world.jobs().values().any(|j| world.startable(j));
     let states: Vec<_> = found.iter().map(|a| (harness_of(a), world.accounts.get(&a.key()))).collect();
     let due = next_due(&states, waiting, now_micros());
     Ok((busy, Held(held.0, None, Vec::new()), [due, held.1, held_due].into_iter().flatten().min()))
@@ -226,7 +226,7 @@ fn ask_held(ctx: &Ctx, world: &World, held: &Held) -> Result<Option<u64>> {
     let after = u64::try_from(after.as_micros()).unwrap_or(u64::MAX);
     let now = now_micros();
     let mut next = None;
-    for j in held.2.iter().filter_map(|n| world.jobs.get(n)) {
+    for j in held.2.iter().filter_map(|n| world.jobs().get(n)) {
         let at = crate::systems::decide::next_held_ask(world, j, after);
         if at == u64::MAX {
             continue;
@@ -266,7 +266,7 @@ fn next_due(accounts: &[(&dyn Harness, Option<&AccountState>)], waiting: bool, n
 /// The seats live runners hold in `worlds`: each one's account and, for omp, provider.
 pub fn seats_held(cfg: &Config, worlds: &[World]) -> Vec<(String, String)> {
     let mut held = Vec::new();
-    for j in worlds.iter().flat_map(|w| w.jobs.values()) {
+    for j in worlds.iter().flat_map(|w| w.jobs().values()) {
         if j.status == Status::Running
             && let (Some(account), Some((pid, started))) = (&j.account, j.runner)
             && os::same_process(pid, started)
@@ -281,7 +281,7 @@ pub fn seats_held(cfg: &Config, worlds: &[World]) -> Vec<(String, String)> {
 /// fold says run and whose runner is still alive.
 pub fn seats_taken<'a>(worlds: impl IntoIterator<Item = &'a World>) -> BTreeMap<String, usize> {
     let mut seats = BTreeMap::new();
-    for j in worlds.into_iter().flat_map(|w| w.jobs.values()) {
+    for j in worlds.into_iter().flat_map(|w| w.jobs().values()) {
         if j.status == Status::Running
             && let (Some(account), Some((pid, started))) = (&j.account, j.runner)
             && os::same_process(pid, started)
@@ -351,7 +351,7 @@ fn plan(
     let limits = &cfg.limits;
     let mut running: BTreeMap<&str, usize> = BTreeMap::new();
     let mut starts = world.profile_starts.clone();
-    for p in world.jobs.values().filter(|j| j.status.has_runner()).filter_map(|j| j.profile.as_deref()) {
+    for p in world.jobs().values().filter(|j| j.status.has_runner()).filter_map(|j| j.profile.as_deref()) {
         *running.entry(p).or_default() += 1;
     }
     // Homes signed in as one account share a seat budget, held under the first one's key.
@@ -362,7 +362,7 @@ fn plan(
         *load.entry(seat(key, provider)).or_default() += 1;
     }
     let mut total = 0;
-    for j in world.jobs.values().filter(|j| j.status == Status::Running) {
+    for j in world.jobs().values().filter(|j| j.status == Status::Running) {
         let account = j.account.as_deref().unwrap_or_default();
         *load.entry(seat(account, &provider_on(cfg, j, account))).or_default() += 1;
         total += 1;
@@ -376,7 +376,7 @@ fn plan(
     // Unmeasured is not the same as enough.
     let disk_ok =
         limits.min_free_disk_gb <= 0.0 || os::free_disk_gb(clones).is_some_and(|gb| gb >= limits.min_free_disk_gb);
-    let mut queued: Vec<&Job> = world.jobs.values().filter(|j| j.status == Status::Queued).collect();
+    let mut queued: Vec<&Job> = world.jobs().values().filter(|j| j.status == Status::Queued).collect();
     queued.sort_by_key(|j| j.created_at);
     let mut out = Vec::new();
     for j in queued {
@@ -595,10 +595,10 @@ mod tests {
             running("c", "c:y", None),
             Job { status: Status::Done, ..running("d", "c:y", Some((me, started))) },
         ] {
-            one.jobs.insert(j.name.clone(), j);
+            one.jobs_mut().insert(j.name.clone(), j);
         }
         let mut two = World::default();
-        two.jobs.insert("a".into(), running("a", "c:x", Some((me, started))));
+        two.jobs_mut().insert("a".into(), running("a", "c:x", Some((me, started))));
         let seats = seats_taken(&[one, two]);
         assert_eq!(seats, BTreeMap::from([("c:x".to_owned(), 2)]), "a dead runner or a finished job holds none");
     }
@@ -671,7 +671,7 @@ mod tests {
                 created_at: i as u64,
                 ..Job::default()
             };
-            world.jobs.insert(j.name.clone(), j);
+            world.jobs_mut().insert(j.name.clone(), j);
         }
         (world, vec![home("omp", "default")])
     }

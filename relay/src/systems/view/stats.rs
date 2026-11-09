@@ -123,7 +123,7 @@ impl Fold {
                 }
             }
             Event::Dispatch(DispatchEvent::Reaped { job }) => {
-                let stopped = before.jobs.get(job).is_some_and(|j| j.stop_requested);
+                let stopped = before.jobs().get(job).is_some_and(|j| j.stop_requested);
                 if let Some(j) = self.job(job) {
                     j.runs.extend(j.run_since.take().map(|r| micros(t, r)));
                     j.outcome = Some(if stopped { Outcome::Stopped } else { Outcome::Failed });

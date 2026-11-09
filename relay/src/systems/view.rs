@@ -101,7 +101,7 @@ pub fn outside(json: bool, cmd: &Cmd) -> Result<()> {
 /// The folded state, with what each job waits for.
 fn world_json(world: &World) -> Result<serde_json::Value> {
     let mut v = serde_json::to_value(world)?;
-    for j in world.jobs.values() {
+    for j in world.jobs().values() {
         v["jobs"][&j.name]["pending"] = serde_json::to_value(world.waits(j))?;
         v["jobs"][&j.name]["readonly"] = j.readonly().into();
     }
@@ -170,7 +170,7 @@ pub fn listed<'a>(
 ) -> Vec<(&'a machine::Project, &'a Job)> {
     let mut jobs: Vec<_> = projects
         .into_iter()
-        .flat_map(|p| p.world.jobs.values().map(move |j| (p, j)))
+        .flat_map(|p| p.world.jobs().values().map(move |j| (p, j)))
         .filter(|(_, j)| all || recent(j, now))
         .collect();
     jobs.sort_by_key(|(_, j)| board_order(j));
@@ -272,7 +272,7 @@ fn model_cell(cfg: Option<&Config>, j: &Job) -> String {
 fn profile_hold(cfg: &Config, world: &World, j: &Job, now: u64) -> Option<String> {
     let name = j.profile.as_deref()?;
     let p = cfg.profiles.get(name)?;
-    let running = world.jobs.values().filter(|o| o.status.has_runner() && o.profile.as_deref() == Some(name)).count();
+    let running = world.jobs().values().filter(|o| o.status.has_runner() && o.profile.as_deref() == Some(name)).count();
     let starts = world.profile_starts.get(name).map_or(&[][..], Vec::as_slice);
     crate::systems::dispatch::profile_hold(name, p, running, starts, now).map(|(why, _)| why)
 }
@@ -524,7 +524,7 @@ fn answer_in(log: &str) -> Option<String> {
 }
 
 fn job(world: &World, name: &str) -> Result<Job> {
-    let Some(j) = world.jobs.get(name) else { fail!(NotFound, "no job named {name}") };
+    let Some(j) = world.jobs().get(name) else { fail!(NotFound, "no job named {name}") };
     Ok(j.clone())
 }
 

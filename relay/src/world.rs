@@ -277,7 +277,8 @@ impl Default for AccountState {
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct World {
-    pub jobs: BTreeMap<String, Job>,
+    /// Read through `jobs()`; changed only through `jobs_mut()` and the fold, which drop `deps`.
+    jobs: BTreeMap<String, Job>,
     pub accounts: BTreeMap<String, AccountState>,
     /// When (bus time, microseconds) each profile's sessions started, within a day
     /// of the latest start. Kept apart from the jobs, which can be cleaned away.
@@ -286,6 +287,48 @@ pub struct World {
     /// Decisions by id, while their job is kept.
     #[serde(default)]
     pub decisions: BTreeMap<String, Decision>,
+    /// What every job waits for, worked out once for this state of `jobs` and shared by every query.
+    #[serde(skip)]
+    deps: Deps,
+}
+
+/// The dependency analysis of one state of a world's jobs, built on the first query after a change
+/// (`Deps::build`): what each job waits for, and whether it is blocked. Every query
+/// (`waits`, `blocked`, `startable`, `moves_on_its_own`) reads it, so a whole pass costs one linear
+/// build. Nothing can leave it stale: `World::jobs` is private, and `jobs_mut` and the fold drop it.
+#[derive(Default)]
+struct Deps(std::sync::OnceLock<Analysis>);
+
+/// The built analysis: each job's waits.
+#[derive(Debug)]
+struct Analysis {
+    waits: std::collections::HashMap<String, Vec<Wait>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every step any build on this thread took, for the bound on a whole pass's work a test asserts.
+    static BUILD_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl Clone for Deps {
+    /// A clone builds its own on its first query: the analysis is a function of the jobs.
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for Deps {
+    /// A cache: two worlds with the same jobs are equal whether or not either has built it.
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for Deps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.get().is_some() { "Deps(built)" } else { "Deps" })
+    }
 }
 
 /// One decision point reached, and what its handlers answered.
@@ -450,33 +493,39 @@ impl Wait {
     }
 }
 
-/// One walk of the dependency graph for `World::waits`: whether a queued job can never start on its
-/// own is worked out once per job (`done`), however many paths reach it, so a walk is linear in the
-/// jobs and their `after` lists. `stack` is the path being walked, for cycles alone: a job found on
-/// it is in a cycle of queued jobs, which never starts, so that answer is as true as any other and is
-/// kept like one.
-struct Blocking<'w> {
-    world: &'w World,
-    done: std::collections::HashMap<&'w str, bool>,
-    stack: Vec<&'w str>,
-    /// Jobs worked out, for the bound on work a test asserts.
-    visits: usize,
+/// The one walk that builds `Deps`: every job's waits, each queued job's blocking worked out once
+/// (`stuck`) however many paths reach it, so the walk is linear in the jobs and their `after` lists.
+/// `path` is the chain being walked, for cycles alone, with constant-time membership: a job found
+/// on it is in a cycle of queued jobs, which never starts, so that answer is a fact and is kept.
+struct Walk<'w> {
+    jobs: &'w BTreeMap<String, Job>,
+    stuck: std::collections::HashMap<&'w str, bool>,
+    path: std::collections::HashSet<&'w str>,
+    steps: usize,
 }
 
-impl<'w> Blocking<'w> {
-    fn new(world: &'w World) -> Self {
-        Self { world, done: std::collections::HashMap::new(), stack: Vec::new(), visits: 0 }
+impl Deps {
+    fn build(jobs: &BTreeMap<String, Job>) -> Analysis {
+        let mut walk =
+            Walk { jobs, stuck: std::collections::HashMap::new(), path: std::collections::HashSet::new(), steps: 0 };
+        let waits = jobs.values().map(|j| (j.name.clone(), walk.waits(j))).collect();
+        #[cfg(test)]
+        BUILD_STEPS.with(|c| c.set(c.get() + walk.steps));
+        Analysis { waits }
     }
+}
 
-    /// What `job` waits for, each dependency's blocking worked out at most once in this walk.
+impl<'w> Walk<'w> {
+    /// What `job` waits for.
     fn waits(&mut self, job: &'w Job) -> Vec<Wait> {
         let wait = |name: &String, state: &str, blocked| Wait { job: name.clone(), state: state.into(), blocked };
-        self.stack.push(&job.name);
+        self.path.insert(&job.name);
         let mut out = Vec::new();
         for a in &job.after {
-            out.extend(match self.world.jobs.get_key_value(a) {
+            self.steps += 1;
+            out.extend(match self.jobs.get_key_value(a) {
                 Some((_, d)) if d.status == Status::Done => None,
-                Some((name, _)) if self.stack.contains(&name.as_str()) => Some(wait(a, "a cycle", true)),
+                Some((name, _)) if self.path.contains(name.as_str()) => Some(wait(a, "a cycle", true)),
                 Some((_, d)) if d.status == Status::Queued => {
                     Some(if self.stuck(d) { wait(a, "blocked", true) } else { wait(a, d.status.as_str(), false) })
                 }
@@ -486,19 +535,20 @@ impl<'w> Blocking<'w> {
                 None => Some(wait(a, "gone", true)),
             });
         }
-        self.stack.pop();
+        self.path.remove(job.name.as_str());
+        if job.status == Status::Queued {
+            self.stuck.insert(&job.name, out.iter().any(|w| w.blocked));
+        }
         out
     }
 
     /// Whether the queued job `d` waits for anything that is blocked, however deep.
     fn stuck(&mut self, d: &'w Job) -> bool {
-        if let Some(&known) = self.done.get(d.name.as_str()) {
+        if let Some(&known) = self.stuck.get(d.name.as_str()) {
             return known;
         }
-        self.visits += 1;
-        let stuck = self.waits(d).iter().any(|w| w.blocked);
-        self.done.insert(&d.name, stuck);
-        stuck
+        self.steps += 1;
+        self.waits(d).iter().any(|w| w.blocked)
     }
 }
 
@@ -506,7 +556,30 @@ impl World {
     /// The jobs `job` still waits for. A dependency that is done, or was done
     /// when it was cleaned away, is not among them; landing it is a later step.
     pub fn waits(&self, job: &Job) -> Vec<Wait> {
-        Blocking::new(self).waits(job)
+        match self.analysis().waits.get(&job.name) {
+            Some(w) => w.clone(),
+            // Not one of this world's jobs: walked on its own.
+            None => Deps::build(&std::iter::once((job.name.clone(), job.clone())).chain(self.jobs.clone()).collect())
+                .waits
+                .remove(&job.name)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The jobs, by name. They change only through `jobs_mut` and the fold.
+    pub fn jobs(&self) -> &BTreeMap<String, Job> {
+        &self.jobs
+    }
+
+    /// The jobs to change, which drops the dependency analysis built for them as they were.
+    pub fn jobs_mut(&mut self) -> &mut BTreeMap<String, Job> {
+        self.deps = Deps::default();
+        &mut self.jobs
+    }
+
+    /// This state's dependency analysis, built on the first query since the jobs last changed.
+    fn analysis(&self) -> &Analysis {
+        self.deps.0.get_or_init(|| Deps::build(&self.jobs))
     }
 
     /// Whether `job` is queued with every dependency done: the dispatcher may give it a seat.
@@ -597,6 +670,8 @@ impl World {
     }
 
     pub(crate) fn apply(&mut self, s: &Stamped) {
+        // Every event may change the jobs: the analysis is built again on the next query.
+        self.deps = Deps::default();
         match &s.event {
             Event::Queue(e) => self.apply_queue(s.t, e),
             Event::Dispatch(e) => self.apply_dispatch(s.t, e),
@@ -1618,35 +1693,64 @@ mod tests {
         assert!(w.blocked(&w.jobs["x"]) && w.blocked(&w.jobs["y"]));
     }
 
-    /// PR #39 second review, issue 1: a dependency shared by many paths is worked out once per walk.
-    /// Twenty queued jobs, each after every earlier one, are 2^19 paths from the last to the first.
+    /// PR #39 reviews 2 and 3: the dependency analysis is built once per state of the jobs and shared by
+    /// every query, in work linear in the jobs and their `after` lists. Bounded for a whole status pass
+    /// (every query the board, dispatch and the wait make, for every job) over a long chain and a dense
+    /// graph, counting every step of every build, not wall time.
     #[test]
-    fn a_walk_of_the_dependencies_works_each_job_out_once() {
-        let names: Vec<String> = (0..20).map(|i| format!("j{i:02}")).collect();
+    fn a_whole_pass_of_dependency_queries_costs_one_linear_walk() {
+        let pass = |w: &World| {
+            BUILD_STEPS.with(|c| c.set(0));
+            for j in w.jobs().values() {
+                let _ = (w.waits(j), w.blocked(j), w.startable(j), w.moves_on_its_own(j));
+            }
+            BUILD_STEPS.with(std::cell::Cell::get)
+        };
+        let fail_first = |evs: &mut Vec<Stamped>, first: &str| {
+            let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
+                job: first.into(),
+                account: "x".into(),
+                runner_pid: 9,
+                runner_started: 1,
+            });
+            evs.push(st(10_000, dispatched));
+            evs.push(st(10_001, Event::Dispatch(DispatchEvent::Reaped { job: first.into() })));
+        };
+        // A chain of 300: each after the one before.
+        let names: Vec<String> = (0..300).map(|i| format!("c{i:03}")).collect();
+        let mut evs = vec![st(1, queued(&names[0]))];
+        for (i, pair) in names.windows(2).enumerate() {
+            evs.push(st(2 + i as u64, queued_after(&pair[1], &[pair[0].as_str()])));
+        }
+        let (jobs, edges) = (names.len(), names.len() - 1);
+        for failed in [false, true] {
+            if failed {
+                fail_first(&mut evs, &names[0]);
+            }
+            let w = World::fold(&evs);
+            let steps = pass(&w);
+            assert!(steps <= 2 * (jobs + edges), "a chain of {jobs}: {steps} steps");
+            assert_eq!(w.blocked(&w.jobs()[&names[299]]), failed);
+        }
+        // Twenty, each after every earlier one: 2^19 paths from the last to the first.
+        let names: Vec<String> = (0..20).map(|i| format!("m{i:02}")).collect();
         let mut evs = vec![st(1, queued(&names[0]))];
         for i in 1..names.len() {
             let after: Vec<&str> = names[..i].iter().map(String::as_str).collect();
             evs.push(st(1 + i as u64, queued_after(&names[i], &after)));
         }
-        let last = &names[names.len() - 1];
+        let (jobs, edges) = (names.len(), names.len() * (names.len() - 1) / 2);
+        fail_first(&mut evs, &names[0]);
         let w = World::fold(&evs);
-        let mut walk = Blocking::new(&w);
-        assert!(walk.waits(&w.jobs[last]).iter().all(|x| !x.blocked), "all queued, nothing failed");
-        assert!(walk.visits < names.len(), "each job at most once: {} visits", walk.visits);
-        // The first fails: every one after it is blocked, and still each is worked out once.
-        let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
-            job: names[0].clone(),
-            account: "x".into(),
-            runner_pid: 9,
-            runner_started: 1,
-        });
-        evs.push(st(100, dispatched));
-        evs.push(st(101, Event::Dispatch(DispatchEvent::Reaped { job: names[0].clone() })));
-        let w = World::fold(&evs);
-        let mut walk = Blocking::new(&w);
-        assert!(walk.waits(&w.jobs[last]).iter().all(|x| x.blocked));
-        assert!(walk.visits < names.len(), "each job at most once: {} visits", walk.visits);
-        assert!(w.blocked(&w.jobs[last]));
+        let steps = pass(&w);
+        assert!(steps <= 2 * (jobs + edges), "a dense graph of {jobs}: {steps} steps");
+        assert!(w.jobs().values().skip(1).all(|j| w.blocked(j)));
+        // A change drops the analysis; the next query builds it again, once.
+        let mut w = w;
+        w.jobs_mut().remove(&names[0]);
+        let steps = pass(&w);
+        assert!(steps <= 2 * (jobs + edges), "{steps} steps after a change");
+        assert_eq!(Wait::summary(&w.waits(&w.jobs()[&names[1]])).as_deref(), Some("waits for m00 (gone)"));
     }
 
     #[test]

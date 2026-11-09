@@ -216,7 +216,7 @@ fn runs_as(cfg: Option<&Config>, j: &Job) -> Option<String> {
 /// `2 running, 1 queued`, or for every project each one's counts after its name.
 fn counts(shown: &[&Project], everywhere: bool, now: u64) -> String {
     let counts = |p: &Project| {
-        let n = |s: Status| p.world.jobs.values().filter(|j| j.status == s).count();
+        let n = |s: Status| p.world.jobs().values().filter(|j| j.status == s).count();
         let mut c = vec![format!("{} running", n(Status::Running))];
         if n(Status::Queued) > 0 {
             c.push(format!("{} queued", n(Status::Queued)));
@@ -228,7 +228,7 @@ fn counts(shown: &[&Project], everywhere: bool, now: u64) -> String {
     }
     let busy: Vec<String> = shown
         .iter()
-        .filter(|p| p.world.jobs.values().any(|j| view::recent(j, now)))
+        .filter(|p| p.world.jobs().values().any(|j| view::recent(j, now)))
         .map(|p| format!("{} {}", p.name, counts(p)))
         .collect();
     if busy.is_empty() { "nothing recent".to_owned() } else { busy.join(" · ") }

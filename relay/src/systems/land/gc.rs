@@ -67,7 +67,7 @@ fn micros(secs: f64) -> u64 {
 
 /// Whether a queued job still needs `name`'s branch: it waits for it, or forks it.
 fn waited_for(world: &World, name: &str) -> bool {
-    world.jobs.values().any(|k| {
+    world.jobs().values().any(|k| {
         k.status == crate::world::Status::Queued
             && (k.after.iter().any(|a| a == name) || k.fork.as_ref().is_some_and(|f| f.job == name))
     })
@@ -103,7 +103,7 @@ fn scratches(ctx: &Ctx, world: &World, gc: &Gc, now_us: u64) -> Vec<Item> {
         if !e.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
-        let go = match world.jobs.get(&name) {
+        let go = match world.jobs().get(&name) {
             Some(j) => !j.runner_alive() && scratch_due(world, j, gc, now_us),
             None => true,
         };
@@ -142,7 +142,7 @@ pub fn plan(ctx: &Ctx, world: &World, now_us: u64) -> Vec<Item> {
     let gc = &ctx.cfg.gc;
     let log_age = micros(gc.logs_gzip_after_days * 86_400.0);
     let mut items = Vec::new();
-    for j in world.jobs.values().filter(|j| !j.status.is_live() && !j.runner_alive()) {
+    for j in world.jobs().values().filter(|j| !j.status.is_live() && !j.runner_alive()) {
         let log = ctx.job_file(&j.name, "log.ndjson");
         let old =
             log.symlink_metadata().ok().filter(std::fs::Metadata::is_file).and_then(|m| m.modified().ok()).is_some_and(
@@ -184,7 +184,7 @@ fn review_refs(ctx: &Ctx, world: &World, gc: &Gc, now_us: u64) -> Vec<Item> {
         .lines()
         .filter_map(|r| r.strip_prefix(PREFIX).map(|job| (job, r)))
         .filter(|(job, _)| {
-            world.jobs.get(*job).is_none_or(|j| {
+            world.jobs().get(*job).is_none_or(|j| {
                 !j.status.is_live() && !j.runner_alive() && j.ended_at.is_some_and(|t| now_us.saturating_sub(t) >= wait)
             })
         })
@@ -377,7 +377,7 @@ pub fn run(ctx: &Ctx, dry_run: bool) -> Result<()> {
 /// The rescue ref a dry run says a clone's removal would make, when its commits are not all in the repository.
 fn rescue_needed(ctx: &Ctx, item: &Item) -> Option<String> {
     let world = ctx.world().ok()?;
-    let j = world.jobs.get(&item.job)?;
+    let j = world.jobs().get(&item.job)?;
     let tip = tip(j.workdir.as_ref()?, j.branch.as_deref()?).ok()?;
     (!in_repo(ctx, &tip)).then(|| format!("refs/relay/rescue/{}", j.name))
 }
@@ -400,7 +400,7 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
         std::fs::remove_dir_all(&item.path).with_context(|| format!("removing {}", item.path.display()))?;
         return collected(ctx, &item.job, "scratch", a.bytes);
     }
-    let j = world.jobs.get(&item.job).context("the job is gone")?;
+    let j = world.jobs().get(&item.job).context("the job is gone")?;
     match item.kind {
         Kind::ReviewRef | Kind::Scratch => unreachable!("handled above"),
         Kind::Log => gzip_log(&item.path),
@@ -441,7 +441,9 @@ mod tests {
     }
 
     fn world(jobs: Vec<Job>) -> World {
-        World { jobs: jobs.into_iter().map(|j| (j.name.clone(), j)).collect(), ..World::default() }
+        let mut w = World::default();
+        w.jobs_mut().extend(jobs.into_iter().map(|j| (j.name.clone(), j)));
+        w
     }
 
     #[test]
@@ -486,7 +488,7 @@ mod tests {
             forker,
         ];
         let w = world(jobs);
-        let due_of = |n: &str| due(&w, &w.jobs[n], &gc, late);
+        let due_of = |n: &str| due(&w, &w.jobs()[n], &gc, late);
         for n in ["running", "checking", "requeued", "fresh", "held", "forked", "look"] {
             assert_eq!(due_of(n), Due::default(), "{n}");
         }
@@ -500,8 +502,8 @@ mod tests {
         let w = world(vec![look.clone(), job("run", Status::Running, Some(1_000)), job("fresh", Status::Done, None)]);
         assert!(!scratch_due(&w, &look, &gc, 1_000 + 6 * HOUR - 1), "under six hours");
         assert!(scratch_due(&w, &look, &gc, 1_000 + 6 * HOUR), "a read-only job has no clone, but has a /tmp");
-        assert!(!scratch_due(&w, &w.jobs["run"], &gc, 10 * DAY), "a live job keeps it");
-        assert!(!scratch_due(&w, &w.jobs["fresh"], &gc, 10 * DAY), "so does one that has not ended");
+        assert!(!scratch_due(&w, &w.jobs()["run"], &gc, 10 * DAY), "a live job keeps it");
+        assert!(!scratch_due(&w, &w.jobs()["fresh"], &gc, 10 * DAY), "so does one that has not ended");
     }
 
     #[test]

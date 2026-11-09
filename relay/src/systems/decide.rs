@@ -492,7 +492,7 @@ pub fn validate(
         {
             return Err(format!("another ${fresh:.2} would pass the job's ceiling of ${ceiling:.2}"));
         }
-        let running = world.jobs.values().filter(|j| j.status.has_runner() && j.profile.as_deref() == Some(name));
+        let running = world.jobs().values().filter(|j| j.status.has_runner() && j.profile.as_deref() == Some(name));
         let starts = world.profile_starts.get(name).map_or(&[][..], Vec::as_slice);
         // A follow-up waits for this job, which holds no slot of its own once it ends.
         let running = running.filter(|j| j.name != job.name).count();
@@ -887,7 +887,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
 /// and unanswered, still about its job as the job is (`World::awaiting`), and the process waiting
 /// to carry it out is alive. The one gate for `decide answer`, `decide list` and the boards.
 pub fn unanswerable(world: &World, d: &Decision, now: u64) -> Option<String> {
-    let job = world.jobs.get(&d.job);
+    let job = world.jobs().get(&d.job);
     if !world.awaiting(d, now) {
         return Some(match job {
             Some(j) if d.parked_until.is_some_and(|u| u > now) && !world.asks_now(d) => format!(
@@ -1011,7 +1011,7 @@ fn answer(ctx: &Ctx, a: Answer) -> Result<()> {
     if let Some(why) = unanswerable(&world, d, now_micros()) {
         fail!(Conflict, "decision {}: {why}", a.id);
     }
-    let Some(job) = world.jobs.get(&d.job) else { fail!(NotFound, "job {} is gone", d.job) };
+    let Some(job) = world.jobs().get(&d.job) else { fail!(NotFound, "job {} is gone", d.job) };
     let action = action_of(&a, &d.job)?;
     let asked = asked(ctx, d, job);
     if let Err(why) = validate(&ctx.cfg, &world, job, &asked, &action, true) {
@@ -1062,7 +1062,7 @@ fn asked(ctx: &Ctx, d: &Decision, job: &Job) -> Request {
 fn held(ctx: &Ctx, name: &str, why: &str) -> Result<()> {
     let Some(_role) = crate::os::Role::try_take(&ctx.state.join(format!("held-{name}.lock")))? else { return Ok(()) };
     let world = ctx.world()?;
-    let Some(job) = world.jobs.get(name).filter(|j| j.status == Status::Queued) else { return Ok(()) };
+    let Some(job) = world.jobs().get(name).filter(|j| j.status == Status::Queued) else { return Ok(()) };
     let after = Duration::from_secs_f64(ctx.cfg.hooks.held_after_minutes * 60.0);
     if next_held_ask(&world, job, u64::try_from(after.as_micros()).unwrap_or(u64::MAX)) > now_micros() {
         return Ok(());
@@ -1080,7 +1080,7 @@ fn held(ctx: &Ctx, name: &str, why: &str) -> Result<()> {
             && (j.created_at, j.attempts, j.queued_at) == (job.created_at, job.attempts, job.queued_at)
     };
     d.carry(ctx, |now, action, _| {
-        let Some(job) = now.jobs.get(name).filter(same) else { return Ok(()) };
+        let Some(job) = now.jobs().get(name).filter(same) else { return Ok(()) };
         match action {
             Action::Reroute { harness, model, profile } => {
                 crate::systems::queue::reroute(ctx, job, harness.as_deref(), model.as_deref(), profile.as_deref())
@@ -1179,7 +1179,7 @@ mod tests {
             account: None,
             cost_usd: 0.0,
         };
-        let carried = d.carry(&ctx, |w, action, why| Ok((w.jobs["a"].status, action, why.to_owned()))).unwrap();
+        let carried = d.carry(&ctx, |w, action, why| Ok((w.jobs()["a"].status, action, why.to_owned()))).unwrap();
         assert_eq!(carried, Some((Status::Checking, follow_up, "w".into())), "current: carried out under the lock");
 
         let resumed = QueueEvent::Resumed {
@@ -1391,7 +1391,7 @@ mod tests {
         let cfg: Config = toml::from_str("name = \"x\"\n[profiles.solo]\nmax_running = 1\n").unwrap();
         let mut w = World::default();
         let busy = Job { name: "busy".into(), status: Status::Running, profile: Some("solo".into()), ..Job::default() };
-        w.jobs.insert(busy.name.clone(), busy);
+        w.jobs_mut().insert(busy.name.clone(), busy);
         let r = req(Point::Ended, 0.0, 1.0);
         let named =
             Action::FollowUp { brief: "b".into(), profile: Some("solo".into()), after: true, fork: false, name: None };

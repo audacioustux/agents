@@ -342,7 +342,12 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   `cap = ["rule", "agent:checker"]` (see [checkpoints](#checkpoints)).
   Its session, in a process group of its own, is watched until it has exited,
   not only until its output closes, and is killed with its group once its
-  decision is withdrawn or goes stale, or a limit passes.
+  decision is withdrawn or goes stale, or a limit passes. A handler's group is
+  recorded with the job while it runs (`<job>.group-<pgid>`), so it also ends
+  with its runner: `queue stop` kills it, and if the runner dies outright
+  (killed, crashed) the dispatcher kills it, with an unsandboxed session left in
+  the runner's group, when it reaps the job; the job's next runner clears any
+  left over.
 - `command:<argv>`: runs the program (argv split on spaces, with no quoting) on
   the host with the request as JSON on stdin, and reads one JSON object from
   stdout: `{"action": "continue", "budget": 20, "why": "..."}` (`cost_usd`

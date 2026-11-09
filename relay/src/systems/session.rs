@@ -25,7 +25,7 @@ use crate::harness::{Harness, Home, Invocation, Permissions, Reader, Session, Ta
 use crate::hostdir::HostDir;
 use crate::os;
 use crate::sandbox::{self, Mounts};
-use crate::supervised::{Group, Supervised};
+use crate::supervised::{Group, Ledger, Supervised};
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request, Reviewing};
 use crate::systems::dispatch;
@@ -64,6 +64,8 @@ fn port(ctx: &Ctx, job: &Job) -> crate::bus::Port<SessionEvent> {
 
 pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
     Ctx::wait_for_gate();
+    // A runner of an earlier attempt that died with a handler at work left its group: it goes now.
+    Ledger::of(&ctx.jobs, &name).kill_all();
     let job = ctx.world()?.jobs_mut().remove(&name).with_context(|| format!("no job named {name}"))?;
     let port = port(ctx, &job);
     let mut spend = (0.0, 0);
@@ -556,7 +558,7 @@ pub fn consult(
             log: "check.ndjson",
             stderr: "check-stderr.log",
             measure: Vec::new(),
-            group: Group::Own,
+            group: Group::Own(Ledger::of(&ctx.jobs, &job.name)),
         };
         let ran = drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader(), live)
             .map(|(report, ending, _)| (report, ending));
@@ -885,7 +887,7 @@ fn start(ctx: &Ctx, job: &Job, run: &Run<'_>, cmd: &mut Command, stdin: Option<&
     cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Ctx::append_private(&ctx.job_file(&job.name, run.stderr))?);
-    let mut child = Supervised::spawn(cmd, run.group).context("starting the session")?;
+    let mut child = Supervised::spawn(cmd, run.group.clone()).context("starting the session")?;
     if let (Some(text), Some(mut pipe)) = (stdin.map(str::to_owned), child.child().stdin.take()) {
         // A writer thread, so a full pipe cannot block reading the output.
         std::thread::spawn(move || pipe.write_all(text.as_bytes()));

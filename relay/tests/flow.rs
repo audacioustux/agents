@@ -1784,6 +1784,65 @@ fn an_agent_handler_that_closes_its_output_and_runs_on_is_stopped_with_the_run()
     assert!(gone(), "the lingering agent went with its group");
 }
 
+/// The pids of the sessions started on `label`'s account, in order, once there are `n`.
+fn session_pids(env: &Env, label: &str, n: usize) -> Vec<String> {
+    let file = env.home.join(format!(".claude.{label}/pids"));
+    for _ in 0..600 {
+        let pids: Vec<String> = std::fs::read_to_string(&file).unwrap_or_default().lines().map(str::to_owned).collect();
+        if pids.len() >= n {
+            return pids;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("fewer than {n} sessions started on {label}");
+}
+
+/// Waits, bounded, until `pid` has gone (or is a zombie no one has reaped yet); whether it did.
+fn gone_within(pid: &str, tenths: u32) -> bool {
+    (0..tenths).any(|_| {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let gone = stat.is_empty() || stat.contains(") Z ");
+        if !gone {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        gone
+    })
+}
+
+/// PR #39 fourth review: an unsandboxed `agent:` handler runs in a process group of its own, which
+/// neither the runner's TERM nor its death reaches. A `queue stop` ends it with the job, and so does
+/// the dispatcher's reaper when the runner is killed outright, along with the unsandboxed worker.
+#[test]
+fn a_stopped_or_killed_runner_takes_its_unsandboxed_agent_handler_with_it() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("agent-stop", false);
+    let hooks = "[hooks]\ndisk = [\"agent:checker\"]\n[profiles.checker]\nharness = \"claude\"\nbudget = 0.5\n\
+                 [sandbox]\nenabled = false\n";
+    configure(&env, "job_disk_gb = 0.00001\njob_ceiling_usd = 5.0\n", hooks);
+    // The worker runs on a, the agent on b; both hold, so the agent is at work when the job is stopped.
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 50, false);
+    std::fs::write(env.home.join(".claude.a/hold"), "").unwrap();
+    std::fs::write(env.home.join(".claude.b/hold"), "").unwrap();
+
+    ok(&relay(&env, &["queue", "add", "stopped", "--text", "Make a change."]), "queue");
+    let agent = session_pids(&env, "b", 1)[0].clone();
+    ok(&relay(&env, &["queue", "stop", "stopped"]), "stop");
+    assert!(gone_within(&agent, 50), "the stop took the agent with it");
+    assert_eq!(wait_for(&env, "stopped")["status"], "stopped");
+
+    ok(&relay(&env, &["queue", "add", "killed", "--text", "Make a change."]), "queue");
+    let agent = session_pids(&env, "b", 2)[1].clone();
+    let worker = session_pids(&env, "a", 2)[1].clone();
+    let runner = job(&env, "killed")["runner"][0].as_u64().unwrap().to_string();
+    assert!(Command::new("kill").args(["-9", &runner]).status().unwrap().success());
+    assert!(gone_within(&agent, 150), "the reaper took the agent with the dead runner");
+    assert!(gone_within(&worker, 50), "and the worker left in the dead runner's group");
+    until(&env, "killed", "failed");
+}
+
 fn events(env: &Env) -> Vec<serde_json::Value> {
     let out = relay(env, &["view", "events"]);
     String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| serde_json::from_str(l).ok()).collect()

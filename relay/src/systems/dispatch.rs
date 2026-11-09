@@ -184,6 +184,12 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     let mut world = ctx.world()?;
     for j in world.jobs_mut().values_mut().filter(|j| j.status.has_runner()) {
         if !j.runner.is_some_and(|(pid, started)| os::same_process(pid, started)) {
+            // A runner that died (killed outright, or crashed) left its handlers' groups, and unsandboxed
+            // its session, running and spending: they go with it now.
+            crate::supervised::Ledger::of(&ctx.jobs, &j.name).kill_all();
+            if let Some((pid, _)) = j.runner {
+                crate::supervised::kill_group_if_any(pid);
+            }
             port.emit(DispatchEvent::Reaped { job: j.name.clone() })?;
             j.status = Status::Failed;
         }

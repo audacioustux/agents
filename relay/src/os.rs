@@ -112,6 +112,20 @@ pub fn terminate_group(pid: u32) -> Result<()> {
     kill_process_group(pid, Signal::TERM).context("kill")
 }
 
+/// Whether a live process (not a zombie) is in process group `pgid` (field 5 of /proc/<pid>/stat).
+/// While one is, the id cannot be reused for another process or group.
+pub fn group_has_members(pgid: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else { return false };
+    entries.flatten().any(|e| {
+        let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else { return false };
+        let Some(after) = stat.rfind(')').and_then(|i| stat.get(i + 2..)) else { return false };
+        let mut fields = after.split_whitespace();
+        // `after` starts at field 3 (state); field 5 is the process group.
+        let state = fields.next();
+        state != Some("Z") && fields.nth(1).and_then(|f| f.parse::<u32>().ok()) == Some(pgid)
+    })
+}
+
 /// SIGKILL to a process group: a handler relay started as a group leader, with everything it started.
 pub fn kill_group(pid: u32) -> Result<()> {
     let pid = Pid::from_raw(i32::try_from(pid)?).context("pid 0")?;

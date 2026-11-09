@@ -663,7 +663,8 @@ pub fn decide_while(
         Handler::Command(argv) => {
             let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
             let env = ctx.relay_env().without(&deny);
-            ask_command(argv, req, Duration::from_secs(ctx.cfg.hooks.command_timeout_seconds), &env, &live)
+            let ledger = crate::supervised::Ledger::of(&ctx.jobs, &job.name);
+            ask_command(argv, req, Duration::from_secs(ctx.cfg.hooks.command_timeout_seconds), &env, &ledger, &live)
         }
         Handler::Orchestrator => ask_orchestrator(ctx, req, &gone),
     };
@@ -766,13 +767,14 @@ fn ask_command(
     req: &Request,
     timeout: Duration,
     env: &crate::host::RelayEnv,
+    ledger: &crate::supervised::Ledger,
     live: &dyn Fn() -> bool,
 ) -> Said {
     let run = || -> Result<String> {
         let mut cmd = env.command("timeout");
         cmd.args(["-k", "5"]).arg(timeout.as_secs().max(1).to_string()).args(argv);
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        let mut child = crate::supervised::Supervised::spawn(&mut cmd, crate::supervised::Group::Own)
+        let mut child = crate::supervised::Supervised::spawn(&mut cmd, crate::supervised::Group::Own(ledger.clone()))
             .with_context(|| format!("starting {}", argv.join(" ")))?;
         let input = serde_json::to_vec(req)?;
         if let Some(mut stdin) = child.child().stdin.take() {
@@ -1459,18 +1461,19 @@ mod tests {
         let full = crate::host::RelayEnv::of([("PATH", "/usr/bin:/bin"), ("HOME", "/h")]);
         let none = full.without(&regex::Regex::new("^$").unwrap());
         let t = Duration::from_secs(1);
+        let ledger = crate::supervised::Ledger::of(&dir, "t");
         let neg = script("neg", r#"echo '{"action": "stop", "why": "w", "cost_usd": -5}'"#);
-        let s = ask_command(&neg, &r, t, &none, &|| true);
+        let s = ask_command(&neg, &r, t, &none, &ledger, &|| true);
         assert_eq!((s.action.name(), s.cost_usd), ("stop", 0.0));
         let big = script("big", "yes '{}' | head -c 200000");
-        assert!(ask_command(&big, &r, t, &none, &|| true).why.contains("more than"));
+        assert!(ask_command(&big, &r, t, &none, &ledger, &|| true).why.contains("more than"));
         let env = script("env", r#"echo "{\"action\": \"stop\", \"why\": \"[$HOME]\"}""#);
-        assert_eq!(ask_command(&env, &r, t, &none, &|| true).why, "[/h]", "the environment it is given");
+        assert_eq!(ask_command(&env, &r, t, &none, &ledger, &|| true).why, "[/h]", "the environment it is given");
         let home_denied = full.without(&regex::Regex::new("^HOME$").unwrap());
-        assert_eq!(ask_command(&env, &r, t, &home_denied, &|| true).why, "[]");
+        assert_eq!(ask_command(&env, &r, t, &home_denied, &ledger, &|| true).why, "[]");
         let stubborn = script("stubborn", "trap '' TERM\nwhile :; do sleep 1; done");
         let started = std::time::Instant::now();
-        assert_eq!(ask_command(&stubborn, &r, t, &none, &|| true).action, Action::Defer);
+        assert_eq!(ask_command(&stubborn, &r, t, &none, &ledger, &|| true).action, Action::Defer);
         assert!(started.elapsed() < Duration::from_secs(15), "killed after the grace");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1491,6 +1494,7 @@ mod tests {
         let full = crate::host::RelayEnv::of([("PATH", "/usr/bin:/bin"), ("HOME", "/h")]);
         let none = full.without(&regex::Regex::new("^$").unwrap());
         let t = Duration::from_secs(1);
+        let ledger = crate::supervised::Ledger::of(&dir, "t");
         // PR #39 review, issue 2: withdrawn while it runs, the whole group is killed at once.
         let pid_file = dir.join("slow.pid");
         let slow =
@@ -1503,7 +1507,7 @@ mod tests {
             wanted.get()
         };
         let started = std::time::Instant::now();
-        let s = ask_command(&slow, &r, Duration::from_secs(120), &none, &live);
+        let s = ask_command(&slow, &r, Duration::from_secs(120), &none, &ledger, &live);
         assert_eq!(s.action, Action::Defer);
         assert!(s.why.contains("withdrawn"), "{}", s.why);
         assert!(started.elapsed() < Duration::from_secs(10), "not waited for: {:?}", started.elapsed());
@@ -1533,7 +1537,7 @@ mod tests {
             wanted.get()
         };
         let started = std::time::Instant::now();
-        let s = ask_command(&leaves, &r, Duration::from_secs(120), &none, &live);
+        let s = ask_command(&leaves, &r, Duration::from_secs(120), &none, &ledger, &live);
         assert!(s.why.contains("withdrawn"), "{}", s.why);
         assert!(started.elapsed() < Duration::from_secs(10), "not waited for: {:?}", started.elapsed());
         let helper = std::fs::read_to_string(&helper_pid).unwrap().trim().to_owned();
@@ -1559,7 +1563,7 @@ mod tests {
             wanted.get()
         };
         let started = std::time::Instant::now();
-        let s = ask_command(&closes, &r, Duration::from_secs(120), &none, &live);
+        let s = ask_command(&closes, &r, Duration::from_secs(120), &none, &ledger, &live);
         assert!(s.why.contains("withdrawn"), "{}", s.why);
         assert!(started.elapsed() < Duration::from_secs(10), "not waited for: {:?}", started.elapsed());
         let closer = std::fs::read_to_string(&closed_pid).unwrap().trim().to_owned();
@@ -1569,7 +1573,14 @@ mod tests {
         }));
         // Wanted all along, a helper holding the output is not waited for past the timeout and its grace.
         let started = std::time::Instant::now();
-        let s = ask_command(&script("lingers", "sleep 20 &\necho '{\"action\": \"wait\"}'"), &r, t, &none, &|| true);
+        let s = ask_command(
+            &script("lingers", "sleep 20 &\necho '{\"action\": \"wait\"}'"),
+            &r,
+            t,
+            &none,
+            &ledger,
+            &|| true,
+        );
         assert_eq!(s.action, Action::Defer, "{}", s.why);
         assert!(started.elapsed() < Duration::from_secs(15), "bounded: {:?}", started.elapsed());
         let _ = std::fs::remove_dir_all(&dir);

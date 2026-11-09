@@ -215,14 +215,22 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         port.emit(before)?;
     }
     port.emit(event)?;
-    // Only a process that is still the recorded runner is signalled, never a reused pid.
-    if let Some((pid, started)) = runner
-        && os::same_process(pid, started)
-    {
-        os::terminate_group(pid)?;
+    if let Some(runner) = runner {
+        stop_runner(ctx, &name, runner)?;
     }
     ctx.wake_dispatch()?;
     ctx.reply(&serde_json::json!({ "job": name, "recorded": recorded }), &format!("{name}: recorded"))
+}
+
+/// Ends a running job's runner: a TERM to its group, which its session is in, then a kill of every
+/// handler group it recorded, which the TERM does not reach. Only a process that is still the
+/// recorded runner is signalled, never a reused pid.
+fn stop_runner(ctx: &Ctx, name: &str, (pid, started): (u32, u64)) -> Result<()> {
+    if os::same_process(pid, started) {
+        os::terminate_group(pid)?;
+    }
+    crate::supervised::Ledger::of(&ctx.jobs, name).kill_all();
+    Ok(())
 }
 
 /// The reviews chained to the build job `builder`: the ones that have not been replaced or detached.

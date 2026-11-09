@@ -228,6 +228,14 @@ impl RelayEnv {
         c.env_clear().envs(&self.0);
         c
     }
+
+    /// The same, run under `relay supervise` ([`crate::supervised::command`]), which passes this
+    /// environment on to `program`.
+    pub fn supervised(&self, program: impl AsRef<OsStr>) -> std::io::Result<Command> {
+        let mut c = crate::supervised::command(program)?;
+        c.env_clear().envs(&self.0);
+        Ok(c)
+    }
 }
 
 /// The environment a session starts from (and a check, and a harness's quota reading): [`base`],

@@ -216,20 +216,18 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     }
     port.emit(event)?;
     if let Some(runner) = runner {
-        stop_runner(ctx, &name, runner)?;
+        stop_runner(runner)?;
     }
     ctx.wake_dispatch()?;
     ctx.reply(&serde_json::json!({ "job": name, "recorded": recorded }), &format!("{name}: recorded"))
 }
 
-/// Ends a running job's runner: a TERM to its group, which its session is in, then a kill of every
-/// handler group it recorded, which the TERM does not reach. Only a process that is still the
-/// recorded runner is signalled, never a reused pid.
-fn stop_runner(ctx: &Ctx, name: &str, (pid, started): (u32, u64)) -> Result<()> {
-    if os::same_process(pid, started) {
-        os::terminate_group(pid)?;
-    }
-    crate::supervised::Ledger::of(&ctx.jobs, name).kill_all();
+/// Ends a running job's runner with a TERM, sent only while the recorded pid is still the recorded
+/// process (`os::signal_if_same`), never to a group id that may have been reused. The runner passes
+/// the TERM on to its own group (an acceptance check it runs) and ends, and every session and handler
+/// it started ends with it, by its supervisor (`supervised`).
+fn stop_runner((pid, started): (u32, u64)) -> Result<()> {
+    os::signal_if_same(pid, started, rustix::process::Signal::TERM)?;
     Ok(())
 }
 

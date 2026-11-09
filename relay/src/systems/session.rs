@@ -4,7 +4,7 @@
 //! dispatch. Nothing here names a harness: the account's harness builds the
 //! command and reads the output, and the limits are enforced here for all.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ use crate::harness::{Harness, Home, Invocation, Permissions, Reader, Session, Ta
 use crate::hostdir::HostDir;
 use crate::os;
 use crate::sandbox::{self, Mounts};
-use crate::supervised::{Group, Ledger, Supervised};
+use crate::supervised::Supervised;
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request, Reviewing};
 use crate::systems::dispatch;
@@ -57,6 +57,26 @@ impl crate::bus::Source for Source {
     }
 }
 
+/// `queue stop` sends the runner a TERM, to the process it checked and never to a stored group id.
+/// The runner passes it on to its own group, which it leads (an acceptance check it runs is in it),
+/// and ends as the TERM would have ended it; each session and handler it started ends with it, by
+/// its supervisor.
+fn pass_term_to_own_group() -> Result<()> {
+    use signal_hook::consts::SIGTERM;
+    let mut signals = signal_hook::iterator::Signals::new([SIGTERM]).context("handling TERM")?;
+    std::thread::spawn(move || {
+        if signals.forever().next().is_some() {
+            if rustix::process::getpgrp() == rustix::process::getpid() {
+                // This process is sent it too, and swallows it here.
+                let _ = rustix::process::kill_current_process_group(rustix::process::Signal::TERM);
+            }
+            let _ = signal_hook::low_level::emulate_default_handler(SIGTERM);
+            std::process::exit(128 + SIGTERM);
+        }
+    });
+    Ok(())
+}
+
 /// This attempt's port: the runner is the only writer of its attempt's file.
 fn port(ctx: &Ctx, job: &Job) -> crate::bus::Port<SessionEvent> {
     ctx.port(&Source { job: job.name.clone(), created: job.created_at, attempt: job.attempts })
@@ -64,8 +84,7 @@ fn port(ctx: &Ctx, job: &Job) -> crate::bus::Port<SessionEvent> {
 
 pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
     Ctx::wait_for_gate();
-    // A runner of an earlier attempt that died with a handler at work left its group: it goes now.
-    Ledger::of(&ctx.jobs, &name).kill_all();
+    pass_term_to_own_group()?;
     let job = ctx.world()?.jobs_mut().remove(&name).with_context(|| format!("no job named {name}"))?;
     let port = port(ctx, &job);
     let mut spend = (0.0, 0);
@@ -201,7 +220,6 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         log: "log.ndjson",
         stderr: "stderr.log",
         measure: work.clone.iter().map(SessionRepo::path).chain([work.tmp.as_path()]).collect(),
-        group: Group::Runner,
     };
     let (report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
@@ -335,7 +353,7 @@ fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home
         cwd: &work.cwd,
         account: true,
     };
-    let cmd = command(ctx, &inv, &mounts);
+    let cmd = supervised_command(ctx, &inv, &mounts)?;
     Ok(ControlFlow::Continue(Launch { cmd, stdin: inv.stdin, session_id, brief, reviewing }))
 }
 
@@ -551,14 +569,13 @@ pub fn consult(
             cwd: &ctx.cfg.repo,
             account: true,
         };
-        let mut cmd = command(ctx, &inv, &mounts);
+        let mut cmd = supervised_command(ctx, &inv, &mounts)?;
         let run = Run {
             session_id: None,
             budget_usd: agent.budget_usd,
             log: "check.ndjson",
             stderr: "check-stderr.log",
             measure: Vec::new(),
-            group: Group::Own(Ledger::of(&ctx.jobs, &job.name)),
         };
         let ran = drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader(), live)
             .map(|(report, ending, _)| (report, ending));
@@ -722,18 +739,34 @@ fn conclude(ctx: &Ctx, job: &Job, key: &str, v: Verdict, now_s: i64) -> Result<E
 
 /// The invocation, niced, inside the sandbox when it is on.
 fn command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> Command {
+    let Ok(c) = build(ctx, inv, mounts, |p| Ok::<_, std::convert::Infallible>(Command::new(p)));
+    c
+}
+
+/// The same under `relay supervise`, for a session the runner drives: its whole process group ends
+/// with it, with the runner, or when it is stopped ([`crate::supervised`]).
+fn supervised_command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<Command> {
+    build(ctx, inv, mounts, |p| crate::supervised::command(p))
+}
+
+fn build<E>(
+    ctx: &Ctx,
+    inv: &Invocation,
+    mounts: &Mounts<'_>,
+    new: impl FnOnce(&OsStr) -> Result<Command, E>,
+) -> Result<Command, E> {
     let mut argv: Vec<OsString> = vec!["nice".into(), "-n".into(), ctx.cfg.session.nice.to_string().into()];
     argv.push(inv.program.clone());
     argv.extend(inv.args.iter().cloned());
     let env = sandbox::session_env(ctx, inv);
     if ctx.cfg.sandbox.enabled {
-        let mut c = Command::new("bwrap");
+        let mut c = new(OsStr::new("bwrap"))?;
         c.args(sandbox::args(ctx, &accounts::home(), mounts, env)).args(argv);
-        c
+        Ok(c)
     } else {
-        let mut c = Command::new(&argv[0]);
+        let mut c = new(&argv[0])?;
         c.args(&argv[1..]).env_clear().envs(env).current_dir(mounts.cwd);
-        c
+        Ok(c)
     }
 }
 
@@ -747,8 +780,6 @@ struct Run<'a> {
     stderr: &'a str,
     /// What to measure while it runs, for a job's worker: its clone (a build job) and its `/tmp`.
     measure: Vec<&'a Path>,
-    /// The worker stays in the runner's group, so `queue stop` reaches it; a decision's agent has its own.
-    group: Group,
 }
 
 /// What the runner hears while it drives a session: a line of output, the
@@ -887,7 +918,7 @@ fn start(ctx: &Ctx, job: &Job, run: &Run<'_>, cmd: &mut Command, stdin: Option<&
     cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Ctx::append_private(&ctx.job_file(&job.name, run.stderr))?);
-    let mut child = Supervised::spawn(cmd, run.group.clone()).context("starting the session")?;
+    let mut child = Supervised::spawn(cmd).context("starting the session")?;
     if let (Some(text), Some(mut pipe)) = (stdin.map(str::to_owned), child.child().stdin.take()) {
         // A writer thread, so a full pipe cannot block reading the output.
         std::thread::spawn(move || pipe.write_all(text.as_bytes()));

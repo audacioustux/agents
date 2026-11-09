@@ -1811,7 +1811,7 @@ fn gone_within(pid: &str, tenths: u32) -> bool {
 
 /// PR #39 fourth review: an unsandboxed `agent:` handler runs in a process group of its own, which
 /// neither the runner's TERM nor its death reaches. A `queue stop` ends it with the job, and so does
-/// the dispatcher's reaper when the runner is killed outright, along with the unsandboxed worker.
+/// a runner killed outright, along with the unsandboxed worker: each by its supervisor (fifth review).
 #[test]
 fn a_stopped_or_killed_runner_takes_its_unsandboxed_agent_handler_with_it() {
     if !have_bwrap() {
@@ -1838,8 +1838,8 @@ fn a_stopped_or_killed_runner_takes_its_unsandboxed_agent_handler_with_it() {
     let worker = session_pids(&env, "a", 2)[1].clone();
     let runner = job(&env, "killed")["runner"][0].as_u64().unwrap().to_string();
     assert!(Command::new("kill").args(["-9", &runner]).status().unwrap().success());
-    assert!(gone_within(&agent, 150), "the reaper took the agent with the dead runner");
-    assert!(gone_within(&worker, 50), "and the worker left in the dead runner's group");
+    assert!(gone_within(&agent, 150), "its supervisor took the agent with the dead runner");
+    assert!(gone_within(&worker, 50), "and the worker's took the worker");
     until(&env, "killed", "failed");
 }
 

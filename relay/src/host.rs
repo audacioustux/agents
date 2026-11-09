@@ -48,7 +48,7 @@ pub fn executable(path: &Path) -> bool {
 /// finds, which is then recorded: a later caller whose `PATH` lacks it finds the same program,
 /// and one whose `PATH` has another does not replace it. With no record (`None`), `PATH` alone.
 pub fn resolve(record: Option<&Path>, name: &OsStr) -> Program {
-    resolve_as(record, name, executable)
+    resolve_as(record, name, &executable)
 }
 
 /// A harness's helper ([`crate::harness::Harness::helpers`]: the interpreter its launcher's
@@ -59,7 +59,9 @@ pub fn resolve(record: Option<&Path>, name: &OsStr) -> Program {
 /// caller's `PATH` (`~/.local/share/mise/installs/bun/<v>/bin/bun`) is found and recorded instead;
 /// with only a shim, the helper is missing, and shown so.
 pub fn resolve_helper(record: Option<&Path>, name: &OsStr) -> Program {
-    resolve_as(record, name, |p| executable(p) && !mise_shim(p))
+    // A launcher finds its helper by name (`#!/usr/bin/env node`) in the recorded file's directory, so
+    // a recorded file under another name (`/opt/node/node-v22`) could not serve it: it is passed over.
+    resolve_as(record, name, &|p: &Path| executable(p) && !mise_shim(p) && p.file_name() == Some(name))
 }
 
 /// Whether `path` is a mise shim: a link to the `mise` executable under another name.
@@ -70,7 +72,7 @@ pub fn mise_shim(path: &Path) -> bool {
         && std::fs::canonicalize(path).is_ok_and(|t| named(&t))
 }
 
-fn resolve_as(record: Option<&Path>, name: &OsStr, runs: fn(&Path) -> bool) -> Program {
+fn resolve_as(record: Option<&Path>, name: &OsStr, runs: &dyn Fn(&Path) -> bool) -> Program {
     let as_path = Path::new(name);
     if name.is_empty() || as_path.components().count() != 1 {
         let found = !name.is_empty() && as_path.is_absolute() && runs(as_path);
@@ -89,7 +91,7 @@ fn resolve_as(record: Option<&Path>, name: &OsStr, runs: fn(&Path) -> bool) -> P
 }
 
 /// What the record says of `key`, if it is a program that can still run (and that `runs` accepts).
-fn recorded(known: &BTreeMap<String, PathBuf>, key: &str, runs: fn(&Path) -> bool) -> Option<PathBuf> {
+fn recorded(known: &BTreeMap<String, PathBuf>, key: &str, runs: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
     known.get(key).filter(|p| p.is_absolute() && runs(p)).cloned()
 }
 
@@ -127,7 +129,7 @@ impl Held {
 
     /// Records `found` for `key`, unless another relay recorded a program that can run since this
     /// one looked: then that one stands, and is the answer.
-    fn record(mut self, key: String, found: PathBuf, runs: fn(&Path) -> bool) -> Program {
+    fn record(mut self, key: String, found: PathBuf, runs: &dyn Fn(&Path) -> bool) -> Program {
         if let Some(p) = recorded(&self.known, &key, runs) {
             return Program::Found(p);
         }
@@ -148,7 +150,7 @@ impl Held {
 /// Where `name` is on relay's own `PATH`, skipping relative entries (they would name a
 /// different file from every other directory).
 #[allow(clippy::disallowed_methods, reason = "the one read of a caller's PATH: what it finds is recorded")]
-fn on_path(name: &OsStr, runs: fn(&Path) -> bool) -> Option<PathBuf> {
+fn on_path(name: &OsStr, runs: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?)
         .filter(|d| d.is_absolute())
         .map(|d| d.join(name))
@@ -417,7 +419,8 @@ mod tests {
         let shim = d.path().join("shims/bun");
         std::os::unix::fs::symlink(&mise, &shim).unwrap();
         let real = program(d.path(), "bun", 0o755);
-        let linked = d.path().join("bun-link");
+        std::fs::create_dir(d.path().join("linked")).unwrap();
+        let linked = d.path().join("linked/bun");
         std::os::unix::fs::symlink(&real, &linked).unwrap();
         assert!(mise_shim(&shim) && !mise_shim(&mise) && !mise_shim(&real) && !mise_shim(&linked));
         let record = d.path().join("programs.json");
@@ -428,11 +431,32 @@ mod tests {
         assert_eq!(resolve_helper(Some(&record), OsStr::new("bun")), Program::Found(linked), "a link to a real one is");
     }
 
+    /// Review of #40: a launcher finds its helper by name in the directory relay puts on its PATH, so
+    /// a record of `node` as `/opt/node/node-v22` would pass discovery and still leave `#!/usr/bin/env
+    /// node` without it. Such a record is passed over, never returned.
+    #[test]
+    fn a_helper_recorded_under_another_name_is_passed_over() {
+        let d = crate::config::tempdir::Dir::new();
+        let misnamed = program(d.path(), "node-v22", 0o755);
+        let record = d.path().join("programs.json");
+        std::fs::write(&record, serde_json::json!({ "node": misnamed }).to_string()).unwrap();
+        assert_eq!(
+            resolve(Some(&record), OsStr::new("node")),
+            Program::Found(misnamed.clone()),
+            "a program is run by path"
+        );
+        assert_ne!(resolve_helper(Some(&record), OsStr::new("node")), Program::Found(misnamed), "a helper not");
+        std::fs::create_dir(d.path().join("named")).unwrap();
+        let named = program(&d.path().join("named"), "node", 0o755);
+        std::fs::write(&record, serde_json::json!({ "node": named }).to_string()).unwrap();
+        assert_eq!(resolve_helper(Some(&record), OsStr::new("node")), Program::Found(named));
+    }
+
     #[test]
     fn concurrent_discoveries_all_stay_in_the_record() {
         let common =
             ["sh", "cat", "ls", "env", "true", "false", "echo", "mkdir", "rm", "cp", "mv", "ln", "sort", "head"];
-        let names: Vec<&str> = common.into_iter().filter(|n| on_path(OsStr::new(n), executable).is_some()).collect();
+        let names: Vec<&str> = common.into_iter().filter(|n| on_path(OsStr::new(n), &executable).is_some()).collect();
         assert!(names.len() >= 6, "too few programs on PATH to race: {names:?}");
         let d = crate::config::tempdir::Dir::new();
         for round in 0..20 {

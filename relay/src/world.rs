@@ -493,10 +493,12 @@ impl Wait {
     }
 }
 
-/// The one walk that builds `Deps`: every job's waits, each queued job's blocking worked out once
-/// (`stuck`) however many paths reach it, so the walk is linear in the jobs and their `after` lists.
-/// `path` is the chain being walked, for cycles alone, with constant-time membership: a job found
-/// on it is in a cycle of queued jobs, which never starts, so that answer is a fact and is kept.
+/// The one walk that builds `Deps`, in two passes and no recursion, so no depth of chain can exhaust
+/// the stack. First every queued job's blocking (`stuck`), by a depth-first walk on an explicit stack,
+/// each job once however many paths reach it: linear in the jobs and their `after` lists. The jobs on
+/// the stack are `path`, kept for constant-time membership: a job met on it is in a cycle of queued
+/// jobs, which never starts, so that answer is a fact and is kept like any other. Then each job's
+/// waits, read off those answers.
 struct Walk<'w> {
     jobs: &'w BTreeMap<String, Job>,
     stuck: std::collections::HashMap<&'w str, bool>,
@@ -504,10 +506,22 @@ struct Walk<'w> {
     steps: usize,
 }
 
+/// What one dependency, `a`, of a job means: blocked for good, waiting on a queued job (whose blocking
+/// is still to be known), or neither.
+enum Edge<'w> {
+    Done,
+    Blocked(&'static str),
+    Live(&'static str),
+    Queued(&'w Job),
+}
+
 impl Deps {
     fn build(jobs: &BTreeMap<String, Job>) -> Analysis {
         let mut walk =
             Walk { jobs, stuck: std::collections::HashMap::new(), path: std::collections::HashSet::new(), steps: 0 };
+        for j in jobs.values().filter(|j| j.status == Status::Queued) {
+            walk.settle(j);
+        }
         let waits = jobs.values().map(|j| (j.name.clone(), walk.waits(j))).collect();
         #[cfg(test)]
         BUILD_STEPS.with(|c| c.set(c.get() + walk.steps));
@@ -516,39 +530,77 @@ impl Deps {
 }
 
 impl<'w> Walk<'w> {
-    /// What `job` waits for.
+    fn edge(&self, a: &str) -> Edge<'w> {
+        match self.jobs.get(a) {
+            Some(d) if d.status == Status::Done => Edge::Done,
+            Some(d) if d.status == Status::Queued => Edge::Queued(d),
+            Some(d) if d.status.is_live() => Edge::Live(d.status.as_str()),
+            Some(d) if d.reason.as_deref() == Some("dequeued") => Edge::Blocked("dequeued"),
+            Some(d) => Edge::Blocked(d.status.as_str()),
+            None => Edge::Blocked("gone"),
+        }
+    }
+
+    /// Works out whether `root` and every queued job under it is stuck, on an explicit stack of
+    /// (job, its next dependency, blocked so far).
+    fn settle(&mut self, root: &'w Job) {
+        if self.stuck.contains_key(root.name.as_str()) {
+            return;
+        }
+        let mut stack: Vec<(&'w Job, usize, bool)> = vec![(root, 0, false)];
+        self.path.insert(&root.name);
+        self.steps += 1;
+        while let Some(top) = stack.len().checked_sub(1) {
+            let (job, next) = (stack[top].0, stack[top].1);
+            if let Some(a) = job.after.get(next) {
+                stack[top].1 += 1;
+                self.steps += 1;
+                let blocked = match self.edge(a) {
+                    Edge::Done | Edge::Live(_) => false,
+                    Edge::Blocked(_) => true,
+                    Edge::Queued(d) if self.path.contains(d.name.as_str()) => true,
+                    Edge::Queued(d) => {
+                        if let Some(&known) = self.stuck.get(d.name.as_str()) {
+                            known
+                        } else {
+                            self.path.insert(&d.name);
+                            self.steps += 1;
+                            stack.push((d, 0, false));
+                            continue;
+                        }
+                    }
+                };
+                stack[top].2 |= blocked;
+            } else {
+                let (job, _, blocked) = stack[top];
+                stack.pop();
+                self.path.remove(job.name.as_str());
+                self.stuck.insert(&job.name, blocked);
+                if let Some(parent) = stack.last_mut() {
+                    parent.2 |= blocked;
+                }
+            }
+        }
+    }
+
+    /// What `job` waits for, read off the settled blocking of every queued job.
     fn waits(&mut self, job: &'w Job) -> Vec<Wait> {
         let wait = |name: &String, state: &str, blocked| Wait { job: name.clone(), state: state.into(), blocked };
-        self.path.insert(&job.name);
         let mut out = Vec::new();
         for a in &job.after {
             self.steps += 1;
-            out.extend(match self.jobs.get_key_value(a) {
-                Some((_, d)) if d.status == Status::Done => None,
-                Some((name, _)) if self.path.contains(name.as_str()) => Some(wait(a, "a cycle", true)),
-                Some((_, d)) if d.status == Status::Queued => {
-                    Some(if self.stuck(d) { wait(a, "blocked", true) } else { wait(a, d.status.as_str(), false) })
+            out.extend(match self.edge(a) {
+                Edge::Done => None,
+                Edge::Queued(d) if d.name == job.name => Some(wait(a, "a cycle", true)),
+                Edge::Queued(d) if self.stuck.get(d.name.as_str()).copied().unwrap_or(false) => {
+                    Some(wait(a, "blocked", true))
                 }
-                Some((_, d)) if d.status.is_live() => Some(wait(a, d.status.as_str(), false)),
-                Some((_, d)) if d.reason.as_deref() == Some("dequeued") => Some(wait(a, "dequeued", true)),
-                Some((_, d)) => Some(wait(a, d.status.as_str(), true)),
-                None => Some(wait(a, "gone", true)),
+                Edge::Queued(d) => Some(wait(a, d.status.as_str(), false)),
+                Edge::Live(state) => Some(wait(a, state, false)),
+                Edge::Blocked(state) => Some(wait(a, state, true)),
             });
         }
-        self.path.remove(job.name.as_str());
-        if job.status == Status::Queued {
-            self.stuck.insert(&job.name, out.iter().any(|w| w.blocked));
-        }
         out
-    }
-
-    /// Whether the queued job `d` waits for anything that is blocked, however deep.
-    fn stuck(&mut self, d: &'w Job) -> bool {
-        if let Some(&known) = self.stuck.get(d.name.as_str()) {
-            return known;
-        }
-        self.steps += 1;
-        self.waits(d).iter().any(|w| w.blocked)
     }
 }
 
@@ -1691,6 +1743,35 @@ mod tests {
         // Two queued jobs that wait for each other never start.
         let w = World::fold(&[st(1, queued_after("x", &["y"])), st(2, queued_after("y", &["x"]))]);
         assert!(w.blocked(&w.jobs["x"]) && w.blocked(&w.jobs["y"]));
+    }
+
+    /// PR #39 fourth review: the walk keeps its own stack, so a chain of any depth cannot exhaust the
+    /// thread's. A hundred thousand jobs, each after the one before, behind a failed one.
+    #[test]
+    fn a_very_deep_chain_is_walked_without_recursion() {
+        let n = 100_000;
+        let mut w = World::default();
+        let jobs = w.jobs_mut();
+        // Named in reverse, so the walk meets the deepest job first and must go all the way down.
+        let name = move |i: usize| format!("d{:06}", n - 1 - i);
+        jobs.insert(name(0), Job { name: name(0), status: Status::Failed, ..Job::default() });
+        for i in 1..n {
+            jobs.insert(
+                name(i),
+                Job { name: name(i), status: Status::Queued, after: vec![name(i - 1)], ..Job::default() },
+            );
+        }
+        // On a thread with a small stack, which a walk that recursed per job would overflow.
+        let walked = std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let last = &w.jobs()[&name(n - 1)];
+                (w.blocked(last), w.moves_on_its_own(last), Wait::summary(&w.waits(last)))
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(walked, (true, false, Some(format!("waits for {} (blocked)", name(n - 2)))));
     }
 
     /// PR #39 reviews 2 and 3: the dependency analysis is built once per state of the jobs and shared by

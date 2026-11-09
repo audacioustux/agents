@@ -450,28 +450,35 @@ impl Wait {
     }
 }
 
-impl World {
-    /// The jobs `job` still waits for. A dependency that is done, or was done
-    /// when it was cleaned away, is not among them; landing it is a later step.
-    pub fn waits(&self, job: &Job) -> Vec<Wait> {
-        self.waits_along(job, &mut vec![job.name.as_str()])
+/// One walk of the dependency graph for `World::waits`: whether a queued job can never start on its
+/// own is worked out once per job (`done`), however many paths reach it, so a walk is linear in the
+/// jobs and their `after` lists. `stack` is the path being walked, for cycles alone: a job found on
+/// it is in a cycle of queued jobs, which never starts, so that answer is as true as any other and is
+/// kept like one.
+struct Blocking<'w> {
+    world: &'w World,
+    done: std::collections::HashMap<&'w str, bool>,
+    stack: Vec<&'w str>,
+    /// Jobs worked out, for the bound on work a test asserts.
+    visits: usize,
+}
+
+impl<'w> Blocking<'w> {
+    fn new(world: &'w World) -> Self {
+        Self { world, done: std::collections::HashMap::new(), stack: Vec::new(), visits: 0 }
     }
 
-    /// `waits`, with `path` the jobs that lead here. A queued dependency is blocked when anything it
-    /// waits for is, however deep (`waits for b (blocked)`), and one already on the path is a cycle,
-    /// which never starts either.
-    fn waits_along<'a>(&'a self, job: &Job, path: &mut Vec<&'a str>) -> Vec<Wait> {
+    /// What `job` waits for, each dependency's blocking worked out at most once in this walk.
+    fn waits(&mut self, job: &'w Job) -> Vec<Wait> {
         let wait = |name: &String, state: &str, blocked| Wait { job: name.clone(), state: state.into(), blocked };
+        self.stack.push(&job.name);
         let mut out = Vec::new();
         for a in &job.after {
-            out.extend(match self.jobs.get_key_value(a) {
+            out.extend(match self.world.jobs.get_key_value(a) {
                 Some((_, d)) if d.status == Status::Done => None,
-                Some((name, _)) if path.contains(&name.as_str()) => Some(wait(a, "a cycle", true)),
-                Some((name, d)) if d.status == Status::Queued => {
-                    path.push(name);
-                    let stuck = self.waits_along(d, path).iter().any(|w| w.blocked);
-                    path.pop();
-                    Some(if stuck { wait(a, "blocked", true) } else { wait(a, d.status.as_str(), false) })
+                Some((name, _)) if self.stack.contains(&name.as_str()) => Some(wait(a, "a cycle", true)),
+                Some((_, d)) if d.status == Status::Queued => {
+                    Some(if self.stuck(d) { wait(a, "blocked", true) } else { wait(a, d.status.as_str(), false) })
                 }
                 Some((_, d)) if d.status.is_live() => Some(wait(a, d.status.as_str(), false)),
                 Some((_, d)) if d.reason.as_deref() == Some("dequeued") => Some(wait(a, "dequeued", true)),
@@ -479,7 +486,27 @@ impl World {
                 None => Some(wait(a, "gone", true)),
             });
         }
+        self.stack.pop();
         out
+    }
+
+    /// Whether the queued job `d` waits for anything that is blocked, however deep.
+    fn stuck(&mut self, d: &'w Job) -> bool {
+        if let Some(&known) = self.done.get(d.name.as_str()) {
+            return known;
+        }
+        self.visits += 1;
+        let stuck = self.waits(d).iter().any(|w| w.blocked);
+        self.done.insert(&d.name, stuck);
+        stuck
+    }
+}
+
+impl World {
+    /// The jobs `job` still waits for. A dependency that is done, or was done
+    /// when it was cleaned away, is not among them; landing it is a later step.
+    pub fn waits(&self, job: &Job) -> Vec<Wait> {
+        Blocking::new(self).waits(job)
     }
 
     /// Whether `job` is queued with every dependency done: the dispatcher may give it a seat.
@@ -1589,6 +1616,37 @@ mod tests {
         // Two queued jobs that wait for each other never start.
         let w = World::fold(&[st(1, queued_after("x", &["y"])), st(2, queued_after("y", &["x"]))]);
         assert!(w.blocked(&w.jobs["x"]) && w.blocked(&w.jobs["y"]));
+    }
+
+    /// PR #39 second review, issue 1: a dependency shared by many paths is worked out once per walk.
+    /// Twenty queued jobs, each after every earlier one, are 2^19 paths from the last to the first.
+    #[test]
+    fn a_walk_of_the_dependencies_works_each_job_out_once() {
+        let names: Vec<String> = (0..20).map(|i| format!("j{i:02}")).collect();
+        let mut evs = vec![st(1, queued(&names[0]))];
+        for i in 1..names.len() {
+            let after: Vec<&str> = names[..i].iter().map(String::as_str).collect();
+            evs.push(st(1 + i as u64, queued_after(&names[i], &after)));
+        }
+        let last = &names[names.len() - 1];
+        let w = World::fold(&evs);
+        let mut walk = Blocking::new(&w);
+        assert!(walk.waits(&w.jobs[last]).iter().all(|x| !x.blocked), "all queued, nothing failed");
+        assert!(walk.visits < names.len(), "each job at most once: {} visits", walk.visits);
+        // The first fails: every one after it is blocked, and still each is worked out once.
+        let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
+            job: names[0].clone(),
+            account: "x".into(),
+            runner_pid: 9,
+            runner_started: 1,
+        });
+        evs.push(st(100, dispatched));
+        evs.push(st(101, Event::Dispatch(DispatchEvent::Reaped { job: names[0].clone() })));
+        let w = World::fold(&evs);
+        let mut walk = Blocking::new(&w);
+        assert!(walk.waits(&w.jobs[last]).iter().all(|x| x.blocked));
+        assert!(walk.visits < names.len(), "each job at most once: {} visits", walk.visits);
+        assert!(w.blocked(&w.jobs[last]));
     }
 
     #[test]

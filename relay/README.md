@@ -766,8 +766,12 @@ first found the name on a `PATH` (mise installs `puku-cli` under
 `~/.local/share/mise/installs/npm-puku-puku-cli/`, with a shim in mise's `shims`). `node` is
 a helper program of the puku harness: the first relay command that finds `puku-cli` finds and
 records `node` too, from that caller's `PATH`, so the dispatcher and its quota reader, which run
-on a narrower one, use the same file; its directory is on the `PATH` sessions get, for `puku-cli`
-itself runs on it. A `node` not found is shown as `program not found: node`, and puku is not used.
+on a narrower one, use the same file. That `node` also comes first on the `PATH` of every puku
+run, whatever `session.env` names, since `puku-cli` starts through `#!/usr/bin/env node`: the quota
+script, the `puku-cli` it renews through and every session all run the one interpreter. A `node`
+not found is shown as `program not found: node`, and puku is not used. In the same way every puku
+run is told `HOME` (the user's home) and `APP_NAME`, which puku finds its sign-in by, so a job whose
+`session.env` names another `HOME` still uses the sign-in relay found the account by.
 
 Quota readings cost no model call. One is taken again after 10 minutes, or
 once a reset it names has passed; a reading that fails is not retried for the

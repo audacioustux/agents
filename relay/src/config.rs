@@ -902,9 +902,17 @@ impl Config {
         };
         let name = self.harness(harness).program.map_or_else(|| slot.clone(), PathBuf::into_os_string);
         *slot = resolve(&name)?;
+        // Every run of the harness finds its helpers first on its `PATH`, as recorded: the quota
+        // script's interpreter, what that script's `puku-cli` launcher runs on, and a session's.
+        let helpers = crate::harness::by_id(harness)?.helpers();
+        for name in helpers {
+            if let Some(dir) = PathBuf::from(resolve(name.as_ref())?).parent() {
+                inv.path_first.push(dir.to_path_buf());
+            }
+        }
         // Such a script's interpreter is one of the harness's helpers, found as its program is.
         if at.is_some() {
-            let declared = crate::harness::by_id(harness)?.helpers().iter().any(|n| inv.program == **n);
+            let declared = helpers.iter().any(|n| inv.program == **n);
             if !declared {
                 return Err(crate::harness::Refusal(format!(
                     "harness {harness}: {} is not one of its helper programs",

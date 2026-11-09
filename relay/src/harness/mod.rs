@@ -145,6 +145,10 @@ pub struct Invocation {
     /// that hands over to it rather than the command itself. It is located as
     /// the program otherwise is ([`crate::config::HarnessConf::locate`]).
     pub command_arg: Option<usize>,
+    /// Directories put first on the `PATH` it runs with, whatever else names one: its harness's
+    /// helpers, as recorded ([`crate::config::Config::locate`]), so a launcher such as
+    /// `#!/usr/bin/env node` runs the interpreter relay found, not one an earlier directory holds.
+    pub path_first: Vec<PathBuf>,
 }
 
 impl Invocation {
@@ -156,6 +160,7 @@ impl Invocation {
             stdin: None,
             files: Vec::new(),
             command_arg: None,
+            path_first: Vec::new(),
         }
     }
 

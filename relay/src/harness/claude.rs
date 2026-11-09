@@ -52,7 +52,8 @@ pub trait Account: Sync + fmt::Debug {
     fn can_refresh(&self, home: &Home) -> bool;
     fn sign_in(&self, home: &Home) -> SignIn;
     fn lapsed(&self, text: &str) -> bool;
-    /// Variables a run on `home` needs besides the one naming the home.
+    /// Variables a run on `home` needs besides the one naming the home: where its sign-in is, when
+    /// that is not in the home. Every run takes them through [`ClaudeCode::run_env`].
     fn env(&self, _home: &Home) -> Vec<(OsString, Option<OsString>)> {
         Vec::new()
     }
@@ -85,6 +86,15 @@ pub const Claude: ClaudeCode = ClaudeCode {
     config_dirs: &["hooks", "plugins", "skills", "commands", "agents", "output-styles"],
     account: &ClaudeAccount,
 };
+
+impl ClaudeCode {
+    /// What every run on `home` (a session, a quota reading and whatever that starts) is told about
+    /// its account: the home, and where the sign-in is ([`Account::env`]). Built here alone, so no run
+    /// can look for the account somewhere relay's own reading of it ([`Account::sign_in`]) did not.
+    pub fn run_env(&self, home: &Home) -> Vec<(OsString, Option<OsString>)> {
+        std::iter::once((self.config_env.into(), Some(home.dir.clone().into()))).chain(self.account.env(home)).collect()
+    }
+}
 
 /// `.claude` is `default`; `.claude.work` is `work`.
 pub fn label_for(entry: &str, prefix: &str) -> Option<String> {
@@ -138,7 +148,7 @@ impl Account for ClaudeAccount {
     fn quota(&self, cli: &ClaudeCode, home: &Home) -> Invocation {
         let mut i = Invocation::new(cli.program);
         i.args(["-p", "/usage", "--strict-mcp-config", "--setting-sources", "project,local"]);
-        i.env.push((cli.config_env.into(), Some(home.dir.clone().into())));
+        i.env.extend(cli.run_env(home));
         i
     }
 
@@ -288,9 +298,8 @@ impl Harness for ClaudeCode {
     fn invocation(&self, home: &Home, task: &Task<'_>) -> Result<Invocation, Refusal> {
         let mut i = Invocation::new(self.program);
         session_args(&mut i, task, self.skip_permissions);
-        i.env.push((self.config_env.into(), Some(home.dir.clone().into())));
+        i.env.extend(self.run_env(home));
         i.env.push(("DISABLE_AUTOUPDATER".into(), Some("1".into())));
-        i.env.extend(self.account.env(home));
         Ok(i)
     }
 

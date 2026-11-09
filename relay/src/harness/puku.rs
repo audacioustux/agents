@@ -69,18 +69,42 @@ const b=await r.json();say({chat:(b&&b.quotas&&b.quotas.chat)||null});})
 .catch((e)=>say({error:String((e&&e.name)||e)}));}
 "#;
 
-/// The user's home a puku home lives in: homes are its direct children.
-fn user_home(home: &Home) -> &Path {
-    home.dir.parent().unwrap_or(Path::new("/"))
+/// Where a puku home's sign-in is: `<user home>/.config/<APP_NAME>/session.json`. The one
+/// description of it: relay reads the sign-in through it (discovery, identity, the sandbox's
+/// writable sign-in), and every run on the home (the quota script, the `puku-cli` that renews
+/// through it, each session) is told it ([`SignInPlace::vars`]), so all of them see one file
+/// whatever `HOME` a job's `session.env` names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SignInPlace {
+    /// The user's home: puku homes are its direct children.
+    user_home: PathBuf,
+    /// `pukucode.<label>`, or none for `default` (`pukucode`).
+    app: Option<String>,
 }
 
-/// `pukucode` for `default`, `pukucode.<label>` for the others.
-fn app_name(home: &Home) -> Option<String> {
-    (home.label != "default").then(|| format!("{APP}.{}", home.label))
-}
+impl SignInPlace {
+    fn of(home: &Home) -> Self {
+        Self {
+            user_home: home.dir.parent().unwrap_or(Path::new("/")).to_path_buf(),
+            app: (home.label != "default").then(|| format!("{APP}.{}", home.label)),
+        }
+    }
 
-fn session_dir(home: &Home) -> PathBuf {
-    user_home(home).join(".config").join(app_name(home).as_deref().unwrap_or(APP))
+    fn dir(&self) -> PathBuf {
+        self.user_home.join(".config").join(self.app.as_deref().unwrap_or(APP))
+    }
+
+    fn file(&self) -> PathBuf {
+        self.dir().join("session.json")
+    }
+
+    /// `HOME` and `APP_NAME` (unset for `default`), which puku finds the sign-in by.
+    fn vars(&self) -> Vec<(OsString, Option<OsString>)> {
+        vec![
+            ("HOME".into(), Some(self.user_home.clone().into())),
+            ("APP_NAME".into(), self.app.clone().map(Into::into)),
+        ]
+    }
 }
 
 /// The last line of `text` that is a JSON object.
@@ -109,13 +133,13 @@ pub struct PukuSession;
 
 impl Account for PukuSession {
     fn can_refresh(&self, home: &Home) -> bool {
-        read_json(&session_dir(home).join("session.json"))
+        read_json(&SignInPlace::of(home).file())
             .and_then(|v| v.get("refreshToken").and_then(Value::as_str).map(|t| !t.is_empty()))
             .unwrap_or(false)
     }
 
     fn sign_in(&self, home: &Home) -> SignIn {
-        let file = read_json(&session_dir(home).join("session.json"));
+        let file = read_json(&SignInPlace::of(home).file());
         let user = file.as_ref().and_then(|v| v.get("user"));
         let field = |k: &str| user.and_then(|u| u.get(k)).and_then(Value::as_str).filter(|s| !s.is_empty());
         let Some(id) = field("id") else { return SignIn::Out };
@@ -130,7 +154,7 @@ impl Account for PukuSession {
     }
 
     fn env(&self, home: &Home) -> Vec<(OsString, Option<OsString>)> {
-        vec![("APP_NAME".into(), app_name(home).map(Into::into))]
+        SignInPlace::of(home).vars()
     }
 
     fn sign_in_paths(&self, user_home: &Path) -> Vec<PathBuf> {
@@ -144,7 +168,7 @@ impl Account for PukuSession {
     }
 
     fn sign_in_dir(&self, home: &Home) -> Option<PathBuf> {
-        Some(session_dir(home))
+        Some(SignInPlace::of(home).dir())
     }
 
     fn helpers(&self) -> &'static [&'static str] {
@@ -153,8 +177,7 @@ impl Account for PukuSession {
 
     fn quota(&self, cli: &ClaudeCode, home: &Home) -> Invocation {
         let mut i = Invocation::script(NODE, &["-e", USAGE_SCRIPT, USAGE_URL], cli.program);
-        i.env.push((cli.config_env.into(), Some(home.dir.clone().into())));
-        i.env.extend(self.env(home));
+        i.env.extend(cli.run_env(home));
         i
     }
 
@@ -231,6 +254,25 @@ mod tests {
         let a = argv(&d);
         assert!(a.contains("--resume o --fork-session") && a.contains("--permission-mode plan"), "{a}");
         assert!(!a.contains("--god-mode") && !a.contains("--dangerously"));
+    }
+
+    /// Re-review of #40: relay's reading of the sign-in, the quota script (and the `puku-cli` it renews
+    /// through, which inherits its environment) and every session take it from one place.
+    #[test]
+    fn discovery_the_quota_script_and_sessions_share_one_sign_in_place() {
+        let h = home("puku", "w");
+        let place = SignInPlace::of(&h);
+        assert_eq!(place.file(), Path::new("/h/.config/pukucode.w/session.json"));
+        assert_eq!(Puku.writable(&h, Path::new("/h")), [PathBuf::from("/h/w"), place.dir()]);
+        let quota = Puku.quota(&h).unwrap();
+        let session = Puku.invocation(&h, &task("p", Session::New("id"), Permissions::Unrestricted, Path::new("/s")));
+        for inv in [&quota, &session.unwrap()] {
+            assert!(inv.env.contains(&("HOME".into(), Some("/h".into()))), "{:?}", inv.env);
+            assert!(inv.env.contains(&("APP_NAME".into(), Some("pukucode.w".into()))));
+            assert!(inv.env.contains(&("PUKU_CONFIG_DIR".into(), Some("/h/w".into()))));
+        }
+        let d = SignInPlace::of(&home("puku", "default"));
+        assert_eq!(d.vars(), [("HOME".into(), Some("/h".into())), ("APP_NAME".into(), None)]);
     }
 
     #[test]

@@ -309,7 +309,7 @@ pub fn default_path(cfg: &Config, home: &Path) -> OsString {
 
 /// A `PATH` of `dirs` in order, without repeats. A directory whose name holds `:` cannot be written in a
 /// Unix `PATH`, so it is left out, never the whole list with it.
-fn path_of(dirs: impl IntoIterator<Item = PathBuf>) -> OsString {
+pub(crate) fn path_of(dirs: impl IntoIterator<Item = PathBuf>) -> OsString {
     use std::os::unix::ffi::OsStrExt as _;
     let mut kept: Vec<PathBuf> = Vec::new();
     for d in dirs {

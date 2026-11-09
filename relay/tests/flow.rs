@@ -1161,6 +1161,41 @@ fn a_first_run_records_pukus_node_where_the_caller_found_it() {
     assert_eq!((j["status"].as_str(), j["account"].as_str()), (Some("done"), Some("puku:p")), "{j}");
     let known: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
     assert_eq!(known["node"].as_str(), node_dir.join("node").to_str(), "{known}");
+    // Re-review of #40: the session's `#!/usr/bin/env node` launcher runs that `node` too, not one an
+    // earlier `PATH` directory holds (the config's `PATH` has the machine's own).
+    let seen = std::fs::read_to_string(env.home.join(".puku-cli.p/node-seen")).unwrap();
+    assert_eq!(seen.trim(), node_dir.join("node").to_str().unwrap(), "the recorded node comes first");
+}
+
+/// Re-review of #40: a job whose `[session.env]` names its own `HOME` still runs on the account's
+/// sign-in, which lives under the user's home: relay found the account there, so the quota script, its
+/// renewal and the session look there too, never under the job's `HOME`.
+#[test]
+fn a_puku_job_with_its_own_home_runs_on_the_accounts_sign_in() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("puku-home", false);
+    std::fs::create_dir_all(env.root.join("state/relay")).unwrap();
+    std::fs::write(
+        env.root.join("state/relay/programs.json"),
+        serde_json::json!({ "node": env.repo.join(".stub/node-bin/node") }).to_string(),
+    )
+    .unwrap();
+    let job_home = env.root.join("job-home");
+    std::fs::create_dir_all(&job_home).unwrap();
+    let stub = env.repo.join(".stub/puku-cli");
+    configure(&env, "", &format!("[harness.puku]\nprogram = \"{}\"\n", stub.display()));
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    let conf =
+        conf.replace("[session.env]\n", &format!("[session.env]\nHOME = {:?}\n", job_home.display().to_string()));
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+    puku_account(&env.home, "p", 10);
+    ok(&relay(&env, &["queue", "add", "look", "--text", "Look.", "--readonly"]), "queue");
+    let j = wait_for(&env, "look");
+    assert_eq!((j["status"].as_str(), j["account"].as_str()), (Some("done"), Some("puku:p")), "{j}");
+    assert!(env.home.join(".config/pukucode.p/renewed").exists(), "the session renewed the account's sign-in");
+    assert!(!job_home.join(".config").exists(), "nothing looked for a sign-in under the job's HOME");
 }
 
 /// Adds `limits` under `[limits]` and appends `extra` to the project's config.

@@ -253,6 +253,13 @@ pub fn session_env(ctx: &Ctx, inv: &crate::harness::Invocation) -> Vec<(OsString
         env.retain(|(name, _)| name != k);
         env.extend(v.clone().map(|v| (k.clone(), v)));
     }
+    // Last, so no layer above (`session.env`, a development shell) can put another interpreter first.
+    if !inv.path_first.is_empty() {
+        let rest = env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.clone()).unwrap_or_default();
+        let dirs = inv.path_first.iter().cloned().chain(std::env::split_paths(&rest));
+        env.retain(|(name, _)| name != "PATH");
+        env.push(("PATH".into(), crate::host::path_of(dirs)));
+    }
     env
 }
 
@@ -331,6 +338,25 @@ mod tests {
         assert_eq!(mount_of(&plan, &dir.join("workflows")), Some(&Mount::Placeholder { dir: true }));
         assert_eq!(mount_of(&plan, &user.join(".config/pukucode")), Some(&Mount::Writable));
         assert_eq!(mount_of(&plan, &user.join(".config/pukucode.work")), Some(&Mount::Hidden));
+    }
+
+    /// Re-review of #40: a harness's helpers come first on a run's `PATH` whatever `session.env` names,
+    /// and the account's own variables (puku's `HOME`) win over the job's.
+    #[test]
+    fn helpers_lead_the_path_and_the_accounts_variables_win() {
+        let d = Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let conf = "name = \"t\"\n[session.env]\nPATH = \"/usr/local/bin:/opt/node/bin\"\nHOME = \"/job\"\n";
+        let cfg = Config::parse(conf, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        let mut inv = crate::harness::Invocation::new("puku-cli");
+        inv.env.push(("HOME".into(), Some("/home/u".into())));
+        inv.path_first.push(PathBuf::from("/opt/node/bin"));
+        let env = session_env(&ctx, &inv);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string_lossy().into_owned());
+        assert_eq!(get("PATH").as_deref(), Some("/opt/node/bin:/usr/local/bin"));
+        assert_eq!(get("HOME").as_deref(), Some("/home/u"));
     }
 
     /// The default omp profile is `~/.omp`, which holds the others: its session may not make a new

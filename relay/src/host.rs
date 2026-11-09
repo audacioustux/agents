@@ -52,17 +52,72 @@ pub fn resolve(record: Option<&Path>, name: &OsStr) -> Program {
         return if found { Program::Found(as_path.to_path_buf()) } else { Program::Missing(name.to_owned()) };
     }
     let key = name.to_string_lossy().into_owned();
-    let mut known = record.map(read).unwrap_or_default();
-    if let Some(p) = known.get(&key).filter(|p| p.is_absolute() && executable(p)) {
-        return Program::Found(p.clone());
+    if let Some(p) = recorded(&record.map(read).unwrap_or_default(), &key) {
+        return Program::Found(p);
     }
     let Some(found) = on_path(name) else { return Program::Missing(name.to_owned()) };
-    if let Some(record) = record {
-        known.insert(key, found.clone());
-        // A record that cannot be written is found again next time.
-        let _ = write(record, &known);
+    // A record that cannot be had or written is found again next time.
+    match record.and_then(Held::take) {
+        Some(held) => held.record(key, found),
+        None => Program::Found(found),
     }
-    Program::Found(found)
+}
+
+/// What the record says of `key`, if it is a program that can still run.
+fn recorded(known: &BTreeMap<String, PathBuf>, key: &str) -> Option<PathBuf> {
+    known.get(key).filter(|p| p.is_absolute() && executable(p)).cloned()
+}
+
+/// The record, read under its lock (`programs.lock` beside it) and held until written: the one way
+/// to change it, so two relays that each found a program cannot drop the other's.
+#[derive(Debug)]
+struct Held {
+    _lock: crate::os::Role,
+    path: PathBuf,
+    known: BTreeMap<String, PathBuf>,
+}
+
+impl Held {
+    /// How long to wait for another relay's write, before leaving the record as it is.
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// The record at `path`, locked; `None` when its state root is not there (a view outside every
+    /// project creates none) or another relay holds it past [`Held::PATIENCE`].
+    fn take(path: &Path) -> Option<Self> {
+        let lock = path.with_extension("lock");
+        if !path.parent().is_some_and(Path::is_dir) {
+            return None;
+        }
+        let started = std::time::Instant::now();
+        loop {
+            match crate::os::Role::try_take(&lock) {
+                Ok(Some(role)) => return Some(Self { _lock: role, path: path.to_path_buf(), known: read(path) }),
+                Ok(None) if started.elapsed() < Self::PATIENCE => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Records `found` for `key`, unless another relay recorded a program that can run since this
+    /// one looked: then that one stands, and is the answer.
+    fn record(mut self, key: String, found: PathBuf) -> Program {
+        if let Some(p) = recorded(&self.known, &key) {
+            return Program::Found(p);
+        }
+        self.known.insert(key, found.clone());
+        let _ = self.write();
+        Program::Found(found)
+    }
+
+    /// Replaces the record whole (a new file renamed over it), so a reader never sees half of one.
+    fn write(&self) -> anyhow::Result<()> {
+        let tmp = self.path.with_extension(format!("json.{}", std::process::id()));
+        crate::ctx::Ctx::write_private(&tmp, &serde_json::to_vec_pretty(&self.known)?)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
 }
 
 /// Where `name` is on relay's own `PATH`, skipping relative entries (they would name a
@@ -77,16 +132,6 @@ fn on_path(name: &OsStr) -> Option<PathBuf> {
 
 fn read(record: &Path) -> BTreeMap<String, PathBuf> {
     std::fs::read(record).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
-}
-
-/// Replaces the record whole (a new file renamed over it), so a reader never sees half of one. Only
-/// into a state root that is there: a view outside every project creates none.
-fn write(record: &Path, known: &BTreeMap<String, PathBuf>) -> anyhow::Result<()> {
-    anyhow::ensure!(record.parent().is_some_and(Path::is_dir), "no state root to record in");
-    let tmp = record.with_extension(format!("json.{}", std::process::id()));
-    crate::ctx::Ctx::write_private(&tmp, &serde_json::to_vec_pretty(known)?)?;
-    std::fs::rename(&tmp, record)?;
-    Ok(())
 }
 
 /// The environment relay gives what it starts on its own, whoever woke it: the user and home this
@@ -223,14 +268,15 @@ mod tests {
         let d = crate::config::tempdir::Dir::new();
         let record = d.path().join("programs.json");
         let first = program(d.path(), "first", 0o755);
-        write(&record, &BTreeMap::from([("omp-xyz".to_owned(), first.clone())])).unwrap();
+        let write = |path: &Path, known: BTreeMap<String, PathBuf>| Held { known, ..Held::take(path).unwrap() }.write();
+        write(&record, BTreeMap::from([("omp-xyz".to_owned(), first.clone())])).unwrap();
         // Not on anyone's PATH: the record alone finds it.
         assert_eq!(resolve(Some(&record), OsStr::new("omp-xyz")), Program::Found(first.clone()));
         // Once it cannot run, it is not found (nor on PATH), and says what was looked for.
         std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(resolve(Some(&record), OsStr::new("omp-xyz")), Program::Missing("omp-xyz".into()));
         // A relative record (written by hand) is not trusted either.
-        write(&record, &BTreeMap::from([("omp-xyz".to_owned(), PathBuf::from("first"))])).unwrap();
+        write(&record, BTreeMap::from([("omp-xyz".to_owned(), PathBuf::from("first"))])).unwrap();
         assert_eq!(resolve(Some(&record), OsStr::new("omp-xyz")), Program::Missing("omp-xyz".into()));
     }
 
@@ -247,6 +293,27 @@ mod tests {
         assert!(matches!(resolve(Some(&nowhere), OsStr::new("sh")), Program::Found(_)));
         assert!(!nowhere.parent().unwrap().exists());
         assert_eq!(resolve(None, OsStr::new("no-such-program-xyz")), Program::Missing("no-such-program-xyz".into()));
+    }
+
+    #[test]
+    fn concurrent_discoveries_all_stay_in_the_record() {
+        let common =
+            ["sh", "cat", "ls", "env", "true", "false", "echo", "mkdir", "rm", "cp", "mv", "ln", "sort", "head"];
+        let names: Vec<&str> = common.into_iter().filter(|n| on_path(OsStr::new(n)).is_some()).collect();
+        assert!(names.len() >= 6, "too few programs on PATH to race: {names:?}");
+        let d = crate::config::tempdir::Dir::new();
+        for round in 0..20 {
+            let record = d.path().join(format!("programs-{round}.json"));
+            std::thread::scope(|s| {
+                for n in &names {
+                    let record = &record;
+                    s.spawn(move || resolve(Some(record), OsStr::new(n)));
+                }
+            });
+            let known = read(&record);
+            let lost: Vec<&&str> = names.iter().filter(|n| !known.contains_key(**n)).collect();
+            assert!(lost.is_empty(), "round {round}: a concurrent writer dropped {lost:?}");
+        }
     }
 
     #[test]

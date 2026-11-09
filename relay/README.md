@@ -665,7 +665,8 @@ single accounts.
 
 A harness's program is `program` when set (a path, or a name), else its own name
 (`claude`, `omp`). A name is the absolute path relay recorded the first time it found
-it on a `PATH` (`$XDG_STATE_HOME/relay/programs.json`, kept while that file can be run),
+it on a `PATH` (`$XDG_STATE_HOME/relay/programs.json`, kept while that file can be run;
+changed only under `programs.lock`, so relays recording at once keep each other's entries),
 so a shell whose `PATH` lacks it (a dispatcher woken from cron, a bare `env -i` shell)
 still finds it, and a shell whose `PATH` names another does not replace it. Only an
 executable file counts. A harness is used when its program is found; one the config has

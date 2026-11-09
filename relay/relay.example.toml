@@ -3,6 +3,7 @@
 
 # Names this project's queue. State lives under $XDG_STATE_HOME/relay/<name>,
 # clones under $XDG_DATA_HOME/relay/<name>/clones.
+# One repository per name: a second checkout with the same name is refused.
 name = "myproject"
 # The repository, relative to this file.
 repo = "."

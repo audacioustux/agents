@@ -34,6 +34,93 @@ pub struct Ctx {
     /// When the repository is a linked worktree, its git directory and the
     /// main repository's, which its `.git` file and a clone's alternates name.
     pub git_dirs: Vec<PathBuf>,
+    /// `state` belongs to `cfg.repo`: a `Ctx` cannot be made without it, so no command reaches a
+    /// project directory another checkout of the same `name` owns.
+    _claim: Claim,
+}
+
+/// The file in a project's state directory naming the repository it belongs to.
+const REPO_FILE: &str = "repo";
+
+/// Proof that a project's state directory belongs to one repository. The state directory is
+/// found by `name` alone, so two checkouts with one `name` would otherwise share a queue, and a
+/// dispatcher started in one would run the other's jobs from its own repository. The first
+/// command claims the directory by recording the repository's root in [`REPO_FILE`]; every later
+/// one must be in that repository. Only [`Claim::take`] makes one, and [`Ctx`] holds one.
+#[derive(Debug)]
+struct Claim(());
+
+impl Claim {
+    /// Claims `state` (which exists, owner-only) for `repo` (canonical), or refuses because another
+    /// repository has. A record already there is only read, so a full or read-only state file system
+    /// still opens for its own repository. A directory from before claims were recorded is claimed
+    /// by the first command that opens it; two first commands racing: one records, the other reads it.
+    fn take(state: &Path, repo: &Path) -> Result<Self> {
+        let file = state.join(REPO_FILE);
+        match Self::read(&file) {
+            Ok(recorded) => return Self::check(state, repo, &file, &recorded),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
+        }
+        match Self::publish(state, repo, &file) {
+            Ok(()) => Ok(Self(())),
+            // Another command recorded one first: it is the record.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let recorded = Self::read(&file).with_context(|| format!("reading {}", file.display()))?;
+                Self::check(state, repo, &file, &recorded)
+            }
+            Err(e) => Err(e).with_context(|| format!("recording the repository in {}", file.display())),
+        }
+    }
+
+    /// The record, read without following a link: it is relay's own file, never a pointer elsewhere.
+    fn read(file: &Path) -> std::io::Result<Vec<u8>> {
+        let mut recorded = Vec::new();
+        std::io::Read::read_to_end(
+            &mut std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
+                .open(file)?,
+            &mut recorded,
+        )?;
+        Ok(recorded)
+    }
+
+    /// Records `repo` at `file`: written aside, then linked into place, so the record appears whole
+    /// or not at all, and a link never replaces one that is there (`AlreadyExists`).
+    fn publish(state: &Path, repo: &Path, file: &Path) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+        let mut line = repo.as_os_str().as_bytes().to_vec();
+        line.push(b'\n');
+        let tmp = state.join(format!("{REPO_FILE}.{}.tmp", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let written = (|| {
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+            f.write_all(&line)?;
+            f.sync_all()?;
+            std::fs::hard_link(&tmp, file)
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        written
+    }
+
+    /// The claim when `recorded` names `repo`, else the refusal naming both.
+    fn check(state: &Path, repo: &Path, file: &Path, recorded: &[u8]) -> Result<Self> {
+        use std::os::unix::ffi::OsStrExt;
+        let recorded = recorded.strip_suffix(b"\n").unwrap_or(recorded);
+        let recorded = Path::new(std::ffi::OsStr::from_bytes(recorded));
+        anyhow::ensure!(
+            recorded == repo,
+            "the state directory {} belongs to the repository {}, not {}: give this project another \
+             `name` in its relay.toml (if that repository moved here, remove {})",
+            state.display(),
+            recorded.display(),
+            repo.display(),
+            file.display()
+        );
+        Ok(Self(()))
+    }
 }
 
 /// A linked worktree's git directories outside it (none for an ordinary checkout).
@@ -107,6 +194,19 @@ impl Ctx {
         let data_root = xdg("XDG_DATA_HOME", ".local/share").join("relay");
         let state = state_root.join(&cfg.name);
         let data = data_root.join(&cfg.name);
+        // Briefs, answers and resume messages are private: owner-only from the project directory down.
+        let private = |d: &Path| -> Result<()> {
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(d)
+                .with_context(|| format!("creating {}", d.display()))?;
+            Ok(std::fs::set_permissions(d, Permissions::from_mode(0o700))?)
+        };
+        // The state directory is claimed before anything else of the project's is touched.
+        private(&state)?;
+        let claim = Claim::take(&state, &cfg.repo)?;
+        private(&data)?;
         let ctx = Self {
             bus: state.join("bus"),
             jobs: state.join("jobs"),
@@ -114,22 +214,14 @@ impl Ctx {
             caches: data.join("caches"),
             scratch: data.join("scratch"),
             git_dirs: git_dirs(&cfg.repo),
-            state: state.clone(),
+            state,
             state_root,
             data_root,
             cfg,
             cfg_path,
             json,
+            _claim: claim,
         };
-        // Briefs, answers and resume messages are private: owner-only from the project directory down.
-        for d in [&state, &data] {
-            DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(d)
-                .with_context(|| format!("creating {}", d.display()))?;
-            std::fs::set_permissions(d, Permissions::from_mode(0o700))?;
-        }
         for d in [&ctx.bus, &ctx.bus.join("session"), &ctx.jobs] {
             DirBuilder::new()
                 .recursive(true)
@@ -462,5 +554,86 @@ mod git_tests {
         assert!(!marker.exists(), "git_untrusted ran the repository's filter");
         let staged = Ctx::git(&dir).args(["ls-files"]).output().unwrap().stdout;
         assert_eq!(String::from_utf8_lossy(&staged).trim(), ".gitattributes\na.txt");
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+
+    fn dirs() -> (crate::config::tempdir::Dir, PathBuf, PathBuf, PathBuf) {
+        let d = crate::config::tempdir::Dir::new();
+        let (state, a, b) = (d.path().join("state/x"), d.path().join("a"), d.path().join("b"));
+        for p in [&state, &a, &b] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        (d, state, a, b)
+    }
+
+    #[test]
+    fn the_first_repository_claims_the_state_directory_and_it_alone_opens_it_again() {
+        let (_d, state, a, _b) = dirs();
+        Claim::take(&state, &a).unwrap();
+        assert_eq!(std::fs::read(state.join(REPO_FILE)).unwrap(), format!("{}\n", a.display()).into_bytes());
+        Claim::take(&state, &a).unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(&state).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(leftovers, [REPO_FILE], "only the record is left in the state directory");
+    }
+
+    /// Finding 6: two checkouts with one `name` share a state directory; the second is refused, by both paths.
+    #[test]
+    fn another_repository_with_the_same_name_is_refused_naming_both() {
+        let (_d, state, a, b) = dirs();
+        Claim::take(&state, &a).unwrap();
+        let e = format!("{:#}", Claim::take(&state, &b).unwrap_err());
+        assert!(e.contains(&a.display().to_string()) && e.contains(&b.display().to_string()), "{e}");
+        assert!(e.contains(&state.display().to_string()), "{e}");
+        // The refusal changed nothing: the first repository still owns it.
+        Claim::take(&state, &a).unwrap();
+    }
+
+    /// Review of PR #37: an existing record is validated without writing anything, so a state file
+    /// system that is full (relay's disk floor) or read-only still opens for its own repository.
+    #[test]
+    fn an_existing_claim_is_validated_without_writing() {
+        let (_d, state, a, b) = dirs();
+        Claim::take(&state, &a).unwrap();
+        std::fs::set_permissions(&state, Permissions::from_mode(0o500)).unwrap();
+        let writable = std::fs::write(state.join("probe"), "").is_ok();
+        let (mine, theirs) = (Claim::take(&state, &a), Claim::take(&state, &b));
+        std::fs::set_permissions(&state, Permissions::from_mode(0o700)).unwrap();
+        assert!(!writable, "the fixture's state directory is still writable (running as root?)");
+        mine.unwrap();
+        // Another repository is still refused for what it is, not for the directory being read-only.
+        let e = format!("{:#}", theirs.unwrap_err());
+        assert!(e.contains("belongs to the repository") && e.contains(&a.display().to_string()), "{e}");
+    }
+
+    /// A state directory from before claims were recorded belongs to the first repository to open it.
+    #[test]
+    fn an_unclaimed_state_directory_is_claimed_by_the_first_to_open_it() {
+        let (_d, state, a, b) = dirs();
+        std::fs::create_dir_all(state.join("bus/session")).unwrap();
+        std::fs::write(state.join("jobs.lock"), "").unwrap();
+        Claim::take(&state, &b).unwrap();
+        assert!(Claim::take(&state, &a).is_err());
+    }
+
+    /// The record is relay's own file: a symlink planted in its place, even to a file naming this very
+    /// repository, is not read through, and a symlink is never written through either.
+    #[test]
+    fn a_record_planted_as_a_symlink_is_refused_not_followed() {
+        let (d, state, a, _b) = dirs();
+        let elsewhere = d.path().join("elsewhere");
+        std::fs::write(&elsewhere, format!("{}\n", a.display())).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, state.join(REPO_FILE)).unwrap();
+        let e = format!("{:#}", Claim::take(&state, &a).unwrap_err());
+        assert!(e.contains("reading"), "{e}");
+        // A dangling one is not created through.
+        let target = d.path().join("made");
+        std::fs::remove_file(state.join(REPO_FILE)).unwrap();
+        std::os::unix::fs::symlink(&target, state.join(REPO_FILE)).unwrap();
+        assert!(Claim::take(&state, &a).is_err());
+        assert!(!target.exists(), "the claim was written through a symlink");
     }
 }

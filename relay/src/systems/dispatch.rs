@@ -625,6 +625,29 @@ mod tests {
         assert_eq!(out.len(), 1, "their seat is not booked under our default's provider");
     }
 
+    /// Copilot review of PR #41, finding 1: a run dispatched before providers were recorded, on its
+    /// project's configured default, names no model and no provider. Its seat may be on any
+    /// provider, so it counts against every one: with `per_account = 1` nothing more starts on that
+    /// omp account until it ends, whichever provider the next job asks for.
+    #[test]
+    fn a_seat_whose_provider_is_unknown_counts_against_every_provider() {
+        let (_d, cfg) = omp_config("");
+        let mut old = theirs("x", None);
+        let x = old.jobs_mut().get_mut("x").unwrap();
+        assert_eq!((x.model.as_deref(), x.provider.as_str(), x.models.len()), (None, "", 0), "nothing recorded");
+        for model in ["openai-codex/gpt-6.1", "minimax-code/M3"] {
+            let (world, found) = omp_world(&[("next", Status::Queued, model)], 0.1, 0.1);
+            let (out, held) = plan_among(&cfg, &world, &[&old], &found);
+            assert_eq!(out, [], "{model}: {:?}", held.0);
+            let provider = model.split_once('/').unwrap().0;
+            assert_eq!(held.0, [format!("next: no account has room (omp:default busy (1 of 1 seat on {provider}))")]);
+        }
+        // Once it ends, its seat is free again.
+        old.jobs_mut().get_mut("x").unwrap().status = Status::Done;
+        let (world, found) = omp_world(&[("next", Status::Queued, "openai-codex/gpt-6.1")], 0.1, 0.1);
+        assert_eq!(plan_among(&cfg, &world, &[&old], &found).0.len(), 1);
+    }
+
     /// The dispatch records the model and provider it resolved, for the session, the seats and the boards.
     #[test]
     fn a_start_records_the_model_and_provider_it_was_judged_on() {

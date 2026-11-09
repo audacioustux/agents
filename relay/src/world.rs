@@ -236,19 +236,18 @@ impl Job {
         self.runner.is_some_and(|(pid, started)| crate::os::same_process(pid, started))
     }
 
-    /// The seat a running job holds, as its dispatch recorded it: its account, and the provider
-    /// (empty for an account with one seat budget). A run recorded before the provider was falls
-    /// back to the provider of the model the job itself names, never to a config's default.
-    pub fn seat(&self) -> Option<(&str, &str)> {
+    /// The seat a running job holds, as its dispatch recorded it: its account, and what it draws
+    /// on there. A run recorded before the model was falls back to the model the job itself names,
+    /// never to a config's default; one with no provider either way draws on an unknown one
+    /// (`Draws::Unknown`), which counts against every provider of the account until it ends.
+    pub fn seat(&self) -> Option<(&str, crate::accounts::Draws)> {
         if self.status != Status::Running {
             return None;
         }
         let account = self.account.as_deref()?;
-        if !self.provider.is_empty() || self.model.is_some() {
-            return Some((account, &self.provider));
-        }
         let harness = account.split_once(':').map_or(account, |(h, _)| h);
-        Some((account, crate::accounts::provider_of(self.models.get(harness).map(String::as_str), harness)))
+        let model = self.model.as_deref().or_else(|| self.models.get(harness).map(String::as_str));
+        Some((account, crate::accounts::draws(model, &self.provider, harness)))
     }
 
     /// Back in the queue at `t`: no account until a dispatch gives it one.
@@ -1256,6 +1255,7 @@ mod tests {
         assert_eq!(review.after, ["dep"], "only a relay that cannot judge the job waits on the gate");
     }
     use super::*;
+    use crate::accounts::Draws;
 
     fn st(t: u64, event: Event) -> Stamped {
         Stamped { t, event, from: None }
@@ -1379,7 +1379,7 @@ mod tests {
         );
         let w = World::fold(&[st(1, queued("a")), dispatched.clone()]);
         let j = &w.jobs["a"];
-        assert_eq!(j.seat(), Some(("omp:default", "openai-codex")));
+        assert_eq!(j.seat(), Some(("omp:default", Draws::Provider("openai-codex".into()))));
         assert_eq!(j.model.as_deref(), Some("openai-codex/gpt-6.1"));
         for back in [ended("a", Outcome::Retry), ended("a", Outcome::Rerun)] {
             let w = World::fold(&[st(1, queued("a")), dispatched.clone(), st(3, back)]);
@@ -1399,7 +1399,7 @@ mod tests {
         let old = r#"{"type":"dispatched","job":"a","account":"claude:w","runner_pid":1,"runner_started":1}"#;
         let old: DispatchEvent = serde_json::from_str(old).unwrap();
         let w = World::fold(&[st(1, queued("a")), st(2, Event::Dispatch(old))]);
-        assert_eq!((w.jobs["a"].seat(), w.jobs["a"].model.as_deref()), (Some(("claude:w", "")), None));
+        assert_eq!((w.jobs["a"].seat(), w.jobs["a"].model.as_deref()), (Some(("claude:w", Draws::Account)), None));
     }
 
     #[test]

@@ -69,14 +69,46 @@ pub fn seat<'a>(twins: &'a BTreeMap<String, String>, account: &'a str) -> &'a st
     twins.get(account).map_or(account, String::as_str)
 }
 
+/// Whether `harness` meters each provider apart (omp: one profile serves several providers, each
+/// with a quota of its own), so its seats are counted per provider.
+fn per_provider(harness: &str) -> bool {
+    harness == "omp"
+}
+
 /// The provider whose quota a `model` draws on, for the harnesses that have
-/// several (omp); empty for the others, and for a model with no prefix. A seat
-/// on an omp account is counted per provider, since each has a quota of its own.
+/// several (omp); empty for the others, and for a model with no prefix. What a
+/// dispatch records; a seat is counted by [`draws`].
 pub fn provider_of<'m>(model: Option<&'m str>, harness: &str) -> &'m str {
-    if harness != "omp" {
+    if !per_provider(harness) {
         return "";
     }
     model.and_then(|m| m.split_once('/')).map_or("", |(provider, _)| provider)
+}
+
+/// What a session's seat on an account is counted against.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Draws {
+    /// The account's one budget, on a harness with one quota per account (claude).
+    Account,
+    /// One provider's budget, on a harness that meters each apart (omp's model prefix).
+    Provider(String),
+    /// Some provider of such a harness, not known which: a run recorded with no provider (from
+    /// before providers were recorded, on the configured default), or a model with no prefix. It
+    /// may draw on any of them, so it counts against every one, and any session on the account
+    /// counts against it.
+    Unknown,
+}
+
+/// What a session of `model` on `harness` draws on. A recorded `provider` (non-empty) is that
+/// provider's on a per-provider harness.
+pub fn draws(model: Option<&str>, provider: &str, harness: &str) -> Draws {
+    if !per_provider(harness) {
+        return Draws::Account;
+    }
+    match (provider, provider_of(model, harness)) {
+        ("", "") => Draws::Unknown,
+        ("", p) | (p, _) => Draws::Provider(p.to_owned()),
+    }
 }
 
 /// Brings what `world` knows of each home in line with what the home's files

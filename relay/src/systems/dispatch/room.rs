@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::accounts::{self, Refusal};
+use crate::accounts::{self, Draws, Refusal};
 use crate::config::{Config, Limits};
 use crate::harness::Home;
 use crate::world::{AccountState, Job, World};
@@ -24,8 +24,8 @@ pub struct Room {
     twins: BTreeMap<String, String>,
     /// Each account's state as every project knows it, settled against its files.
     accounts: BTreeMap<String, AccountState>,
-    /// Sessions per seat: (the account, or its first twin; the provider, empty for one budget).
-    load: BTreeMap<(String, String), usize>,
+    /// Sessions per seat: (the account, or its first twin; what they draw on there).
+    load: BTreeMap<(String, Draws), usize>,
     /// This project's jobs with a runner, per profile.
     running: BTreeMap<String, usize>,
     /// When this project's sessions of each profile started (bus time).
@@ -100,8 +100,8 @@ impl Room {
         // Ours as the fold says (a dispatch pass reaps dead runners first); theirs only while
         // their runner lives, since nobody here reaps them.
         let theirs = others.iter().flat_map(|w| w.jobs().values()).filter(|j| j.runner_alive());
-        for (account, provider) in world.jobs().values().chain(theirs).filter_map(Job::seat) {
-            room.book(account, provider);
+        for (account, draws) in world.jobs().values().chain(theirs).filter_map(Job::seat) {
+            room.book(account, draws);
         }
         for p in world.jobs().values().filter(|j| j.status.has_runner()).filter_map(|j| j.profile.as_deref()) {
             *room.running.entry(p.to_owned()).or_default() += 1;
@@ -130,18 +130,30 @@ impl Room {
         self.load.iter().filter(|((a, _), _)| a == seat).map(|(_, n)| n).sum()
     }
 
-    fn seat(&self, account: &str, provider: &str) -> (String, String) {
-        (accounts::seat(&self.twins, account).to_owned(), provider.to_owned())
+    fn seat(&self, account: &str, draws: Draws) -> (String, Draws) {
+        (accounts::seat(&self.twins, account).to_owned(), draws)
     }
 
-    fn book(&mut self, account: &str, provider: &str) {
-        *self.load.entry(self.seat(account, provider)).or_default() += 1;
+    fn book(&mut self, account: &str, draws: Draws) {
+        *self.load.entry(self.seat(account, draws)).or_default() += 1;
+    }
+
+    /// The sessions a new one drawing on `draws` at `account` would share its seats with: those on
+    /// the same budget, and on a per-provider harness every session whose provider is unknown,
+    /// since it may be on this one; a new session whose provider is unknown shares with them all.
+    fn taken(&self, account: &str, draws: &Draws) -> usize {
+        let on = |d: Draws| self.load.get(&self.seat(account, d)).copied().unwrap_or(0);
+        match draws {
+            Draws::Account => on(Draws::Account),
+            Draws::Provider(_) => on(draws.clone()) + on(Draws::Unknown),
+            Draws::Unknown => self.running_on(account),
+        }
     }
 
     /// Gives back the seat `job` holds, if any: a checker may take the seat its worker's ended run frees.
     pub fn free(&mut self, job: &Job) {
-        if let Some((account, provider)) = job.seat()
-            && let Some(n) = self.load.get_mut(&self.seat(account, provider))
+        if let Some((account, draws)) = job.seat()
+            && let Some(n) = self.load.get_mut(&self.seat(account, draws))
         {
             *n = n.saturating_sub(1);
         }
@@ -152,10 +164,10 @@ impl Room {
     /// ([`accounts::fit`]). `Ok` is how good a fit it is.
     pub fn admit(&self, limits: &Limits, home: &Home, model: Option<&str>, now_us: u64) -> Result<f64, Refused> {
         let key = home.key();
-        let provider = accounts::provider_of(model, home.harness);
-        let taken = self.load.get(&self.seat(&key, provider)).copied().unwrap_or(0);
+        let draws = accounts::draws(model, "", home.harness);
+        let taken = self.taken(&key, &draws);
         let busy = (taken >= limits.per_account).then(|| {
-            let on = if provider.is_empty() { String::new() } else { format!(" on {provider}") };
+            let on = if let Draws::Provider(p) = &draws { format!(" on {p}") } else { String::new() };
             let s = if limits.per_account == 1 { "" } else { "s" };
             format!("busy ({taken} of {} seat{s}{on})", limits.per_account)
         });
@@ -209,7 +221,7 @@ impl Room {
         let model = model_for(cfg, j, home.harness);
         let provider = accounts::provider_of(model.as_deref(), home.harness).to_owned();
         let account = home.key();
-        self.book(&account, &provider);
+        self.book(&account, accounts::draws(model.as_deref(), &provider, home.harness));
         if let Some(name) = j.profile.as_deref().filter(|n| cfg.profiles.contains_key(*n)) {
             *self.running.entry(name.to_owned()).or_default() += 1;
             self.starts.entry(name.to_owned()).or_default().push(now_us);

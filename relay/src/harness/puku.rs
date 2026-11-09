@@ -381,16 +381,21 @@ mod tests {
     /// The script under the installed node, where there is one, against a local server.
     #[test]
     fn the_usage_script_asks_with_the_homes_token_and_prints_only_the_quota() {
-        // A node that runs here: a mise shim on PATH may be there and still fail outside a pinned project.
-        if !std::process::Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
-            eprintln!("skipped: no node runs here");
-            return;
-        }
-        // A temporary directory holding a space and a quote, as a TMPDIR may.
+        // A temporary directory holding a space and a quote, as a TMPDIR may, and the only home node
+        // and anything it starts can see ([`crate::isolated`]).
         let d = tmp("script dir 'q'");
+        let home = crate::isolated::Isolated::at(&d.0);
+        // A node that runs here: a mise shim on PATH may be there and still fail outside a pinned project.
+        let node = match home.ask("node", &["--version"]) {
+            Ok((node, _)) => node,
+            Err(why) => {
+                eprintln!("skipped: {why}");
+                return;
+            }
+        };
         let run = |url: &str, cli: &Path, app: Option<&str>| {
-            let mut cmd = std::process::Command::new("node");
-            cmd.args(["-e", USAGE_SCRIPT, url]).arg(cli).env("HOME", &d.0).env_remove("APP_NAME");
+            let mut cmd = home.command(&node);
+            cmd.args(["-e", USAGE_SCRIPT, url]).arg(cli).env_remove("APP_NAME");
             if let Some(a) = app {
                 cmd.env("APP_NAME", a);
             }

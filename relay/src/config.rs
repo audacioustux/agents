@@ -768,7 +768,20 @@ impl Config {
             "hooks.seat_wait_minutes must not be negative"
         );
         self.validate_disk()?;
-        regex::Regex::new(&self.sandbox.env_deny).context("sandbox.env_deny")?;
+        let deny = regex::Regex::new(&self.sandbox.env_deny).context("sandbox.env_deny")?;
+        for k in self.session.env.keys() {
+            ensure!(valid_env_name(k), "session.env name {k:?} is not a variable name");
+            // Refused, not dropped: a session never gets a variable the deny list names, and an entry
+            // that silently did nothing (or, as it once did, got through) is worse than an error.
+            if let Some(m) = deny.find(k) {
+                bail!(
+                    "session.env {k} matches sandbox.env_deny {:?} (at {:?}), so no session may get it: \
+                     remove it, or narrow sandbox.env_deny",
+                    self.sandbox.env_deny,
+                    m.as_str()
+                );
+            }
+        }
         for p in self.sandbox.hide_home.iter().chain(&self.sandbox.caches) {
             if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
                 bail!("{} must be a path inside $HOME, written relative to it", p.display());
@@ -829,9 +842,6 @@ impl Config {
                 !path.is_empty() && plain && !p.is_absolute(),
                 "gc.build_outputs entry {path:?} must be a path inside the clone, such as \"target\""
             );
-        }
-        for k in self.session.env.keys() {
-            ensure!(valid_env_name(k), "session.env name {k:?} is not a variable name");
         }
         Ok(())
     }
@@ -1063,6 +1073,25 @@ mod tests {
         assert_eq!(script.args, [std::ffi::OsStr::new("-e"), std::ffi::OsStr::new("x"), pinned.as_os_str()]);
         let sh = cfg.locate("claude", crate::harness::Invocation::script("sh", &["-c", "x"], "claude"));
         assert_eq!(sh.unwrap_err().0, "harness claude: sh is not one of its helper programs");
+    }
+
+    /// Review of #40: a `[session.env]` entry that `sandbox.env_deny` names is refused when the config is
+    /// loaded, by name and pattern, for every pattern alike (it would never reach a session).
+    #[test]
+    fn a_session_env_entry_the_deny_list_names_is_refused_at_load() {
+        let d = repo();
+        for (name, at) in
+            [("PUKU_WORKER_URL", "PUKU"), ("CLAUDE_CODE_X", "CLAUDE"), ("NPM_TOKEN", "TOKEN"), ("GH_AUTH", "_AUTH")]
+        {
+            let text = format!("name = \"x\"\n[session.env]\n{name} = \"v\"\n");
+            let e = format!("{:#}", Config::parse(&text, d.path()).unwrap_err());
+            assert!(e.contains(name) && e.contains(DEFAULT_ENV_DENY) && e.contains(&format!("{at:?}")), "{e}");
+        }
+        // A project's own deny list is the one applied, and what it does not name is kept.
+        let own = "name = \"x\"\n[sandbox]\nenv_deny = \"^SECRET_\"\n[session.env]\nSECRET_A = \"v\"\n";
+        assert!(format!("{:#}", Config::parse(own, d.path()).unwrap_err()).contains("^SECRET_"));
+        let kept = "name = \"x\"\n[session.env]\nGIT_AUTHOR_NAME = \"a\"\nPATH = \"/bin\"\n";
+        assert_eq!(Config::parse(kept, d.path()).unwrap().session.env.len(), 2);
     }
 
     fn repo() -> tempdir::Dir {

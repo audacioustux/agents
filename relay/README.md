@@ -949,7 +949,10 @@ where the job's own mounts come last, so nothing above can hide them.
 Environment variables are cleared and relay's own (built from the config, never the
 calling shell's) are passed in, except those matching
 `sandbox.env_deny` (tokens, secrets, keys, `AUTH`, cookies, sessions and
-`CLAUDE*` and `PUKU*`). The adapter then sets the one that selects the account. A
+`CLAUDE*` and `PUKU*`). The adapter then sets the one that selects the account. The
+same list applies to `[session.env]`: an entry it names (`PUKU_WORKER_URL`, `NPM_TOKEN`) is
+refused when the config is loaded, naming the variable and the pattern, rather than dropped,
+so narrow `sandbox.env_deny` if a job really needs one. A
 project whose toolchain comes from a development environment that cannot
 start inside the sandbox (single-user Nix locks its store, which is
 read-only there) names it in `session.env_shell`, such as

@@ -763,8 +763,11 @@ token (401 or 403) or no sign-in marks the account signed out; a token that coul
 be renewed leaves it unread. Both `puku-cli` and the script's `node` are found as a
 harness's program is (above): `[harness.puku] program`, else the path recorded when relay
 first found the name on a `PATH` (mise installs `puku-cli` under
-`~/.local/share/mise/installs/npm-puku-puku-cli/`, with a shim in mise's `shims`). A `node`
-not found leaves the account unread, as a missing `puku-cli` does.
+`~/.local/share/mise/installs/npm-puku-puku-cli/`, with a shim in mise's `shims`). `node` is
+a helper program of the puku harness: the first relay command that finds `puku-cli` finds and
+records `node` too, from that caller's `PATH`, so the dispatcher and its quota reader, which run
+on a narrower one, use the same file; its directory is on the `PATH` sessions get, for `puku-cli`
+itself runs on it. A `node` not found is shown as `program not found: node`, and puku is not used.
 
 Quota readings cost no model call. One is taken again after 10 minutes, or
 once a reset it names has passed; a reading that fails is not retried for the

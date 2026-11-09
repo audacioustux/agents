@@ -41,6 +41,9 @@ pub const Puku: ClaudeCode = ClaudeCode {
 /// The sign-in directory's name under `~/.config` for the default home.
 const APP: &str = "pukucode";
 
+/// What runs the usage script: a helper of the harness, found and recorded with `puku-cli`.
+const NODE: &str = "node";
+
 /// Where the usage script asks. A constant, so no environment can send the token elsewhere.
 pub const USAGE_URL: &str = "https://api-cli.puku.sh/puku/v1/subscription";
 
@@ -144,8 +147,12 @@ impl Account for PukuSession {
         Some(session_dir(home))
     }
 
+    fn helpers(&self) -> &'static [&'static str] {
+        &[NODE]
+    }
+
     fn quota(&self, cli: &ClaudeCode, home: &Home) -> Invocation {
-        let mut i = Invocation::script("node", &["-e", USAGE_SCRIPT, USAGE_URL], cli.program);
+        let mut i = Invocation::script(NODE, &["-e", USAGE_SCRIPT, USAGE_URL], cli.program);
         i.env.push((cli.config_env.into(), Some(home.dir.clone().into())));
         i.env.extend(self.env(home));
         i

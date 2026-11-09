@@ -253,6 +253,12 @@ pub trait Harness: Sync + fmt::Debug {
     fn program(&self) -> &'static str {
         self.id()
     }
+    /// Other programs its runs need, by name: an interpreter a quota script runs on. Looked up and
+    /// recorded with its program ([`crate::config::Config::harness_programs`]), so they are found
+    /// wherever relay runs, and the only programs an [`Invocation::script`] may run.
+    fn helpers(&self) -> &'static [&'static str] {
+        &[]
+    }
     fn caps(&self) -> Caps;
     /// How a prompt addresses the model ("You are Claude").
     fn identity(&self) -> &'static str;

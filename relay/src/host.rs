@@ -278,15 +278,21 @@ fn account(uid: u32) -> Option<(String, String)> {
 }
 
 /// The `PATH` when `session.env` names none: relay's own directory, the user's tool directories
-/// (`~/.local/bin`, `~/bin`, `~/.cargo/bin`, mise's shims, the Nix profile), each found harness
-/// program's directory (for its interpreter), then the system's. Only those that exist, in that order.
+/// (`~/.local/bin`, `~/bin`, `~/.cargo/bin`, mise's shims, the Nix profile), the directory of each
+/// found harness program and helper (for its interpreter: puku-cli runs on `node`), then the system's. Only those that exist, in that order.
 pub fn default_path(cfg: &Config, home: &Path) -> OsString {
     let own = crate::os::own_binary().ok().and_then(|p| p.parent().map(Path::to_path_buf));
     let user = [".local/bin", "bin", ".cargo/bin", ".local/share/mise/shims", ".nix-profile/bin"].map(|d| home.join(d));
-    let harnesses = cfg.harness_programs().into_iter().filter_map(|(_, p)| match p {
-        Program::Found(p) => p.parent().map(Path::to_path_buf),
-        Program::Missing(_) => None,
-    });
+    let programs = cfg.harness_programs();
+    let found: Vec<PathBuf> = programs
+        .iter()
+        .flat_map(crate::config::HarnessPrograms::all)
+        .filter_map(|p| match p {
+            Program::Found(p) => p.parent().map(Path::to_path_buf),
+            Program::Missing(_) => None,
+        })
+        .collect();
+    let harnesses = found.into_iter();
     let system = [
         "/nix/var/nix/profiles/default/bin",
         "/run/current-system/sw/bin",
@@ -396,6 +402,38 @@ mod tests {
             let known = read(&record);
             let lost: Vec<&&str> = names.iter().filter(|n| !known.contains_key(**n)).collect();
             assert!(lost.is_empty(), "round {round}: a concurrent writer dropped {lost:?}");
+        }
+    }
+
+    /// Review of #40: a helper a harness runs (puku's `node`) in a directory of its own is recorded with
+    /// the harness and its directory is on the `PATH` children get, so a sanitized child still runs it.
+    #[test]
+    fn a_harness_helper_is_recorded_and_its_directory_is_on_the_default_path() {
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let (cli_dir, node_dir) = (d.path().join("puku/bin"), d.path().join("opt node/bin"));
+        std::fs::create_dir_all(&cli_dir).unwrap();
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let cli = program(&cli_dir, "puku-cli", 0o755);
+        let node = program(&node_dir, "node", 0o755);
+        let record = d.path().join("programs.json");
+        std::fs::write(&record, serde_json::json!({ "node": node }).to_string()).unwrap();
+        let conf = format!("name = \"x\"\n[harness.puku]\nprogram = \"{}\"\n", cli.display());
+        let mut cfg = Config::parse(&conf, d.path()).unwrap();
+        cfg.programs = Some(record.clone());
+        let puku = cfg.harness_programs().into_iter().find(|p| p.harness.id() == "puku").unwrap();
+        assert_eq!(puku.helpers, [("node", Program::Found(node.clone()))]);
+        assert!(puku.missing().is_none() && cfg.harnesses().iter().any(|h| h.id() == "puku"));
+        let path = default_path(&cfg, d.path());
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert!(dirs.contains(&node_dir) && dirs.contains(&cli_dir), "{path:?}");
+        // A helper that cannot be found leaves the harness shown as missing it, and unused.
+        std::fs::remove_file(&node).unwrap();
+        std::fs::write(&record, serde_json::json!({ "node": node }).to_string()).unwrap();
+        let without = cfg.harness_programs().into_iter().find(|p| p.harness.id() == "puku").unwrap();
+        if let (_, Program::Missing(what)) = &without.helpers[0] {
+            assert_eq!(cfg.missing_harnesses(), [("puku", what.to_string_lossy().into_owned())]);
+            assert!(!cfg.harnesses().iter().any(|h| h.id() == "puku"));
         }
     }
 

@@ -1134,6 +1134,35 @@ fn a_puku_session_runs_on_its_own_home_and_sign_in_and_sees_no_other() {
     }
 }
 
+/// Review of #40: on a first run, with nothing recorded, puku's `node` was looked up only by the quota
+/// reader, a child of the dispatcher running on the config's `PATH`, which lacks the directory the
+/// caller's shell found it in. A harness's helpers are its programs: the foreground command that
+/// first finds the harness records them, so the dispatcher's reading runs that `node`.
+#[test]
+fn a_first_run_records_pukus_node_where_the_caller_found_it() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("puku-first", false);
+    let record = env.root.join("state/relay/programs.json");
+    assert!(!record.exists(), "a first run: nothing recorded");
+    let stub = env.repo.join(".stub/puku-cli");
+    configure(&env, "", &format!("[harness.puku]\nprogram = \"{}\"\n", stub.display()));
+    puku_account(&env.home, "p", 10);
+    // The caller's shell has the stub `node` first; the config's `PATH`, which children run on, has not.
+    let node_dir = env.repo.join(".stub/node-bin");
+    let caller = std::env::join_paths(
+        std::iter::once(node_dir.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let queued = relay_from(&env, &caller, &[], &["queue", "add", "look", "--text", "Look.", "--readonly"]);
+    ok(&queued, "queue");
+    let j = wait_for(&env, "look");
+    assert_eq!((j["status"].as_str(), j["account"].as_str()), (Some("done"), Some("puku:p")), "{j}");
+    let known: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    assert_eq!(known["node"].as_str(), node_dir.join("node").to_str(), "{known}");
+}
+
 /// Adds `limits` under `[limits]` and appends `extra` to the project's config.
 fn configure(env: &Env, limits: &str, extra: &str) {
     let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();

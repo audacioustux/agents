@@ -836,10 +836,12 @@ impl Config {
         Ok(())
     }
 
-    /// Every harness this config expects, with its program as this machine has it, in registry
+    /// Every harness this config expects, with its programs as this machine has them, in registry
     /// order: one not turned off whose program is found, or one `[harness.X]` names (so a missing
-    /// program is shown, never silently dropped). The one place a harness's program is looked up.
-    pub fn harness_programs(&self) -> Vec<(&'static dyn crate::harness::Harness, crate::host::Program)> {
+    /// program is shown, never silently dropped). The one place a harness's programs are looked up:
+    /// its own, and, once that is found, each helper its runs need ([`crate::harness::Harness::helpers`]),
+    /// so the first command that asks records them all, before any child runs on a narrower `PATH`.
+    pub fn harness_programs(&self) -> Vec<HarnessPrograms> {
         crate::harness::ALL
             .iter()
             .copied()
@@ -850,25 +852,28 @@ impl Config {
                 }
                 let name = conf.and_then(|c| c.program.clone()).unwrap_or_else(|| PathBuf::from(h.program()));
                 let program = crate::host::resolve(self.programs.as_deref(), name.as_os_str());
-                (conf.is_some() || matches!(program, crate::host::Program::Found(_))).then_some((h, program))
+                let found = matches!(program, crate::host::Program::Found(_));
+                let helpers = if found {
+                    let resolve = |n: &&'static str| crate::host::resolve(self.programs.as_deref(), n.as_ref());
+                    h.helpers().iter().map(|n| (*n, resolve(n))).collect()
+                } else {
+                    Vec::new()
+                };
+                (conf.is_some() || found).then_some(HarnessPrograms { harness: h, program, helpers })
             })
             .collect()
     }
 
-    /// The harnesses relay may use: those [`Config::harness_programs`] found, in registry order.
+    /// The harnesses relay may use: those whose programs [`Config::harness_programs`] all found, in
+    /// registry order.
     pub fn harnesses(&self) -> Vec<&'static dyn crate::harness::Harness> {
-        let found = self.harness_programs().into_iter();
-        found.filter(|(_, p)| matches!(p, crate::host::Program::Found(_))).map(|(h, _)| h).collect()
+        self.harness_programs().into_iter().filter(|p| p.missing().is_none()).map(|p| p.harness).collect()
     }
 
-    /// The harnesses this config expects whose program is not found, each with what was looked for.
+    /// The harnesses this config expects with a program not found, each with what was looked for.
     pub fn missing_harnesses(&self) -> Vec<(&'static str, String)> {
         let all = self.harness_programs().into_iter();
-        all.filter_map(|(h, p)| match p {
-            crate::host::Program::Missing(what) => Some((h.id(), what.to_string_lossy().into_owned())),
-            crate::host::Program::Found(_) => None,
-        })
-        .collect()
+        all.filter_map(|p| Some((p.harness.id(), p.missing()?.to_string_lossy().into_owned()))).collect()
     }
 
     /// `inv` run by its harness's program as this machine has it ([`Config::harness_programs`]):
@@ -897,8 +902,15 @@ impl Config {
         };
         let name = self.harness(harness).program.map_or_else(|| slot.clone(), PathBuf::into_os_string);
         *slot = resolve(&name)?;
-        // Such a script's interpreter is found as a harness's program is, and recorded with them.
+        // Such a script's interpreter is one of the harness's helpers, found as its program is.
         if at.is_some() {
+            let declared = crate::harness::by_id(harness)?.helpers().iter().any(|n| inv.program == **n);
+            if !declared {
+                return Err(crate::harness::Refusal(format!(
+                    "harness {harness}: {} is not one of its helper programs",
+                    inv.program.to_string_lossy()
+                )));
+            }
             inv.program = resolve(&inv.program)?;
         }
         Ok(inv)
@@ -911,6 +923,31 @@ impl Config {
     /// Directories hidden inside the sandbox.
     pub fn hidden_dirs(&self) -> Vec<PathBuf> {
         self.sandbox.hide.clone().unwrap_or_else(|| self.repo.parent().map(Path::to_path_buf).into_iter().collect())
+    }
+}
+
+/// A harness's programs as this machine has them ([`Config::harness_programs`]).
+#[derive(Debug, Clone)]
+pub struct HarnessPrograms {
+    pub harness: &'static dyn crate::harness::Harness,
+    /// Its own program.
+    pub program: crate::host::Program,
+    /// Each helper by name; looked up only once its own program is found.
+    pub helpers: Vec<(&'static str, crate::host::Program)>,
+}
+
+impl HarnessPrograms {
+    /// Its own program, then its helpers.
+    pub fn all(&self) -> impl Iterator<Item = &crate::host::Program> {
+        std::iter::once(&self.program).chain(self.helpers.iter().map(|(_, p)| p))
+    }
+
+    /// The first program not found, by what was looked for: the harness is usable only with none.
+    pub fn missing(&self) -> Option<&std::ffi::OsStr> {
+        self.all().find_map(|p| match p {
+            crate::host::Program::Missing(what) => Some(what.as_os_str()),
+            crate::host::Program::Found(_) => None,
+        })
     }
 }
 
@@ -1006,12 +1043,18 @@ mod tests {
         let off = Config::parse("name = \"x\"\n[harness.omp]\nenabled = false\nprogram = \"/opt/x/omp\"\n", d.path());
         assert!(off.unwrap().missing_harnesses().is_empty(), "a harness turned off is not missing");
         // A script handing over to the harness: the harness's program as configured, and the script's
-        // interpreter found as a program is, never by a caller's PATH.
-        let script = cfg.locate("claude", crate::harness::Invocation::script("sh", &["-c", "x"], "claude")).unwrap();
-        assert!(Path::new(&script.program).is_absolute() && script.program != pinned.as_os_str(), "{script:?}");
-        assert_eq!(script.args, [std::ffi::OsStr::new("-c"), std::ffi::OsStr::new("x"), pinned.as_os_str()]);
-        let no_shell = cfg.locate("claude", crate::harness::Invocation::script("no-such-sh-xyz", &[], "claude"));
-        assert_eq!(no_shell.unwrap_err().0, "harness claude: program not found: no-such-sh-xyz");
+        // interpreter, which must be one of its helpers, as this machine's record has it.
+        let conf = format!("name = \"x\"\n[harness.puku]\nprogram = \"{}\"\n", pinned.display());
+        let mut puku = Config::parse(&conf, d.path()).unwrap();
+        let (node, record) = (d.path().join("node"), d.path().join("programs.json"));
+        std::fs::copy(&pinned, &node).unwrap();
+        std::fs::write(&record, serde_json::json!({ "node": node }).to_string()).unwrap();
+        puku.programs = Some(record);
+        let script = puku.locate("puku", crate::harness::Invocation::script("node", &["-e", "x"], "puku-cli")).unwrap();
+        assert_eq!(script.program, node.as_os_str());
+        assert_eq!(script.args, [std::ffi::OsStr::new("-e"), std::ffi::OsStr::new("x"), pinned.as_os_str()]);
+        let sh = cfg.locate("claude", crate::harness::Invocation::script("sh", &["-c", "x"], "claude"));
+        assert_eq!(sh.unwrap_err().0, "harness claude: sh is not one of its helper programs");
     }
 
     fn repo() -> tempdir::Dir {

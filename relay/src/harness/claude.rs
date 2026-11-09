@@ -67,6 +67,10 @@ pub trait Account: Sync + fmt::Debug {
     }
     fn quota(&self, cli: &ClaudeCode, home: &Home) -> Invocation;
     fn parse_quota(&self, text: &str, now_s: i64) -> Meters;
+    /// Programs its quota reading runs besides the CLI ([`Harness::helpers`]).
+    fn helpers(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 #[allow(non_upper_case_globals)]
@@ -211,6 +215,10 @@ impl Harness for ClaudeCode {
 
     fn program(&self) -> &'static str {
         self.program
+    }
+
+    fn helpers(&self) -> &'static [&'static str] {
+        self.account.helpers()
     }
 
     fn caps(&self) -> Caps {

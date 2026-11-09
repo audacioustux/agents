@@ -408,6 +408,32 @@ fn the_board_shows_every_project_with_everywhere_and_outside_any_project() {
     assert!(text.contains("our task") && text.contains("their task"), "every project: {text}");
 }
 
+/// Audit finding 6: a second checkout whose relay.toml has the same `name` would share the first's
+/// state directory, and the first's dispatcher would run its jobs from the first's repository. It is
+/// refused, naming both repositories, and the first's queue is untouched.
+#[test]
+fn a_second_checkout_with_the_same_name_is_refused_its_state() {
+    let env = setup("samename", false);
+    let other = env.root.join("other");
+    git(&env.repo, &["worktree", "add", "-q", "--detach", other.to_str().unwrap()]);
+    std::fs::copy(env.repo.join("relay.toml"), other.join("relay.toml")).unwrap();
+    // No account is signed in, so the first checkout's job stays queued.
+    ok(&relay(&env, &["queue", "add", "ours", "--text", "our task"]), "the first checkout queues");
+    // Run from the second checkout (settings after `prepared` win).
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_relay"));
+    let theirs = prepared(&env, &mut cmd)
+        .current_dir(&other)
+        .args(["queue", "add", "theirs", "--text", "their task"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&theirs.stderr).into_owned();
+    assert!(!theirs.status.success(), "the second checkout was let in: {err}");
+    let (ours, other) = (env.repo.canonicalize().unwrap(), other.canonicalize().unwrap());
+    assert!(err.contains(&ours.display().to_string()) && err.contains(&other.display().to_string()), "{err}");
+    let text = board(&env);
+    assert!(text.contains("our task") && !text.contains("their task"), "{text}");
+}
+
 fn board(env: &Env) -> String {
     String::from_utf8_lossy(&relay(env, &["view", "status"]).stdout).into_owned()
 }

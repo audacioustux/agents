@@ -634,7 +634,7 @@ pub fn decide(
         Handler::Agent(a) => ask_agent(ctx, job, a, req),
         Handler::Command(argv) => {
             let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
-            let env = ctx.environ().without(&deny);
+            let env = ctx.relay_env().without(&deny);
             ask_command(argv, req, Duration::from_secs(ctx.cfg.hooks.command_timeout_seconds), &env)
         }
         Handler::Orchestrator => ask_orchestrator(ctx, req),
@@ -695,7 +695,7 @@ const COMMAND_ANSWER_BYTES: u64 = 64 * 1024;
 /// (then killed 5 s later if it ignores the TERM), in `env` and nothing else
 /// (relay's own, less what `sandbox.env_deny` matches) and with at most
 /// `COMMAND_ANSWER_BYTES` of answer. A cost it reports is counted, never below zero.
-fn ask_command(argv: &[String], req: &Request, timeout: Duration, env: &crate::host::Environ) -> Said {
+fn ask_command(argv: &[String], req: &Request, timeout: Duration, env: &crate::host::RelayEnv) -> Said {
     let run = || -> Result<String> {
         let mut cmd = env.command("timeout");
         cmd.args(["-k", "5"]).arg(timeout.as_secs().max(1).to_string()).args(argv);
@@ -1270,7 +1270,7 @@ mod tests {
             vec![p.display().to_string()]
         };
         let r = req(Point::Cap, 0.0, 1.0);
-        let full = crate::host::Environ::of([("PATH", "/usr/bin:/bin"), ("HOME", "/h")]);
+        let full = crate::host::RelayEnv::of([("PATH", "/usr/bin:/bin"), ("HOME", "/h")]);
         let none = full.without(&regex::Regex::new("^$").unwrap());
         let t = Duration::from_secs(1);
         let neg = script("neg", r#"echo '{"action": "stop", "why": "w", "cost_usd": -5}'"#);

@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::bus::{self, Owned, Port, Stamped};
 use crate::config::Config;
-use crate::host::Environ;
+use crate::host::{JobEnv, RelayEnv};
 use crate::os::{Doorbell, Role};
 use crate::world::World;
 
@@ -298,17 +298,23 @@ impl Ctx {
         Ok((pid, gate))
     }
 
-    /// The environment everything this project starts on its own runs in ([`Environ`]): never the caller's.
-    pub fn environ(&self) -> Environ {
-        Environ::new(&self.cfg, &self.state_root, &self.data_root)
+    /// The environment relay's own children run in ([`RelayEnv`]): never the caller's, and with this
+    /// relay's home, state and data roots and policy whatever `session.env` says.
+    pub fn relay_env(&self) -> RelayEnv {
+        RelayEnv::new(&self.cfg, &self.state_root, &self.data_root)
+    }
+
+    /// The environment a session starts from ([`JobEnv`]): never the caller's, `session.env` over it.
+    pub fn job_env(&self) -> JobEnv {
+        JobEnv::new(&self.cfg, &self.state_root, &self.data_root)
     }
 
     fn spawn(&self, args: &[&str], log: &Path, stdin: Stdio) -> Result<Child> {
-        self.spawn_in(&self.environ(), args, log, stdin)
+        self.spawn_in(&self.relay_env(), args, log, stdin)
     }
 
     /// The one way relay starts itself: in `env`, with nothing of the caller's.
-    fn spawn_in(&self, env: &Environ, args: &[&str], log: &Path, stdin: Stdio) -> Result<Child> {
+    fn spawn_in(&self, env: &RelayEnv, args: &[&str], log: &Path, stdin: Stdio) -> Result<Child> {
         let out = Self::append_private(log)?;
         env.command(crate::os::own_binary()?)
             .arg("--config")
@@ -348,7 +354,7 @@ impl Ctx {
     /// As [`Ctx::wake_dispatch`], in the environment `cfg` makes: a dispatcher handing over to one
     /// that reads an edited config gives it that config's environment, not its own.
     pub fn wake_dispatch_under(&self, cfg: &Config) -> Result<()> {
-        let env = Environ::new(cfg, &self.state_root, &self.data_root);
+        let env = RelayEnv::new(cfg, &self.state_root, &self.data_root);
         let child = self.spawn_in(&env, &["dispatch", "serve"], &self.state.join("dispatch.log"), Stdio::null())?;
         self.reap(child);
         Ok(())

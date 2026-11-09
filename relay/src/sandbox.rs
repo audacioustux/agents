@@ -219,13 +219,13 @@ pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsS
     a
 }
 
-/// The environment a session gets: relay's own ([`Ctx::environ`], built from the config, never
+/// The environment a session gets: [`Ctx::job_env`] (built from the config, never
 /// the caller's) minus names matching `sandbox.env_deny`, then the invocation's own variables
 /// (which may name what the filter removes, such as `CLAUDE_CONFIG_DIR`).
 pub fn session_env(ctx: &Ctx, inv: &crate::harness::Invocation) -> Vec<(OsString, OsString)> {
     let deny = Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
     let mut env: Vec<(OsString, OsString)> = ctx
-        .environ()
+        .job_env()
         .without(&deny)
         .vars()
         .filter(|(k, _)| !matches!(k.to_string_lossy().as_ref(), "TMPDIR" | "TEMP" | "TMP" | "PWD" | "OLDPWD"))

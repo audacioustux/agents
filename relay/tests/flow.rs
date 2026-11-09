@@ -2824,3 +2824,31 @@ fn outside_a_project_the_accounts_pane_is_machine_wide_and_calls_no_account_read
     assert!(accounts.lines().any(|l| l.contains("claude:solo") && l.contains("40%")), "the shared reading: {outside}");
     assert!(!accounts.contains("ready"), "no project's rules judged it: {outside}");
 }
+
+#[test]
+fn a_jobs_own_state_root_in_session_env_does_not_move_relay_itself() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("selectors", false);
+    let theirs = env.root.join("job-state");
+    let elsewhere = env.root.join("job-data");
+    let extra = format!(
+        "[session.env]\nXDG_STATE_HOME = {:?}\nXDG_DATA_HOME = {:?}\nRELAY_POLICY = {:?}\n",
+        theirs.display().to_string(),
+        elsewhere.display().to_string(),
+        env.root.join("no-such-policy.toml").display().to_string()
+    );
+    configure(&env, "", &extra);
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "env", "--text", "[env]", "--readonly"]), "queue");
+    // The dispatcher serves the state root the job was queued in, not the job's own.
+    let ours = format!("XDG_STATE_HOME={}", env.root.join("state").display());
+    let dispatcher = dispatcher_environ(&env);
+    assert!(dispatcher.contains(&ours), "{dispatcher:?}");
+    assert!(!dispatcher.iter().any(|v| v.starts_with("RELAY_POLICY=")), "{dispatcher:?}");
+    assert_eq!(wait_for(&env, "env")["status"], "done");
+    // The session still gets what `[session.env]` asks for.
+    let job = std::fs::read_to_string(env.home.join(".claude.a/env")).unwrap();
+    assert!(job.lines().any(|l| l == format!("XDG_STATE_HOME={}", theirs.display())), "{job}");
+}

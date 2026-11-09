@@ -134,40 +134,58 @@ fn read(record: &Path) -> BTreeMap<String, PathBuf> {
     std::fs::read(record).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
-/// The environment relay gives what it starts on its own, whoever woke it: the user and home this
-/// process runs as, the state and data roots it serves, the policy its config was merged with, a
-/// `PATH` from this machine ([`default_path`]), a UTF-8 locale, and `session.env` over all of
-/// them. Nothing else of the caller's: no `TZ`, no `GIT_DIR`, no tokens.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Environ(BTreeMap<OsString, OsString>);
+/// The variables that say which relay a process is: whose home, which state and data roots, which
+/// policy, which project. relay's own children must keep the ones of the relay that starts them,
+/// whatever `session.env` says; a session may be given others.
+pub const SELECTORS: [&str; 5] = ["HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "RELAY_POLICY", "RELAY_CONFIG"];
 
-impl Environ {
+/// What relay sets in every environment it builds, whoever woke it: the user and home this process
+/// runs as, the state and data roots it serves, the policy its config was merged with, a `PATH`
+/// from this machine ([`default_path`]) unless `session.env` names one, and a UTF-8 locale. Nothing
+/// of the caller's: no `TZ`, no `GIT_DIR`, no tokens.
+fn base(cfg: &Config, state_root: &Path, data_root: &Path) -> BTreeMap<OsString, OsString> {
+    let home = crate::accounts::home();
+    let mut env: BTreeMap<OsString, OsString> = BTreeMap::new();
+    let mut set = |k: &str, v: &OsStr| env.insert(k.into(), v.to_owned());
+    set("HOME", home.as_os_str());
+    if let Some((user, shell)) = account(rustix::process::getuid().as_raw()) {
+        set("USER", user.as_ref());
+        set("LOGNAME", user.as_ref());
+        set("SHELL", shell.as_ref());
+    }
+    set("LANG", "C.UTF-8".as_ref());
+    for (var, root) in [("XDG_STATE_HOME", state_root), ("XDG_DATA_HOME", data_root)] {
+        if let Some(dir) = root.parent() {
+            set(var, dir.as_os_str());
+        }
+    }
+    // Named only when it is not where every process would look anyway, so a policy file
+    // deleted later stays optional.
+    if let Some(p) = cfg.policy_path.as_ref().filter(|p| **p != crate::config::Policy::default_in(&home)) {
+        set("RELAY_POLICY", p.as_os_str());
+    }
+    if !cfg.session.env.contains_key("PATH") {
+        set("PATH", &default_path(cfg, &home));
+    }
+    env
+}
+
+fn without(env: &BTreeMap<OsString, OsString>, deny: &regex::Regex) -> BTreeMap<OsString, OsString> {
+    env.iter().filter(|(k, _)| !deny.is_match(&k.to_string_lossy())).map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+/// The environment of relay's own children (the dispatcher, its runners, gc, the quota reader, and
+/// `command:` hooks, which may call relay back): [`base`], then `session.env` except the
+/// [`SELECTORS`], which stay this relay's, so a child always serves the queue its parent wrote to.
+/// The only environment [`RelayEnv::command`] starts anything in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayEnv(BTreeMap<OsString, OsString>);
+
+impl RelayEnv {
     pub fn new(cfg: &Config, state_root: &Path, data_root: &Path) -> Self {
-        let home = crate::accounts::home();
-        let mut env: BTreeMap<OsString, OsString> = BTreeMap::new();
-        let mut set = |k: &str, v: &OsStr| env.insert(k.into(), v.to_owned());
-        set("HOME", home.as_os_str());
-        if let Some((user, shell)) = account(rustix::process::getuid().as_raw()) {
-            set("USER", user.as_ref());
-            set("LOGNAME", user.as_ref());
-            set("SHELL", shell.as_ref());
-        }
-        set("LANG", "C.UTF-8".as_ref());
-        for (var, root) in [("XDG_STATE_HOME", state_root), ("XDG_DATA_HOME", data_root)] {
-            if let Some(dir) = root.parent() {
-                set(var, dir.as_os_str());
-            }
-        }
-        // Named only when it is not where every process would look anyway, so a policy file
-        // deleted later stays optional.
-        if let Some(p) = cfg.policy_path.as_ref().filter(|p| **p != crate::config::Policy::default_in(&home)) {
-            set("RELAY_POLICY", p.as_os_str());
-        }
-        if !cfg.session.env.contains_key("PATH") {
-            set("PATH", &default_path(cfg, &home));
-        }
-        for (k, v) in &cfg.session.env {
-            set(k, v.as_ref());
+        let mut env = base(cfg, state_root, data_root);
+        for (k, v) in cfg.session.env.iter().filter(|(k, _)| !SELECTORS.contains(&k.as_str())) {
+            env.insert(k.into(), v.into());
         }
         Self(env)
     }
@@ -178,19 +196,14 @@ impl Environ {
         Self(vars.into_iter().map(|(k, v)| (k.into(), v.into())).collect())
     }
 
-    pub fn vars(&self) -> impl Iterator<Item = (&OsString, &OsString)> {
-        self.0.iter()
+    #[cfg(test)]
+    pub fn get(&self, k: &str) -> Option<&OsString> {
+        self.0.get(OsStr::new(k))
     }
 
     /// The same, less every variable whose name `deny` matches.
     pub fn without(&self, deny: &regex::Regex) -> Self {
-        Self(
-            self.0
-                .iter()
-                .filter(|(k, _)| !deny.is_match(&k.to_string_lossy()))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        )
+        Self(without(&self.0, deny))
     }
 
     /// `program`, to run with this environment and nothing of the caller's (found on this `PATH`).
@@ -198,6 +211,36 @@ impl Environ {
         let mut c = Command::new(program);
         c.env_clear().envs(&self.0);
         c
+    }
+}
+
+/// The environment a session starts from (and a check, and a harness's quota reading): [`base`],
+/// then every `session.env` entry, selectors included, since the job's own tools may want them.
+/// It cannot start relay: it has no `command`, only variables for a sandbox or a harness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobEnv(BTreeMap<OsString, OsString>);
+
+impl JobEnv {
+    pub fn new(cfg: &Config, state_root: &Path, data_root: &Path) -> Self {
+        let mut env = base(cfg, state_root, data_root);
+        for (k, v) in &cfg.session.env {
+            env.insert(k.into(), v.into());
+        }
+        Self(env)
+    }
+
+    #[cfg(test)]
+    pub fn get(&self, k: &str) -> Option<&OsString> {
+        self.0.get(OsStr::new(k))
+    }
+
+    pub fn vars(&self) -> impl Iterator<Item = (&OsString, &OsString)> {
+        self.0.iter()
+    }
+
+    /// The same, less every variable whose name `deny` matches.
+    pub fn without(&self, deny: &regex::Regex) -> Self {
+        Self(without(&self.0, deny))
     }
 }
 
@@ -321,24 +364,46 @@ mod tests {
         let d = crate::config::tempdir::Dir::new();
         std::fs::create_dir(d.path().join(".git")).unwrap();
         let cfg = Config::parse("name = \"x\"\n[session.env]\nFROM_CONFIG = \"yes\"\n", d.path()).unwrap();
-        let env = Environ::new(&cfg, Path::new("/s/relay"), Path::new("/d/relay"));
-        let get = |k: &str| env.0.get(OsStr::new(k)).map(|v| v.to_string_lossy().into_owned());
+        let env = JobEnv::new(&cfg, Path::new("/s/relay"), Path::new("/d/relay"));
+        let get = |k: &str| env.get(k).map(|v| v.to_string_lossy().into_owned());
         assert_eq!(get("FROM_CONFIG").as_deref(), Some("yes"));
         assert_eq!((get("XDG_STATE_HOME").as_deref(), get("XDG_DATA_HOME").as_deref()), (Some("/s"), Some("/d")));
         assert_eq!(get("HOME"), Some(crate::accounts::home().display().to_string()));
         let path = get("PATH").unwrap();
         assert!(path.split(':').any(|d| d == "/usr/bin"), "{path}");
-        let names: Vec<String> = env.0.keys().map(|k| k.to_string_lossy().into_owned()).collect();
+        let names: Vec<String> = env.vars().map(|(k, _)| k.to_string_lossy().into_owned()).collect();
         let expected =
             ["FROM_CONFIG", "HOME", "LANG", "LOGNAME", "PATH", "SHELL", "USER", "XDG_DATA_HOME", "XDG_STATE_HOME"];
         assert!(names.iter().all(|n| expected.contains(&n.as_str())), "only what relay sets: {names:?}");
+        assert_eq!(RelayEnv::new(&cfg, Path::new("/s/relay"), Path::new("/d/relay")).0, env.0, "the same, here");
         // session.env wins, PATH included.
         let cfg =
             Config::parse("name = \"x\"\n[session.env]\nPATH = \"/only\"\nLANG = \"en_GB.UTF-8\"\n", d.path()).unwrap();
-        let env = Environ::new(&cfg, Path::new("/s/relay"), Path::new("/d/relay"));
-        assert_eq!(env.0.get(OsStr::new("PATH")), Some(&OsString::from("/only")));
-        assert_eq!(env.0.get(OsStr::new("LANG")), Some(&OsString::from("en_GB.UTF-8")));
+        let env = JobEnv::new(&cfg, Path::new("/s/relay"), Path::new("/d/relay"));
+        assert_eq!(env.get("PATH"), Some(&OsString::from("/only")));
+        assert_eq!(env.get("LANG"), Some(&OsString::from("en_GB.UTF-8")));
         let deny = regex::Regex::new("^PATH$").unwrap();
-        assert!(!env.without(&deny).0.contains_key(OsStr::new("PATH")));
+        assert!(env.without(&deny).get("PATH").is_none());
+    }
+
+    #[test]
+    fn relays_own_children_keep_its_selectors_whatever_session_env_says() {
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let text = "name = \"x\"\n[session.env]\nHOME = \"/job\"\nXDG_STATE_HOME = \"/job-state\"\n\
+                    XDG_DATA_HOME = \"/job-data\"\nRELAY_POLICY = \"/job.toml\"\nRELAY_CONFIG = \"/job/relay.toml\"\n\
+                    PATH = \"/job/bin\"\n";
+        let cfg = Config::parse(text, d.path()).unwrap();
+        let (state, data) = (Path::new("/s/relay"), Path::new("/d/relay"));
+        let ours = RelayEnv::new(&cfg, state, data);
+        let job = JobEnv::new(&cfg, state, data);
+        let home = crate::accounts::home();
+        assert_eq!(ours.get("HOME"), Some(&home.into_os_string()));
+        assert_eq!((ours.get("XDG_STATE_HOME"), ours.get("XDG_DATA_HOME")), (Some(&"/s".into()), Some(&"/d".into())));
+        assert_eq!((ours.get("RELAY_POLICY"), ours.get("RELAY_CONFIG")), (None, None));
+        assert_eq!(ours.get("PATH"), Some(&"/job/bin".into()), "not a selector: the config's PATH runs relay too");
+        for k in SELECTORS {
+            assert!(job.get(k).is_some_and(|v| v.to_string_lossy().starts_with("/job")), "the job gets its {k}");
+        }
     }
 }

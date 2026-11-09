@@ -149,7 +149,10 @@ Whoever wakes it chooses nothing of its environment. The dispatcher, and everyth
 starts (runners, gc, the quota reader, hooks, sessions), gets one built from the config
 and this machine: `HOME`, the user and login shell from `/etc/passwd`, the state and data
 roots this relay serves, the policy file the config was merged with, `LANG=C.UTF-8`, a
-`PATH` (below), and `[session] env` over all of them. No `TZ`, `GIT_DIR`, token or other
+`PATH` (below), and `[session] env` over all of them, except that relay's own processes
+keep this relay's `HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `RELAY_POLICY` and
+`RELAY_CONFIG` whatever `[session] env` says (a session does get the ones set there), so a
+dispatcher always serves the queue it was woken for. No `TZ`, `GIT_DIR`, token or other
 variable of the calling shell reaches it. With no `PATH` in `[session] env`, the `PATH` is
 relay's own directory, `~/.local/bin`, `~/bin`, `~/.cargo/bin`, mise's shims
 (`~/.local/share/mise/shims`), `~/.nix-profile/bin`, the system Nix profiles, each found

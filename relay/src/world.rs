@@ -408,7 +408,10 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 
 /// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
 /// holds, how a mark is kept), so checkpoints folded the old way are discarded.
-const FOLD_VERSION: u32 = 12;
+/// `tests::the_fold_version_moves_with_the_fold` pins it to what the fold makes of a
+/// fixed bus, so a fold that changes without a bump fails the tests.
+/// 13: `dispatched` records the model and provider; a job back in the queue has no account.
+const FOLD_VERSION: u32 = 13;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -1319,6 +1322,71 @@ mod tests {
 
     fn ended(job: &str, outcome: Outcome) -> Event {
         Event::Session(SessionEvent::Ended { job: job.into(), outcome, cost_usd: 0.0, turns: 1, reason: None })
+    }
+
+    /// FNV-1a: a digest that is the same on every build, unlike `std`'s hasher.
+    fn fnv(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
+    }
+
+    /// Copilot review of PR #41, finding 3: a fold that changes what it makes of the bus without a
+    /// `FOLD_VERSION` bump leaves old checkpoints standing. This pins each version to the digest of
+    /// the fold of a fixed bus (a dispatch, a run that ends, retries and is resumed by hand, a
+    /// limit, a reading). When the fold changes, the digest does: bump `FOLD_VERSION` and add the
+    /// new pair; never change a pair already recorded.
+    #[test]
+    fn the_fold_version_moves_with_the_fold() {
+        const PINNED: &[(u32, u64)] = &[(13, 0x1d75_bf1b_971c_dfd9)];
+        let dispatched = |t, model: Option<&str>| {
+            st(
+                t,
+                Event::Dispatch(DispatchEvent::Dispatched {
+                    job: "a".into(),
+                    account: "omp:w".into(),
+                    model: model.map(Into::into),
+                    provider: model.and_then(|m| m.split_once('/')).map_or("", |(p, _)| p).into(),
+                    runner_pid: 7,
+                    runner_started: 1,
+                }),
+            )
+        };
+        let resumed = Event::Queue(QueueEvent::Resumed {
+            job: "a".into(),
+            message: "go on".into(),
+            budget_usd: Some(2.0),
+            models: BTreeMap::from([("omp".to_owned(), "minimax-code/M3".to_owned())]),
+        });
+        let reading = Event::Quota(QuotaEvent::Reading {
+            account: "omp:w".into(),
+            meters: BTreeMap::from([(
+                "openai-codex/5 hours".to_owned(),
+                crate::harness::Meter { utilization: 0.5, resets_at: Some(99) },
+            )]),
+            sign_in: None,
+        });
+        let events = [
+            st(1, queued("a")),
+            st(2, queued("b")),
+            dispatched(3, Some("openai-codex/gpt-6.1")),
+            st(4, Event::Session(SessionEvent::Limited { account: "omp:w".into(), until: 50 })),
+            st(5, ended("a", Outcome::Retry)),
+            dispatched(6, None),
+            st(7, ended("a", Outcome::Failed)),
+            st(8, resumed),
+            st(9, reading),
+        ];
+        let digest = fnv(serde_json::to_string(&World::fold(&events)).unwrap().as_bytes());
+        let (version, pinned) = *PINNED.last().unwrap();
+        assert_eq!(version, FOLD_VERSION, "pin the digest of FOLD_VERSION {FOLD_VERSION}: {digest:#x}");
+        assert_eq!(
+            digest,
+            pinned,
+            "the fold changed ({digest:#x}): bump FOLD_VERSION and add ({}, {digest:#x}) to PINNED",
+            FOLD_VERSION + 1
+        );
+        let mut versions: Vec<u32> = PINNED.iter().map(|p| p.0).collect();
+        versions.dedup();
+        assert_eq!(versions.len(), PINNED.len(), "one digest per version");
     }
 
     #[test]
@@ -2283,6 +2351,28 @@ mod tests {
             // Unreadable is the same as missing.
             std::fs::write(&b.file, "{").unwrap();
             assert_eq!(b.load(), b.full());
+        }
+
+        /// Copilot review of PR #41, finding 3: a checkpoint folded by fold 12, before a job back in
+        /// the queue lost its account, is folded again from the bus rather than advanced.
+        #[test]
+        fn a_checkpoint_from_before_requeues_cleared_the_account_is_folded_again() {
+            let b = Fixture::new();
+            let retried = r#"{"t":3,"type":"ended","job":"a","outcome":"retry","cost_usd":0.0,"turns":1,"reason":null}
+"#;
+            b.append("queue.ndjson", &queued(1, "a"));
+            b.append("dispatch.ndjson", &dispatched(2, "a"));
+            b.append("session/a.1.ndjson", retried);
+            assert_eq!(b.load().jobs["a"].account, None);
+            // What fold 12 made of the same bus: queued again, its old account kept.
+            let mut c = b.checkpoint();
+            c["version"] = format!("{}+fold12", env!("CARGO_PKG_VERSION")).into();
+            c["world"]["jobs"]["a"]["account"] = "c:w".into();
+            std::fs::write(&b.file, serde_json::to_vec(&c).unwrap()).unwrap();
+            let w = b.load();
+            assert_eq!((w.jobs["a"].status, w.jobs["a"].account.as_deref()), (Status::Queued, None));
+            assert_eq!(w, b.full());
+            assert_eq!(b.checkpoint()["version"], fold_version());
         }
 
         #[test]

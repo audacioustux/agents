@@ -41,6 +41,13 @@ lists every key with its default. Unknown keys are errors. The file holds
 per-machine choices (accounts, limits), so a project shared across machines
 usually gitignores it.
 
+`name` names the project's queue: its state lives under `$XDG_STATE_HOME/relay/<name>`
+and its clones under `$XDG_DATA_HOME/relay/<name>`. The first command to open a
+project records its repository's root there (in the file `repo`), and relay then
+refuses a config with that `name` but another repository, naming both, so two
+checkouts (or worktrees) of one project each need their own `name`. If the
+repository moved, remove that `repo` file and the next command records the new root.
+
 ## What a job is
 
 A job is a name plus a **brief**, the only context the session gets. It is

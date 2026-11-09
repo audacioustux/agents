@@ -442,6 +442,48 @@ fn showing_a_stale_account_starts_a_reading_and_says_so() {
     assert!(!board.contains("refreshing") && !board.contains("stale"), "{board}");
 }
 
+/// Copilot review of PR #41, finding 2: a reader already at work (here one holding the machine's
+/// reader lock and reading nothing of ours, as a dispatch reading only another account would) does
+/// not swallow a request: every account `quota show` says it is refreshing is read once that
+/// reader lets go, with nothing started by hand after.
+#[test]
+fn every_account_said_to_be_refreshing_is_read_after_a_busy_reader() {
+    let env = setup("pending-reads", false);
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 20, false);
+    let lock = env.root.join("state/relay/quota.lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    let mut holder = Command::new("flock").arg(&lock).args(["sleep", "2"]).spawn().unwrap();
+    for _ in 0..100 {
+        if lock.exists() && locked(&lock) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(locked(&lock), "the planted reader holds the lock");
+    let shown = relay(&env, &["--json", "quota", "show"]);
+    ok(&shown, "show");
+    let v: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(v["refreshing"], serde_json::json!(["claude:a", "claude:b"]), "{v}");
+    holder.wait().unwrap();
+    let readings = env.root.join("state/relay/flow/bus/quota.ndjson");
+    let read = |account: &str| {
+        std::fs::read_to_string(&readings).unwrap_or_default().lines().any(|l| {
+            let e: serde_json::Value = serde_json::from_str(l).unwrap_or_default();
+            e["type"] == "reading" && e["account"] == account
+        })
+    };
+    for _ in 0..200 {
+        if read("claude:a") && read("claude:b") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(read("claude:a") && read("claude:b"), "both were read: {:?}", std::fs::read_to_string(&readings));
+    let pending = std::fs::read_to_string(env.root.join("state/relay/flow/quota.pending")).unwrap_or_default();
+    assert!(pending.trim().is_empty(), "nothing is left pending: {pending}");
+}
+
 /// Audit finding 16: the quota reader is one per machine, and a refresh that finds a reading under
 /// way (here another project's, holding the machine's reader lock) waits for it rather than
 /// exiting 0 with nothing read.

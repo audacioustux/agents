@@ -748,7 +748,10 @@ the accounts (`quota show`, `view status`, `view watch`) starts a reading of eve
 stale one and says `refreshing` (`refreshing` in `--json`), so an idle machine's
 board does not go stale. There is one reader on the machine: `relay quota refresh`
 that finds a reading under way (any project's) waits for it, then reads only what
-it did not. An account is used only when:
+it did not. A reading relay asks for itself joins the project's pending set
+(`<state>/quota.pending`), which one background reader per project reads to the
+last, waiting its turn for the machine's reader, before it exits: an account shown
+as `refreshing` is always read. An account is used only when:
 
 - it has a reading, and not a stale one (unread or stale is not the same as
   having room; a job waits while a fresh one is taken);

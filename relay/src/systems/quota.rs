@@ -39,6 +39,10 @@ pub enum Cmd {
         /// Only accounts some queued job may run on: a reading nobody waits for is not taken.
         #[arg(long)]
         wanted: bool,
+        /// Read the accounts this project asked for (`start_refresh`) until none is left. What
+        /// relay starts in the background; not for use by hand.
+        #[arg(long, hide = true, conflicts_with_all = ["stale", "wanted"])]
+        pending: bool,
     },
     /// Let relay use an account (`harness:label`) again, for example after signing it back in.
     Enable { account: String },
@@ -49,7 +53,8 @@ pub enum Cmd {
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Show => show(ctx, &ctx.world()?, true),
-        Cmd::Refresh { stale, wanted } => refresh(ctx, stale, wanted),
+        Cmd::Refresh { pending: true, .. } => drain(ctx),
+        Cmd::Refresh { stale, wanted, .. } => refresh(ctx, stale, wanted),
         Cmd::Enable { account } => toggle(ctx, account, true),
         Cmd::Disable { account } => toggle(ctx, account, false),
     }
@@ -72,8 +77,10 @@ fn reader_lock(ctx: &Ctx) -> std::path::PathBuf {
 
 /// The accounts in `room` a reading would be taken of: those that report quota and are signed in;
 /// with `only_stale`, only those whose reading is due; with `only_wanted`, only those a queued job
-/// of `world` may run on. One home of each sign-in, preferring one not known signed out.
-fn to_read(room: &Room, world: &World, only_stale: bool, only_wanted: bool, now: u64) -> Vec<Home> {
+/// of `world` may run on; with `only`, only those keys. One home of each sign-in, preferring one
+/// not known signed out.
+fn to_read(room: &Room, world: &World, select: &Select<'_>, now: u64) -> Vec<Home> {
+    let Select { only_stale, only_wanted, only } = *select;
     let state = |a: &Home| room.account(&a.key());
     let mut todo: Vec<Home> = room
         .found()
@@ -81,6 +88,7 @@ fn to_read(room: &Room, world: &World, only_stale: bool, only_wanted: bool, now:
         .filter(|a| harness_of(a).caps().quota && !state(a).is_some_and(|s| s.unsigned))
         .filter(|a| !only_stale || accounts::due(harness_of(a), state(a), now))
         .filter(|a| !only_wanted || wanted(world, a))
+        .filter(|a| only.is_none_or(|keys| keys.contains(&a.key())))
         .cloned()
         .collect();
     // Homes signed in as one account share a reading: one of them is read.
@@ -90,25 +98,130 @@ fn to_read(room: &Room, world: &World, only_stale: bool, only_wanted: bool, now:
     todo
 }
 
-/// Starts `quota refresh --stale` in the background when any account's reading in `room` is due
-/// (with `wanted`, only of accounts a queued job of `world` may run on), unless a reading is already
-/// being taken; returns the accounts whose reading is due, which that reading takes. The one way
+/// The accounts this project asked to have read that no reader has taken yet: a set (one key per
+/// line in `<state>/quota.pending`), changed only under its lock. Requests add to it
+/// ([`start_refresh`]); this project's drainer ([`drain`]) empties it, reading each, before it exits.
+struct Pending<'a>(&'a Ctx);
+
+impl Pending<'_> {
+    /// `f` on the set, under its lock; written back when `f` changed it.
+    fn with<T>(&self, f: impl FnOnce(&mut BTreeSet<String>) -> T) -> Result<T> {
+        let _lock = Role::take(&self.0.state.join("quota.pending.lock"))?;
+        let file = self.0.state.join("quota.pending");
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let mut set: BTreeSet<String> = text.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect();
+        let before = set.clone();
+        let out = f(&mut set);
+        if set != before {
+            let text: String = set.iter().map(|k| k.clone() + "\n").collect();
+            Ctx::write_private(&file, text.as_bytes())?;
+        }
+        Ok(out)
+    }
+
+    fn add(&self, keys: &[String]) -> Result<()> {
+        self.with(|set| set.extend(keys.iter().cloned()))
+    }
+
+    fn take(&self) -> Result<BTreeSet<String>> {
+        self.with(std::mem::take)
+    }
+
+    fn is_empty(&self) -> Result<bool> {
+        self.with(|set| set.is_empty())
+    }
+}
+
+/// The role of this project's drainer: one at a time reads what it asked for.
+fn drainer_lock(ctx: &Ctx) -> std::path::PathBuf {
+    ctx.state.join("quota.drainer.lock")
+}
+
+/// Asks for a reading of every account in `room` whose reading is due (with `wanted`, only of
+/// accounts a queued job of `world` may run on), and returns them: each is in this project's
+/// pending set, which a drainer it starts (unless one is at work, which will see them) reads to
+/// the last before it exits, so every account returned is one a reader will read. The one way
 /// relay starts a reading on its own: the dispatcher, a checker waiting for a seat, and every
 /// command that shows the accounts.
 pub fn start_refresh(ctx: &Ctx, room: &Room, world: &World, wanted: bool) -> Result<Vec<String>> {
-    let due: Vec<String> = to_read(room, world, true, wanted, now_micros()).iter().map(Home::key).collect();
-    // A reader already at work takes them, or its result makes them fresh; a second would only wait for it.
-    if !due.is_empty() && Role::try_take(&reader_lock(ctx))?.is_some() {
-        let args: &[&str] =
-            if wanted { &["quota", "refresh", "--stale", "--wanted"] } else { &["quota", "refresh", "--stale"] };
-        ctx.spawn_self(args, &ctx.state.join("quota.log"))?;
+    let select = Select { only_stale: true, only_wanted: wanted, only: None };
+    let due: Vec<String> = to_read(room, world, &select, now_micros()).iter().map(Home::key).collect();
+    if due.is_empty() {
+        return Ok(due);
+    }
+    Pending(ctx).add(&due)?;
+    // A drainer at work looks at the set again after it lets go of its role, so it sees these.
+    if Role::try_take(&drainer_lock(ctx))?.is_some() {
+        ctx.spawn_self(&["quota", "refresh", "--pending"], &ctx.state.join("quota.log"))?;
     }
     Ok(due)
 }
 
+/// This project's drainer: reads what is pending until nothing is, waiting for the machine's
+/// reader in turn. It looks once more after letting go of its role, so a request made as it was
+/// finishing (which found the role taken and started no drainer) is not left behind.
+fn drain(ctx: &Ctx) -> Result<()> {
+    let pending = Pending(ctx);
+    loop {
+        let Some(role) = Role::try_take(&drainer_lock(ctx))? else { return Ok(()) };
+        loop {
+            let asked = pending.take()?;
+            if asked.is_empty() {
+                break;
+            }
+            let r = read_accounts(ctx, &Select { only_stale: true, only_wanted: false, only: Some(&asked) })?;
+            out!(
+                "{} pending {}: {}",
+                crate::os::stamp(),
+                asked.iter().cloned().collect::<Vec<_>>().join(", "),
+                r.json()
+            );
+        }
+        drop(role);
+        if pending.is_empty()? {
+            return Ok(());
+        }
+    }
+}
+
+/// Which accounts a reading takes: see [`to_read`].
+#[derive(Clone, Copy)]
+struct Select<'a> {
+    only_stale: bool,
+    only_wanted: bool,
+    only: Option<&'a BTreeSet<String>>,
+}
+
+/// What a reading took: the accounts read (also those another reader read while this one
+/// waited), those that gave no reading, and those found signed out.
+struct Taken {
+    read: Vec<String>,
+    unreadable: Vec<String>,
+    signed_out: Vec<String>,
+}
+
+impl Taken {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({ "read": self.read, "unreadable": self.unreadable, "signedOut": self.signed_out })
+    }
+}
+
 fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
-    // One reader on the machine at a time. One that finds another at work waits for it, then
-    // takes only what that one did not: a refresh never ends without the readings it was asked for.
+    let t = read_accounts(ctx, &Select { only_stale, only_wanted, only: None })?;
+    let mut text = Vec::new();
+    if !t.unreadable.is_empty() {
+        text.push(format!("no reading: {}", t.unreadable.join(", ")));
+    }
+    if !t.signed_out.is_empty() {
+        text.push(format!("signed out: {}", t.signed_out.join(", ")));
+    }
+    ctx.reply(&t.json(), &text.join("\n"))
+}
+
+/// Takes the readings `select` names. One reader on the machine at a time: one that finds another
+/// at work waits for it, then takes only what that one did not, so it never ends without the
+/// readings it was asked for.
+fn read_accounts(ctx: &Ctx, select: &Select<'_>) -> Result<Taken> {
     let asked = now_micros();
     let _role = Role::take(&reader_lock(ctx))?;
     // A reading another project took recently is as good as one of ours.
@@ -117,8 +230,7 @@ fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
     let room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
     let now = now_micros();
     let meanwhile = |a: &Home| room.account(&a.key()).and_then(|s| s.read_at).is_some_and(|t| t >= asked);
-    let (taken, todo): (Vec<Home>, Vec<Home>) =
-        to_read(&room, &world, only_stale, only_wanted, now).into_iter().partition(meanwhile);
+    let (taken, todo): (Vec<Home>, Vec<Home>) = to_read(&room, &world, select, now).into_iter().partition(meanwhile);
     let port = ctx.port(&Source(()));
     // In parallel: one reading can take a minute and a half.
     let readings: Vec<_> = std::thread::scope(|s| {
@@ -148,14 +260,7 @@ fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
             port.emit(QuotaEvent::Unreadable { account })?;
         }
     }
-    let mut text = Vec::new();
-    if !unreadable.is_empty() {
-        text.push(format!("no reading: {}", unreadable.join(", ")));
-    }
-    if !signed_out.is_empty() {
-        text.push(format!("signed out: {}", signed_out.join(", ")));
-    }
-    ctx.reply(&serde_json::json!({ "read": read, "unreadable": unreadable, "signedOut": signed_out }), &text.join("\n"))
+    Ok(Taken { read, unreadable, signed_out })
 }
 
 fn read(ctx: &Ctx, home: &Home) -> Option<String> {
@@ -688,6 +793,23 @@ mod tests {
         }]);
         let v = view_of(&cfg, &[omp()], &world(&[]), &[&theirs]);
         assert_eq!(v.ready, [false], "{}", v.json);
+    }
+
+    /// A request for an account already pending adds nothing; the drainer takes them all at once.
+    #[test]
+    fn pending_requests_are_a_set_the_drainer_empties() {
+        let d = tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let cfg = Config::parse("name = \"demo\"\n", d.path()).unwrap();
+        let ctx = Ctx::unclaimed(cfg, d.path().join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        std::fs::create_dir_all(&ctx.state).unwrap();
+        let pending = Pending(&ctx);
+        assert!(pending.is_empty().unwrap());
+        pending.add(&["claude:a".into()]).unwrap();
+        pending.add(&["claude:b".into(), "claude:a".into()]).unwrap();
+        let taken: Vec<String> = pending.take().unwrap().into_iter().collect();
+        assert_eq!(taken, ["claude:a", "claude:b"]);
+        assert!(pending.is_empty().unwrap() && pending.take().unwrap().is_empty());
     }
 
     #[test]

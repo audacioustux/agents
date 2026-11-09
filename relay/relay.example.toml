@@ -33,7 +33,7 @@ exclude = []
 # shown as `program not found`. `enabled` overrides all of that.
 # [harness.claude]
 # enabled = true
-# program = "/path/to/claude"   # a path, or a name found as above; tests use a stub
+# program = "/path/to/claude"   # a path (relative: to this file's directory), or a name found as above
 # model = "claude-sonnet-5-5"   # for jobs that name none for this harness; a full id, as aliases move
 # effort = "high"
 # extra_args = []

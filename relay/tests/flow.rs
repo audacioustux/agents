@@ -2899,3 +2899,26 @@ fn a_command_hook_that_calls_relay_back_reaches_the_same_project_from_a_config_n
     assert_eq!(std::fs::read_to_string(&code).unwrap_or_default().trim(), "0", "the hook's relay call failed: {said}");
     assert!(said.contains("\"go\""), "it reached the project: {said}");
 }
+
+#[test]
+fn a_relative_program_is_the_config_directorys_from_any_working_directory() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("relative-program", false);
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    let absolute = format!("program = \"{}\"", env.repo.join(".stub/claude").display());
+    assert!(conf.contains(&absolute));
+    std::fs::write(env.repo.join("relay.toml"), conf.replace(&absolute, "program = \".stub/claude\"")).unwrap();
+    claude_account(&env.home, "a", 10, false);
+    let sub = env.repo.join("src/deep");
+    std::fs::create_dir_all(&sub).unwrap();
+    let from_sub = |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_relay"));
+        prepared(&env, c.args(args)).current_dir(&sub).output().unwrap()
+    };
+    let (usable, missing) = harnesses_seen(&from_sub(&["--json", "quota", "show"]));
+    assert!(usable.contains(&"claude".to_owned()) && missing.is_empty(), "{usable:?} {missing:?}");
+    ok(&from_sub(&["queue", "add", "rel", "--text", "Look.", "--readonly"]), "queue from a subdirectory");
+    assert_eq!(wait_for(&env, "rel")["status"], "done", "the session ran the same program");
+}

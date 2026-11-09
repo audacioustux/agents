@@ -41,14 +41,16 @@ pub fn executable(path: &Path) -> bool {
     path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-/// The program `name` names. A path (anything with a `/`) is taken as it is. A bare name is the
+/// The program `name` names. An absolute path is taken as it is; a relative one (`bin/claude`) is
+/// never found, since it would name a different file from every working directory (a config's
+/// relative `program` is made absolute against its file's directory when it is loaded). A bare name is the
 /// absolute path recorded at `record` while that can still run, else what relay's own `PATH`
 /// finds, which is then recorded: a later caller whose `PATH` lacks it finds the same program,
 /// and one whose `PATH` has another does not replace it. With no record (`None`), `PATH` alone.
 pub fn resolve(record: Option<&Path>, name: &OsStr) -> Program {
     let as_path = Path::new(name);
     if name.is_empty() || as_path.components().count() != 1 {
-        let found = !name.is_empty() && executable(as_path);
+        let found = !name.is_empty() && as_path.is_absolute() && executable(as_path);
         return if found { Program::Found(as_path.to_path_buf()) } else { Program::Missing(name.to_owned()) };
     }
     let key = name.to_string_lossy().into_owned();
@@ -314,9 +316,12 @@ mod tests {
         let d = crate::config::tempdir::Dir::new();
         let run = program(d.path(), "run", 0o755);
         let plain = program(d.path(), "plain", 0o644);
-        assert_eq!(resolve(None, run.as_os_str()), Program::Found(run));
+        assert_eq!(resolve(None, run.as_os_str()), Program::Found(run.clone()));
         assert_eq!(resolve(None, plain.as_os_str()), Program::Missing(plain.clone().into()));
         assert_eq!(resolve(None, d.path().as_os_str()), Program::Missing(d.path().into()), "a directory");
+        // A relative path names a different file from each working directory: never found.
+        let rel = PathBuf::from(".").join(run.file_name().unwrap());
+        assert_eq!(resolve(None, rel.as_os_str()), Program::Missing(rel.clone().into()));
         assert!(!executable(&plain));
     }
 

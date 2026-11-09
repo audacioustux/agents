@@ -669,7 +669,8 @@ An account is named `harness:label` (`claude:work`, `omp:default`).
 `extra_args` and `program`, or turns it off; `accounts.exclude` leaves out
 single accounts.
 
-A harness's program is `program` when set (a path, or a name), else its own name
+A harness's program is `program` when set (a path, relative to the config file's directory
+when it is not absolute, or a name), else its own name
 (`claude`, `omp`). A name is the absolute path relay recorded the first time it found
 it on a `PATH` (`$XDG_STATE_HOME/relay/programs.json`, kept while that file can be run;
 changed only under `programs.lock`, so relays recording at once keep each other's entries),

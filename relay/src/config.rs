@@ -413,8 +413,8 @@ pub struct Accounts {
 pub struct HarnessConf {
     /// Default: on when its program is found ([`Config::harness_programs`]).
     pub enabled: Option<bool>,
-    /// The command to run instead of the harness's own name: a path, or a name looked up as the
-    /// harness's own is. Tests use a stub.
+    /// The command to run instead of the harness's own name: a path (a relative one is the config
+    /// file's directory's), or a name looked up as the harness's own is. Tests use a stub.
     pub program: Option<PathBuf>,
     /// The model for jobs that name none for this harness.
     pub model: Option<String>,
@@ -582,6 +582,13 @@ impl Config {
     pub fn parse_with(text: &str, dir: &Path, policy: Option<(&Policy, &Path)>) -> Result<Self> {
         let mut cfg: Self = toml::from_str(text)?;
         cfg.repo = dir.join(&cfg.repo).canonicalize().with_context(|| format!("repo {}", cfg.repo.display()))?;
+        // A relative `program` path is the config file's, as `repo` is, never the working
+        // directory's: from here on a program is an absolute path or a bare name.
+        for conf in cfg.harnesses.values_mut() {
+            if let Some(p) = conf.program.as_mut().filter(|p| p.is_relative() && p.components().count() > 1) {
+                *p = dir.join(&*p);
+            }
+        }
         cfg.merge(policy);
         cfg.validate()?;
         Ok(cfg)
@@ -960,6 +967,19 @@ mod tests {
         assert!(gone.locate("omp", crate::harness::Invocation::new("omp")).unwrap_err().0.contains("/opt/x/omp"));
         assert!(!gone.harnesses().iter().any(|h| h.id() == "omp"), "not usable");
         assert_eq!(gone.missing_harnesses(), [("omp", "/opt/x/omp".to_owned())], "but shown");
+        // A relative path is the config directory's (`pinned` is there), wherever relay runs from; a bare
+        // name stays a name.
+        let rel = Config::parse(
+            "name = \"x\"\n[harness.claude]\nprogram = \"./claude\"\n[harness.omp]\nprogram = \"omp-beta\"\n",
+            d.path(),
+        )
+        .unwrap();
+        assert_eq!(rel.harness("claude").program, Some(d.path().join("./claude")));
+        assert_eq!(
+            rel.locate("claude", crate::harness::Invocation::new("claude")).unwrap().program,
+            d.path().join("claude")
+        );
+        assert_eq!(rel.harness("omp").program, Some(PathBuf::from("omp-beta")));
         let off = Config::parse("name = \"x\"\n[harness.omp]\nenabled = false\nprogram = \"/opt/x/omp\"\n", d.path());
         assert!(off.unwrap().missing_harnesses().is_empty(), "a harness turned off is not missing");
     }

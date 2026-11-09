@@ -1654,7 +1654,18 @@ fn a_disk_hook_may_let_a_job_go_on() {
     Command::new("chmod").arg("755").arg(&script).status().unwrap();
     configure(&env, "job_disk_gb = 0.00001\n", &format!("[hooks]\ndisk = [\"command:{}\"]\n", script.display()));
     claude_account(&env.home, "a", 10, false);
+    // The session runs until the hook has answered: an answer after the run ended would be withdrawn.
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
     ok(&relay(&env, &["queue", "add", "big", "--text", "Make a change."]), "queue");
+    for _ in 0..300 {
+        if decisions(&env, "big").first().is_some_and(|d| !d["action"].is_null()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(job(&env, "big")["status"], "running", "it goes on while the hook lets it");
+    std::fs::remove_file(&hold).unwrap();
     let j = wait_for(&env, "big");
     assert_eq!(j["status"], "done", "{j}");
     let d = &decisions(&env, "big")[0];

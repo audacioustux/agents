@@ -347,7 +347,9 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   `sandbox.env_deny` names, is killed 5 s after `command_timeout_seconds` if it
   ignores the TERM, and may print at most 64 KiB. It runs in a process group of
   its own, killed whole within a second once its decision is withdrawn or goes
-  stale. A malformed answer, a failure or a timeout is a `defer`.
+  stale, and a second after that grace if anything in it (a helper it left in the
+  background) still holds its output open: it is done only once it has exited
+  and its output is closed. A malformed answer, a failure or a timeout is a `defer`.
 - `orchestrator`: parks the request on the bus. `relay decide list --wait`
   blocks on the doorbell until a request is waiting and prints it (`--json`:
   each with its full request); `relay decide answer ID --action A [--message M]

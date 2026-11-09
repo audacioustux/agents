@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -753,6 +753,8 @@ const COMMAND_ANSWER_BYTES: u64 = 64 * 1024;
 /// How often a running `command:` handler is looked at, and how many looks between asking whether it is still wanted.
 const COMMAND_LOOK: Duration = Duration::from_millis(100);
 const LOOKS_PER_ASK: u32 = 10;
+/// Past `command_timeout_seconds`: `timeout -k 5`'s own grace, and a second more.
+const COMMAND_GRACE: Duration = Duration::from_secs(6);
 
 /// Runs an external handler with the request on stdin, bounded by `timeout`
 /// (then killed 5 s later if it ignores the TERM), in `env` and nothing else
@@ -786,19 +788,35 @@ fn ask_command(
             let mut out = Vec::new();
             stdout.take(COMMAND_ANSWER_BYTES + 1).read_to_end(&mut out).map(|_| out)
         });
-        let mut looks = 0;
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
+        // Done only when the command has exited and its output is closed: a helper it left in the
+        // background can hold the output open after the leader is gone. Until then a withdrawal, or the
+        // timeout and its grace passing, kills the whole group, with or without its leader.
+        let deadline = Instant::now() + timeout + COMMAND_GRACE;
+        let (mut status, mut looks) = (None, 0);
+        loop {
+            if status.is_none() {
+                status = child.try_wait()?;
+            }
+            if status.is_some() && reader.is_finished() {
+                break;
             }
             looks += 1;
-            if looks % LOOKS_PER_ASK == 0 && !live() {
+            let late = Instant::now() >= deadline;
+            if late || looks % LOOKS_PER_ASK == 0 && !live() {
                 let _ = crate::os::kill_group(child.id());
-                let _ = child.wait();
-                anyhow::bail!("withdrawn while it ran");
+                if status.is_none() {
+                    let _ = child.wait();
+                }
+                // The reader is not joined: whatever outside the group may still hold the output is not waited for.
+                anyhow::bail!(if late {
+                    "still running, or holding its output open, past the timeout"
+                } else {
+                    "withdrawn while it ran"
+                });
             }
             std::thread::sleep(COMMAND_LOOK);
-        };
+        }
+        let status = status.context("exited")?;
         let out = reader.join().map_err(|_| anyhow::anyhow!("reading its answer"))??;
         anyhow::ensure!(out.len() as u64 <= COMMAND_ANSWER_BYTES, "answered more than {COMMAND_ANSWER_BYTES} bytes");
         anyhow::ensure!(status.success(), "exited with {status}");
@@ -1502,6 +1520,40 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(gone(), "the handler's own process went with it");
+
+        // PR #39 second review, issue 2: the handler exits but leaves a helper holding its output. It is
+        // still withdrawn, and the helper killed with its group.
+        let helper_pid = dir.join("helper.pid");
+        let body = format!("sleep 20 &\necho $! >{}\necho '{{\"action\": \"wait\"}}'", helper_pid.display());
+        let leaves = script("leaves", &body);
+        let wanted = std::cell::Cell::new(true);
+        let live = || {
+            if helper_pid.exists() {
+                wanted.set(false);
+            }
+            wanted.get()
+        };
+        let started = std::time::Instant::now();
+        let s = ask_command(&leaves, &r, Duration::from_secs(120), &none, &live);
+        assert!(s.why.contains("withdrawn"), "{}", s.why);
+        assert!(started.elapsed() < Duration::from_secs(10), "not waited for: {:?}", started.elapsed());
+        let helper = std::fs::read_to_string(&helper_pid).unwrap().trim().to_owned();
+        let dead = |pid: &str| {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            stat.is_empty() || stat.contains(") Z ")
+        };
+        for _ in 0..50 {
+            if dead(&helper) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(dead(&helper), "the helper went with the group");
+        // Wanted all along, a helper holding the output is not waited for past the timeout and its grace.
+        let started = std::time::Instant::now();
+        let s = ask_command(&script("lingers", "sleep 20 &\necho '{\"action\": \"wait\"}'"), &r, t, &none, &|| true);
+        assert_eq!(s.action, Action::Defer, "{}", s.why);
+        assert!(started.elapsed() < Duration::from_secs(15), "bounded: {:?}", started.elapsed());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -40,6 +40,11 @@ pub struct Config {
     /// The policy file this was merged with, when one was read.
     #[serde(skip)]
     pub policy_path: Option<PathBuf>,
+    /// This machine's record of where each harness's program is ([`crate::host::resolve`]), set
+    /// where a config is loaded for real; none in a test, which then finds programs on `PATH` and
+    /// records nothing.
+    #[serde(skip)]
+    pub programs: Option<PathBuf>,
     /// Where each merged setting came from: `profiles.NAME.FIELD` and
     /// `session.banned_models.REGEX`, each `policy` or `project`.
     #[serde(skip)]
@@ -184,11 +189,20 @@ impl Policy {
 
     /// Where the policy is read from, and whether `$RELAY_POLICY` names it
     /// (then it must exist): `$RELAY_POLICY`, else `~/.config/relay/policy.toml`.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "which policy is the caller's choice; children get it from the config"
+    )]
     pub fn path() -> Option<(PathBuf, bool)> {
         match std::env::var_os("RELAY_POLICY").filter(|p| !p.is_empty()) {
             Some(p) => Some((PathBuf::from(p), true)),
-            None => std::env::var_os("HOME").map(|h| (PathBuf::from(h).join(POLICY_FILE), false)),
+            None => std::env::var_os("HOME").map(|h| (Self::default_in(Path::new(&h)), false)),
         }
+    }
+
+    /// Where the policy is when `$RELAY_POLICY` names none, for a user whose home is `home`.
+    pub fn default_in(home: &Path) -> PathBuf {
+        home.join(POLICY_FILE)
     }
 
     /// The policy file, optional unless `$RELAY_POLICY` names it.
@@ -397,30 +411,16 @@ pub struct Accounts {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct HarnessConf {
-    /// Default: on when the harness is installed (or `program` names it).
+    /// Default: on when its program is found ([`Config::harness_programs`]).
     pub enabled: Option<bool>,
-    /// The command to run instead of the harness's own name. Tests use a stub.
+    /// The command to run instead of the harness's own name: a path (a relative one is the config
+    /// file's directory's), or a name looked up as the harness's own is. Tests use a stub.
     pub program: Option<PathBuf>,
     /// The model for jobs that name none for this harness.
     pub model: Option<String>,
     pub effort: Option<String>,
     /// Extra arguments for every session of this harness.
     pub extra_args: Vec<String>,
-}
-
-impl HarnessConf {
-    /// The invocation, run by the configured program when one is set, else by
-    /// the harness as relay's own `PATH` finds it. A project's `env_shell` must
-    /// not pick the harness: one project's devshell once put a stale `nixpkgs` claude
-    /// first, on which `opus` meant an older model and current ids were refused.
-    pub fn locate(&self, mut inv: crate::harness::Invocation) -> crate::harness::Invocation {
-        if let Some(p) = &self.program {
-            inv.program = p.clone().into();
-        } else if let Some(p) = crate::os::on_path(&inv.program) {
-            inv.program = p.into();
-        }
-        inv
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -582,6 +582,13 @@ impl Config {
     pub fn parse_with(text: &str, dir: &Path, policy: Option<(&Policy, &Path)>) -> Result<Self> {
         let mut cfg: Self = toml::from_str(text)?;
         cfg.repo = dir.join(&cfg.repo).canonicalize().with_context(|| format!("repo {}", cfg.repo.display()))?;
+        // A relative `program` path is the config file's, as `repo` is, never the working
+        // directory's: from here on a program is an absolute path or a bare name.
+        for conf in cfg.harnesses.values_mut() {
+            if let Some(p) = conf.program.as_mut().filter(|p| p.is_relative() && p.components().count() > 1) {
+                *p = dir.join(&*p);
+            }
+        }
         cfg.merge(policy);
         cfg.validate()?;
         Ok(cfg)
@@ -647,16 +654,17 @@ impl Config {
 
     /// `--config`, else `$RELAY_CONFIG`, else the nearest `relay.toml` at or above the
     /// current directory; `None` when there is none of these.
-    pub fn locate(explicit: Option<&Path>) -> Result<Option<PathBuf>> {
+    #[allow(clippy::disallowed_methods, reason = "which project is the caller's choice")]
+    pub fn find(explicit: Option<&Path>) -> Result<Option<PathBuf>> {
         match explicit.map(Path::to_path_buf).or_else(|| std::env::var_os("RELAY_CONFIG").map(PathBuf::from)) {
             Some(p) => Ok(Some(p)),
             None => Ok(find_upwards(&std::env::current_dir()?)),
         }
     }
 
-    /// The project config [`Config::locate`] finds, merged with the owner's policy.
+    /// The project config [`Config::find`] finds, merged with the owner's policy.
     pub fn load(explicit: Option<&Path>) -> Result<(Self, PathBuf)> {
-        let path = Self::locate(explicit)?.with_context(|| format!("no {FILE_NAME} here or above; pass --config"))?;
+        let path = Self::find(explicit)?.with_context(|| format!("no {FILE_NAME} here or above; pass --config"))?;
         Self::load_at(&path)
     }
 
@@ -671,6 +679,7 @@ impl Config {
             policy.as_ref().map(|(p, from)| (p, from.as_path())),
         )
         .with_context(|| format!("in {}", path.display()))?;
+        let cfg = Self { programs: Some(crate::host::record_in(&crate::ctx::state_root())), ..cfg };
         Ok((cfg, path))
     }
 
@@ -691,6 +700,7 @@ impl Config {
             profiles: BTreeMap::new(),
             hooks: Hooks::default(),
             policy_path: None,
+            programs: Some(crate::host::record_in(&crate::ctx::state_root())),
             origins: BTreeMap::new(),
         };
         cfg.merge(policy.as_ref().map(|(p, from)| (p, from.as_path())));
@@ -815,17 +825,60 @@ impl Config {
         Ok(())
     }
 
-    /// The harnesses relay may use, in registry order.
-    pub fn harnesses(&self) -> Vec<&'static dyn crate::harness::Harness> {
+    /// Every harness this config expects, with its program as this machine has it, in registry
+    /// order: one not turned off whose program is found, or one `[harness.X]` names (so a missing
+    /// program is shown, never silently dropped). The one place a harness's program is looked up.
+    pub fn harness_programs(&self) -> Vec<(&'static dyn crate::harness::Harness, crate::host::Program)> {
         crate::harness::ALL
             .iter()
             .copied()
-            .filter(|h| {
+            .filter_map(|h| {
                 let conf = self.harnesses.get(h.id());
-                conf.and_then(|c| c.enabled)
-                    .unwrap_or_else(|| conf.and_then(|c| c.program.as_ref()).is_some() || crate::harness::installed(*h))
+                if conf.and_then(|c| c.enabled) == Some(false) {
+                    return None;
+                }
+                let name = conf.and_then(|c| c.program.clone()).unwrap_or_else(|| PathBuf::from(h.id()));
+                let program = crate::host::resolve(self.programs.as_deref(), name.as_os_str());
+                (conf.is_some() || matches!(program, crate::host::Program::Found(_))).then_some((h, program))
             })
             .collect()
+    }
+
+    /// The harnesses relay may use: those [`Config::harness_programs`] found, in registry order.
+    pub fn harnesses(&self) -> Vec<&'static dyn crate::harness::Harness> {
+        let found = self.harness_programs().into_iter();
+        found.filter(|(_, p)| matches!(p, crate::host::Program::Found(_))).map(|(h, _)| h).collect()
+    }
+
+    /// The harnesses this config expects whose program is not found, each with what was looked for.
+    pub fn missing_harnesses(&self) -> Vec<(&'static str, String)> {
+        let all = self.harness_programs().into_iter();
+        all.filter_map(|(h, p)| match p {
+            crate::host::Program::Missing(what) => Some((h.id(), what.to_string_lossy().into_owned())),
+            crate::host::Program::Found(_) => None,
+        })
+        .collect()
+    }
+
+    /// `inv` run by its harness's program as this machine has it ([`Config::harness_programs`]):
+    /// never by whatever a caller's or a project shell's `PATH` would find first (one project's
+    /// devshell once put a stale `nixpkgs` claude there, on which `opus` meant an older model).
+    pub fn locate(
+        &self,
+        harness: &str,
+        mut inv: crate::harness::Invocation,
+    ) -> Result<crate::harness::Invocation, crate::harness::Refusal> {
+        let name = self.harness(harness).program.map_or_else(|| inv.program.clone(), PathBuf::into_os_string);
+        match crate::host::resolve(self.programs.as_deref(), &name) {
+            crate::host::Program::Found(p) => {
+                inv.program = p.into_os_string();
+                Ok(inv)
+            }
+            crate::host::Program::Missing(what) => Err(crate::harness::Refusal(format!(
+                "harness {harness}: program not found: {}",
+                what.to_string_lossy()
+            ))),
+        }
     }
 
     pub fn harness(&self, id: &str) -> HarnessConf {
@@ -896,13 +949,39 @@ mod tests {
 
     #[test]
     fn a_harness_runs_as_relay_finds_it_not_as_a_project_shell_would() {
-        let conf = HarnessConf::default();
-        let inv = conf.locate(crate::harness::Invocation::new("sh"));
+        use std::os::unix::fs::PermissionsExt;
+        let d = repo();
+        let cfg = Config::parse("name = \"x\"", d.path()).unwrap();
+        let inv = cfg.locate("claude", crate::harness::Invocation::new("sh")).unwrap();
         assert!(Path::new(&inv.program).is_absolute(), "{:?}", inv.program);
-        let pinned = HarnessConf { program: Some("/opt/x/claude".into()), ..HarnessConf::default() };
-        assert_eq!(pinned.locate(crate::harness::Invocation::new("claude")).program, "/opt/x/claude");
-        let missing = conf.locate(crate::harness::Invocation::new("no-such-harness-xyz"));
-        assert_eq!(missing.program, "no-such-harness-xyz", "left to fail as it would have");
+        let pinned = d.path().join("claude");
+        std::fs::write(&pinned, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&pinned, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let conf = format!("name = \"x\"\n[harness.claude]\nprogram = \"{}\"\n", pinned.display());
+        let cfg = Config::parse(&conf, d.path()).unwrap();
+        assert_eq!(cfg.locate("claude", crate::harness::Invocation::new("claude")).unwrap().program, pinned);
+        // A program that is not there is refused by name, never left for the shell to fail on.
+        let missing = cfg.locate("omp", crate::harness::Invocation::new("no-such-harness-xyz")).unwrap_err();
+        assert_eq!(missing.0, "harness omp: program not found: no-such-harness-xyz");
+        let gone = Config::parse("name = \"x\"\n[harness.omp]\nprogram = \"/opt/x/omp\"\n", d.path()).unwrap();
+        assert!(gone.locate("omp", crate::harness::Invocation::new("omp")).unwrap_err().0.contains("/opt/x/omp"));
+        assert!(!gone.harnesses().iter().any(|h| h.id() == "omp"), "not usable");
+        assert_eq!(gone.missing_harnesses(), [("omp", "/opt/x/omp".to_owned())], "but shown");
+        // A relative path is the config directory's (`pinned` is there), wherever relay runs from; a bare
+        // name stays a name.
+        let rel = Config::parse(
+            "name = \"x\"\n[harness.claude]\nprogram = \"./claude\"\n[harness.omp]\nprogram = \"omp-beta\"\n",
+            d.path(),
+        )
+        .unwrap();
+        assert_eq!(rel.harness("claude").program, Some(d.path().join("./claude")));
+        assert_eq!(
+            rel.locate("claude", crate::harness::Invocation::new("claude")).unwrap().program,
+            d.path().join("claude")
+        );
+        assert_eq!(rel.harness("omp").program, Some(PathBuf::from("omp-beta")));
+        let off = Config::parse("name = \"x\"\n[harness.omp]\nenabled = false\nprogram = \"/opt/x/omp\"\n", d.path());
+        assert!(off.unwrap().missing_harnesses().is_empty(), "a harness turned off is not missing");
     }
 
     fn repo() -> tempdir::Dir {

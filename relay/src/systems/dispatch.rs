@@ -81,9 +81,9 @@ fn serve(ctx: &Ctx) -> Result<()> {
             // One that does not load yet (a half-saved file) changes nothing; it is
             // looked at again when the file changes again.
             match Config::load(Some(&ctx.cfg_path)) {
-                Ok(_) => {
+                Ok((cfg, _)) => {
                     drop(role);
-                    return ctx.wake_dispatch();
+                    return ctx.wake_dispatch_under(&cfg);
                 }
                 Err(e) => {
                     eprintln!("{} config changed but does not load; keeping the old: {e:#}", crate::os::stamp());

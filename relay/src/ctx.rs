@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::bus::{self, Owned, Port, Stamped};
 use crate::config::Config;
+use crate::host::{JobEnv, RelayEnv, Selectors};
 use crate::os::{Doorbell, Role};
 use crate::world::World;
 
@@ -133,6 +134,7 @@ fn git_dirs(repo: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+#[allow(clippy::disallowed_methods, reason = "which state root is the caller's choice; children are told it")]
 fn xdg(var: &str, fallback: &str) -> PathBuf {
     std::env::var_os(var)
         .map(PathBuf::from)
@@ -388,11 +390,32 @@ impl Ctx {
         Ok((pid, gate))
     }
 
+    /// The environment relay's own children run in ([`RelayEnv`]): never the caller's, and with this
+    /// relay's home, state and data roots and policy whatever `session.env` says.
+    pub fn relay_env(&self) -> RelayEnv {
+        RelayEnv::new(&self.cfg, self.selectors())
+    }
+
+    /// Which relay this is: the config it serves (as `--config` names it to every child) and its roots.
+    pub fn selectors(&self) -> Selectors<'_> {
+        Selectors { config: &self.cfg_path, state_root: &self.state_root, data_root: &self.data_root }
+    }
+
+    /// The environment a session starts from ([`JobEnv`]): never the caller's, `session.env` over it.
+    pub fn job_env(&self) -> JobEnv {
+        JobEnv::new(&self.cfg, &self.state_root, &self.data_root)
+    }
+
     fn spawn(&self, args: &[&str], log: &Path, stdin: Stdio) -> Result<Child> {
+        self.spawn_in(&self.relay_env(), args, log, stdin)
+    }
+
+    /// The one way relay starts itself: in `env`, with nothing of the caller's.
+    fn spawn_in(&self, env: &RelayEnv, args: &[&str], log: &Path, stdin: Stdio) -> Result<Child> {
         let out = Self::append_private(log)?;
-        Command::new(crate::os::own_binary()?)
+        env.command(crate::os::own_binary()?)
             .arg("--config")
-            .arg(&self.cfg_path)
+            .arg(self.selectors().config)
             .args(args)
             .stdin(stdin)
             .stdout(out.try_clone()?)
@@ -422,7 +445,16 @@ impl Ctx {
     }
 
     pub fn wake_dispatch(&self) -> Result<()> {
-        self.spawn_self(&["dispatch", "serve"], &self.state.join("dispatch.log")).map(drop)
+        self.wake_dispatch_under(&self.cfg)
+    }
+
+    /// As [`Ctx::wake_dispatch`], in the environment `cfg` makes: a dispatcher handing over to one
+    /// that reads an edited config gives it that config's environment, not its own.
+    pub fn wake_dispatch_under(&self, cfg: &Config) -> Result<()> {
+        let env = RelayEnv::new(cfg, self.selectors());
+        let child = self.spawn_in(&env, &["dispatch", "serve"], &self.state.join("dispatch.log"), Stdio::null())?;
+        self.reap(child);
+        Ok(())
     }
 
     /// The repository's `HEAD` commit when its working tree is clean: then

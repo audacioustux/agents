@@ -127,7 +127,7 @@ fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
 }
 
 fn read(ctx: &Ctx, home: &Home) -> Option<String> {
-    let inv = ctx.cfg.harness(home.harness).locate(harness_of(home).quota(home)?);
+    let inv = ctx.cfg.locate(home.harness, harness_of(home).quota(home)?).ok()?;
     let out = Command::new("timeout")
         .arg("90")
         .arg(&inv.program)
@@ -232,15 +232,7 @@ fn judge(
     let state = match fit {
         Ok(_) if !h.caps().quota => "ready (unmetered)".to_owned(),
         Ok(_) => "ready".to_owned(),
-        Err(accounts::Refusal::SignedOut) => {
-            format!("signed out since {}", accounts::fmt_time(secs(st.and_then(|s| s.signed_at).unwrap_or(0))))
-        }
-        Err(accounts::Refusal::Limited) => {
-            format!("limited until {}", accounts::fmt_time(st.and_then(|s| s.limited_until).unwrap_or(0)))
-        }
-        // The meter cell names the meter.
-        Err(accounts::Refusal::AtFloor(_)) => "at floor".to_owned(),
-        Err(r) => r.describe(),
+        Err(r) => refusal_cell(&r, st),
     };
     let deciding = st.and_then(|s| {
         let governing = h.meters_for(model, &s.meters).ok()?;
@@ -256,6 +248,21 @@ fn judge(
     // A floor loosened for a reset is part of what the cell says.
     let cell = floor.floor_why.as_ref().map_or(cell.clone(), |why| format!("{cell} ({why})"));
     (state, cell, floor, ready)
+}
+
+/// A state cell for what holds an account back.
+fn refusal_cell(r: &accounts::Refusal, st: Option<&AccountState>) -> String {
+    match r {
+        accounts::Refusal::SignedOut => {
+            format!("signed out since {}", accounts::fmt_time(secs(st.and_then(|s| s.signed_at).unwrap_or(0))))
+        }
+        accounts::Refusal::Limited => {
+            format!("limited until {}", accounts::fmt_time(st.and_then(|s| s.limited_until).unwrap_or(0)))
+        }
+        // The meter cell names the meter.
+        accounts::Refusal::AtFloor(_) => "at floor".to_owned(),
+        r => r.describe(),
+    }
 }
 
 /// Whether a queued job may run on `account`, so its reading decides something.
@@ -288,22 +295,117 @@ impl AccountsView {
 }
 
 pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
-    accounts_among(&ctx.cfg, world, &ctx.neighbours())
+    accounts_among(Rules::Project(ctx), world, &ctx.neighbours())
+}
+
+/// Whose rules judge whether an account would take a job.
+#[derive(Debug, Clone, Copy)]
+pub enum Rules<'a> {
+    /// A project's: its floor, seats, `accounts.exclude`, harnesses and `quota disable`. Only a
+    /// project relay runs in has a [`Ctx`], so the owner's policy alone, with every default, can
+    /// never judge as if it were one.
+    Project(&'a Ctx),
+    /// None, outside every project: every account on the machine with what all projects share
+    /// (sign-ins, limits, readings, sessions running), and no account called ready, since what
+    /// would decide that is each project's own.
+    MachineWide,
+}
+
+impl<'a> Rules<'a> {
+    /// The project's rules where relay runs in one (`home`), else none.
+    pub fn of(home: Option<&'a Ctx>) -> Self {
+        home.map_or(Self::MachineWide, Self::Project)
+    }
 }
 
 /// As [`accounts_view`], for `world` among the other projects' folds, already read
 /// (outside any project, `world` is empty and `others` are all of them).
 pub fn accounts_among<'a>(
-    cfg: &Config,
+    rules: Rules<'_>,
     world: &World,
     others: impl IntoIterator<Item = &'a World> + Clone,
 ) -> AccountsView {
     let mut world = world.clone();
     world.hear_accounts(others.clone());
-    let found = accounts::discover(cfg);
+    let found = match rules {
+        Rules::Project(ctx) => accounts::discover(&ctx.cfg),
+        Rules::MachineWide => accounts::discover_all(),
+    };
     accounts::settle(&mut world, &found);
     let others: Vec<&World> = others.into_iter().collect();
-    view(cfg, &found, &world, &others, &seats_taken(others.iter().copied()), now_micros())
+    let elsewhere = seats_taken(others.iter().copied());
+    match rules {
+        Rules::Project(ctx) => {
+            let mut v = view(&ctx.cfg, &found, &world, &others, &elsewhere, now_micros());
+            v.missing(&ctx.cfg.missing_harnesses());
+            v
+        }
+        Rules::MachineWide => machine_wide(&found, &world, &elsewhere, now_micros()),
+    }
+}
+
+impl AccountsView {
+    /// A row for each harness the project expects whose program is not found, never called ready.
+    fn missing(&mut self, missing: &[(&str, String)]) {
+        for (id, what) in missing {
+            self.cells.push(vec![
+                (*id).to_owned(),
+                String::new(),
+                format!("program not found: {what}"),
+                String::new(),
+                String::new(),
+            ]);
+            self.ready.push(false);
+        }
+        self.json["missing"] = missing.iter().map(|(id, _)| *id).collect::<Vec<_>>().into();
+    }
+}
+
+/// Every account on the machine as all projects know it, judged by none of them.
+fn machine_wide(found: &[Home], world: &World, elsewhere: &BTreeMap<String, usize>, now: u64) -> AccountsView {
+    let twins = accounts::twins(found);
+    let rows: Vec<Row<'_>> = found
+        .iter()
+        .map(|a| {
+            let key = a.key();
+            let st = world.accounts.get(&key);
+            let state = accounts::shared_refusal(harness_of(a), st, now)
+                .map_or_else(|| "not limited".to_owned(), |r| refusal_cell(&r, st));
+            let tightest = st
+                .and_then(|s| {
+                    let all: Vec<&crate::harness::Meter> = s.meters.values().collect();
+                    accounts::tightest(&all, &s.meters, secs(now))
+                })
+                .map_or(String::new(), |(k, m)| accounts::meter_line(k, m));
+            let seat = accounts::seat(&twins, &key);
+            let running = elsewhere.iter().filter(|(k, _)| accounts::seat(&twins, k) == seat).map(|(_, n)| n).sum();
+            Row {
+                same_as: twins.get(&key).cloned(),
+                identity: match accounts::sign_in(a) {
+                    SignIn::As(id) => Some(id),
+                    SignIn::Out | SignIn::Unknown => None,
+                },
+                account: key,
+                state,
+                running,
+                meters: st.map(|s| &s.meters),
+                read_at: st.and_then(|s| s.read_at),
+                tightest,
+                floor: Floor { floor: None, floor_why: None },
+                ready: false,
+                by_model: Vec::new(),
+            }
+        })
+        .collect();
+    let mut names: Vec<&str> = found.iter().map(|a| a.harness).collect();
+    names.dedup();
+    let head = format!(
+        "accounts on {}, machine-wide (each project judges its own floor, seats and exclusions)",
+        if names.is_empty() { "no harness".to_owned() } else { names.join(", ") }
+    );
+    let (cells, ready) = rows.iter().flat_map(Row::cells).unzip();
+    let json = serde_json::json!({ "machineWide": true, "harnesses": names, "accounts": rows });
+    AccountsView { json, head, cells, ready }
 }
 
 /// The view of `found` in `world` (which has heard its neighbours), with the models the other

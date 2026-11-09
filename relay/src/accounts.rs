@@ -13,8 +13,16 @@ use crate::world::{AccountState, World};
 /// A reading older than this is refreshed before it is trusted.
 pub const STALE_MICROS: u64 = 10 * 60 * 1_000_000;
 
+#[allow(clippy::disallowed_methods, reason = "whose home is the caller's choice; children are told it")]
 pub fn home() -> PathBuf {
     std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// Every account on this machine, of every harness, whether any project uses it or not: what
+/// a view outside every project shows ([`crate::systems::quota::Rules::MachineWide`]).
+pub fn discover_all() -> Vec<Home> {
+    let user = home();
+    crate::harness::ALL.iter().flat_map(|h| h.homes(&user)).collect()
 }
 
 /// Every usable account of every enabled harness, minus `accounts.exclude`.
@@ -204,6 +212,14 @@ fn account_refusal(harness: &dyn Harness, state: Option<&AccountState>, now_s: i
     } else {
         None
     }
+}
+
+/// What holds the account back on every project alike (no sign-in, a sign-out, a limit, no or a
+/// stale reading), whatever one project's switch (`quota disable`) says: `None` when nothing does.
+pub fn shared_refusal(harness: &dyn Harness, state: Option<&AccountState>, now_us: u64) -> Option<Refusal> {
+    let a = AccountState { enabled: true, ..state.cloned().unwrap_or_default() };
+    account_refusal(harness, Some(&a), secs(now_us))
+        .or_else(|| is_stale(harness, Some(&a), now_us).then_some(Refusal::Stale))
 }
 
 /// Whether the account can take a job on `model` now (`now_us`, bus time),

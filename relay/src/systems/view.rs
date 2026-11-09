@@ -122,7 +122,7 @@ fn status(scope: Scope<'_>, json: bool, all: bool, everywhere: bool) -> Result<(
         out!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    let text = board(scope.cfg, &scope.read()?, all, everywhere);
+    let text = board(scope.cfg, scope.home, &scope.read()?, all, everywhere);
     // On a terminal, one screen line per line; piped, every line whole.
     let width = crate::os::terminal_size().map(|(cols, _)| cols);
     out!("{}", fit(&text, width));
@@ -378,7 +378,7 @@ pub fn decision_cells<'a>(
 }
 
 /// The jobs and accounts, as text.
-fn board(cfg: &Config, m: &Machine, all: bool, everywhere: bool) -> String {
+fn board(cfg: &Config, home: Option<&Ctx>, m: &Machine, all: bool, everywhere: bool) -> String {
     let now = now_micros();
     let everywhere = everywhere || !m.projects.iter().any(|p| p.own);
     let jobs = listed(m.shown(everywhere), all, now);
@@ -411,7 +411,7 @@ fn board(cfg: &Config, m: &Machine, all: bool, everywhere: bool) -> String {
         lines.extend(m.unreadable.iter().map(|u| format!("  unreadable: {u}")));
     }
     lines.push(String::new());
-    lines.push(m.accounts(cfg).text());
+    lines.push(m.accounts(home).text());
     lines.join("\n")
 }
 

@@ -219,16 +219,17 @@ pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsS
     a
 }
 
-/// The environment a session gets: the caller's minus names matching
-/// `sandbox.env_deny`, then the invocation's own variables (which may name
-/// what the filter removes, such as `CLAUDE_CONFIG_DIR`).
+/// The environment a session gets: [`Ctx::job_env`] (built from the config, never
+/// the caller's) minus names matching `sandbox.env_deny`, then the invocation's own variables
+/// (which may name what the filter removes, such as `CLAUDE_CONFIG_DIR`).
 pub fn session_env(ctx: &Ctx, inv: &crate::harness::Invocation) -> Vec<(OsString, OsString)> {
     let deny = Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
-    let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
-        .filter(|(k, _)| {
-            let name = k.to_string_lossy();
-            !deny.is_match(&name) && !matches!(name.as_ref(), "TMPDIR" | "TEMP" | "TMP" | "PWD" | "OLDPWD")
-        })
+    let mut env: Vec<(OsString, OsString)> = ctx
+        .job_env()
+        .without(&deny)
+        .vars()
+        .filter(|(k, _)| !matches!(k.to_string_lossy().as_ref(), "TMPDIR" | "TEMP" | "TMP" | "PWD" | "OLDPWD"))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     // Signing keys are hidden, so git inside cannot sign: say so up front
     // rather than let every session find out by a failed commit.

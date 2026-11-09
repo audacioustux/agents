@@ -221,6 +221,10 @@ fn spawn_and_wait(built: &crate::harness::Invocation, cwd: &std::path::Path, id:
     if let (Some(text), Some(mut stdin)) = (&built.stdin, child.stdin.take()) {
         stdin.write_all(text.as_bytes()).map_err(|e| format!("writing the prompt: {e}"))?;
     }
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "`relay ask` runs the harness in the caller's own foreground, under their terminal and Ctrl-C"
+    )]
     let status = child.wait().map_err(|e| e.to_string())?;
     Ok(status.code().and_then(|c| u8::try_from(c).ok()).unwrap_or(1))
 }

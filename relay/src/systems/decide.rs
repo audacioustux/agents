@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -492,7 +492,7 @@ pub fn validate(
         {
             return Err(format!("another ${fresh:.2} would pass the job's ceiling of ${ceiling:.2}"));
         }
-        let running = world.jobs.values().filter(|j| j.status.has_runner() && j.profile.as_deref() == Some(name));
+        let running = world.jobs().values().filter(|j| j.status.has_runner() && j.profile.as_deref() == Some(name));
         let starts = world.profile_starts.get(name).map_or(&[][..], Vec::as_slice);
         // A follow-up waits for this job, which holds no slot of its own once it ends.
         let running = running.filter(|j| j.name != job.name).count();
@@ -551,7 +551,8 @@ impl Said {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decided {
     pub id: String,
-    pub action: Action,
+    /// Reached only through `carry`, so nothing acts on a decision its job has moved past.
+    action: Action,
     pub why: String,
     /// The handler that decided; `None` when every one deferred and the fallback stands.
     pub handler: Option<String>,
@@ -615,33 +616,71 @@ pub fn decide(
     rule: &dyn Fn() -> Option<(Action, String)>,
     fallback: Action,
 ) -> Result<Decided> {
+    decide_while(ctx, job, req, handlers, rule, fallback, &|| true)
+}
+
+/// As `decide`, for as long as `wanted` says the caller still wants the answer. Once it does not,
+/// or once the decision no longer asks about the job as it is (`World::still_asks`: resumed, reaped,
+/// a new attempt, forgotten), no handler is asked, a parked one stops waiting, and `fallback` stands.
+pub fn decide_while(
+    ctx: &Ctx,
+    job: &Job,
+    req: &Request,
+    handlers: &[Handler],
+    rule: &dyn Fn() -> Option<(Action, String)>,
+    fallback: Action,
+    wanted: &(dyn Fn() -> bool + Sync),
+) -> Result<Decided> {
     let port = ctx.port(&Source(()));
     let point = req.point();
+    let me = std::process::id();
     port.emit(DecideEvent::DecisionRequested {
         id: req.id.clone(),
         job: job.name.clone(),
         point,
         created: job.created_at,
         attempt: job.attempts,
+        waiter: crate::os::start_time(me).map(|started| (me, started)),
     })?;
     let _ = std::fs::write(ctx.job_file(&job.name, &format!("decision.{}.json", req.id)), serde_json::to_vec(req)?);
     let world = ctx.world()?;
+    let gone = || -> Option<&'static str> {
+        if !wanted() {
+            return Some("withdrawn: the run it was asked for has ended");
+        }
+        // Not on record any more (its job was forgotten) counts as withdrawn too.
+        let w = ctx.world().ok()?;
+        (!w.still_asks(&req.id)).then_some("withdrawn: the job has moved on since it was asked")
+    };
+    // A handler at work hears of it as soon as the decision is withdrawn or goes stale, and stops.
+    let live = || gone().is_none();
     let ask = |h: &Handler| match h {
         Handler::Rule => rule().map_or_else(
             || Said::defer("no rule applies"),
             |(action, why)| Said { action, why, cost_usd: 0.0, account: None },
         ),
-        Handler::Agent(a) => ask_agent(ctx, job, a, req),
+        Handler::Agent(a) => ask_agent(ctx, job, a, req, &live),
         Handler::Command(argv) => {
             let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
             let env = ctx.relay_env().without(&deny);
-            ask_command(argv, req, Duration::from_secs(ctx.cfg.hooks.command_timeout_seconds), &env)
+            ask_command(argv, req, Duration::from_secs(ctx.cfg.hooks.command_timeout_seconds), &env, &live)
         }
-        Handler::Orchestrator => ask_orchestrator(ctx, req),
+        Handler::Orchestrator => ask_orchestrator(ctx, req, &gone),
     };
-    let ask = |h: &Handler| match ask(h) {
-        s if *h == Handler::Orchestrator => s,
-        s => Said { action: bounded(s.action, req.next_cap_usd), ..s },
+    // Freshness before a handler is asked, and again after it answers: whatever it said while the job
+    // moved on is recorded as a defer, with what it cost.
+    let ask = |h: &Handler| {
+        if let Some(why) = gone() {
+            return Said::defer(why);
+        }
+        let said = match ask(h) {
+            s if *h == Handler::Orchestrator => s,
+            s => Said { action: bounded(s.action, req.next_cap_usd), ..s },
+        };
+        match gone() {
+            Some(why) => Said { action: Action::Defer, why: why.into(), ..said },
+            None => said,
+        }
     };
     let check = |h: &Handler, a: &Action| validate(&ctx.cfg, &world, job, req, a, *h == Handler::Orchestrator);
     let mut failed = None;
@@ -672,6 +711,27 @@ pub fn decide(
     })
 }
 
+impl Decided {
+    /// The decided action's name, for the record. Carrying it out goes through `carry`.
+    pub fn action_name(&self) -> &'static str {
+        self.action.name()
+    }
+
+    /// Carries the decided action out with `act`: under the jobs lock, and only while the decision still
+    /// asks about its job as the job is (`World::asks_now`), so a `queue resume` (which takes the same
+    /// lock) either comes first and nothing is done, or comes after. The one way a decision's action
+    /// reaches anything. `act` is given the world read under the lock, and the action and why, and must
+    /// not take the lock itself. `Ok(None)`: the job moved on, and nothing was done.
+    pub fn carry<R>(&self, ctx: &Ctx, act: impl FnOnce(&World, Action, &str) -> Result<R>) -> Result<Option<R>> {
+        let _lock = ctx.jobs_lock()?;
+        let world = ctx.world()?;
+        if !world.still_asks(&self.id) {
+            return Ok(None);
+        }
+        act(&world, self.action.clone(), &self.why).map(Some)
+    }
+}
+
 /// Whether an `agent:` handler at `point` waits for a seat. A cap's stop is a job failed over a
 /// seat, and an end judged by nobody is a run left unexamined; a held job is asked again later,
 /// and a disk nearly full cannot wait: its stop is resumable, its fallback the safe side.
@@ -679,9 +739,9 @@ fn waits_for_seat(point: Point) -> bool {
     matches!(point, Point::Cap | Point::Ended)
 }
 
-fn ask_agent(ctx: &Ctx, job: &Job, a: &Agent, req: &Request) -> Said {
+fn ask_agent(ctx: &Ctx, job: &Job, a: &Agent, req: &Request, live: &dyn Fn() -> bool) -> Said {
     let (account, cost_usd, answer) =
-        crate::systems::session::consult(ctx, job, a, &prompt(req), waits_for_seat(req.point()));
+        crate::systems::session::consult(ctx, job, a, &prompt(req), waits_for_seat(req.point()), live);
     match answer.and_then(|text| parse_answer(&text).ok_or_else(|| format!("agent:{} gave no action", a.label))) {
         Ok((action, why)) => Said { action, why, cost_usd, account },
         Err(why) => Said { cost_usd, account, ..Said::defer(why) },
@@ -690,30 +750,55 @@ fn ask_agent(ctx: &Ctx, job: &Job, a: &Agent, req: &Request) -> Said {
 
 /// The most a `command:` handler may print.
 const COMMAND_ANSWER_BYTES: u64 = 64 * 1024;
+/// How many looks at a running `command:` handler (`supervised::LOOK` apart) between asking whether it is still wanted.
+const LOOKS_PER_ASK: u32 = 10;
+/// Past `command_timeout_seconds`: `timeout -k 5`'s own grace, and a second more.
+const COMMAND_GRACE: Duration = Duration::from_secs(6);
 
 /// Runs an external handler with the request on stdin, bounded by `timeout`
 /// (then killed 5 s later if it ignores the TERM), in `env` and nothing else
 /// (relay's own, less what `sandbox.env_deny` matches) and with at most
 /// `COMMAND_ANSWER_BYTES` of answer. A cost it reports is counted, never below zero.
-fn ask_command(argv: &[String], req: &Request, timeout: Duration, env: &crate::host::RelayEnv) -> Said {
+/// It runs under `relay supervise`, as a process group of its own that ends when it exits or
+/// its runner does, and is killed whole as soon as `live` says the decision is no longer wanted.
+fn ask_command(
+    argv: &[String],
+    req: &Request,
+    timeout: Duration,
+    env: &crate::host::RelayEnv,
+    live: &dyn Fn() -> bool,
+) -> Said {
     let run = || -> Result<String> {
-        let mut cmd = env.command("timeout");
-        cmd.args(["-k", "5"]).arg(timeout.as_secs().max(1).to_string()).args(argv);
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .with_context(|| format!("starting {}", argv.join(" ")))?;
+        // `--foreground` keeps `timeout`, and so the handler, in the supervisor's group.
+        let mut cmd = env.supervised("timeout")?;
+        cmd.args(["--foreground", "-k", "5"]).arg(timeout.as_secs().max(1).to_string()).args(argv);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child =
+            crate::supervised::Supervised::spawn(&mut cmd).with_context(|| format!("starting {}", argv.join(" ")))?;
         let input = serde_json::to_vec(req)?;
-        if let Some(mut stdin) = child.stdin.take() {
+        if let Some(mut stdin) = child.child().stdin.take() {
             std::thread::spawn(move || stdin.write_all(&input));
         }
-        let mut out = Vec::new();
-        if let Some(stdout) = child.stdout.take() {
-            stdout.take(COMMAND_ANSWER_BYTES + 1).read_to_end(&mut out)?;
-        }
-        let status = child.wait()?;
+        let stdout = child.child().stdout.take().context("stdout")?;
+        let reader = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            stdout.take(COMMAND_ANSWER_BYTES + 1).read_to_end(&mut out).map(|_| out)
+        });
+        // Supervised until it has exited and its output has closed: a withdrawal, or the timeout and its
+        // grace passing, kills the whole group, with or without its leader.
+        let deadline = Instant::now() + timeout + COMMAND_GRACE;
+        let mut looks = 0;
+        let stop = || {
+            looks += 1;
+            if Instant::now() >= deadline {
+                Some("still running, or holding its output open, past the timeout")
+            } else {
+                (looks % LOOKS_PER_ASK == 0 && !live()).then_some("withdrawn while it ran")
+            }
+        };
+        // Stopped, the reader is not joined: whatever outside the group may hold the output is not waited for.
+        let status = child.finish(|| reader.is_finished(), stop)?.map_err(anyhow::Error::msg)?;
+        let out = reader.join().map_err(|_| anyhow::anyhow!("reading its answer"))??;
         anyhow::ensure!(out.len() as u64 <= COMMAND_ANSWER_BYTES, "answered more than {COMMAND_ANSWER_BYTES} bytes");
         anyhow::ensure!(status.success(), "exited with {status}");
         Ok(String::from_utf8_lossy(&out).into_owned())
@@ -731,10 +816,14 @@ fn ask_command(argv: &[String], req: &Request, timeout: Duration, env: &crate::h
     }
 }
 
+/// How often a parked request looks again whether it is still wanted, with no event to say so.
+const PARKED_LOOK: Duration = Duration::from_secs(1);
+
 /// Parks the request on the bus and waits on the doorbell for `relay decide
-/// answer` until the timeout. An answer counts only if recorded before then;
-/// the last look, under the jobs lock, sees any that `answer` was writing.
-fn ask_orchestrator(ctx: &Ctx, req: &Request) -> Said {
+/// answer` until the timeout, or until `gone` says why it is no longer wanted.
+/// An answer counts only if recorded before then; the last look, under the jobs
+/// lock, sees any that `answer` was writing.
+fn ask_orchestrator(ctx: &Ctx, req: &Request, gone: &dyn Fn() -> Option<&'static str>) -> Said {
     let port = ctx.port(&Source(()));
     let minutes = ctx.cfg.hooks.orchestrator_timeout_minutes;
     let wait = Duration::from_secs_f64(minutes * 60.0);
@@ -744,24 +833,27 @@ fn ask_orchestrator(ctx: &Ctx, req: &Request) -> Said {
         let d = w.decisions.get(&req.id)?;
         Some((d.answer.clone()?, d.answer_why.clone()))
     };
+    // Withdrawal wins over an answer already recorded: it was for a job that has moved on.
+    let read_or_gone = || gone().map(Err).or_else(|| read().map(Ok));
     if port.emit(DecideEvent::Parked { id: req.id.clone(), until }).is_err() {
         return Said::defer("could not park the request");
     }
     let bell = ctx.doorbell().ok();
     let sleep = |d: Duration| match &bell {
         Some(b) => {
-            b.wait(d);
+            b.wait(d.min(PARKED_LOOK));
         }
-        None => std::thread::sleep(d.min(Duration::from_secs(1))),
+        None => std::thread::sleep(d.min(PARKED_LOOK)),
     };
-    let answer = await_answer(until, read, sleep, now_micros).or_else(|| {
+    let answer = await_answer(until, read_or_gone, sleep, now_micros).or_else(|| {
         let _lock = ctx.jobs_lock().ok();
-        read()
+        read_or_gone()
     });
-    answer.map_or_else(
-        || Said::defer(format!("no answer in {minutes} minutes")),
-        |(action, why)| Said { action, why, cost_usd: 0.0, account: None },
-    )
+    match answer {
+        Some(Ok((action, why))) => Said { action, why, cost_usd: 0.0, account: None },
+        Some(Err(why)) => Said::defer(why),
+        None => Said::defer(format!("no answer in {minutes} minutes")),
+    }
 }
 
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
@@ -772,9 +864,35 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     }
 }
 
-/// The decisions waiting for the orchestrator at `now`, oldest first.
+/// Why decision `d` cannot be answered at `now` (bus time), or `None` when it can: it is parked
+/// and unanswered, still about its job as the job is (`World::awaiting`), and the process waiting
+/// to carry it out is alive. The one gate for `decide answer`, `decide list` and the boards.
+pub fn unanswerable(world: &World, d: &Decision, now: u64) -> Option<String> {
+    let job = world.jobs().get(&d.job);
+    if !world.awaiting(d, now) {
+        return Some(match job {
+            Some(j) if d.parked_until.is_some_and(|u| u > now) && !world.asks_now(d) => format!(
+                "it was asked about an earlier state of {} (attempt {}), which is now {} (attempt {})",
+                d.job,
+                d.attempt,
+                j.status.as_str(),
+                j.attempts
+            ),
+            _ => "it is not waiting for an answer".into(),
+        });
+    }
+    // A runner that died while parked never hears the answer; the dispatcher reaps its job.
+    let waiter = d.waiter.or_else(|| job.filter(|_| d.point != Point::Held).and_then(|j| j.runner));
+    if waiter.is_some_and(|(pid, started)| !crate::os::same_process(pid, started)) {
+        let who = if d.point == Point::Held { "the process waiting for it" } else { "its runner" };
+        return Some(format!("{who} has died; nothing would carry the answer out"));
+    }
+    None
+}
+
+/// The decisions waiting for the orchestrator at `now` that can be answered, oldest first.
 pub fn pending(world: &World, now: u64) -> Vec<&Decision> {
-    let mut out: Vec<&Decision> = world.decisions.values().filter(|d| d.pending(now)).collect();
+    let mut out: Vec<&Decision> = world.decisions.values().filter(|d| unanswerable(world, d, now).is_none()).collect();
     out.sort_by_key(|d| d.requested_at);
     out
 }
@@ -871,10 +989,10 @@ fn answer(ctx: &Ctx, a: Answer) -> Result<()> {
     let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
     let Some(d) = world.decisions.get(&a.id) else { fail!(NotFound, "no decision {}", a.id) };
-    if !d.pending(now_micros()) {
-        fail!(Conflict, "decision {} is not waiting for an answer", a.id);
+    if let Some(why) = unanswerable(&world, d, now_micros()) {
+        fail!(Conflict, "decision {}: {why}", a.id);
     }
-    let Some(job) = world.jobs.get(&d.job) else { fail!(NotFound, "job {} is gone", d.job) };
+    let Some(job) = world.jobs().get(&d.job) else { fail!(NotFound, "job {} is gone", d.job) };
     let action = action_of(&a, &d.job)?;
     let asked = asked(ctx, d, job);
     if let Err(why) = validate(&ctx.cfg, &world, job, &asked, &action, true) {
@@ -884,7 +1002,7 @@ fn answer(ctx: &Ctx, a: Answer) -> Result<()> {
     let id = a.id.clone();
     ctx.port(&Source(())).emit(DecideEvent::Answered { id: a.id.clone(), action, why: a.why.unwrap_or_default() })?;
     if ctx.world()?.decisions.get(&id).is_none_or(|d| d.answer.is_none()) {
-        fail!(Conflict, "decision {id} timed out before the answer was recorded");
+        fail!(Conflict, "decision {id} timed out or went stale before the answer was recorded");
     }
     ctx.reply(&json!({ "id": a.id, "action": name }), &format!("{}: {name}", a.id))
 }
@@ -925,7 +1043,7 @@ fn asked(ctx: &Ctx, d: &Decision, job: &Job) -> Request {
 fn held(ctx: &Ctx, name: &str, why: &str) -> Result<()> {
     let Some(_role) = crate::os::Role::try_take(&ctx.state.join(format!("held-{name}.lock")))? else { return Ok(()) };
     let world = ctx.world()?;
-    let Some(job) = world.jobs.get(name).filter(|j| j.status == Status::Queued) else { return Ok(()) };
+    let Some(job) = world.jobs().get(name).filter(|j| j.status == Status::Queued) else { return Ok(()) };
     let after = Duration::from_secs_f64(ctx.cfg.hooks.held_after_minutes * 60.0);
     if next_held_ask(&world, job, u64::try_from(after.as_micros()).unwrap_or(u64::MAX)) > now_micros() {
         return Ok(());
@@ -938,21 +1056,20 @@ fn held(ctx: &Ctx, name: &str, why: &str) -> Result<()> {
     req.spent_usd = job.cost_usd;
     req.earlier = earlier(&world, job);
     let d = decide(ctx, job, &req, &handlers, &|| None, Action::Wait)?;
-    let lock = ctx.jobs_lock()?;
-    let now = ctx.world()?;
     let same = |j: &&Job| {
         j.status == Status::Queued
             && (j.created_at, j.attempts, j.queued_at) == (job.created_at, job.attempts, job.queued_at)
     };
-    let Some(job) = now.jobs.get(name).filter(same) else { return Ok(()) };
-    match d.action {
-        Action::Reroute { harness, model, profile } => {
-            crate::systems::queue::reroute(ctx, job, harness.as_deref(), model.as_deref(), profile.as_deref())?;
+    d.carry(ctx, |now, action, _| {
+        let Some(job) = now.jobs().get(name).filter(same) else { return Ok(()) };
+        match action {
+            Action::Reroute { harness, model, profile } => {
+                crate::systems::queue::reroute(ctx, job, harness.as_deref(), model.as_deref(), profile.as_deref())
+            }
+            Action::Force => crate::systems::queue::force(ctx, &job.name),
+            _ => Ok(()),
         }
-        Action::Force => crate::systems::queue::force(ctx, &job.name)?,
-        _ => {}
-    }
-    drop(lock);
+    })?;
     ctx.wake_dispatch()
 }
 
@@ -993,6 +1110,74 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    /// A project in a scratch directory, with `lines` (`file`, NDJSON line) on its bus.
+    fn project(dir: &crate::config::tempdir::Dir) -> Ctx {
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let cfg = Config::parse("name = \"demo\"\n", root).unwrap();
+        let ctx = Ctx::unclaimed(cfg, root.join("relay.toml"), root.join("state"), root.join("data"));
+        std::fs::create_dir_all(ctx.bus.join("session")).unwrap();
+        std::fs::create_dir_all(&ctx.jobs).unwrap();
+        ctx
+    }
+
+    fn append(ctx: &Ctx, file: &str, t: u64, event: impl Serialize) {
+        use std::io::Write as _;
+        let mut v = serde_json::to_value(event).unwrap();
+        v["t"] = t.into();
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(ctx.bus.join(file)).unwrap();
+        writeln!(f, "{v}").unwrap();
+    }
+
+    /// PR #39 review, issue 1: a decision acts only through `carry`, which checks under the jobs lock
+    /// that the job is still at the attempt it was asked about. A `queue resume` in between wins.
+    #[test]
+    fn a_decision_is_carried_out_only_while_its_job_is_where_it_was_asked() {
+        use crate::bus::{DispatchEvent, QueueEvent};
+        let dir = crate::config::tempdir::Dir::new();
+        let ctx = project(&dir);
+        let queued = r#"{"t":1,"type":"queued","job":"a","task":"x","readonly":false,"effort":null,"budget_usd":1.0,"pinned":null}"#;
+        std::fs::write(ctx.bus.join("queue.ndjson"), format!("{queued}\n")).unwrap();
+        let dispatched =
+            DispatchEvent::Dispatched { job: "a".into(), account: "c:w".into(), runner_pid: 7, runner_started: 1 };
+        append(&ctx, "dispatch.ndjson", 2, dispatched);
+        let asked = DecideEvent::DecisionRequested {
+            id: "d".into(),
+            job: "a".into(),
+            point: Point::Ended,
+            created: 1,
+            attempt: 1,
+            waiter: None,
+        };
+        append(&ctx, "decide.ndjson", 3, asked);
+        let follow_up = Action::FollowUp { brief: "b".into(), profile: None, after: true, fork: false, name: None };
+        let d = Decided {
+            id: "d".into(),
+            action: follow_up.clone(),
+            why: "w".into(),
+            handler: Some("orchestrator".into()),
+            account: None,
+            cost_usd: 0.0,
+        };
+        let carried = d.carry(&ctx, |w, action, why| Ok((w.jobs()["a"].status, action, why.to_owned()))).unwrap();
+        assert_eq!(carried, Some((Status::Checking, follow_up, "w".into())), "current: carried out under the lock");
+
+        let resumed = QueueEvent::Resumed {
+            job: "a".into(),
+            message: "mine".into(),
+            budget_usd: None,
+            models: std::collections::BTreeMap::default(),
+        };
+        append(&ctx, "queue.ndjson", 4, resumed);
+        let mut ran = false;
+        let carried = d.carry(&ctx, |_, _, _| {
+            ran = true;
+            Ok(())
+        });
+        assert_eq!(carried.unwrap(), None);
+        assert!(!ran, "resumed by hand: nothing acts on the old decision");
+    }
 
     fn said(action: Action) -> Said {
         Said { action, why: "w".into(), cost_usd: 0.25, account: None }
@@ -1152,6 +1337,7 @@ mod tests {
                 created: 7,
                 attempt: i,
                 requested_at: u64::from(i),
+                waiter: None,
                 parked_until: None,
                 answer: None,
                 answer_why: String::new(),
@@ -1186,7 +1372,7 @@ mod tests {
         let cfg: Config = toml::from_str("name = \"x\"\n[profiles.solo]\nmax_running = 1\n").unwrap();
         let mut w = World::default();
         let busy = Job { name: "busy".into(), status: Status::Running, profile: Some("solo".into()), ..Job::default() };
-        w.jobs.insert(busy.name.clone(), busy);
+        w.jobs_mut().insert(busy.name.clone(), busy);
         let r = req(Point::Ended, 0.0, 1.0);
         let named =
             Action::FollowUp { brief: "b".into(), profile: Some("solo".into()), after: true, fork: false, name: None };
@@ -1210,6 +1396,7 @@ mod tests {
             created: 1,
             attempt: 0,
             requested_at: 2_000,
+            waiter: None,
             parked_until: None,
             answer: None,
             answer_why: String::new(),
@@ -1274,17 +1461,106 @@ mod tests {
         let none = full.without(&regex::Regex::new("^$").unwrap());
         let t = Duration::from_secs(1);
         let neg = script("neg", r#"echo '{"action": "stop", "why": "w", "cost_usd": -5}'"#);
-        let s = ask_command(&neg, &r, t, &none);
+        let s = ask_command(&neg, &r, t, &none, &|| true);
         assert_eq!((s.action.name(), s.cost_usd), ("stop", 0.0));
         let big = script("big", "yes '{}' | head -c 200000");
-        assert!(ask_command(&big, &r, t, &none).why.contains("more than"));
+        assert!(ask_command(&big, &r, t, &none, &|| true).why.contains("more than"));
         let env = script("env", r#"echo "{\"action\": \"stop\", \"why\": \"[$HOME]\"}""#);
-        assert_eq!(ask_command(&env, &r, t, &none).why, "[/h]", "the environment it is given");
-        assert_eq!(ask_command(&env, &r, t, &full.without(&regex::Regex::new("^HOME$").unwrap())).why, "[]");
+        assert_eq!(ask_command(&env, &r, t, &none, &|| true).why, "[/h]", "the environment it is given");
+        let home_denied = full.without(&regex::Regex::new("^HOME$").unwrap());
+        assert_eq!(ask_command(&env, &r, t, &home_denied, &|| true).why, "[]");
         let stubborn = script("stubborn", "trap '' TERM\nwhile :; do sleep 1; done");
         let started = std::time::Instant::now();
-        assert_eq!(ask_command(&stubborn, &r, t, &none).action, Action::Defer);
+        assert_eq!(ask_command(&stubborn, &r, t, &none, &|| true).action, Action::Defer);
         assert!(started.elapsed() < Duration::from_secs(15), "killed after the grace");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `command:` handler is supervised until it has exited and its output has closed: withdrawn, it
+    /// is killed with its whole group, whether it runs on, closed its output, or left a helper holding it.
+    #[test]
+    fn a_command_handler_is_supervised_until_it_exited_and_its_output_closed() {
+        let dir = std::env::temp_dir().join(format!("relay-cmd-supervised-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\ncat >/dev/null\n{body}\n")).unwrap();
+            Command::new("chmod").arg("755").arg(&p).status().unwrap();
+            vec![p.display().to_string()]
+        };
+        let r = req(Point::Cap, 0.0, 1.0);
+        let full = crate::host::RelayEnv::of([("PATH", "/usr/bin:/bin"), ("HOME", "/h")]);
+        let none = full.without(&regex::Regex::new("^$").unwrap());
+        // PR #39 review, issue 2: withdrawn while it runs, the whole group is killed at once.
+        let pid_file = dir.join("slow.pid");
+        let slow =
+            script("slow", &format!("echo $$ >{}\nsleep 60\necho '{{\"action\": \"wait\"}}'", pid_file.display()));
+        let wanted = std::cell::Cell::new(true);
+        let live = || {
+            if pid_file.exists() {
+                wanted.set(false);
+            }
+            wanted.get()
+        };
+        let started = std::time::Instant::now();
+        let s = ask_command(&slow, &r, Duration::from_secs(120), &none, &live);
+        assert_eq!(s.action, Action::Defer);
+        assert!(s.why.contains("withdrawn"), "{}", s.why);
+        assert!(started.elapsed() < Duration::from_secs(10), "not waited for: {:?}", started.elapsed());
+        let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+        let gone = || {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            stat.is_empty() || stat.contains(") Z ")
+        };
+        for _ in 0..50 {
+            if gone() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(gone(), "the handler's own process went with it");
+
+        // PR #39 second review, issue 2: the handler exits but leaves a helper holding its output. Its
+        // supervisor kills the helper as the handler exits (fifth review), so nothing waits on it.
+        let helper_pid = dir.join("helper.pid");
+        let body =
+            format!("sleep 20 &\necho $! >{}\necho '{{\"action\": \"stop\", \"why\": \"w\"}}'", helper_pid.display());
+        let leaves = script("leaves", &body);
+        let started = std::time::Instant::now();
+        let s = ask_command(&leaves, &r, Duration::from_secs(120), &none, &|| true);
+        assert_eq!((s.action.name(), s.why.as_str()), ("stop", "w"), "its answer counts");
+        assert!(started.elapsed() < Duration::from_secs(5), "not waited for: {:?}", started.elapsed());
+        let helper = std::fs::read_to_string(&helper_pid).unwrap().trim().to_owned();
+        let dead = |pid: &str| {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            stat.is_empty() || stat.contains(") Z ")
+        };
+        for _ in 0..50 {
+            if dead(&helper) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(dead(&helper), "the helper went with the group");
+        // PR #39 third review, issue 1: one that closes its output and runs on is still withdrawn.
+        let closed_pid = dir.join("closed.pid");
+        let closes = script("closes", &format!("echo $$ >{}\nexec >&-\nsleep 20", closed_pid.display()));
+        let wanted = std::cell::Cell::new(true);
+        let live = || {
+            if closed_pid.exists() {
+                wanted.set(false);
+            }
+            wanted.get()
+        };
+        let started = std::time::Instant::now();
+        let s = ask_command(&closes, &r, Duration::from_secs(120), &none, &live);
+        assert!(s.why.contains("withdrawn"), "{}", s.why);
+        assert!(started.elapsed() < Duration::from_secs(10), "not waited for: {:?}", started.elapsed());
+        let closer = std::fs::read_to_string(&closed_pid).unwrap().trim().to_owned();
+        assert!((0..50).any(|_| dead(&closer) || {
+            std::thread::sleep(Duration::from_millis(100));
+            false
+        }));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

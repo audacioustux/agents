@@ -38,7 +38,7 @@ pub enum Cmd {
 /// landing is the operator's step. A job nobody reviews, and nobody has been asked to, gets none.
 fn unreviewed(ctx: &Ctx, world: &crate::world::World, job: &crate::world::Job, branch: &str) -> Option<String> {
     let asked = !job.verdicts.is_empty()
-        || world.jobs.values().any(|j| j.review_of() == Some(job.name.as_str()) && j.unchained.is_none());
+        || world.jobs().values().any(|j| j.review_of() == Some(job.name.as_str()) && j.unchained.is_none());
     if !asked {
         return None;
     }
@@ -68,7 +68,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     let world = ctx.world()?;
     match cmd {
         Cmd::Fetch { name } => {
-            let Some(j) = world.jobs.get(&name) else { fail!(NotFound, "no job named {name}") };
+            let Some(j) = world.jobs().get(&name) else { fail!(NotFound, "no job named {name}") };
             let (Some(dir), Some(branch)) = (&j.workdir, &j.branch) else {
                 if j.branch.is_some() {
                     fail!(
@@ -99,7 +99,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         }
         Cmd::Gc { .. } => unreachable!("handled above"),
         Cmd::Clean { name } => {
-            let Some(j) = world.jobs.get(&name) else { fail!(NotFound, "no job named {name}") };
+            let Some(j) = world.jobs().get(&name) else { fail!(NotFound, "no job named {name}") };
             if j.status.is_live() {
                 fail!(Conflict, "{name} is {}; stop it first", j.status.as_str());
             }

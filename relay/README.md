@@ -68,7 +68,9 @@ session ended `done`, landed or not: landing stays your step. A build job
 waiting for build jobs starts from their branch (below). A dependency that fails,
 is stopped, dequeued or cleaned away before it was done never finishes, so the
 dependent shows `waits for a (failed)` and does not start on its own, nor keep
-the dispatcher awake. Queue the dependency again (or `queue resume` it), or
+the dispatcher awake. So does every job queued behind it, however deep the chain
+(`waits for b (blocked)`), and jobs that wait for each other (`a cycle`); `view result --wait` on it exits 4 with that line rather
+than wait forever. Queue the dependency again (or `queue resume` it), or
 `relay queue release NAME [--from a]`. Only existing jobs can be named, so there
 are no cycles.
 
@@ -133,7 +135,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one. A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
-| `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends |
+| `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends and its runner has exited (it may re-review or wake the dispatcher after the end), and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |
 | `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)) |
 | `relay view events` | The merged event log |
 | `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |
@@ -150,7 +152,9 @@ refused by a rule (a banned model, a disabled harness or one whose program is no
 anything else. An agent driving relay can branch on those, never on wording.
 
 Nothing needs starting by hand. Every command that changes something wakes the
-dispatcher, which exits on its own a minute after the queue empties.
+dispatcher, which exits on its own a minute after the queue empties and no
+runner holds a job (a job `checking` at a parked decision counts: if its runner
+dies there, the dispatcher is still awake to reap it).
 
 Whoever wakes it chooses nothing of its environment. The dispatcher, and everything it
 starts (runners, gc, the quota reader, hooks, sessions), gets one built from the config
@@ -336,20 +340,39 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   last message, the job's earlier decisions and the JSON shape of each allowed
   action. `limits.checker` with `budget_growth` above 1 is shorthand for
   `cap = ["rule", "agent:checker"]` (see [checkpoints](#checkpoints)).
+  Its session, in a process group of its own, is watched until it has exited,
+  not only until its output closes, and is killed with its group once its
+  decision is withdrawn or goes stale, or a limit passes. Every handler and
+  session runs under a small supervisor (`relay supervise`) that leads its
+  process group and kills the group when the handler exits, when it is stopped,
+  or within moments of its runner ending (`queue stop`, killed, crashed); nothing
+  is recorded and no stored pid is signalled.
 - `command:<argv>`: runs the program (argv split on spaces, with no quoting) on
   the host with the request as JSON on stdin, and reads one JSON object from
   stdout: `{"action": "continue", "budget": 20, "why": "..."}` (`cost_usd`
   optional, never counted below zero). It runs without the variables
   `sandbox.env_deny` names, is killed 5 s after `command_timeout_seconds` if it
-  ignores the TERM, and may print at most 64 KiB. A malformed answer, a failure
-  or a timeout is a `defer`.
+  ignores the TERM, and may print at most 64 KiB. It runs in a process group of
+  its own, killed whole within a second once its decision is withdrawn or goes
+  stale, and a second after that grace if anything in it (a helper it left in the
+  background) still holds its output open: it is done only once it has exited
+  and its output is closed. A malformed answer, a failure or a timeout is a `defer`.
 - `orchestrator`: parks the request on the bus. `relay decide list --wait`
   blocks on the doorbell until a request is waiting and prints it (`--json`:
   each with its full request); `relay decide answer ID --action A [--message M]
   [--budget USD] [--profile P] [--brief TEXT] [--why W] ...` answers it. Past
   `orchestrator_timeout_minutes` the chain moves on, and an answer recorded
-  later is refused (exit 4) and changes nothing. A runner waiting for an
-  answer shows `checking` and holds no seat. `relay view status` lists waiting
+  later is refused (exit 4) and changes nothing. A decision is about one attempt
+  of its job: once that attempt has moved on (`queue resume`, a new run, the job
+  reaped or ended) or the process waiting for the answer (the job's runner, or
+  `decide held`) has died, an answer is refused (exit 4, saying which), `decide
+  list` no longer shows it, and the runner stops waiting and asks no further
+  handler. A handler that answers after that (a `command:` or `agent:` still
+  running, an answer read late) is recorded as `defer` (`withdrawn: ...`) with
+  what it cost. Whatever was decided is carried out under the lock `queue resume`
+  takes, and only while the job is still at the attempt it was asked about: a
+  `follow-up`, `resume`, `requeue` or review verdict never acts on a job that
+  has moved on. A runner waiting for an answer shows `checking` and holds no seat. `relay view status` lists waiting
   decisions in their own section, so a human sees them too.
 
 **Safety.** A worker's report and diff reach an `agent` or `command` handler,
@@ -639,7 +662,9 @@ a totals line, and a `collected` event per clone removed or emptied:
 The dispatcher runs a pass at most every `interval_minutes` while it is awake
 (a stamp in the state directory keeps that across restarts), and at once when
 free disk falls under `min_free_disk_gb` (not again within five minutes). A pass
-stops cleanly at `pass_seconds` and the next goes on; only one runs at a time.
+stops cleanly at `pass_seconds` and the next goes on; only one runs at a time:
+`relay land gc` while another pass runs does nothing and exits 4 (`gc: another
+pass is running`), so try again once it is done.
 
 **A ceiling for running jobs.** The runner measures a build job's clone when it
 starts and every `disk_sample_minutes` (a recursive stat walk, bounded in time,
@@ -650,7 +675,14 @@ read-only job has too. The size is on the board (`12G`) and in `--json`
 point is reached. With no `disk` chain, or every handler deferring, the job is
 stopped with the reason `disk: clone 52G over 40G` or `disk: 8G free, under 20G`,
 its clone and session kept: free some space (`land gc` first), then `queue
-resume`. `wait` lets it go on, and asks again only after an hour. Nothing is
+resume`. `wait` lets it go on, and asks again only after an hour. While the
+chain decides (an orchestrator can take `orchestrator_timeout_minutes`), the run
+goes on under all its limits: its spend cap, silence limit and time limit still
+end it, and a decision still waiting then is withdrawn (`decided` by
+`orchestrator`, `defer`, `withdrawn: ...`) and refused if answered. A
+`command:` or `agent:` handler still at work then is stopped with it (a command's
+whole process group is killed, an agent's session ended), so the job ends, frees
+its seat and `view result --wait` returns without waiting for the handler. Nothing is
 ever deleted inside a running job's clone.
 
 `[session] env` sets variables in every job's environment (and the dispatcher's), over
@@ -916,7 +948,8 @@ own process, and owns one output port:
   only a doorbell. A runner's exit rings it too. Otherwise the dispatcher
   sleeps until the next moment the plan could change by itself (a limit
   lifting, a meter resetting, a reading going stale), with a 5-minute
-  backstop, and exits after a minute with nothing to do.
+  backstop, and exits after a minute with nothing to do: nothing queued that can
+  start, and no job held by a runner, running or checking.
 - **Single roles:** the dispatcher and the quota reader each hold a `flock`,
   which the kernel releases if the holder dies.
 

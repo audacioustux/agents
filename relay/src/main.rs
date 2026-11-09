@@ -21,6 +21,7 @@ mod host;
 mod hostdir;
 mod os;
 mod sandbox;
+mod supervised;
 mod systems;
 mod world;
 
@@ -84,6 +85,15 @@ enum System {
     },
     /// One-shot, read-only call to a harness, now, in your own account. Needs no relay.toml.
     Ask(systems::ask::Args),
+    /// Runs a session or decision handler for the runner `parent`, as the leader of a process group
+    /// of its own that ends with it (started by relay itself; see `supervised`).
+    #[command(hide = true)]
+    Supervise {
+        #[arg(long)]
+        parent: u32,
+        #[arg(last = true, required = true)]
+        argv: Vec<std::ffi::OsString>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -91,6 +101,8 @@ fn main() -> ExitCode {
     let json = cli.json;
     let result = match cli.system {
         System::Ask(a) => systems::ask::run(&a, json),
+        // Its output is the handler's: it says nothing of its own there.
+        System::Supervise { parent, argv } => return supervised::supervise(parent, &argv),
         system => run(cli.config.as_deref(), json, system).map(|()| 0),
     };
     reply::finish(result, json, "relay")
@@ -117,7 +129,9 @@ fn run(config: Option<&std::path::Path>, json: bool, system: System) -> anyhow::
         System::Land(c) => systems::land::run(&ctx, c),
         System::Decide(c) => systems::decide::run(&ctx, c),
         System::Probe { account } => systems::probe::run(&ctx, account.as_deref()),
-        System::Ask(_) | System::Profiles | System::Config(_) => unreachable!("runs without a project context"),
+        System::Ask(_) | System::Supervise { .. } | System::Profiles | System::Config(_) => {
+            unreachable!("runs without a project context")
+        }
     }
 }
 

@@ -21,7 +21,7 @@ use crate::world::Job;
 pub(super) fn setup(ctx: &Ctx, job: &Job, model: Option<&str>) -> Result<Option<Reviewing>, String> {
     let Some(of) = job.review_of() else { return Ok(None) };
     let world = ctx.world().map_err(|e| format!("{e:#}"))?;
-    let Some(builder) = world.jobs.get(of) else { return Err(format!("the job under review, {of}, is gone")) };
+    let Some(builder) = world.jobs().get(of) else { return Err(format!("the job under review, {of}, is gone")) };
     independent(ctx, builder, model)?;
     let reference = format!("refs/relay/review/{}", job.name);
     fetch(ctx, builder, &reference).map_err(|e| format!("fetching {of}'s branch for review: {e}"))?;
@@ -139,8 +139,8 @@ pub(super) fn carry_out(
     let family = run.model.map(model_family);
     // Who this review is, and where the branch is, now: both can have changed since the review started.
     let world = ctx.world()?;
-    let unchained = world.jobs.get(&job.name).and_then(|r| r.unchained.clone());
-    let stale_head = world.jobs.get(of).and_then(tip).filter(|t| *t != seen.commit);
+    let unchained = world.jobs().get(&job.name).and_then(|r| r.unchained.clone());
+    let stale_head = world.jobs().get(of).and_then(tip).filter(|t| *t != seen.commit);
     let event = SessionEvent::Reviewed {
         job: job.name.clone(),
         of: of.to_owned(),
@@ -202,7 +202,7 @@ pub(super) fn rereview(ctx: &Ctx, builder: &str) -> Result<Vec<String>> {
 /// the commit the review judged and nobody else will ask for the new one: resume it now.
 pub(super) fn rereview_if_overtaken(ctx: &Ctx, reviewer: &str) -> Result<Vec<String>> {
     let world = ctx.world()?;
-    let Some(of) = world.jobs.get(reviewer).and_then(|r| r.review_of()) else { return Ok(Vec::new()) };
+    let Some(of) = world.jobs().get(reviewer).and_then(|r| r.review_of()) else { return Ok(Vec::new()) };
     resume_rejecting(ctx, of, Some(reviewer))
 }
 
@@ -210,9 +210,9 @@ pub(super) fn rereview_if_overtaken(ctx: &Ctx, reviewer: &str) -> Result<Vec<Str
 /// With `only`, the builder must be done and past the commit judged.
 fn resume_rejecting(ctx: &Ctx, builder: &str, only: Option<&str>) -> Result<Vec<String>> {
     let world = ctx.world()?;
-    let Some(b) = world.jobs.get(builder) else { return Ok(Vec::new()) };
+    let Some(b) = world.jobs().get(builder) else { return Ok(Vec::new()) };
     let rejecting: Vec<&str> = world
-        .jobs
+        .jobs()
         .values()
         .filter(|r| r.review_of() == Some(builder) && r.unchained.is_none() && only.is_none_or(|o| o == r.name))
         .filter(|r| {

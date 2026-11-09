@@ -4,11 +4,12 @@
 //! dispatch. Nothing here names a harness: the account's harness builds the
 //! command and reads the output, and the limits are enforced here for all.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,7 @@ use crate::harness::{Harness, Home, Invocation, Permissions, Reader, Session, Ta
 use crate::hostdir::HostDir;
 use crate::os;
 use crate::sandbox::{self, Mounts};
+use crate::supervised::Supervised;
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request, Reviewing};
 use crate::systems::dispatch;
@@ -55,6 +57,26 @@ impl crate::bus::Source for Source {
     }
 }
 
+/// `queue stop` sends the runner a TERM, to the process it checked and never to a stored group id.
+/// The runner passes it on to its own group, which it leads (an acceptance check it runs is in it),
+/// and ends as the TERM would have ended it; each session and handler it started ends with it, by
+/// its supervisor.
+fn pass_term_to_own_group() -> Result<()> {
+    use signal_hook::consts::SIGTERM;
+    let mut signals = signal_hook::iterator::Signals::new([SIGTERM]).context("handling TERM")?;
+    std::thread::spawn(move || {
+        if signals.forever().next().is_some() {
+            if rustix::process::getpgrp() == rustix::process::getpid() {
+                // This process is sent it too, and swallows it here.
+                let _ = rustix::process::kill_current_process_group(rustix::process::Signal::TERM);
+            }
+            let _ = signal_hook::low_level::emulate_default_handler(SIGTERM);
+            std::process::exit(128 + SIGTERM);
+        }
+    });
+    Ok(())
+}
+
 /// This attempt's port: the runner is the only writer of its attempt's file.
 fn port(ctx: &Ctx, job: &Job) -> crate::bus::Port<SessionEvent> {
     ctx.port(&Source { job: job.name.clone(), created: job.created_at, attempt: job.attempts })
@@ -62,7 +84,8 @@ fn port(ctx: &Ctx, job: &Job) -> crate::bus::Port<SessionEvent> {
 
 pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
     Ctx::wait_for_gate();
-    let job = ctx.world()?.jobs.remove(&name).with_context(|| format!("no job named {name}"))?;
+    pass_term_to_own_group()?;
+    let job = ctx.world()?.jobs_mut().remove(&name).with_context(|| format!("no job named {name}"))?;
     let port = port(ctx, &job);
     let mut spend = (0.0, 0);
     let (outcome, reason) =
@@ -199,7 +222,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         measure: work.clone.iter().map(SessionRepo::path).chain([work.tmp.as_path()]).collect(),
     };
     let (report, ending, disk) =
-        drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader())?;
+        drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
     if !report.answer.is_empty() {
         std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
     }
@@ -330,7 +353,7 @@ fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home
         cwd: &work.cwd,
         account: true,
     };
-    let cmd = command(ctx, &inv, &mounts);
+    let cmd = supervised_command(ctx, &inv, &mounts)?;
     Ok(ControlFlow::Continue(Launch { cmd, stdin: inv.stdin, session_id, brief, reviewing }))
 }
 
@@ -449,37 +472,46 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
     };
     let handlers = decide::chain(&ctx.cfg, Point::Cap).unwrap_or_default();
     let d = decide::decide(ctx, job, &req, &handlers, &rule, Action::Stop { why: String::new() })?;
-    let (verdict, next, message) = match d.action.clone() {
-        Action::Continue { budget } => (CheckVerdict::Continue, Some(budget.unwrap_or(cap)), String::new()),
-        Action::Redirect { message, budget } => (CheckVerdict::Redirect, Some(budget.unwrap_or(cap)), message),
-        _ => (CheckVerdict::Stop, None, String::new()),
-    };
-    let checker = match d.handler.as_deref() {
-        Some("rule") | None => d.account.clone(),
-        Some(h) => d.account.clone().or_else(|| Some(h.to_owned())),
-    };
-    let check = Check {
-        checkpoint: n,
-        verdict,
-        why: match (&d.action, d.why.is_empty()) {
-            (Action::Stop { why }, true) if !why.is_empty() => why.clone(),
-            _ => d.why.clone(),
-        },
-        message: next.map(|cap| checkpoint::resume_message(n, cap, verdict, &message)).unwrap_or_default(),
-        next_cap_usd: next,
-        head: now.head.clone(),
-        tree: now.tree.clone(),
-        checker,
-        cost_usd: d.cost_usd,
-        decision: Some(d.id),
-    };
-    let stopped = if check.why.is_empty() { String::new() } else { format!(" ({})", check.why) };
-    port.emit(SessionEvent::Checked { job: job.name.clone(), check })?;
-    Ok(if next.is_none() {
-        (Outcome::Failed, Some(format!("waits for a human at its checkpoint{stopped}; resume with --budget to go on")))
-    } else {
-        (Outcome::Retry, None)
-    })
+    // The checkpoint's record is the decision carried out: nothing, once the job has moved on.
+    let carried = d.carry(ctx, |_, action, _| {
+        let (verdict, next, message) = match action.clone() {
+            Action::Continue { budget } => (CheckVerdict::Continue, Some(budget.unwrap_or(cap)), String::new()),
+            Action::Redirect { message, budget } => (CheckVerdict::Redirect, Some(budget.unwrap_or(cap)), message),
+            _ => (CheckVerdict::Stop, None, String::new()),
+        };
+        let checker = match d.handler.as_deref() {
+            Some("rule") | None => d.account.clone(),
+            Some(h) => d.account.clone().or_else(|| Some(h.to_owned())),
+        };
+        let check = Check {
+            checkpoint: n,
+            verdict,
+            why: match (&action, d.why.is_empty()) {
+                (Action::Stop { why }, true) if !why.is_empty() => why.clone(),
+                _ => d.why.clone(),
+            },
+            message: next.map(|cap| checkpoint::resume_message(n, cap, verdict, &message)).unwrap_or_default(),
+            next_cap_usd: next,
+            head: now.head.clone(),
+            tree: now.tree.clone(),
+            checker,
+            cost_usd: d.cost_usd,
+            decision: Some(d.id.clone()),
+        };
+        let stopped = if check.why.is_empty() { String::new() } else { format!(" ({})", check.why) };
+        port.emit(SessionEvent::Checked { job: job.name.clone(), check })?;
+        Ok(if next.is_none() {
+            (
+                Outcome::Failed,
+                Some(format!("waits for a human at its checkpoint{stopped}; resume with --budget to go on")),
+            )
+        } else {
+            (Outcome::Retry, None)
+        })
+    })?;
+    Ok(carried.unwrap_or_else(|| {
+        (Outcome::Failed, Some(format!("decision {} not carried out: the job moved on since it was asked", d.id)))
+    }))
 }
 
 /// A read-only session for a decision on `agent`'s harness: the account it
@@ -491,9 +523,10 @@ pub fn consult(
     agent: &decide::Agent,
     prompt: &str,
     patient: bool,
+    live: &dyn Fn() -> bool,
 ) -> (Option<String>, f64, Result<String, String>) {
     let wait = if patient { ctx.cfg.hooks.seat_wait_minutes } else { 0.0 };
-    let home = match await_seat(ctx, job, agent, wait) {
+    let home = match await_seat(ctx, job, agent, wait, live) {
         Ok(home) => home,
         Err(why) => return (None, 0.0, Err(why)),
     };
@@ -536,7 +569,7 @@ pub fn consult(
             cwd: &ctx.cfg.repo,
             account: true,
         };
-        let mut cmd = command(ctx, &inv, &mounts);
+        let mut cmd = supervised_command(ctx, &inv, &mounts)?;
         let run = Run {
             session_id: None,
             budget_usd: agent.budget_usd,
@@ -544,7 +577,7 @@ pub fn consult(
             stderr: "check-stderr.log",
             measure: Vec::new(),
         };
-        let ran = drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader())
+        let ran = drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader(), live)
             .map(|(report, ending, _)| (report, ending));
         let _ = std::fs::remove_dir_all(&scratch);
         ran
@@ -568,7 +601,13 @@ const SEAT_REREAD: Duration = Duration::from_secs(30);
 /// A seat for `agent`'s session: waits up to `minutes` for one to free, asking for a fresh quota
 /// reading of any account whose reading is old (dispatch only takes readings for queued jobs, and a
 /// checkpoint is not one). Nothing else is held meanwhile but the worker's own seat.
-fn await_seat(ctx: &Ctx, job: &Job, agent: &decide::Agent, minutes: f64) -> Result<Home, String> {
+fn await_seat(
+    ctx: &Ctx,
+    job: &Job,
+    agent: &decide::Agent,
+    minutes: f64,
+    live: &dyn Fn() -> bool,
+) -> Result<Home, String> {
     let wait = Duration::from_secs_f64(minutes.max(0.0) * 60.0);
     let started = Instant::now();
     let mut asked: Option<Instant> = None;
@@ -583,6 +622,9 @@ fn await_seat(ctx: &Ctx, job: &Job, agent: &decide::Agent, minutes: f64) -> Resu
             let _ = ctx.spawn_self(&["quota", "refresh", "--stale"], &ctx.state.join("quota.log"));
         }
         let left = wait.saturating_sub(started.elapsed());
+        if !live() {
+            return Err(format!("agent:{} was withdrawn while it waited for a seat", agent.label));
+        }
         if left.is_zero() {
             let (harness, label) = (&agent.harness, &agent.label);
             return Err(if wait.is_zero() {
@@ -697,18 +739,34 @@ fn conclude(ctx: &Ctx, job: &Job, key: &str, v: Verdict, now_s: i64) -> Result<E
 
 /// The invocation, niced, inside the sandbox when it is on.
 fn command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> Command {
+    let Ok(c) = build(ctx, inv, mounts, |p| Ok::<_, std::convert::Infallible>(Command::new(p)));
+    c
+}
+
+/// The same under `relay supervise`, for a session the runner drives: its whole process group ends
+/// with it, with the runner, or when it is stopped ([`crate::supervised`]).
+fn supervised_command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<Command> {
+    build(ctx, inv, mounts, |p| crate::supervised::command(p))
+}
+
+fn build<E>(
+    ctx: &Ctx,
+    inv: &Invocation,
+    mounts: &Mounts<'_>,
+    new: impl FnOnce(&OsStr) -> Result<Command, E>,
+) -> Result<Command, E> {
     let mut argv: Vec<OsString> = vec!["nice".into(), "-n".into(), ctx.cfg.session.nice.to_string().into()];
     argv.push(inv.program.clone());
     argv.extend(inv.args.iter().cloned());
     let env = sandbox::session_env(ctx, inv);
     if ctx.cfg.sandbox.enabled {
-        let mut c = Command::new("bwrap");
+        let mut c = new(OsStr::new("bwrap"))?;
         c.args(sandbox::args(ctx, &accounts::home(), mounts, env)).args(argv);
-        c
+        Ok(c)
     } else {
-        let mut c = Command::new(&argv[0]);
+        let mut c = new(&argv[0])?;
         c.args(&argv[1..]).env_clear().envs(env).current_dir(mounts.cwd);
-        c
+        Ok(c)
     }
 }
 
@@ -725,11 +783,23 @@ struct Run<'a> {
 }
 
 /// What the runner hears while it drives a session: a line of output, the
-/// end of the output, or the clone's measured size.
+/// end of the output, the clone's measured size, or the `disk` chain's answer.
 enum Heard {
     Line(std::io::Result<String>),
     End,
     Disk(u64),
+    /// `Some(reason)` stops the job; `None` lets it go on.
+    DiskDecided(Result<Option<String>>),
+}
+
+/// What a measured clone asks of the runner. Deciding is not among them: a
+/// chain can wait for the orchestrator for many minutes, so it runs on a
+/// thread of its own while the drive loop goes on enforcing every limit.
+enum DiskStep {
+    Go,
+    Stop(String),
+    /// Ask the `disk` chain this request, with the reason that stands if every handler defers.
+    Ask(Box<Request>, Vec<decide::Handler>, String),
 }
 
 /// The longest one measurement of a clone may take.
@@ -755,22 +825,23 @@ pub fn disk_reason(limits: &crate::config::Limits, bytes: u64, free_gb: Option<f
     Some(format!("disk: {} free, under {}", gb(free), gb(limits.min_free_disk_gb)))
 }
 
-/// A measured clone: records its size, and when it is a reason to stop,
-/// asks the `disk` chain (none set: stop). `Some(reason)` stops the job; `None` lets it go on.
-fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: &mut Option<Instant>) -> Result<Option<String>> {
+/// A measured clone: records its size, and when it is a reason to stop, says
+/// to ask the `disk` chain (none set: stop). Nothing is asked while `asking`
+/// (a decision is already out) or before `quiet_until`.
+fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: Option<Instant>, asking: bool) -> Result<DiskStep> {
     port(ctx, job).emit(SessionEvent::Disk { job: job.name.clone(), bytes })?;
-    if quiet_until.is_some_and(|t| Instant::now() < t) {
-        return Ok(None);
+    if asking || quiet_until.is_some_and(|t| Instant::now() < t) {
+        return Ok(DiskStep::Go);
     }
     let world = ctx.world()?;
     let largest = world
-        .jobs
+        .jobs()
         .values()
         .filter(|o| o.name != job.name && o.status.has_runner())
         .all(|o| o.disk_bytes.unwrap_or(0) <= bytes);
     let free = os::free_disk_gb(&ctx.clones);
-    let Some(why) = disk_reason(&ctx.cfg.limits, bytes, free, largest) else { return Ok(None) };
-    let Some(handlers) = decide::chain(&ctx.cfg, Point::Disk) else { return Ok(Some(why)) };
+    let Some(why) = disk_reason(&ctx.cfg.limits, bytes, free, largest) else { return Ok(DiskStep::Go) };
+    let Some(handlers) = decide::chain(&ctx.cfg, Point::Disk) else { return Ok(DiskStep::Stop(why)) };
     let mut req = Request::new(job, Point::Disk);
     req.brief = std::fs::read_to_string(ctx.job_file(&job.name, "prompt.md")).unwrap_or_default();
     req.situation = format!(
@@ -778,39 +849,41 @@ fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: &mut Option<Instant>) 
     );
     req.spent_usd = job.cost_usd;
     req.earlier = decide::earlier(&world, job);
-    let d = decide::decide(ctx, job, &req, &handlers, &|| None, Action::Stop { why: why.clone() })?;
-    if d.action == Action::Wait {
-        *quiet_until = Some(Instant::now() + DISK_REASK);
-        return Ok(None);
-    }
-    Ok(Some(why))
+    Ok(DiskStep::Ask(Box::new(req), handlers, why))
 }
 
-/// Runs the agent, feeding its stdin and teeing its stream to the job's log.
-/// Ends it if it goes silent, runs past its time limit or spends past its
-/// cap: the same limits for every harness, whatever the CLI enforces itself.
-fn drive(
+/// Runs the `disk` chain for as long as `wanted` holds: `Some(why)` stops the job, `None` (`wait`) lets it go on.
+fn decide_disk(
     ctx: &Ctx,
     job: &Job,
-    account: &str,
-    run: &Run<'_>,
-    cmd: &mut Command,
-    stdin: Option<&str>,
-    mut reader: Box<dyn Reader>,
-) -> Result<(Report, Ending, Option<String>)> {
-    let port = port(ctx, job);
-    let mut log = Ctx::append_private(&ctx.job_file(&job.name, run.log))?;
-    let mut child = cmd
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Ctx::append_private(&ctx.job_file(&job.name, run.stderr))?)
-        .spawn()
-        .context("starting the session")?;
-    if let (Some(text), Some(mut pipe)) = (stdin.map(str::to_owned), child.stdin.take()) {
-        // A writer thread, so a full pipe cannot block reading the output.
-        std::thread::spawn(move || pipe.write_all(text.as_bytes()));
+    req: &Request,
+    handlers: &[decide::Handler],
+    why: String,
+    wanted: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<String>> {
+    let fallback = Action::Stop { why: why.clone() };
+    let d = decide::decide_while(ctx, job, req, handlers, &|| None, fallback, wanted)?;
+    // A decision the job has moved past stops nothing: the run it was asked for is over.
+    Ok(d.carry(ctx, |_, action, _| Ok((action != Action::Wait).then_some(why)))?.flatten())
+}
+
+/// Withdraws an outstanding decision when dropped, however the drive loop ends.
+struct Withdraw<'a>(&'a AtomicBool);
+
+impl Drop for Withdraw<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
     }
-    let stdout = child.stdout.take().context("stdout")?;
+}
+
+/// What the drive loop hears from: the session's output, line by line, and the clone's size, now
+/// and every `limits.disk_sample_minutes` until the returned stop sender is dropped. The first
+/// sender is for answers the loop asks for itself.
+fn listen(
+    ctx: &Ctx,
+    run: &Run<'_>,
+    stdout: std::process::ChildStdout,
+) -> (mpsc::Sender<Heard>, mpsc::Receiver<Heard>, mpsc::Sender<()>) {
     let (tx, rx) = mpsc::channel();
     let lines = tx.clone();
     std::thread::spawn(move || {
@@ -821,14 +894,14 @@ fn drive(
         }
         let _ = lines.send(Heard::End);
     });
-    // Measures the clone now and every `limits.disk_sample_minutes`, until `_stop` is dropped.
-    let (_stop, stopped) = mpsc::channel::<()>();
+    let (stop, stopped) = mpsc::channel::<()>();
     if !run.measure.is_empty() {
         let dirs: Vec<PathBuf> = run.measure.iter().map(|p| (*p).to_path_buf()).collect();
         let every = Duration::from_secs_f64(ctx.cfg.limits.disk_sample_minutes * 60.0);
+        let sizes = tx.clone();
         std::thread::spawn(move || {
             loop {
-                if tx.send(Heard::Disk(os::dirs_size(&dirs, DISK_WALK))).is_err() {
+                if sizes.send(Heard::Disk(os::dirs_size(&dirs, DISK_WALK))).is_err() {
                     return;
                 }
                 if !matches!(stopped.recv_timeout(every), Err(mpsc::RecvTimeoutError::Timeout)) {
@@ -837,6 +910,75 @@ fn drive(
             }
         });
     }
+    (tx, rx, stop)
+}
+
+/// Starts the session, its stderr to the job's file and `stdin` fed by a thread of its own.
+fn start(ctx: &Ctx, job: &Job, run: &Run<'_>, cmd: &mut Command, stdin: Option<&str>) -> Result<Supervised> {
+    cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Ctx::append_private(&ctx.job_file(&job.name, run.stderr))?);
+    let mut child = Supervised::spawn(cmd).context("starting the session")?;
+    if let (Some(text), Some(mut pipe)) = (stdin.map(str::to_owned), child.child().stdin.take()) {
+        // A writer thread, so a full pipe cannot block reading the output.
+        std::thread::spawn(move || pipe.write_all(text.as_bytes()));
+    }
+    Ok(child)
+}
+
+/// The end of a drive: once its output has closed a session may run on, so it is supervised still,
+/// under the same limits (withdrawal, the deadline, silence since `heard_at`), until it has exited.
+fn settle(
+    child: &mut Supervised,
+    ending: &mut Ending,
+    live: &dyn Fn() -> bool,
+    deadline: Instant,
+    heard_at: Instant,
+    silent_after: Duration,
+) -> Result<()> {
+    let limits = || {
+        if !live() {
+            Some((false, false))
+        } else if Instant::now() >= deadline {
+            Some((false, true))
+        } else {
+            (heard_at.elapsed() >= silent_after).then_some((true, false))
+        }
+    };
+    ending.exit_ok = match child.finish(|| true, limits)? {
+        Ok(status) => status.success(),
+        Err((silent, timed_out)) => {
+            (ending.silent, ending.timed_out) = (ending.silent || silent, ending.timed_out || timed_out);
+            false
+        }
+    };
+    Ok(())
+}
+
+/// How often a drive asks `live` whether its session is still wanted.
+const LIVE_LOOK: Duration = Duration::from_secs(1);
+
+/// Runs the agent, feeding its stdin and teeing its stream to the job's log.
+/// Ends it if it goes silent, runs past its time limit or spends past its
+/// cap: the same limits for every harness, whatever the CLI enforces itself.
+/// Ends it too once `live` says nobody wants it any more (a decision's agent
+/// whose decision was withdrawn); a worker's run passes `|| true`.
+#[allow(clippy::too_many_arguments)]
+fn drive(
+    ctx: &Ctx,
+    job: &Job,
+    account: &str,
+    run: &Run<'_>,
+    cmd: &mut Command,
+    stdin: Option<&str>,
+    mut reader: Box<dyn Reader>,
+    live: &dyn Fn() -> bool,
+) -> Result<(Report, Ending, Option<String>)> {
+    let port = port(ctx, job);
+    let mut log = Ctx::append_private(&ctx.job_file(&job.name, run.log))?;
+    let mut child = start(ctx, job, run, cmd, stdin)?;
+    let stdout = child.child().stdout.take().context("stdout")?;
+    let (answers, rx, _stop) = listen(ctx, run, stdout);
 
     let silent_after = Duration::from_secs(ctx.cfg.limits.silent_minutes * 60);
     let deadline = Instant::now() + Duration::from_secs_f64(ctx.cfg.session.max_hours * 3600.0);
@@ -845,50 +987,94 @@ fn drive(
     let mut quiet_until = None;
     let mut heard_at = Instant::now();
     let mut named = run.session_id.map(str::to_owned);
-    loop {
-        let wait =
-            silent_after.saturating_sub(heard_at.elapsed()).min(deadline.saturating_duration_since(Instant::now()));
-        match rx.recv_timeout(wait) {
-            Ok(Heard::Line(Ok(line))) => {
-                heard_at = Instant::now();
-                if reader.keep(&line) {
-                    writeln!(log, "{line}")?;
-                }
-                if let Some(meters) = reader.line(&line) {
-                    port.emit(SessionEvent::Rate { account: account.to_owned(), meters })?;
-                }
-                let r = reader.report();
-                if let (Some(named), Some(id)) = (named.as_mut(), r.session_id.as_deref())
-                    && id != named
-                {
-                    port.emit(SessionEvent::Identified { job: job.name.clone(), session_id: id.to_owned() })?;
-                    id.clone_into(named);
-                }
-                if r.cost_usd > run.budget_usd {
-                    ending.over_budget = true;
-                    let _ = child.kill();
-                    break;
-                }
-            }
-            Ok(Heard::Disk(bytes)) => {
-                disk = on_disk(ctx, job, bytes, &mut quiet_until)?;
-                if disk.is_some() {
+    // A `disk` decision runs beside the loop; it is withdrawn when the loop ends, and joined here.
+    let wanted = AtomicBool::new(true);
+    let mut asking = false;
+    std::thread::scope(|scope| -> Result<()> {
+        let _withdraw = Withdraw(&wanted);
+        let mut looked_at = Instant::now();
+        loop {
+            if looked_at.elapsed() >= LIVE_LOOK {
+                looked_at = Instant::now();
+                if !live() {
                     // bwrap's --die-with-parent and pid namespace take everything inside with it.
-                    let _ = child.kill();
+                    child.kill();
                     break;
                 }
             }
-            Ok(Heard::Line(Err(_)) | Heard::End) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                (ending.silent, ending.timed_out) =
-                    if Instant::now() >= deadline { (false, true) } else { (true, false) };
-                // bwrap's --die-with-parent and pid namespace take everything inside with it.
-                let _ = child.kill();
-                break;
+            let wait = silent_after
+                .saturating_sub(heard_at.elapsed())
+                .min(deadline.saturating_duration_since(Instant::now()))
+                .min(LIVE_LOOK);
+            match rx.recv_timeout(wait) {
+                Ok(Heard::Line(Ok(line))) => {
+                    heard_at = Instant::now();
+                    if reader.keep(&line) {
+                        writeln!(log, "{line}")?;
+                    }
+                    if let Some(meters) = reader.line(&line) {
+                        port.emit(SessionEvent::Rate { account: account.to_owned(), meters })?;
+                    }
+                    let r = reader.report();
+                    if let (Some(named), Some(id)) = (named.as_mut(), r.session_id.as_deref())
+                        && id != named
+                    {
+                        port.emit(SessionEvent::Identified { job: job.name.clone(), session_id: id.to_owned() })?;
+                        id.clone_into(named);
+                    }
+                    if r.cost_usd > run.budget_usd {
+                        ending.over_budget = true;
+                        child.kill();
+                        break;
+                    }
+                }
+                Ok(Heard::Disk(bytes)) => match on_disk(ctx, job, bytes, quiet_until, asking)? {
+                    DiskStep::Go => {}
+                    DiskStep::Stop(why) => {
+                        disk = Some(why);
+                        // bwrap's --die-with-parent and pid namespace take everything inside with it.
+                        child.kill();
+                        break;
+                    }
+                    DiskStep::Ask(req, handlers, why) => {
+                        asking = true;
+                        let (answers, wanted) = (answers.clone(), &wanted);
+                        scope.spawn(move || {
+                            let still = || wanted.load(Ordering::Relaxed);
+                            let _ =
+                                answers.send(Heard::DiskDecided(decide_disk(ctx, job, &req, &handlers, why, &still)));
+                        });
+                    }
+                },
+                Ok(Heard::DiskDecided(answer)) => {
+                    asking = false;
+                    let Some(why) = answer? else {
+                        quiet_until = Some(Instant::now() + DISK_REASK);
+                        continue;
+                    };
+                    disk = Some(why);
+                    child.kill();
+                    break;
+                }
+                Ok(Heard::Line(Err(_)) | Heard::End) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // The wait is cut short to look at `live`: only a limit that has passed ends the run.
+                    (ending.silent, ending.timed_out) = if Instant::now() >= deadline {
+                        (false, true)
+                    } else if heard_at.elapsed() >= silent_after {
+                        (true, false)
+                    } else {
+                        continue;
+                    };
+                    // bwrap's --die-with-parent and pid namespace take everything inside with it.
+                    child.kill();
+                    break;
+                }
             }
         }
-    }
-    ending.exit_ok = child.wait()?.success();
+        Ok(())
+    })?;
+    settle(&mut child, &mut ending, live, deadline, heard_at, silent_after)?;
     Ok((reader.report().clone(), ending, disk))
 }
 
@@ -905,7 +1091,7 @@ pub fn bases(world: &World, job: &Job) -> Vec<(String, PathBuf, String)> {
             continue;
         }
         seen.push(n);
-        let Some(j) = world.jobs.get(n) else { continue };
+        let Some(j) = world.jobs().get(n) else { continue };
         if j.readonly() {
             todo.extend(&j.after);
         } else if let (Some(dir), Some(branch)) = (&j.workdir, &j.branch) {
@@ -1054,7 +1240,7 @@ mod base_tests {
         };
         let mut w = World::default();
         for j in [build("one", &[]), review("look", &["one"]), review("loop", &["loop"]), build("other", &[])] {
-            w.jobs.insert(j.name.clone(), j);
+            w.jobs_mut().insert(j.name.clone(), j);
         }
         let names = |j: &Job| bases(&w, j).into_iter().map(|b| b.0).collect::<Vec<_>>();
         assert_eq!(names(&build("two", &["look"])), ["one"], "build, review, build");

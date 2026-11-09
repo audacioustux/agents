@@ -618,6 +618,10 @@ pub enum DecideEvent {
         /// The job's incarnation (`created_at`).
         created: u64,
         attempt: u32,
+        /// The process that waits for the answer and carries it out, as (pid, start time): the
+        /// job's runner, or the `decide held` process. An answer for a dead waiter is refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        waiter: Option<(u32, u64)>,
     },
     /// The chain reached `orchestrator`: the request waits for `relay decide answer` until `until` (bus time).
     Parked { id: String, until: u64 },

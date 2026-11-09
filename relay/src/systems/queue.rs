@@ -13,7 +13,7 @@ use crate::bus::{ACCEPTANCE_GATE, Fork, QueueEvent};
 use crate::config::{Profile, valid_name};
 use crate::ctx::Ctx;
 use crate::os;
-use crate::world::{Job, Status};
+use crate::world::{Job, Status, World};
 
 /// The capability to write queue's port; only this module can make one.
 #[derive(Debug)]
@@ -126,7 +126,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         | Cmd::Dequeue { name }
         | Cmd::Stop { name } => name.clone(),
     };
-    let job = world.jobs.get(&name);
+    let job = world.jobs().get(&name);
     // The job, when its status is one the command applies to.
     let when = |ok: fn(Status) -> bool| match job {
         None => fail!(NotFound, "no job named {name}"),
@@ -143,8 +143,8 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             if job.is_some_and(|j| j.status.is_live() || j.attempts > 0) {
                 fail!(Conflict, "job {name} exists; pick another name, or: relay land clean {name}");
             }
-            let replaced = add.declare.review_of().map(|b| chain(&world.jobs, b)).unwrap_or_default();
-            let queued = add.queued(ctx, &world.jobs)?;
+            let replaced = add.declare.review_of().map(|b| chain(world.jobs(), b)).unwrap_or_default();
+            let queued = add.queued(ctx, world.jobs())?;
             // One live chain per job: the new review takes the old one's place, in the same breath.
             events.extend(
                 replaced
@@ -156,7 +156,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         }
         Cmd::Unreview { .. } => {
             let j = when(|_| true)?;
-            let mut chained = chain(&world.jobs, &j.name);
+            let mut chained = chain(world.jobs(), &j.name);
             let Some(last) = chained.pop() else { fail!(Conflict, "{name} has no review chained to it") };
             events.extend(chained.into_iter().map(|job| QueueEvent::Unchained { job, by: None }));
             (QueueEvent::Unchained { job: last, by: None }, None)
@@ -175,7 +175,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 if brief.trim().is_empty() {
                     fail!(Usage, "the review brief is empty");
                 }
-                let chained = chain(&world.jobs, &name);
+                let chained = chain(world.jobs(), &name);
                 if chained.is_empty() {
                     fail!(
                         Conflict,
@@ -215,14 +215,20 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         port.emit(before)?;
     }
     port.emit(event)?;
-    // Only a process that is still the recorded runner is signalled, never a reused pid.
-    if let Some((pid, started)) = runner
-        && os::same_process(pid, started)
-    {
-        os::terminate_group(pid)?;
+    if let Some(runner) = runner {
+        stop_runner(runner)?;
     }
     ctx.wake_dispatch()?;
     ctx.reply(&serde_json::json!({ "job": name, "recorded": recorded }), &format!("{name}: recorded"))
+}
+
+/// Ends a running job's runner with a TERM, sent only while the recorded pid is still the recorded
+/// process (`os::signal_if_same`), never to a group id that may have been reused. The runner passes
+/// the TERM on to its own group (an acceptance check it runs) and ends, and every session and handler
+/// it started ends with it, by its supervisor (`supervised`).
+fn stop_runner((pid, started): (u32, u64)) -> Result<()> {
+    os::signal_if_same(pid, started, rustix::process::Signal::TERM)?;
+    Ok(())
 }
 
 /// The reviews chained to the build job `builder`: the ones that have not been replaced or detached.
@@ -340,14 +346,14 @@ pub struct FollowUp {
     pub fork: bool,
 }
 
-/// Queues `f` as `queue add` would, and returns its name.
-pub fn follow_up(ctx: &Ctx, parent: &Job, f: FollowUp) -> Result<String> {
-    let _lock = ctx.jobs_lock()?;
-    let world = ctx.world()?;
+/// Queues `f` as `queue add` would, and returns its name. Only a decision queues a follow-up, so this
+/// runs inside `Decided::carry`: `world` was read under the jobs lock carry holds, after it checked that
+/// `parent` is still at the attempt the decision was about.
+pub fn follow_up(ctx: &Ctx, world: &World, parent: &Job, f: FollowUp) -> Result<String> {
     let base = f.name.unwrap_or_else(|| format!("{}-next", parent.name));
     let name = (1..1000)
         .map(|i| if i == 1 { base.clone() } else { format!("{base}-{i}") })
-        .find(|n| !world.jobs.contains_key(n))
+        .find(|n| !world.jobs().contains_key(n))
         .unwrap_or(base);
     let add = Add {
         name: name.clone(),
@@ -367,7 +373,7 @@ pub fn follow_up(ctx: &Ctx, parent: &Job, f: FollowUp) -> Result<String> {
         fork: f.fork.then(|| parent.name.clone()),
         declare: declare::Declare::default(),
     };
-    let mut event = add.queued(ctx, &world.jobs)?;
+    let mut event = add.queued(ctx, world.jobs())?;
     if let QueueEvent::Queued { parent: of, depth, .. } = &mut event {
         (*of, *depth) = (Some(parent.name.clone()), parent.depth + 1);
     }
@@ -379,10 +385,10 @@ pub fn follow_up(ctx: &Ctx, parent: &Job, f: FollowUp) -> Result<String> {
 /// Resumes the build job `builder` with a reviewer's findings, as `queue resume` would: its session goes on
 /// on any account with room. Not while it works, not once `hooks.max_decisions` reviews have rejected it,
 /// and not on a banned model. `None` when resumed, else why not.
+/// Only a review's decision does this, so it runs inside `Decided::carry`, which holds the jobs lock.
 pub fn resume_reviewed(ctx: &Ctx, builder: &str, message: String) -> Result<Option<String>> {
-    let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
-    let Some(j) = world.jobs.get(builder) else { return Ok(Some(format!("{builder} is gone"))) };
+    let Some(j) = world.jobs().get(builder) else { return Ok(Some(format!("{builder} is gone"))) };
     // This reject is already among the verdicts: `hooks.max_decisions` of them resume the builder.
     let rejected =
         j.verdicts.iter().filter(|v| v.verdict == crate::bus::Verdict::Reject && v.stale_head.is_none()).count();
@@ -396,12 +402,12 @@ pub fn resume_reviewed(ctx: &Ctx, builder: &str, message: String) -> Result<Opti
 pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String) -> Result<Option<String>> {
     let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
-    let Some(j) = world.jobs.get(reviewer) else { return Ok(Some(format!("{reviewer} is gone"))) };
+    let Some(j) = world.jobs().get(reviewer) else { return Ok(Some(format!("{reviewer} is gone"))) };
     if let Some(u) = &j.unchained {
         return Ok(Some(format!("{reviewer} is no longer {builder}'s reviewer ({})", u.summary())));
     }
     // A review of a branch that is still being worked on would judge a head that moves under it.
-    if world.jobs.get(builder).is_some_and(|b| b.status.is_live()) {
+    if world.jobs().get(builder).is_some_and(|b| b.status.is_live()) {
         return Ok(Some(format!("{builder} is at work again; its end asks for the review")));
     }
     // A run that could not record its verdict (the cap on decisions per job) would leave the stale one.
@@ -411,7 +417,7 @@ pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String
             ctx.cfg.hooks.max_decisions
         )));
     }
-    let rejected = world.jobs.get(builder).map_or(0, |b| {
+    let rejected = world.jobs().get(builder).map_or(0, |b| {
         b.verdicts
             .iter()
             .filter(|v| v.reviewer == reviewer && v.verdict == crate::bus::Verdict::Reject && v.stale_head.is_none())
@@ -720,7 +726,7 @@ mod tests {
                 });
             }
         }
-        World::fold(&events).jobs
+        World::fold(&events).jobs().clone()
     }
 
     fn refusal(r: Result<()>) -> String {

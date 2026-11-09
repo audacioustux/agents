@@ -10,7 +10,9 @@
 #   fail     every session there ends in an error
 #   decision a decision hook's answer, one line of JSON (default defer)
 #   decisions appended to by every decision hook run there
+#   linger   a decision hook run there answers, then closes its stdout and sleeps (its pid in linger.pid)
 #   argv     appended to with every session's arguments
+#   pids     appended to with every session's pid, as it starts
 #   prompts  appended to with every worker prompt (and the resume messages it is sent)
 #   tmp-fs, hidden-write, shm-write, shm-over  written by a brief containing [tmpcheck]: /tmp's filesystem type, whether a write into a hidden directory worked, and whether /dev/shm takes a small write and refuses 5 MiB
 #   rereview  the verdict (accept|reject) of a review that relay resumed after its reject (default accept)
@@ -31,6 +33,7 @@ case " $* " in
 *" --version "*) echo "stub 1.0"; exit 0 ;;
 esac
 echo "$*" >>"$acct/argv"
+echo $$ >>"$acct/pids"
 echo "${CARGO_INCREMENTAL-unset}" >>"$acct/cargo"
 sid=""
 resume=""
@@ -91,6 +94,11 @@ case "$prompt" in
   answer=$(cat "$acct/decision" 2>/dev/null || echo '{"action": "defer"}')
   esc=$(printf '%s' "$answer" | sed 's/\\/\\\\/g; s/"/\\"/g')
   printf '{"type":"result","subtype":"success","is_error":false,"result":"%s","num_turns":1,"total_cost_usd":0.01}\n' "$esc"
+  if [ -f "$acct/linger" ]; then
+    echo $$ >"$acct/linger.pid"
+    exec >&-
+    sleep 300
+  fi
   exit 0
   ;;
 esac

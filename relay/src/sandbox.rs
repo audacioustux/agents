@@ -260,21 +260,7 @@ mod tests {
         let repo = root.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         let cfg = Config::parse("name = \"t\"\n[sandbox]\nhide = []\ncaches = []\nhide_home = []\n", &repo).unwrap();
-        let (state, data) = (root.join("state/t"), root.join("data/t"));
-        Ctx {
-            cfg,
-            json: false,
-            cfg_path: repo.join("relay.toml"),
-            bus: state.join("bus"),
-            jobs: state.join("jobs"),
-            clones: data.join("clones"),
-            caches: data.join("caches"),
-            scratch: data.join("scratch"),
-            state,
-            state_root: root.join("state"),
-            data_root: root.join("data"),
-            git_dirs: Vec::new(),
-        }
+        Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"))
     }
 
     fn plan_for(root: &Path, home: &Home) -> Vec<(PathBuf, Mount)> {

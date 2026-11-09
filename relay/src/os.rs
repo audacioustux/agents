@@ -106,10 +106,48 @@ pub fn same_process(pid: u32, started: u64) -> bool {
     start_time(pid) == Some(started)
 }
 
-/// SIGTERM to a process group (relay starts each session runner as a group leader).
-pub fn terminate_group(pid: u32) -> Result<()> {
+/// Sends `sig` to `pid` only while it is still the process that started at `started`, and says
+/// whether it did. The signal goes through a pidfd opened before the check, so it reaches the
+/// process checked, never one that has taken over its pid since.
+pub fn signal_if_same(pid: u32, started: u64, sig: Signal) -> Result<bool> {
+    let Some(p) = Pid::from_raw(i32::try_from(pid)?) else { return Ok(false) };
+    let fd = match rustix::process::pidfd_open(p, rustix::process::PidfdFlags::empty()) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::SRCH) => return Ok(false),
+        Err(e) => return Err(e).context("pidfd_open"),
+    };
+    if !same_process(pid, started) {
+        return Ok(false);
+    }
+    match rustix::process::pidfd_send_signal(&fd, sig) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::SRCH) => Ok(false),
+        Err(e) => Err(e).context("pidfd_send_signal"),
+    }
+}
+
+/// The live processes (not zombies) in process group `pgid` (field 5 of /proc/<pid>/stat).
+pub fn group_members(pgid: u32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let pid = e.file_name().to_str()?.parse::<u32>().ok()?;
+            let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+            let after = stat.get(stat.rfind(')')? + 2..)?;
+            let mut fields = after.split_whitespace();
+            // `after` starts at field 3 (state); field 5 is the process group.
+            let state = fields.next()?;
+            (state != "Z" && fields.nth(1)?.parse::<u32>().ok()? == pgid).then_some(pid)
+        })
+        .collect()
+}
+
+/// SIGKILL to a process group: a supervisor relay started as a group leader and has not reaped, with
+/// everything in its group.
+pub fn kill_group(pid: u32) -> Result<()> {
     let pid = Pid::from_raw(i32::try_from(pid)?).context("pid 0")?;
-    kill_process_group(pid, Signal::TERM).context("kill")
+    kill_process_group(pid, Signal::KILL).context("kill")
 }
 
 /// The path this binary was started from. Once an upgrade replaces it, Linux
@@ -251,6 +289,23 @@ mod tests {
         assert!(!bell.wait(Duration::from_millis(10)));
         std::fs::write(d.path().join("x"), "1").unwrap();
         assert!(bell.wait(Duration::from_secs(1)));
+    }
+
+    /// PR #39 fifth review, gap 2: a stored pid is signalled only through a pidfd checked to be the
+    /// process recorded: one whose start time differs (a reused pid) is left alone.
+    #[test]
+    fn a_stored_pid_is_signalled_only_while_it_is_the_process_recorded() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let started = start_time(pid).unwrap();
+        assert!(!signal_if_same(pid, started + 1, Signal::KILL).unwrap(), "another process's start time");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(same_process(pid, started), "left alone");
+        assert!(signal_if_same(pid, started, Signal::KILL).unwrap());
+        #[allow(clippy::disallowed_methods, reason = "a test reaps the child it killed")]
+        let status = child.wait().unwrap();
+        assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(9));
+        assert!(!signal_if_same(pid, started, Signal::KILL).unwrap(), "gone, it is not signalled");
     }
 
     #[test]

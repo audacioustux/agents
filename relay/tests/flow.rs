@@ -5,6 +5,7 @@
 
 #![allow(clippy::disallowed_methods, reason = "a test reads its own switches and passes its PATH on by config")]
 
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
@@ -117,6 +118,10 @@ fn setup(tag: &str, omp: bool) -> Env {
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
+    // A dispatcher's first gc pass would race a test's own `land gc`: stamp one as just run.
+    let state = root.join("state/relay/flow");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&state).unwrap();
+    std::fs::write(state.join("gc.last"), "").unwrap();
     let stub = |h: &str| repo.join(".stub").join(h).display().to_string();
     let omp_conf = if omp {
         format!("[harness.omp]\nenabled = true\nprogram = \"{}\"\nmodel = \"stub/m1\"\n", stub("omp"))
@@ -559,6 +564,7 @@ fn a_job_whose_dependency_failed_is_blocked_until_released() {
     ok(&relay(&env, &["queue", "add", "base", "--text", "One.", "--readonly"]), "queue base");
     ok(&relay(&env, &["queue", "add", "late", "--text", "Two.", "--readonly", "--after", "base"]), "queue late");
     ok(&relay(&env, &["queue", "add", "free", "--text", "Three.", "--readonly", "--after", "base,base"]), "queue free");
+    ok(&relay(&env, &["queue", "add", "last", "--text", "Four.", "--readonly", "--after", "late"]), "queue last");
     until(&env, "base", "failed");
     std::fs::remove_file(&fail).unwrap();
     std::thread::sleep(Duration::from_secs(2));
@@ -566,12 +572,26 @@ fn a_job_whose_dependency_failed_is_blocked_until_released() {
     assert_eq!((late["status"].as_str(), late["attempts"].as_u64()), (Some("queued"), Some(0)), "{late}");
     assert_eq!(late["pending"][0]["blocked"], true);
     assert!(board(&env).contains("[waits for base (failed)]"), "{}", board(&env));
+    // Audit finding 11: waiting for its end returns at once, since it never ends on its own.
+    let mut cmd = Command::new("timeout");
+    cmd.args(["20", env!("CARGO_BIN_EXE_relay"), "view", "result", "late", "--wait", "--json"]);
+    let out = relay_cmd(&env, &mut cmd);
+    assert_eq!(out.status.code(), Some(4), "a blocked job is a conflict, not a hang: {}", stderr(&out));
+    assert!(stderr(&out).contains("waits for base (failed)"), "{}", stderr(&out));
+    // PR #39 review: one further down the chain is blocked too, though what it waits for is only queued.
+    let mut cmd = Command::new("timeout");
+    cmd.args(["20", env!("CARGO_BIN_EXE_relay"), "view", "result", "last", "--wait", "--json"]);
+    let out = relay_cmd(&env, &mut cmd);
+    assert_eq!(out.status.code(), Some(4), "the chain is blocked, not a hang: {}", stderr(&out));
+    assert!(stderr(&out).contains("waits for late (blocked)"), "{}", stderr(&out));
+    assert!(board(&env).contains("[waits for late (blocked)]"), "{}", board(&env));
 
     let out = relay(&env, &["queue", "release", "late", "--from", "elsewhere"]);
     assert_eq!(out.status.code(), Some(2), "it does not wait for that");
     ok(&relay(&env, &["queue", "release", "late", "--from", "base"]), "release");
     assert_eq!(job(&env, "late")["after"], serde_json::json!([]));
     assert_eq!(wait_for(&env, "late")["status"], "done");
+    assert_eq!(wait_for(&env, "last")["status"], "done", "released with it, the chain goes on");
     assert_eq!(job(&env, "free")["status"], "queued", "release was for late only");
     let out = relay(&env, &["queue", "release", "late"]);
     assert_eq!(out.status.code(), Some(4), "nothing left to release");
@@ -688,6 +708,8 @@ fn an_unknown_or_banned_profile_is_refused() {
 fn profiles_and_config_show_need_no_project() {
     let env = setup("profile-outside", false);
     std::fs::remove_file(env.repo.join("relay.toml")).unwrap();
+    // No project here: not even the gc stamp `setup` leaves for one.
+    std::fs::remove_dir_all(env.root.join("state")).unwrap();
     let out = relay(&env, &["profiles"]);
     ok(&out, "profiles outside a project, without a policy");
     assert!(String::from_utf8_lossy(&out.stdout).contains("no profiles"));
@@ -1104,6 +1126,162 @@ fn the_orchestrator_answers_a_parked_decision_and_its_silence_falls_through() {
     assert_eq!(steps, [("orchestrator", "defer"), ("rule", "accept")], "{d}");
 }
 
+/// The id of the decision parked for `name`, by `decide list --wait` (bounded), with what else is listed.
+fn parked(env: &Env, name: &str) -> (String, serde_json::Value) {
+    for _ in 0..50 {
+        let mut cmd = Command::new("timeout");
+        cmd.args(["60", env!("CARGO_BIN_EXE_relay"), "decide", "list", "--wait", "--timeout", "50", "--json"]);
+        let out = relay_cmd(env, &mut cmd);
+        ok(&out, "decide list --wait");
+        let listed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let found = listed["pending"].as_array().unwrap().iter().find(|p| p["job"] == name).cloned();
+        if let Some(p) = found {
+            return (p["id"].as_str().unwrap().to_owned(), listed);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    panic!("no decision parked for {name}");
+}
+
+/// Whether `pid` is still the process that started at `started` (field 22 of /proc/<pid>/stat).
+fn alive(pid: u64, started: u64) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
+    let after = &stat[stat.rfind(')').unwrap() + 2..];
+    let fields: Vec<&str> = after.split_whitespace().collect();
+    fields[0] != "Z" && fields.get(19).and_then(|f| f.parse().ok()) == Some(started)
+}
+
+/// Whether a process holds the flock at `path` (`flock -n` cannot take it).
+fn locked(path: &Path) -> bool {
+    !Command::new("flock").arg("-n").arg(path).arg("true").status().unwrap().success()
+}
+
+/// Audit findings 8 and 18: a parked decision is answerable only while the attempt it asks about
+/// is the job's current one and the runner waiting for it is alive; a job whose runner died while
+/// parked keeps the dispatcher awake until it is reaped.
+#[test]
+fn a_decision_for_a_resumed_job_or_a_dead_runner_is_refused_and_the_job_is_reaped() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("stale-decision", false);
+    let hooks = "[hooks]\nended = [\"orchestrator\"]\norchestrator_timeout_minutes = 5.0\n";
+    configure(&env, "job_ceiling_usd = 5.0\n", hooks);
+    claude_account(&env.home, "a", 10, false);
+
+    // Resumed by hand while parked: the follow-up would be queued for an attempt that is gone.
+    ok(&relay(&env, &["queue", "add", "moved", "--text", "Make a change."]), "queue");
+    let (stale, _) = parked(&env, "moved");
+    ok(&relay(&env, &["queue", "resume", "moved", "--message", "Go on."]), "resume");
+    let out = relay(&env, &["decide", "answer", &stale, "--action", "follow-up", "--brief", "More."]);
+    // Refused as stale, or as closed once the old runner noticed and stopped waiting.
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    // The resumed run parks a decision of its own; the stale one is never listed again.
+    let (fresh, listed) = loop {
+        let (id, listed) = parked(&env, "moved");
+        if id != stale {
+            break (id, listed);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(!listed.to_string().contains(&format!("\"{stale}\"")), "{listed}");
+    ok(&relay(&env, &["decide", "answer", &fresh, "--action", "accept"]), "answer the current one");
+    assert_eq!(wait_for(&env, "moved")["status"], "done");
+    assert!(job(&env, "moved-next").is_null(), "no follow-up was queued");
+
+    // The runner dies while parked: nothing would carry an answer out.
+    ok(&relay(&env, &["queue", "add", "orphan", "--text", "Make a change."]), "queue");
+    let (id, _) = parked(&env, "orphan");
+    assert_eq!(job(&env, "orphan")["status"], "checking");
+    let runner = job(&env, "orphan")["runner"].clone();
+    let (pid, started) = (runner[0].as_u64().unwrap(), runner[1].as_u64().unwrap());
+    assert!(Command::new("kill").args(["-9", &pid.to_string()]).status().unwrap().success());
+    // The signal is delivered asynchronously: answer only once the runner is gone.
+    for _ in 0..100 {
+        if !alive(pid, started) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!alive(pid, started), "the runner did not die");
+    let out = relay(&env, &["decide", "answer", &id, "--action", "accept"]);
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    // Refused for the dead runner, or, once the dispatcher reaped it, for the failed job.
+    let why = stderr(&out);
+    assert!(why.contains("runner has died") || why.contains("now failed (attempt 1)"), "{why}");
+    let listed = relay(&env, &["decide", "list", "--json"]);
+    assert!(!out_of(&listed).contains(&id), "{}", out_of(&listed));
+    // Past the dispatcher's idle minute the job is reaped, or a dispatcher is still there to reap it.
+    std::thread::sleep(Duration::from_secs(65));
+    let reaped = job(&env, "orphan")["status"] == "failed";
+    assert!(reaped || locked(&env.root.join("state/relay/flow/dispatch.lock")), "checking with no dispatcher");
+    // Any event wakes it; it reaps the job and the one queued after it is blocked.
+    ok(&relay(&env, &["queue", "add", "poke", "--text", "After.", "--readonly", "--after", "orphan"]), "queue");
+    until(&env, "orphan", "failed");
+    assert_eq!(job(&env, "orphan")["reason"], "session runner died without reporting");
+}
+
+/// Waits, bounded, until `path` exists.
+fn appears(path: &Path) {
+    for _ in 0..600 {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("{} never appeared", path.display());
+}
+
+/// Waits, bounded, until `pid` is no longer the process that started at `started`.
+fn dies(pid: u64, started: u64) {
+    for _ in 0..600 {
+        if !alive(pid, started) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("process {pid} is still alive");
+}
+
+/// PR #39 review, issue 1: a handler that answers after the job was resumed by hand does not act.
+/// The old runner's `command:` handler is still deciding when `queue resume` moves the job on.
+#[test]
+fn a_handler_that_answers_after_a_resume_does_not_queue_a_follow_up() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("stale-handler", false);
+    let d = env.root.display();
+    let script = env.root.join("decide.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\nif mkdir {d}/first 2>/dev/null; then\n  touch {d}/asked\n  \
+             while [ ! -e {d}/go ]; do sleep 0.1; done\n  \
+             echo '{{\"action\": \"follow-up\", \"brief\": \"More.\", \"why\": \"stale\"}}'\nelse\n  \
+             echo '{{\"action\": \"accept\", \"why\": \"fine\"}}'\nfi\n"
+        ),
+    )
+    .unwrap();
+    Command::new("chmod").arg("755").arg(&script).status().unwrap();
+    let hooks = format!("[hooks]\nended = [\"command:{}\"]\n", script.display());
+    configure(&env, "job_ceiling_usd = 5.0\n", &hooks);
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "moved", "--text", "Make a change."]), "queue");
+    appears(&env.root.join("asked"));
+    let runner = job(&env, "moved")["runner"].clone();
+    let (pid, started) = (runner[0].as_u64().unwrap(), runner[1].as_u64().unwrap());
+    ok(&relay(&env, &["queue", "resume", "moved", "--message", "Go on."]), "resume");
+    std::fs::write(env.root.join("go"), "").unwrap();
+    dies(pid, started);
+    assert_eq!(wait_for(&env, "moved")["status"], "done");
+    assert!(job(&env, "moved-next").is_null(), "the stale answer queued nothing: {}", job(&env, "moved-next"));
+    let first = &decisions(&env, "moved")[0];
+    let step = &first["steps"][0];
+    assert_eq!(step["action"]["action"], "defer", "{first}");
+    assert!(step["why"].as_str().unwrap().starts_with("withdrawn"), "{first}");
+}
+
 #[test]
 fn a_command_decides_at_a_cap_a_bad_answer_defers_and_a_big_budget_is_bounded() {
     if !have_bwrap() {
@@ -1402,7 +1580,27 @@ fn an_old_log_is_gzipped_and_still_read_by_view_result() {
     claude_account(&env.home, "a", 10, false);
     ok(&relay(&env, &["queue", "add", "talk", "--text", "Look.", "--readonly"]), "queue");
     assert_eq!(wait_for(&env, "talk")["status"], "done");
+    // The wait ends with the runner, so gc does not skip the job as live.
+    let runner = &job(&env, "talk")["runner"];
+    assert!(!alive(runner[0].as_u64().unwrap(), runner[1].as_u64().unwrap()), "its runner has exited: {runner}");
     let plain = std::fs::read_to_string(records(&env, "talk", "log.ndjson")).unwrap();
+
+    // A pass that finds another running does nothing, and says so with exit 4.
+    let lock = env.root.join("state/relay/flow/gc.lock");
+    let mut holder = Command::new("flock").arg("-o").arg(&lock).args(["sleep", "60"]).spawn().unwrap();
+    for _ in 0..100 {
+        if locked(&lock) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let busy = relay(&env, &["land", "gc"]);
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert_eq!(busy.status.code(), Some(4), "{}", stderr(&busy));
+    assert!(stderr(&busy).contains("another pass is running"), "{}", stderr(&busy));
+    assert!(records(&env, "talk", "log.ndjson").exists(), "the busy pass did nothing");
+
     ok(&relay(&env, &["land", "gc"]), "gc");
     assert!(!records(&env, "talk", "log.ndjson").exists());
     let gz = records(&env, "talk", "log.ndjson.gz");
@@ -1456,11 +1654,193 @@ fn a_disk_hook_may_let_a_job_go_on() {
     Command::new("chmod").arg("755").arg(&script).status().unwrap();
     configure(&env, "job_disk_gb = 0.00001\n", &format!("[hooks]\ndisk = [\"command:{}\"]\n", script.display()));
     claude_account(&env.home, "a", 10, false);
+    // The session runs until the hook has answered: an answer after the run ended would be withdrawn.
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
     ok(&relay(&env, &["queue", "add", "big", "--text", "Make a change."]), "queue");
+    for _ in 0..300 {
+        if decisions(&env, "big").first().is_some_and(|d| !d["action"].is_null()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(job(&env, "big")["status"], "running", "it goes on while the hook lets it");
+    std::fs::remove_file(&hold).unwrap();
     let j = wait_for(&env, "big");
     assert_eq!(j["status"], "done", "{j}");
     let d = &decisions(&env, "big")[0];
     assert_eq!((d["point"].as_str(), d["action"]["action"].as_str()), (Some("disk"), Some("wait")), "{d}");
+}
+
+/// Audit finding 9: a `disk` decision parked at the orchestrator leaves the run's own limits on.
+#[test]
+fn a_disk_decision_parked_at_the_orchestrator_does_not_suspend_the_runs_limits() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("disk-parked", false);
+    // 10 KB: any clone is over it. The orchestrator would be waited for half an hour.
+    let hooks = "[hooks]\ndisk = [\"orchestrator\"]\norchestrator_timeout_minutes = 30.0\n";
+    configure(&env, "job_disk_gb = 0.00001\njob_ceiling_usd = 5.0\n", hooks);
+    // A session that holds forever, and a time limit of about 7 seconds.
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(env.repo.join("relay.toml"), conf.replace("[session]\n", "[session]\nmax_hours = 0.002\n")).unwrap();
+    claude_account(&env.home, "a", 10, false);
+    std::fs::write(env.home.join(".claude.a/hold"), "").unwrap();
+    ok(&relay(&env, &["queue", "add", "grows", "--text", "Make a change."]), "queue");
+    let (id, _) = parked(&env, "grows");
+    let j = wait_for(&env, "grows");
+    assert_eq!(j["status"], "failed", "{j}");
+    assert_eq!(j["reason"], "ran past its time limit; ended", "{j}");
+    // The decision went with its run: withdrawn, and no longer answerable.
+    let out = relay(&env, &["decide", "answer", &id, "--action", "wait"]);
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    let d = &decisions(&env, "grows")[0];
+    assert_eq!(d["point"], "disk", "{d}");
+    let steps = d["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1, "{d}");
+    assert_eq!(
+        (steps[0]["handler"].as_str(), steps[0]["action"]["action"].as_str()),
+        (Some("orchestrator"), Some("defer"))
+    );
+    assert!(steps[0]["why"].as_str().unwrap().starts_with("withdrawn"), "{d}");
+}
+
+/// PR #39 review, issue 2: a `command:` disk handler still running when the run ends is stopped with
+/// it, not waited for: the job ends, its seat and the wait are free, and the handler is gone.
+#[test]
+fn a_disk_handler_still_deciding_when_the_run_ends_is_stopped_with_it() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("disk-handler", false);
+    let script = env.root.join("decide.sh");
+    let pid_file = env.root.join("handler.pid");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\necho $$ >{}\nsleep 300\necho '{{\"action\": \"wait\", \"why\": \"late\"}}'\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    Command::new("chmod").arg("755").arg(&script).status().unwrap();
+    let hooks = format!("[hooks]\ndisk = [\"command:{}\"]\ncommand_timeout_seconds = 600\n", script.display());
+    configure(&env, "job_disk_gb = 0.00001\njob_ceiling_usd = 5.0\n", &hooks);
+    // A session that holds forever, and a time limit of about 7 seconds.
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(env.repo.join("relay.toml"), conf.replace("[session]\n", "[session]\nmax_hours = 0.002\n")).unwrap();
+    claude_account(&env.home, "a", 10, false);
+    std::fs::write(env.home.join(".claude.a/hold"), "").unwrap();
+    ok(&relay(&env, &["queue", "add", "grows", "--text", "Make a change."]), "queue");
+    appears(&pid_file);
+    let j = wait_for(&env, "grows");
+    assert_eq!((j["status"].as_str(), j["reason"].as_str()), (Some("failed"), Some("ran past its time limit; ended")));
+    let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    assert!(stat.is_empty() || stat.contains(") Z "), "the handler went with the run: {stat}");
+    let d = &decisions(&env, "grows")[0];
+    let step = &d["steps"][0];
+    assert_eq!(step["action"]["action"], "defer", "{d}");
+    assert!(step["why"].as_str().unwrap().starts_with("withdrawn"), "{d}");
+}
+
+/// PR #39 third review, issue 1: an `agent:` disk handler whose session closes its output and runs on
+/// is still supervised: stopped with the run, not waited for. Unsandboxed, as bubblewrap holds the
+/// output open itself until its child exits.
+#[test]
+fn an_agent_handler_that_closes_its_output_and_runs_on_is_stopped_with_the_run() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("agent-linger", false);
+    let hooks = "[hooks]\ndisk = [\"agent:checker\"]\n[profiles.checker]\nharness = \"claude\"\nbudget = 0.5\n\
+                 [sandbox]\nenabled = false\n";
+    configure(&env, "job_disk_gb = 0.00001\njob_ceiling_usd = 5.0\n", hooks);
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(env.repo.join("relay.toml"), conf.replace("[session]\n", "[session]\nmax_hours = 0.002\n")).unwrap();
+    // The worker runs on a and holds; the agent, on b, answers and lingers with its output closed.
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 50, false);
+    std::fs::write(env.home.join(".claude.a/hold"), "").unwrap();
+    std::fs::write(env.home.join(".claude.b/linger"), "").unwrap();
+    std::fs::write(env.home.join(".claude.b/decision"), r#"{"action": "wait", "why": "plenty"}"#).unwrap();
+    ok(&relay(&env, &["queue", "add", "grows", "--text", "Make a change."]), "queue");
+    let pid_file = env.home.join(".claude.b/linger.pid");
+    appears(&pid_file);
+    let j = wait_for(&env, "grows");
+    assert_eq!((j["status"].as_str(), j["reason"].as_str()), (Some("failed"), Some("ran past its time limit; ended")));
+    let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+    let gone = || {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        stat.is_empty() || stat.contains(") Z ")
+    };
+    for _ in 0..50 {
+        if gone() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(gone(), "the lingering agent went with its group");
+}
+
+/// The pids of the sessions started on `label`'s account, in order, once there are `n`.
+fn session_pids(env: &Env, label: &str, n: usize) -> Vec<String> {
+    let file = env.home.join(format!(".claude.{label}/pids"));
+    for _ in 0..600 {
+        let pids: Vec<String> = std::fs::read_to_string(&file).unwrap_or_default().lines().map(str::to_owned).collect();
+        if pids.len() >= n {
+            return pids;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("fewer than {n} sessions started on {label}");
+}
+
+/// Waits, bounded, until `pid` has gone (or is a zombie no one has reaped yet); whether it did.
+fn gone_within(pid: &str, tenths: u32) -> bool {
+    (0..tenths).any(|_| {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let gone = stat.is_empty() || stat.contains(") Z ");
+        if !gone {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        gone
+    })
+}
+
+/// PR #39 fourth review: an unsandboxed `agent:` handler runs in a process group of its own, which
+/// neither the runner's TERM nor its death reaches. A `queue stop` ends it with the job, and so does
+/// a runner killed outright, along with the unsandboxed worker: each by its supervisor (fifth review).
+#[test]
+fn a_stopped_or_killed_runner_takes_its_unsandboxed_agent_handler_with_it() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("agent-stop", false);
+    let hooks = "[hooks]\ndisk = [\"agent:checker\"]\n[profiles.checker]\nharness = \"claude\"\nbudget = 0.5\n\
+                 [sandbox]\nenabled = false\n";
+    configure(&env, "job_disk_gb = 0.00001\njob_ceiling_usd = 5.0\n", hooks);
+    // The worker runs on a, the agent on b; both hold, so the agent is at work when the job is stopped.
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 50, false);
+    std::fs::write(env.home.join(".claude.a/hold"), "").unwrap();
+    std::fs::write(env.home.join(".claude.b/hold"), "").unwrap();
+
+    ok(&relay(&env, &["queue", "add", "stopped", "--text", "Make a change."]), "queue");
+    let agent = session_pids(&env, "b", 1)[0].clone();
+    ok(&relay(&env, &["queue", "stop", "stopped"]), "stop");
+    assert!(gone_within(&agent, 50), "the stop took the agent with it");
+    assert_eq!(wait_for(&env, "stopped")["status"], "stopped");
+
+    ok(&relay(&env, &["queue", "add", "killed", "--text", "Make a change."]), "queue");
+    let agent = session_pids(&env, "b", 2)[1].clone();
+    let worker = session_pids(&env, "a", 2)[1].clone();
+    let runner = job(&env, "killed")["runner"][0].as_u64().unwrap().to_string();
+    assert!(Command::new("kill").args(["-9", &runner]).status().unwrap().success());
+    assert!(gone_within(&agent, 150), "its supervisor took the agent with the dead runner");
+    assert!(gone_within(&worker, 50), "and the worker's took the worker");
+    until(&env, "killed", "failed");
 }
 
 fn events(env: &Env) -> Vec<serde_json::Value> {

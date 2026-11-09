@@ -101,7 +101,7 @@ pub fn outside(json: bool, cmd: &Cmd) -> Result<()> {
 /// The folded state, with what each job waits for.
 fn world_json(world: &World) -> Result<serde_json::Value> {
     let mut v = serde_json::to_value(world)?;
-    for j in world.jobs.values() {
+    for j in world.jobs().values() {
         v["jobs"][&j.name]["pending"] = serde_json::to_value(world.waits(j))?;
         v["jobs"][&j.name]["readonly"] = j.readonly().into();
     }
@@ -170,7 +170,7 @@ pub fn listed<'a>(
 ) -> Vec<(&'a machine::Project, &'a Job)> {
     let mut jobs: Vec<_> = projects
         .into_iter()
-        .flat_map(|p| p.world.jobs.values().map(move |j| (p, j)))
+        .flat_map(|p| p.world.jobs().values().map(move |j| (p, j)))
         .filter(|(_, j)| all || recent(j, now))
         .collect();
     jobs.sort_by_key(|(_, j)| board_order(j));
@@ -272,7 +272,7 @@ fn model_cell(cfg: Option<&Config>, j: &Job) -> String {
 fn profile_hold(cfg: &Config, world: &World, j: &Job, now: u64) -> Option<String> {
     let name = j.profile.as_deref()?;
     let p = cfg.profiles.get(name)?;
-    let running = world.jobs.values().filter(|o| o.status.has_runner() && o.profile.as_deref() == Some(name)).count();
+    let running = world.jobs().values().filter(|o| o.status.has_runner() && o.profile.as_deref() == Some(name)).count();
     let starts = world.profile_starts.get(name).map_or(&[][..], Vec::as_slice);
     crate::systems::dispatch::profile_hold(name, p, running, starts, now).map(|(why, _)| why)
 }
@@ -524,19 +524,40 @@ fn answer_in(log: &str) -> Option<String> {
 }
 
 fn job(world: &World, name: &str) -> Result<Job> {
-    let Some(j) = world.jobs.get(name) else { fail!(NotFound, "no job named {name}") };
+    let Some(j) = world.jobs().get(name) else { fail!(NotFound, "no job named {name}") };
     Ok(j.clone())
 }
 
-/// The job once it has ended. Sleeps on the doorbell between reads, and wakes
-/// the dispatcher whenever the bus has been quiet, so the wait cannot outlive it.
+/// The job once it has ended and its runner has exited (`Job::runner_alive`), so
+/// nothing of that run is still at work on its files. Sleeps on the doorbell
+/// between reads, and wakes the dispatcher whenever the bus has been quiet, so
+/// the wait cannot outlive it.
+/// A live job that does not move on its own (`World::moves_on_its_own`: queued
+/// behind a dependency that will never be done) would never end: that is a
+/// conflict (exit 4), naming what it waits for.
+/// How often a wait looks again for an ended job's runner to exit.
+const RUNNER_EXIT_LOOK: Duration = Duration::from_millis(100);
+
 fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
     let bell = ctx.doorbell()?;
     let mut quiet = true;
     loop {
-        let j = job(&ctx.world()?, name)?;
+        let world = ctx.world()?;
+        let j = job(&world, name)?;
         if !j.status.is_live() {
-            return Ok(j);
+            if !j.runner_alive() {
+                return Ok(j);
+            }
+            // A runner's exit rings no bell: look again shortly.
+            bell.wait(RUNNER_EXIT_LOOK);
+            continue;
+        }
+        if !world.moves_on_its_own(&j) {
+            let why = Wait::summary(&world.waits(&j)).unwrap_or_else(|| "cannot start on its own".into());
+            fail!(
+                Conflict,
+                "{name} {why}, so it will not end on its own: queue that job again, or relay queue release {name}"
+            );
         }
         if quiet {
             ctx.wake_dispatch()?;

@@ -115,6 +115,9 @@ fn setup(tag: &str, omp: bool) -> Env {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     std::fs::copy(here.join("tests/stub-claude.sh"), repo.join(".stub/claude")).unwrap();
     std::fs::copy(here.join("tests/stub-omp.sh"), repo.join(".stub/omp")).unwrap();
+    std::fs::copy(here.join("tests/stub-puku.sh"), repo.join(".stub/puku-cli")).unwrap();
+    std::fs::create_dir_all(repo.join(".stub/node-bin")).unwrap();
+    std::fs::copy(here.join("tests/stub-puku.sh"), repo.join(".stub/node-bin/node")).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
@@ -1066,6 +1069,69 @@ fn a_home_with_no_sign_in_is_never_chosen() {
     assert_eq!(j["account"], "claude:b", "a has more room but is not signed in: {j}");
     let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
     assert!(table.contains("claude:a") && table.contains("not signed in"), "{table}");
+}
+
+/// A puku-cli home, `~/.puku-cli.<label>`, signed in under `APP_NAME=pukucode.<label>`, whose weekly
+/// chat quota is `used_pct` used and resets in 2100.
+fn puku_account(home: &Path, label: &str, used_pct: u32) {
+    let d = home.join(format!(".puku-cli.{label}"));
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("usage"),
+        format!(
+            r#"{{"chat":{{"windows":{{"weekly":{{"limit":100,"used":{used_pct},"resetsAt":"2100-01-01T00:00:00Z"}}}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let s = home.join(format!(".config/pukucode.{label}"));
+    std::fs::create_dir_all(&s).unwrap();
+    std::fs::write(
+        s.join("session.json"),
+        format!(
+            r#"{{"accessToken":"fake","refreshToken":"fake","expiresAt":1,"createdAt":1,"user":{{"id":"puku-user-{label}","email":"{SECRET_EMAIL}","provider":"github"}}}}"#
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_puku_session_runs_on_its_own_home_and_sign_in_and_sees_no_other() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("puku", false);
+    // The quota script's `node` is found as a harness's program is: this machine's record says the stub.
+    std::fs::create_dir_all(env.root.join("state/relay")).unwrap();
+    std::fs::write(
+        env.root.join("state/relay/programs.json"),
+        serde_json::json!({ "node": env.repo.join(".stub/node-bin/node") }).to_string(),
+    )
+    .unwrap();
+    let stub = env.repo.join(".stub/puku-cli");
+    configure(&env, "", &format!("[harness.puku]\nprogram = \"{}\"\n", stub.display()));
+    puku_account(&env.home, "p", 10);
+    puku_account(&env.home, "q", 95);
+    let probe = relay(&env, &["probe"]);
+    ok(&probe, "probe");
+    assert!(String::from_utf8_lossy(&probe.stdout).contains("== puku:p"));
+
+    ok(&relay(&env, &["queue", "add", "look", "--text", "Look.", "--readonly"]), "queue");
+    let j = wait_for(&env, "look");
+    assert_eq!((j["status"].as_str(), j["account"].as_str()), (Some("done"), Some("puku:p")), "{j}");
+    let r = result(&env, "look");
+    assert!(r.contains("ran on .puku-cli.p with 1 transcript turns"), "{r}");
+    let argv = std::fs::read_to_string(env.home.join(".puku-cli.p/argv")).unwrap();
+    assert!(argv.contains("--god-mode") && argv.contains("--output-format stream-json"), "{argv}");
+    assert!(env.home.join(".config/pukucode.p/renewed").exists(), "its sign-in is writable, to renew");
+    let seen = std::fs::read_to_string(env.home.join(".puku-cli.p/sign-ins-seen")).unwrap();
+    assert!(seen.contains("pukucode.p/session.json") && !seen.contains("pukucode.q"), "{seen}");
+
+    let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
+    let json = String::from_utf8_lossy(&relay(&env, &["quota", "show", "--json"]).stdout).into_owned();
+    assert!(table.contains("puku:p") && table.contains("puku:q") && table.contains("seven_day"), "{table}");
+    for secret in [SECRET_EMAIL, "puku-user-p", "\"fake\""] {
+        assert!(!table.contains(secret) && !json.contains(secret), "{secret} leaked:\n{table}\n{json}");
+    }
 }
 
 /// Adds `limits` under `[limits]` and appends `extra` to the project's config.

@@ -16,6 +16,7 @@ pub mod bridge;
 pub mod claude;
 pub mod omp;
 pub mod prompt;
+pub mod puku;
 pub mod report;
 
 use std::collections::BTreeMap;
@@ -23,7 +24,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// A signed-in account of one harness: a Claude Code config dir, an omp profile.
+/// A signed-in account of one harness: a Claude Code config dir, an omp profile, a puku-cli config dir.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Home {
     pub harness: &'static str,
@@ -140,11 +141,31 @@ pub struct Invocation {
     /// Written before the run, each directly inside the task's [`Task::inbox`] (and refused anywhere
     /// else). The prompt goes here for a CLI that reads it from a file.
     pub files: Vec<(PathBuf, String)>,
+    /// The argument naming the harness's command, when `program` is a script
+    /// that hands over to it rather than the command itself. It is located as
+    /// the program otherwise is ([`crate::config::HarnessConf::locate`]).
+    pub command_arg: Option<usize>,
 }
 
 impl Invocation {
     pub(crate) fn new(program: &str) -> Self {
-        Self { program: program.into(), args: Vec::new(), env: Vec::new(), stdin: None, files: Vec::new() }
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            stdin: None,
+            files: Vec::new(),
+            command_arg: None,
+        }
+    }
+
+    /// Run by `program` with `args`, the harness's `command` among them.
+    pub(crate) fn script(program: &str, args: &[&str], command: &str) -> Self {
+        let mut i = Self::new(program);
+        i.args(args);
+        i.command_arg = Some(i.args.len());
+        i.arg(command);
+        i
     }
 
     fn arg(&mut self, a: impl Into<OsString>) -> &mut Self {
@@ -176,6 +197,13 @@ impl Invocation {
         }
         Ok(())
     }
+}
+
+/// What a path in a home is: what a placeholder for it is made as when it is not there yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    File,
+    Dir,
 }
 
 /// Why a harness cannot run a task as asked.
@@ -219,8 +247,12 @@ pub trait Reader: Send {
 
 /// One harness. Implement it and add it to [`ALL`] to plug a CLI in.
 pub trait Harness: Sync + fmt::Debug {
-    /// Also its program's name, as [`crate::config::Config::harness_programs`] looks it up.
     fn id(&self) -> &'static str;
+    /// Its program's name, as [`crate::config::Config::harness_programs`] looks it up: its id
+    /// unless the CLI's command differs (puku's is `puku-cli`).
+    fn program(&self) -> &'static str {
+        self.id()
+    }
     fn caps(&self) -> Caps;
     /// How a prompt addresses the model ("You are Claude").
     fn identity(&self) -> &'static str;
@@ -233,9 +265,15 @@ pub trait Harness: Sync + fmt::Debug {
     fn writable(&self, home: &Home, user_home: &Path) -> Vec<PathBuf>;
     /// What inside those the host later runs or obeys (settings, hooks,
     /// plugins, scripts), so it is mounted back read-only: a session must not
-    /// be able to change what runs outside the sandbox.
-    fn protected(&self, _home: &Home) -> Vec<PathBuf> {
+    /// be able to change what runs outside the sandbox. Each with what it is,
+    /// since one the home does not have yet is made empty first, as that kind.
+    fn protected_kinds(&self, _home: &Home) -> Vec<(PathBuf, Kind)> {
         Vec::new()
+    }
+    /// The paths of [`Self::protected_kinds`], for a test that asks only what is protected.
+    #[cfg(test)]
+    fn protected(&self, home: &Home) -> Vec<PathBuf> {
+        self.protected_kinds(home).into_iter().map(|(p, _)| p).collect()
     }
     /// Who the home is signed in as, so homes that share one account share its quota.
     fn sign_in(&self, _home: &Home) -> SignIn {
@@ -270,7 +308,7 @@ pub trait Harness: Sync + fmt::Debug {
 }
 
 /// Every harness this crate knows, in a fixed order.
-pub static ALL: [&dyn Harness; 2] = [&claude::Claude, &omp::Omp];
+pub static ALL: [&dyn Harness; 3] = [&claude::Claude, &omp::Omp, &puku::Puku];
 
 pub fn by_id(id: &str) -> Result<&'static dyn Harness, Refusal> {
     ALL.iter().copied().find(|h| h.id() == id).ok_or_else(|| {
@@ -325,7 +363,7 @@ mod tests {
     #[test]
     fn registry() {
         assert_eq!(by_id("omp").unwrap().id(), "omp");
-        assert!(by_id("codex").unwrap_err().0.contains("Supported: claude, omp"));
+        assert!(by_id("codex").unwrap_err().0.contains("Supported: claude, omp, puku"));
         let ids: Vec<_> = ALL.iter().map(|h| h.id()).collect();
         let mut sorted = ids.clone();
         sorted.dedup();

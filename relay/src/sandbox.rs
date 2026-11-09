@@ -74,10 +74,16 @@ pub enum Mount {
 pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)> {
     let cfg = &ctx.cfg;
     let own = crate::accounts::harness_of(m.home);
-    let other_homes =
-        crate::harness::ALL.iter().flat_map(|h| h.home_paths(user_home)).filter(|p| !m.account || *p != m.home.dir);
     let own_writable = if m.account { own.writable(m.home, user_home) } else { Vec::new() };
-    let own_protected = if m.account { own.protected(m.home) } else { Vec::new() };
+    // Its own home, and its sign-in where that lives outside the home (puku-cli's), are not another's.
+    let other_homes = crate::harness::ALL
+        .iter()
+        .flat_map(|h| h.home_paths(user_home))
+        .filter(|p| !m.account || (*p != m.home.dir && !own_writable.contains(p)));
+    let own_protected = if m.account { own.protected_kinds(m.home) } else { Vec::new() };
+    // What the adapter says each protected path is; anything else kept from the session that is not
+    // there (a hidden store under the account) is a directory.
+    let kinds: std::collections::BTreeMap<PathBuf, crate::harness::Kind> = own_protected.iter().cloned().collect();
     let all = |paths: Vec<PathBuf>, mount: Mount| paths.into_iter().map(|p| (p, mount.clone())).collect::<Vec<_>>();
     let layers: [Vec<(PathBuf, Mount)>; 7] = [
         all(cfg.hidden_dirs().into_iter().chain([runtime_dir()]).chain(host_sockets()).collect(), Mount::Hidden),
@@ -85,7 +91,7 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
         all(other_homes.collect(), Mount::Hidden)
             .into_iter()
             .chain(all(own_writable, Mount::Writable))
-            .chain(all(own_protected, Mount::ReadOnly))
+            .chain(all(own_protected.into_iter().map(|(p, _)| p).collect(), Mount::ReadOnly))
             .collect(),
         cfg.sandbox.caches.iter().map(|r| (user_home.join(r), Mount::From(ctx.caches.join(r)))).collect(),
         all(cfg.sandbox.hide_home.iter().map(|r| user_home.join(r)).collect(), Mount::Hidden),
@@ -108,8 +114,8 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
         // Under relay's own cache directory (`From`), what the session creates is not the host's.
         let creatable = out.iter().any(|(w, k)| *k == Mount::Writable && p.starts_with(w));
         if kept_from_session && creatable {
-            // `settings.json`, `CLAUDE.md`, `config.yml` are files; `hooks`, `profiles` directories.
-            out.push((p.clone(), Mount::Placeholder { dir: p.extension().is_none() }));
+            let dir = kinds.get(&p).is_none_or(|k| *k == crate::harness::Kind::Dir);
+            out.push((p.clone(), Mount::Placeholder { dir }));
         }
     }
     out
@@ -304,6 +310,27 @@ mod tests {
         // Nothing is created by planning; a path under no writable mount gets no placeholder at all.
         assert!(!dir.join("settings.json").exists());
         assert!(mount_of(&plan, &d.path().join("user/.ssh")).is_none());
+    }
+
+    /// A placeholder is what the adapter says the path is, whatever its name: puku's `PUKU.md` is a
+    /// file and its `rules` and `workflows` directories. Its sign-in lives outside the home and is
+    /// its own session's to renew, while another home's is hidden.
+    #[test]
+    fn puku_placeholders_take_their_kind_from_the_adapter_and_its_sign_in_is_its_own() {
+        let d = Dir::new();
+        let user = d.path().join("user");
+        let dir = user.join(".puku-cli");
+        for p in [dir.clone(), user.join(".config/pukucode"), user.join(".config/pukucode.work")] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let home = Home { harness: "puku", label: "default".into(), dir: dir.clone() };
+        let plan = plan_for(d.path(), &home);
+        assert_eq!(mount_of(&plan, &dir.join("PUKU.md")), Some(&Mount::Placeholder { dir: false }), "{plan:?}");
+        assert_eq!(mount_of(&plan, &dir.join("settings.json")), Some(&Mount::Placeholder { dir: false }));
+        assert_eq!(mount_of(&plan, &dir.join("rules")), Some(&Mount::Placeholder { dir: true }));
+        assert_eq!(mount_of(&plan, &dir.join("workflows")), Some(&Mount::Placeholder { dir: true }));
+        assert_eq!(mount_of(&plan, &user.join(".config/pukucode")), Some(&Mount::Writable));
+        assert_eq!(mount_of(&plan, &user.join(".config/pukucode.work")), Some(&Mount::Hidden));
     }
 
     /// The default omp profile is `~/.omp`, which holds the others: its session may not make a new

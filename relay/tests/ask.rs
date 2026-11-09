@@ -1,7 +1,7 @@
 //! `relay ask`, end to end, in --dry-run (which never starts the child CLI).
-//! The `omp` checks run the installed omp, so a renamed flag in an omp
+//! The `omp`, `claude` and `puku` checks run the installed CLI, so a renamed flag in a
 //! release fails here instead of in a caller's request. They skip, saying
-//! why, when omp is not installed or does not run (a shim whose runtime is gone).
+//! why, when it is not installed or does not run (a shim whose runtime is gone).
 
 use std::process::Command;
 
@@ -133,5 +133,55 @@ fn claude_argv_matches_the_installed_claude() {
         "--disallowedTools",
     ] {
         assert!(help.contains(flag), "claude --help no longer lists {flag}");
+    }
+}
+
+#[test]
+fn puku_argv_matches_the_installed_puku() {
+    let (code, j, err) = bridge(&["puku", "ask", "secret question text", "--dry-run"]);
+    assert_eq!(code, 0, "{err}");
+    let cmd: Vec<&str> = j["command"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(&cmd[..4], ["puku-cli", "-p", "--permission-mode", "plan"]);
+    assert_eq!(j["prompt"]["delivery"], "stdin");
+    // Only whether it is on PATH: `installed_help` would ask it in the caller's own home.
+    let on_path =
+        Command::new("sh").args(["-c", "command -v puku-cli >/dev/null"]).status().is_ok_and(|s| s.success());
+    if !on_path {
+        eprintln!("skipped: puku-cli is not installed");
+        return;
+    }
+    // In an empty home: every puku-cli start renews an expired sign-in, and this one must touch none.
+    let home = std::env::temp_dir().join(format!("relay-ask-puku-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    let out = Command::new("puku-cli")
+        .arg("--help")
+        .env("HOME", &home)
+        .env("PUKU_CONFIG_DIR", home.join(".puku-cli"))
+        .env_remove("APP_NAME")
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+    let help = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Every flag the puku adapter builds: claude's, with --god-mode for --dangerously-skip-permissions.
+    for flag in [
+        "--print",
+        "--output-format",
+        "--verbose",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "--disable-slash-commands",
+        "--god-mode",
+        "--permission-mode",
+        "--max-budget-usd",
+        "--append-system-prompt",
+        "--model",
+        "--effort",
+        "--name",
+        "--session-id",
+        "--resume",
+        "--fork-session",
+        "--disallowedTools",
+    ] {
+        assert!(help.contains(flag), "puku-cli --help no longer lists {flag}");
     }
 }

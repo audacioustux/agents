@@ -552,13 +552,21 @@ pub fn positive(x: f64) -> bool {
 
 /// `AUTH` only as a whole word, so `GH_AUTH` and `SSH_AUTH_SOCK` go but `GIT_AUTHOR_NAME` stays.
 const DEFAULT_ENV_DENY: &str =
-    "(?i)TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|_KEY$|(^|_)AUTH($|_)|COOKIE|SESSION|^CLAUDE|^ANTHROPIC";
+    "(?i)TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|_KEY$|(^|_)AUTH($|_)|COOKIE|SESSION|^CLAUDE|^ANTHROPIC|^PUKU";
 
 #[cfg(test)]
 #[test]
 fn default_env_deny() {
     let re = regex::Regex::new(DEFAULT_ENV_DENY).unwrap();
-    for gone in ["GITHUB_TOKEN", "GH_AUTH", "SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY", "OPENAI_API_KEY", "CLAUDECODE"] {
+    for gone in [
+        "GITHUB_TOKEN",
+        "GH_AUTH",
+        "SSH_AUTH_SOCK",
+        "AWS_SECRET_ACCESS_KEY",
+        "OPENAI_API_KEY",
+        "CLAUDECODE",
+        "PUKU_WORKER_URL",
+    ] {
         assert!(re.is_match(gone), "{gone}");
     }
     for kept in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "PATH", "HOME", "LANG", "KEYBOARD"] {
@@ -840,7 +848,7 @@ impl Config {
                 if conf.and_then(|c| c.enabled) == Some(false) {
                     return None;
                 }
-                let name = conf.and_then(|c| c.program.clone()).unwrap_or_else(|| PathBuf::from(h.id()));
+                let name = conf.and_then(|c| c.program.clone()).unwrap_or_else(|| PathBuf::from(h.program()));
                 let program = crate::host::resolve(self.programs.as_deref(), name.as_os_str());
                 (conf.is_some() || matches!(program, crate::host::Program::Found(_))).then_some((h, program))
             })
@@ -871,17 +879,29 @@ impl Config {
         harness: &str,
         mut inv: crate::harness::Invocation,
     ) -> Result<crate::harness::Invocation, crate::harness::Refusal> {
-        let name = self.harness(harness).program.map_or_else(|| inv.program.clone(), PathBuf::into_os_string);
-        match crate::host::resolve(self.programs.as_deref(), &name) {
-            crate::host::Program::Found(p) => {
-                inv.program = p.into_os_string();
-                Ok(inv)
-            }
+        let resolve = |name: &std::ffi::OsStr| match crate::host::resolve(self.programs.as_deref(), name) {
+            crate::host::Program::Found(p) => Ok(p.into_os_string()),
             crate::host::Program::Missing(what) => Err(crate::harness::Refusal(format!(
                 "harness {harness}: program not found: {}",
                 what.to_string_lossy()
             ))),
+        };
+        // The harness's own program: what runs, or what a script that runs hands over to (puku's quota).
+        let at = inv.command_arg;
+        let slot = match at {
+            Some(i) => inv
+                .args
+                .get_mut(i)
+                .ok_or_else(|| crate::harness::Refusal(format!("harness {harness}: no argument {i}")))?,
+            None => &mut inv.program,
+        };
+        let name = self.harness(harness).program.map_or_else(|| slot.clone(), PathBuf::into_os_string);
+        *slot = resolve(&name)?;
+        // Such a script's interpreter is found as a harness's program is, and recorded with them.
+        if at.is_some() {
+            inv.program = resolve(&inv.program)?;
         }
+        Ok(inv)
     }
 
     pub fn harness(&self, id: &str) -> HarnessConf {
@@ -985,6 +1005,13 @@ mod tests {
         assert_eq!(rel.harness("omp").program, Some(PathBuf::from("omp-beta")));
         let off = Config::parse("name = \"x\"\n[harness.omp]\nenabled = false\nprogram = \"/opt/x/omp\"\n", d.path());
         assert!(off.unwrap().missing_harnesses().is_empty(), "a harness turned off is not missing");
+        // A script handing over to the harness: the harness's program as configured, and the script's
+        // interpreter found as a program is, never by a caller's PATH.
+        let script = cfg.locate("claude", crate::harness::Invocation::script("sh", &["-c", "x"], "claude")).unwrap();
+        assert!(Path::new(&script.program).is_absolute() && script.program != pinned.as_os_str(), "{script:?}");
+        assert_eq!(script.args, [std::ffi::OsStr::new("-c"), std::ffi::OsStr::new("x"), pinned.as_os_str()]);
+        let no_shell = cfg.locate("claude", crate::harness::Invocation::script("no-such-sh-xyz", &[], "claude"));
+        assert_eq!(no_shell.unwrap_err().0, "harness claude: program not found: no-such-sh-xyz");
     }
 
     fn repo() -> tempdir::Dir {

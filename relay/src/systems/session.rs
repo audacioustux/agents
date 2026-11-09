@@ -450,37 +450,46 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
     };
     let handlers = decide::chain(&ctx.cfg, Point::Cap).unwrap_or_default();
     let d = decide::decide(ctx, job, &req, &handlers, &rule, Action::Stop { why: String::new() })?;
-    let (verdict, next, message) = match d.action.clone() {
-        Action::Continue { budget } => (CheckVerdict::Continue, Some(budget.unwrap_or(cap)), String::new()),
-        Action::Redirect { message, budget } => (CheckVerdict::Redirect, Some(budget.unwrap_or(cap)), message),
-        _ => (CheckVerdict::Stop, None, String::new()),
-    };
-    let checker = match d.handler.as_deref() {
-        Some("rule") | None => d.account.clone(),
-        Some(h) => d.account.clone().or_else(|| Some(h.to_owned())),
-    };
-    let check = Check {
-        checkpoint: n,
-        verdict,
-        why: match (&d.action, d.why.is_empty()) {
-            (Action::Stop { why }, true) if !why.is_empty() => why.clone(),
-            _ => d.why.clone(),
-        },
-        message: next.map(|cap| checkpoint::resume_message(n, cap, verdict, &message)).unwrap_or_default(),
-        next_cap_usd: next,
-        head: now.head.clone(),
-        tree: now.tree.clone(),
-        checker,
-        cost_usd: d.cost_usd,
-        decision: Some(d.id),
-    };
-    let stopped = if check.why.is_empty() { String::new() } else { format!(" ({})", check.why) };
-    port.emit(SessionEvent::Checked { job: job.name.clone(), check })?;
-    Ok(if next.is_none() {
-        (Outcome::Failed, Some(format!("waits for a human at its checkpoint{stopped}; resume with --budget to go on")))
-    } else {
-        (Outcome::Retry, None)
-    })
+    // The checkpoint's record is the decision carried out: nothing, once the job has moved on.
+    let carried = d.carry(ctx, |_, action, _| {
+        let (verdict, next, message) = match action.clone() {
+            Action::Continue { budget } => (CheckVerdict::Continue, Some(budget.unwrap_or(cap)), String::new()),
+            Action::Redirect { message, budget } => (CheckVerdict::Redirect, Some(budget.unwrap_or(cap)), message),
+            _ => (CheckVerdict::Stop, None, String::new()),
+        };
+        let checker = match d.handler.as_deref() {
+            Some("rule") | None => d.account.clone(),
+            Some(h) => d.account.clone().or_else(|| Some(h.to_owned())),
+        };
+        let check = Check {
+            checkpoint: n,
+            verdict,
+            why: match (&action, d.why.is_empty()) {
+                (Action::Stop { why }, true) if !why.is_empty() => why.clone(),
+                _ => d.why.clone(),
+            },
+            message: next.map(|cap| checkpoint::resume_message(n, cap, verdict, &message)).unwrap_or_default(),
+            next_cap_usd: next,
+            head: now.head.clone(),
+            tree: now.tree.clone(),
+            checker,
+            cost_usd: d.cost_usd,
+            decision: Some(d.id.clone()),
+        };
+        let stopped = if check.why.is_empty() { String::new() } else { format!(" ({})", check.why) };
+        port.emit(SessionEvent::Checked { job: job.name.clone(), check })?;
+        Ok(if next.is_none() {
+            (
+                Outcome::Failed,
+                Some(format!("waits for a human at its checkpoint{stopped}; resume with --budget to go on")),
+            )
+        } else {
+            (Outcome::Retry, None)
+        })
+    })?;
+    Ok(carried.unwrap_or_else(|| {
+        (Outcome::Failed, Some(format!("decision {} not carried out: the job moved on since it was asked", d.id)))
+    }))
 }
 
 /// A read-only session for a decision on `agent`'s harness: the account it
@@ -806,7 +815,8 @@ fn decide_disk(
 ) -> Result<Option<String>> {
     let fallback = Action::Stop { why: why.clone() };
     let d = decide::decide_while(ctx, job, req, handlers, &|| None, fallback, wanted)?;
-    Ok((d.action != Action::Wait).then_some(why))
+    // A decision the job has moved past stops nothing: the run it was asked for is over.
+    Ok(d.carry(ctx, |_, action, _| Ok((action != Action::Wait).then_some(why)))?.flatten())
 }
 
 /// Withdraws an outstanding decision when dropped, however the drive loop ends.

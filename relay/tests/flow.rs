@@ -1221,6 +1221,67 @@ fn a_decision_for_a_resumed_job_or_a_dead_runner_is_refused_and_the_job_is_reape
     assert_eq!(job(&env, "orphan")["reason"], "session runner died without reporting");
 }
 
+/// Waits, bounded, until `path` exists.
+fn appears(path: &Path) {
+    for _ in 0..600 {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("{} never appeared", path.display());
+}
+
+/// Waits, bounded, until `pid` is no longer the process that started at `started`.
+fn dies(pid: u64, started: u64) {
+    for _ in 0..600 {
+        if !alive(pid, started) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("process {pid} is still alive");
+}
+
+/// PR #39 review, issue 1: a handler that answers after the job was resumed by hand does not act.
+/// The old runner's `command:` handler is still deciding when `queue resume` moves the job on.
+#[test]
+fn a_handler_that_answers_after_a_resume_does_not_queue_a_follow_up() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("stale-handler", false);
+    let d = env.root.display();
+    let script = env.root.join("decide.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\nif mkdir {d}/first 2>/dev/null; then\n  touch {d}/asked\n  \
+             while [ ! -e {d}/go ]; do sleep 0.1; done\n  \
+             echo '{{\"action\": \"follow-up\", \"brief\": \"More.\", \"why\": \"stale\"}}'\nelse\n  \
+             echo '{{\"action\": \"accept\", \"why\": \"fine\"}}'\nfi\n"
+        ),
+    )
+    .unwrap();
+    Command::new("chmod").arg("755").arg(&script).status().unwrap();
+    let hooks = format!("[hooks]\nended = [\"command:{}\"]\n", script.display());
+    configure(&env, "job_ceiling_usd = 5.0\n", &hooks);
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "moved", "--text", "Make a change."]), "queue");
+    appears(&env.root.join("asked"));
+    let runner = job(&env, "moved")["runner"].clone();
+    let (pid, started) = (runner[0].as_u64().unwrap(), runner[1].as_u64().unwrap());
+    ok(&relay(&env, &["queue", "resume", "moved", "--message", "Go on."]), "resume");
+    std::fs::write(env.root.join("go"), "").unwrap();
+    dies(pid, started);
+    assert_eq!(wait_for(&env, "moved")["status"], "done");
+    assert!(job(&env, "moved-next").is_null(), "the stale answer queued nothing: {}", job(&env, "moved-next"));
+    let first = &decisions(&env, "moved")[0];
+    let step = &first["steps"][0];
+    assert_eq!(step["action"]["action"], "defer", "{first}");
+    assert!(step["why"].as_str().unwrap().starts_with("withdrawn"), "{first}");
+}
+
 #[test]
 fn a_command_decides_at_a_cap_a_bad_answer_defers_and_a_big_budget_is_bounded() {
     if !have_bwrap() {

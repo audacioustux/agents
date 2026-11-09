@@ -35,7 +35,7 @@ pub(super) fn at_end(ctx: &Ctx, job: &Job, home: &Home, run: &Ran<'_>, ended: En
     let req = ask(ctx, job, run, &ended, check.as_ref())?;
     let rule = || ended_rule(&rule_input(ctx, job, run, &ended, silent, check.as_ref()));
     let d = decide::decide(ctx, job, &req, &handlers, &rule, Action::Accept)?;
-    let carried = carry_out(ctx, job, run, ended, d)?;
+    let carried = carry_out(ctx, job, run, ended, &d)?;
     Ok(never_done_red(carried, check.as_ref()))
 }
 
@@ -97,32 +97,41 @@ fn rule_input<'a>(
 }
 
 /// Does what the chain decided, and says how the run ended.
-fn carry_out(ctx: &Ctx, job: &Job, run: &Ran<'_>, ended: Ended, d: decide::Decided) -> Result<Ended> {
+fn carry_out(ctx: &Ctx, job: &Job, run: &Ran<'_>, ended: Ended, d: &decide::Decided) -> Result<Ended> {
     let port = port(ctx, job);
-    Ok(match d.action {
-        Action::Stop { why } => (Outcome::Failed, Some(if why.is_empty() { d.why } else { why })),
-        Action::Resume { message, budget } => {
-            let message = if message.trim().is_empty() { "Continue where you left off.".into() } else { message };
-            port.emit(SessionEvent::FollowUp { job: job.name.clone(), message, budget_usd: budget })?;
-            (Outcome::Retry, Some(format!("resumed by decision {}", d.id)))
-        }
-        Action::Requeue { profile } => {
-            requeue(ctx, job, &profile)?;
-            (Outcome::Retry, Some(format!("requeued under profile {profile}")))
-        }
-        Action::FollowUp { brief, profile, after, fork, name } => {
-            let spec = crate::systems::queue::FollowUp { name, brief, profile, after, fork };
-            let queued = crate::systems::queue::follow_up(ctx, job, spec)?;
-            let said = ended
-                .1
-                .map_or_else(|| format!("follow-up {queued} queued"), |r| format!("{r}; follow-up {queued} queued"));
-            (ended.0, Some(said))
-        }
-        Action::Review { verdict, reason, message } => {
-            (ended.0, Some(review::carry_out(ctx, job, run, verdict, reason, &message)?))
-        }
-        _ => ended,
-    })
+    let outcome = ended.0;
+    let carried = d.carry(ctx, |world, action, decided_why| {
+        Ok(match action {
+            Action::Stop { why } => (Outcome::Failed, Some(if why.is_empty() { decided_why.to_owned() } else { why })),
+            Action::Resume { message, budget } => {
+                let message = if message.trim().is_empty() { "Continue where you left off.".into() } else { message };
+                port.emit(SessionEvent::FollowUp { job: job.name.clone(), message, budget_usd: budget })?;
+                (Outcome::Retry, Some(format!("resumed by decision {}", d.id)))
+            }
+            Action::Requeue { profile } => {
+                requeue(ctx, job, &profile)?;
+                (Outcome::Retry, Some(format!("requeued under profile {profile}")))
+            }
+            Action::FollowUp { brief, profile, after, fork, name } => {
+                let spec = crate::systems::queue::FollowUp { name, brief, profile, after, fork };
+                let queued = crate::systems::queue::follow_up(ctx, world, job, spec)?;
+                let said = ended.1.map_or_else(
+                    || format!("follow-up {queued} queued"),
+                    |r| format!("{r}; follow-up {queued} queued"),
+                );
+                (outcome, Some(said))
+            }
+            Action::Review { verdict, reason, message } => {
+                (outcome, Some(review::carry_out(ctx, job, run, verdict, reason, &message)?))
+            }
+            _ => ended,
+        })
+    })?;
+    Ok(carried.unwrap_or_else(|| {
+        let why =
+            format!("decision {} ({}) not carried out: the job moved on since it was asked", d.id, d.action_name());
+        (outcome, Some(why))
+    }))
 }
 
 /// Sends the job back to the queue to start afresh under `profile`, its branch kept.

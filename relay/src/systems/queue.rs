@@ -13,7 +13,7 @@ use crate::bus::{ACCEPTANCE_GATE, Fork, QueueEvent};
 use crate::config::{Profile, valid_name};
 use crate::ctx::Ctx;
 use crate::os;
-use crate::world::{Job, Status};
+use crate::world::{Job, Status, World};
 
 /// The capability to write queue's port; only this module can make one.
 #[derive(Debug)]
@@ -340,10 +340,10 @@ pub struct FollowUp {
     pub fork: bool,
 }
 
-/// Queues `f` as `queue add` would, and returns its name.
-pub fn follow_up(ctx: &Ctx, parent: &Job, f: FollowUp) -> Result<String> {
-    let _lock = ctx.jobs_lock()?;
-    let world = ctx.world()?;
+/// Queues `f` as `queue add` would, and returns its name. Only a decision queues a follow-up, so this
+/// runs inside `Decided::carry`: `world` was read under the jobs lock carry holds, after it checked that
+/// `parent` is still at the attempt the decision was about.
+pub fn follow_up(ctx: &Ctx, world: &World, parent: &Job, f: FollowUp) -> Result<String> {
     let base = f.name.unwrap_or_else(|| format!("{}-next", parent.name));
     let name = (1..1000)
         .map(|i| if i == 1 { base.clone() } else { format!("{base}-{i}") })
@@ -379,8 +379,8 @@ pub fn follow_up(ctx: &Ctx, parent: &Job, f: FollowUp) -> Result<String> {
 /// Resumes the build job `builder` with a reviewer's findings, as `queue resume` would: its session goes on
 /// on any account with room. Not while it works, not once `hooks.max_decisions` reviews have rejected it,
 /// and not on a banned model. `None` when resumed, else why not.
+/// Only a review's decision does this, so it runs inside `Decided::carry`, which holds the jobs lock.
 pub fn resume_reviewed(ctx: &Ctx, builder: &str, message: String) -> Result<Option<String>> {
-    let _lock = ctx.jobs_lock()?;
     let world = ctx.world()?;
     let Some(j) = world.jobs.get(builder) else { return Ok(Some(format!("{builder} is gone"))) };
     // This reject is already among the verdicts: `hooks.max_decisions` of them resume the builder.

@@ -551,7 +551,8 @@ impl Said {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decided {
     pub id: String,
-    pub action: Action,
+    /// Reached only through `carry`, so nothing acts on a decision its job has moved past.
+    action: Action,
     pub why: String,
     /// The handler that decided; `None` when every one deferred and the fallback stands.
     pub handler: Option<String>,
@@ -652,7 +653,6 @@ pub fn decide_while(
         stale.then_some("withdrawn: the job has moved on since it was asked")
     };
     let ask = |h: &Handler| match h {
-        _ if gone().is_some() => Said::defer(gone().unwrap_or_default()),
         Handler::Rule => rule().map_or_else(
             || Said::defer("no rule applies"),
             |(action, why)| Said { action, why, cost_usd: 0.0, account: None },
@@ -665,9 +665,20 @@ pub fn decide_while(
         }
         Handler::Orchestrator => ask_orchestrator(ctx, req, &gone),
     };
-    let ask = |h: &Handler| match ask(h) {
-        s if *h == Handler::Orchestrator => s,
-        s => Said { action: bounded(s.action, req.next_cap_usd), ..s },
+    // Freshness before a handler is asked, and again after it answers: whatever it said while the job
+    // moved on is recorded as a defer, with what it cost.
+    let ask = |h: &Handler| {
+        if let Some(why) = gone() {
+            return Said::defer(why);
+        }
+        let said = match ask(h) {
+            s if *h == Handler::Orchestrator => s,
+            s => Said { action: bounded(s.action, req.next_cap_usd), ..s },
+        };
+        match gone() {
+            Some(why) => Said { action: Action::Defer, why: why.into(), ..said },
+            None => said,
+        }
     };
     let check = |h: &Handler, a: &Action| validate(&ctx.cfg, &world, job, req, a, *h == Handler::Orchestrator);
     let mut failed = None;
@@ -696,6 +707,27 @@ pub fn decide_while(
         account: said.account,
         cost_usd: cost,
     })
+}
+
+impl Decided {
+    /// The decided action's name, for the record. Carrying it out goes through `carry`.
+    pub fn action_name(&self) -> &'static str {
+        self.action.name()
+    }
+
+    /// Carries the decided action out with `act`: under the jobs lock, and only while the decision still
+    /// asks about its job as the job is (`World::asks_now`), so a `queue resume` (which takes the same
+    /// lock) either comes first and nothing is done, or comes after. The one way a decision's action
+    /// reaches anything. `act` is given the world read under the lock, and the action and why, and must
+    /// not take the lock itself. `Ok(None)`: the job moved on, and nothing was done.
+    pub fn carry<R>(&self, ctx: &Ctx, act: impl FnOnce(&World, Action, &str) -> Result<R>) -> Result<Option<R>> {
+        let _lock = ctx.jobs_lock()?;
+        let world = ctx.world()?;
+        if !world.decisions.get(&self.id).is_some_and(|d| world.asks_now(d)) {
+            return Ok(None);
+        }
+        act(&world, self.action.clone(), &self.why).map(Some)
+    }
 }
 
 /// Whether an `agent:` handler at `point` waits for a seat. A cap's stop is a job failed over a
@@ -774,7 +806,8 @@ fn ask_orchestrator(ctx: &Ctx, req: &Request, gone: &dyn Fn() -> Option<&'static
         let d = w.decisions.get(&req.id)?;
         Some((d.answer.clone()?, d.answer_why.clone()))
     };
-    let read_or_gone = || read().map(Ok).or_else(|| gone().map(Err));
+    // Withdrawal wins over an answer already recorded: it was for a job that has moved on.
+    let read_or_gone = || gone().map(Err).or_else(|| read().map(Ok));
     if port.emit(DecideEvent::Parked { id: req.id.clone(), until }).is_err() {
         return Said::defer("could not park the request");
     }
@@ -787,7 +820,7 @@ fn ask_orchestrator(ctx: &Ctx, req: &Request, gone: &dyn Fn() -> Option<&'static
     };
     let answer = await_answer(until, read_or_gone, sleep, now_micros).or_else(|| {
         let _lock = ctx.jobs_lock().ok();
-        read().map(Ok)
+        read_or_gone()
     });
     match answer {
         Some(Ok((action, why))) => Said { action, why, cost_usd: 0.0, account: None },
@@ -996,21 +1029,20 @@ fn held(ctx: &Ctx, name: &str, why: &str) -> Result<()> {
     req.spent_usd = job.cost_usd;
     req.earlier = earlier(&world, job);
     let d = decide(ctx, job, &req, &handlers, &|| None, Action::Wait)?;
-    let lock = ctx.jobs_lock()?;
-    let now = ctx.world()?;
     let same = |j: &&Job| {
         j.status == Status::Queued
             && (j.created_at, j.attempts, j.queued_at) == (job.created_at, job.attempts, job.queued_at)
     };
-    let Some(job) = now.jobs.get(name).filter(same) else { return Ok(()) };
-    match d.action {
-        Action::Reroute { harness, model, profile } => {
-            crate::systems::queue::reroute(ctx, job, harness.as_deref(), model.as_deref(), profile.as_deref())?;
+    d.carry(ctx, |now, action, _| {
+        let Some(job) = now.jobs.get(name).filter(same) else { return Ok(()) };
+        match action {
+            Action::Reroute { harness, model, profile } => {
+                crate::systems::queue::reroute(ctx, job, harness.as_deref(), model.as_deref(), profile.as_deref())
+            }
+            Action::Force => crate::systems::queue::force(ctx, &job.name),
+            _ => Ok(()),
         }
-        Action::Force => crate::systems::queue::force(ctx, &job.name)?,
-        _ => {}
-    }
-    drop(lock);
+    })?;
     ctx.wake_dispatch()
 }
 
@@ -1051,6 +1083,74 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    /// A project in a scratch directory, with `lines` (`file`, NDJSON line) on its bus.
+    fn project(dir: &crate::config::tempdir::Dir) -> Ctx {
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let cfg = Config::parse("name = \"demo\"\n", root).unwrap();
+        let ctx = Ctx::unclaimed(cfg, root.join("relay.toml"), root.join("state"), root.join("data"));
+        std::fs::create_dir_all(ctx.bus.join("session")).unwrap();
+        std::fs::create_dir_all(&ctx.jobs).unwrap();
+        ctx
+    }
+
+    fn append(ctx: &Ctx, file: &str, t: u64, event: impl Serialize) {
+        use std::io::Write as _;
+        let mut v = serde_json::to_value(event).unwrap();
+        v["t"] = t.into();
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(ctx.bus.join(file)).unwrap();
+        writeln!(f, "{v}").unwrap();
+    }
+
+    /// PR #39 review, issue 1: a decision acts only through `carry`, which checks under the jobs lock
+    /// that the job is still at the attempt it was asked about. A `queue resume` in between wins.
+    #[test]
+    fn a_decision_is_carried_out_only_while_its_job_is_where_it_was_asked() {
+        use crate::bus::{DispatchEvent, QueueEvent};
+        let dir = crate::config::tempdir::Dir::new();
+        let ctx = project(&dir);
+        let queued = r#"{"t":1,"type":"queued","job":"a","task":"x","readonly":false,"effort":null,"budget_usd":1.0,"pinned":null}"#;
+        std::fs::write(ctx.bus.join("queue.ndjson"), format!("{queued}\n")).unwrap();
+        let dispatched =
+            DispatchEvent::Dispatched { job: "a".into(), account: "c:w".into(), runner_pid: 7, runner_started: 1 };
+        append(&ctx, "dispatch.ndjson", 2, dispatched);
+        let asked = DecideEvent::DecisionRequested {
+            id: "d".into(),
+            job: "a".into(),
+            point: Point::Ended,
+            created: 1,
+            attempt: 1,
+            waiter: None,
+        };
+        append(&ctx, "decide.ndjson", 3, asked);
+        let follow_up = Action::FollowUp { brief: "b".into(), profile: None, after: true, fork: false, name: None };
+        let d = Decided {
+            id: "d".into(),
+            action: follow_up.clone(),
+            why: "w".into(),
+            handler: Some("orchestrator".into()),
+            account: None,
+            cost_usd: 0.0,
+        };
+        let carried = d.carry(&ctx, |w, action, why| Ok((w.jobs["a"].status, action, why.to_owned()))).unwrap();
+        assert_eq!(carried, Some((Status::Checking, follow_up, "w".into())), "current: carried out under the lock");
+
+        let resumed = QueueEvent::Resumed {
+            job: "a".into(),
+            message: "mine".into(),
+            budget_usd: None,
+            models: std::collections::BTreeMap::default(),
+        };
+        append(&ctx, "queue.ndjson", 4, resumed);
+        let mut ran = false;
+        let carried = d.carry(&ctx, |_, _, _| {
+            ran = true;
+            Ok(())
+        });
+        assert_eq!(carried.unwrap(), None);
+        assert!(!ran, "resumed by hand: nothing acts on the old decision");
+    }
 
     fn said(action: Action) -> Said {
         Said { action, why: "w".into(), cost_usd: 0.25, account: None }

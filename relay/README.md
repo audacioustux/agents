@@ -357,7 +357,12 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   reaped or ended) or the process waiting for the answer (the job's runner, or
   `decide held`) has died, an answer is refused (exit 4, saying which), `decide
   list` no longer shows it, and the runner stops waiting and asks no further
-  handler. A runner waiting for an answer shows `checking` and holds no seat. `relay view status` lists waiting
+  handler. A handler that answers after that (a `command:` or `agent:` still
+  running, an answer read late) is recorded as `defer` (`withdrawn: ...`) with
+  what it cost. Whatever was decided is carried out under the lock `queue resume`
+  takes, and only while the job is still at the attempt it was asked about: a
+  `follow-up`, `resume`, `requeue` or review verdict never acts on a job that
+  has moved on. A runner waiting for an answer shows `checking` and holds no seat. `relay view status` lists waiting
   decisions in their own section, so a human sees them too.
 
 **Safety.** A worker's report and diff reach an `agent` or `command` handler,

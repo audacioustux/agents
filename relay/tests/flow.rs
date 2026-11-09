@@ -1695,6 +1695,45 @@ fn a_disk_decision_parked_at_the_orchestrator_does_not_suspend_the_runs_limits()
     assert!(steps[0]["why"].as_str().unwrap().starts_with("withdrawn"), "{d}");
 }
 
+/// PR #39 review, issue 2: a `command:` disk handler still running when the run ends is stopped with
+/// it, not waited for: the job ends, its seat and the wait are free, and the handler is gone.
+#[test]
+fn a_disk_handler_still_deciding_when_the_run_ends_is_stopped_with_it() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("disk-handler", false);
+    let script = env.root.join("decide.sh");
+    let pid_file = env.root.join("handler.pid");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\necho $$ >{}\nsleep 300\necho '{{\"action\": \"wait\", \"why\": \"late\"}}'\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    Command::new("chmod").arg("755").arg(&script).status().unwrap();
+    let hooks = format!("[hooks]\ndisk = [\"command:{}\"]\ncommand_timeout_seconds = 600\n", script.display());
+    configure(&env, "job_disk_gb = 0.00001\njob_ceiling_usd = 5.0\n", &hooks);
+    // A session that holds forever, and a time limit of about 7 seconds.
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(env.repo.join("relay.toml"), conf.replace("[session]\n", "[session]\nmax_hours = 0.002\n")).unwrap();
+    claude_account(&env.home, "a", 10, false);
+    std::fs::write(env.home.join(".claude.a/hold"), "").unwrap();
+    ok(&relay(&env, &["queue", "add", "grows", "--text", "Make a change."]), "queue");
+    appears(&pid_file);
+    let j = wait_for(&env, "grows");
+    assert_eq!((j["status"].as_str(), j["reason"].as_str()), (Some("failed"), Some("ran past its time limit; ended")));
+    let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    assert!(stat.is_empty() || stat.contains(") Z "), "the handler went with the run: {stat}");
+    let d = &decisions(&env, "grows")[0];
+    let step = &d["steps"][0];
+    assert_eq!(step["action"]["action"], "defer", "{d}");
+    assert!(step["why"].as_str().unwrap().starts_with("withdrawn"), "{d}");
+}
+
 fn events(env: &Env) -> Vec<serde_json::Value> {
     let out = relay(env, &["view", "events"]);
     String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| serde_json::from_str(l).ok()).collect()

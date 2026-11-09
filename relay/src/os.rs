@@ -112,6 +112,12 @@ pub fn terminate_group(pid: u32) -> Result<()> {
     kill_process_group(pid, Signal::TERM).context("kill")
 }
 
+/// SIGKILL to a process group: a handler relay started as a group leader, with everything it started.
+pub fn kill_group(pid: u32) -> Result<()> {
+    let pid = Pid::from_raw(i32::try_from(pid)?).context("pid 0")?;
+    kill_process_group(pid, Signal::KILL).context("kill")
+}
+
 /// The path this binary was started from. Once an upgrade replaces it, Linux
 /// names the running image `<path> (deleted)`; the path itself then holds
 /// the new binary, which is the one to start.

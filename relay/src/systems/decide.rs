@@ -652,16 +652,18 @@ pub fn decide_while(
         let stale = w.decisions.get(&req.id).is_some_and(|d| !w.asks_now(d));
         stale.then_some("withdrawn: the job has moved on since it was asked")
     };
+    // A handler at work hears of it as soon as the decision is withdrawn or goes stale, and stops.
+    let live = || gone().is_none();
     let ask = |h: &Handler| match h {
         Handler::Rule => rule().map_or_else(
             || Said::defer("no rule applies"),
             |(action, why)| Said { action, why, cost_usd: 0.0, account: None },
         ),
-        Handler::Agent(a) => ask_agent(ctx, job, a, req),
+        Handler::Agent(a) => ask_agent(ctx, job, a, req, &live),
         Handler::Command(argv) => {
             let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
             let env = ctx.relay_env().without(&deny);
-            ask_command(argv, req, Duration::from_secs(ctx.cfg.hooks.command_timeout_seconds), &env)
+            ask_command(argv, req, Duration::from_secs(ctx.cfg.hooks.command_timeout_seconds), &env, &live)
         }
         Handler::Orchestrator => ask_orchestrator(ctx, req, &gone),
     };
@@ -737,9 +739,9 @@ fn waits_for_seat(point: Point) -> bool {
     matches!(point, Point::Cap | Point::Ended)
 }
 
-fn ask_agent(ctx: &Ctx, job: &Job, a: &Agent, req: &Request) -> Said {
+fn ask_agent(ctx: &Ctx, job: &Job, a: &Agent, req: &Request, live: &dyn Fn() -> bool) -> Said {
     let (account, cost_usd, answer) =
-        crate::systems::session::consult(ctx, job, a, &prompt(req), waits_for_seat(req.point()));
+        crate::systems::session::consult(ctx, job, a, &prompt(req), waits_for_seat(req.point()), live);
     match answer.and_then(|text| parse_answer(&text).ok_or_else(|| format!("agent:{} gave no action", a.label))) {
         Ok((action, why)) => Said { action, why, cost_usd, account },
         Err(why) => Said { cost_usd, account, ..Said::defer(why) },
@@ -748,15 +750,27 @@ fn ask_agent(ctx: &Ctx, job: &Job, a: &Agent, req: &Request) -> Said {
 
 /// The most a `command:` handler may print.
 const COMMAND_ANSWER_BYTES: u64 = 64 * 1024;
+/// How often a running `command:` handler is looked at, and how many looks between asking whether it is still wanted.
+const COMMAND_LOOK: Duration = Duration::from_millis(100);
+const LOOKS_PER_ASK: u32 = 10;
 
 /// Runs an external handler with the request on stdin, bounded by `timeout`
 /// (then killed 5 s later if it ignores the TERM), in `env` and nothing else
 /// (relay's own, less what `sandbox.env_deny` matches) and with at most
 /// `COMMAND_ANSWER_BYTES` of answer. A cost it reports is counted, never below zero.
-fn ask_command(argv: &[String], req: &Request, timeout: Duration, env: &crate::host::RelayEnv) -> Said {
+/// It runs as a process group of its own, killed whole as soon as `live` says the
+/// decision is no longer wanted.
+fn ask_command(
+    argv: &[String],
+    req: &Request,
+    timeout: Duration,
+    env: &crate::host::RelayEnv,
+    live: &dyn Fn() -> bool,
+) -> Said {
     let run = || -> Result<String> {
+        use std::os::unix::process::CommandExt as _;
         let mut cmd = env.command("timeout");
-        cmd.args(["-k", "5"]).arg(timeout.as_secs().max(1).to_string()).args(argv);
+        cmd.args(["-k", "5"]).arg(timeout.as_secs().max(1).to_string()).args(argv).process_group(0);
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -767,11 +781,25 @@ fn ask_command(argv: &[String], req: &Request, timeout: Duration, env: &crate::h
         if let Some(mut stdin) = child.stdin.take() {
             std::thread::spawn(move || stdin.write_all(&input));
         }
-        let mut out = Vec::new();
-        if let Some(stdout) = child.stdout.take() {
-            stdout.take(COMMAND_ANSWER_BYTES + 1).read_to_end(&mut out)?;
-        }
-        let status = child.wait()?;
+        let stdout = child.stdout.take().context("stdout")?;
+        let reader = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            stdout.take(COMMAND_ANSWER_BYTES + 1).read_to_end(&mut out).map(|_| out)
+        });
+        let mut looks = 0;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            looks += 1;
+            if looks % LOOKS_PER_ASK == 0 && !live() {
+                let _ = crate::os::kill_group(child.id());
+                let _ = child.wait();
+                anyhow::bail!("withdrawn while it ran");
+            }
+            std::thread::sleep(COMMAND_LOOK);
+        };
+        let out = reader.join().map_err(|_| anyhow::anyhow!("reading its answer"))??;
         anyhow::ensure!(out.len() as u64 <= COMMAND_ANSWER_BYTES, "answered more than {COMMAND_ANSWER_BYTES} bytes");
         anyhow::ensure!(status.success(), "exited with {status}");
         Ok(String::from_utf8_lossy(&out).into_owned())
@@ -1434,17 +1462,46 @@ mod tests {
         let none = full.without(&regex::Regex::new("^$").unwrap());
         let t = Duration::from_secs(1);
         let neg = script("neg", r#"echo '{"action": "stop", "why": "w", "cost_usd": -5}'"#);
-        let s = ask_command(&neg, &r, t, &none);
+        let s = ask_command(&neg, &r, t, &none, &|| true);
         assert_eq!((s.action.name(), s.cost_usd), ("stop", 0.0));
         let big = script("big", "yes '{}' | head -c 200000");
-        assert!(ask_command(&big, &r, t, &none).why.contains("more than"));
+        assert!(ask_command(&big, &r, t, &none, &|| true).why.contains("more than"));
         let env = script("env", r#"echo "{\"action\": \"stop\", \"why\": \"[$HOME]\"}""#);
-        assert_eq!(ask_command(&env, &r, t, &none).why, "[/h]", "the environment it is given");
-        assert_eq!(ask_command(&env, &r, t, &full.without(&regex::Regex::new("^HOME$").unwrap())).why, "[]");
+        assert_eq!(ask_command(&env, &r, t, &none, &|| true).why, "[/h]", "the environment it is given");
+        let home_denied = full.without(&regex::Regex::new("^HOME$").unwrap());
+        assert_eq!(ask_command(&env, &r, t, &home_denied, &|| true).why, "[]");
         let stubborn = script("stubborn", "trap '' TERM\nwhile :; do sleep 1; done");
         let started = std::time::Instant::now();
-        assert_eq!(ask_command(&stubborn, &r, t, &none).action, Action::Defer);
+        assert_eq!(ask_command(&stubborn, &r, t, &none, &|| true).action, Action::Defer);
         assert!(started.elapsed() < Duration::from_secs(15), "killed after the grace");
+        // PR #39 review, issue 2: withdrawn while it runs, the whole group is killed at once.
+        let pid_file = dir.join("slow.pid");
+        let slow =
+            script("slow", &format!("echo $$ >{}\nsleep 60\necho '{{\"action\": \"wait\"}}'", pid_file.display()));
+        let wanted = std::cell::Cell::new(true);
+        let live = || {
+            if pid_file.exists() {
+                wanted.set(false);
+            }
+            wanted.get()
+        };
+        let started = std::time::Instant::now();
+        let s = ask_command(&slow, &r, Duration::from_secs(120), &none, &live);
+        assert_eq!(s.action, Action::Defer);
+        assert!(s.why.contains("withdrawn"), "{}", s.why);
+        assert!(started.elapsed() < Duration::from_secs(10), "not waited for: {:?}", started.elapsed());
+        let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+        let gone = || {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            stat.is_empty() || stat.contains(") Z ")
+        };
+        for _ in 0..50 {
+            if gone() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(gone(), "the handler's own process went with it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

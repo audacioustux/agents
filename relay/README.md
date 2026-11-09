@@ -345,8 +345,9 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   stdout: `{"action": "continue", "budget": 20, "why": "..."}` (`cost_usd`
   optional, never counted below zero). It runs without the variables
   `sandbox.env_deny` names, is killed 5 s after `command_timeout_seconds` if it
-  ignores the TERM, and may print at most 64 KiB. A malformed answer, a failure
-  or a timeout is a `defer`.
+  ignores the TERM, and may print at most 64 KiB. It runs in a process group of
+  its own, killed whole within a second once its decision is withdrawn or goes
+  stale. A malformed answer, a failure or a timeout is a `defer`.
 - `orchestrator`: parks the request on the bus. `relay decide list --wait`
   blocks on the doorbell until a request is waiting and prints it (`--json`:
   each with its full request); `relay decide answer ID --action A [--message M]
@@ -669,7 +670,10 @@ resume`. `wait` lets it go on, and asks again only after an hour. While the
 chain decides (an orchestrator can take `orchestrator_timeout_minutes`), the run
 goes on under all its limits: its spend cap, silence limit and time limit still
 end it, and a decision still waiting then is withdrawn (`decided` by
-`orchestrator`, `defer`, `withdrawn: ...`) and refused if answered. Nothing is
+`orchestrator`, `defer`, `withdrawn: ...`) and refused if answered. A
+`command:` or `agent:` handler still at work then is stopped with it (a command's
+whole process group is killed, an agent's session ended), so the job ends, frees
+its seat and `view result --wait` returns without waiting for the handler. Nothing is
 ever deleted inside a running job's clone.
 
 `[session] env` sets variables in every job's environment (and the dispatcher's), over

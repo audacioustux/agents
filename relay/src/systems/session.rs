@@ -200,7 +200,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         measure: work.clone.iter().map(SessionRepo::path).chain([work.tmp.as_path()]).collect(),
     };
     let (report, ending, disk) =
-        drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader())?;
+        drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
     if !report.answer.is_empty() {
         std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
     }
@@ -501,9 +501,10 @@ pub fn consult(
     agent: &decide::Agent,
     prompt: &str,
     patient: bool,
+    live: &dyn Fn() -> bool,
 ) -> (Option<String>, f64, Result<String, String>) {
     let wait = if patient { ctx.cfg.hooks.seat_wait_minutes } else { 0.0 };
-    let home = match await_seat(ctx, job, agent, wait) {
+    let home = match await_seat(ctx, job, agent, wait, live) {
         Ok(home) => home,
         Err(why) => return (None, 0.0, Err(why)),
     };
@@ -554,7 +555,7 @@ pub fn consult(
             stderr: "check-stderr.log",
             measure: Vec::new(),
         };
-        let ran = drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader())
+        let ran = drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader(), live)
             .map(|(report, ending, _)| (report, ending));
         let _ = std::fs::remove_dir_all(&scratch);
         ran
@@ -578,7 +579,13 @@ const SEAT_REREAD: Duration = Duration::from_secs(30);
 /// A seat for `agent`'s session: waits up to `minutes` for one to free, asking for a fresh quota
 /// reading of any account whose reading is old (dispatch only takes readings for queued jobs, and a
 /// checkpoint is not one). Nothing else is held meanwhile but the worker's own seat.
-fn await_seat(ctx: &Ctx, job: &Job, agent: &decide::Agent, minutes: f64) -> Result<Home, String> {
+fn await_seat(
+    ctx: &Ctx,
+    job: &Job,
+    agent: &decide::Agent,
+    minutes: f64,
+    live: &dyn Fn() -> bool,
+) -> Result<Home, String> {
     let wait = Duration::from_secs_f64(minutes.max(0.0) * 60.0);
     let started = Instant::now();
     let mut asked: Option<Instant> = None;
@@ -593,6 +600,9 @@ fn await_seat(ctx: &Ctx, job: &Job, agent: &decide::Agent, minutes: f64) -> Resu
             let _ = ctx.spawn_self(&["quota", "refresh", "--stale"], &ctx.state.join("quota.log"));
         }
         let left = wait.saturating_sub(started.elapsed());
+        if !live() {
+            return Err(format!("agent:{} was withdrawn while it waited for a seat", agent.label));
+        }
         if left.is_zero() {
             let (harness, label) = (&agent.harness, &agent.label);
             return Err(if wait.is_zero() {
@@ -865,20 +875,8 @@ fn listen(
     (tx, rx, stop)
 }
 
-/// Runs the agent, feeding its stdin and teeing its stream to the job's log.
-/// Ends it if it goes silent, runs past its time limit or spends past its
-/// cap: the same limits for every harness, whatever the CLI enforces itself.
-fn drive(
-    ctx: &Ctx,
-    job: &Job,
-    account: &str,
-    run: &Run<'_>,
-    cmd: &mut Command,
-    stdin: Option<&str>,
-    mut reader: Box<dyn Reader>,
-) -> Result<(Report, Ending, Option<String>)> {
-    let port = port(ctx, job);
-    let mut log = Ctx::append_private(&ctx.job_file(&job.name, run.log))?;
+/// Starts the session, its stderr to the job's file and `stdin` fed by a thread of its own.
+fn start(ctx: &Ctx, job: &Job, run: &Run<'_>, cmd: &mut Command, stdin: Option<&str>) -> Result<std::process::Child> {
     let mut child = cmd
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -889,6 +887,31 @@ fn drive(
         // A writer thread, so a full pipe cannot block reading the output.
         std::thread::spawn(move || pipe.write_all(text.as_bytes()));
     }
+    Ok(child)
+}
+
+/// How often a drive asks `live` whether its session is still wanted.
+const LIVE_LOOK: Duration = Duration::from_secs(1);
+
+/// Runs the agent, feeding its stdin and teeing its stream to the job's log.
+/// Ends it if it goes silent, runs past its time limit or spends past its
+/// cap: the same limits for every harness, whatever the CLI enforces itself.
+/// Ends it too once `live` says nobody wants it any more (a decision's agent
+/// whose decision was withdrawn); a worker's run passes `|| true`.
+#[allow(clippy::too_many_arguments)]
+fn drive(
+    ctx: &Ctx,
+    job: &Job,
+    account: &str,
+    run: &Run<'_>,
+    cmd: &mut Command,
+    stdin: Option<&str>,
+    mut reader: Box<dyn Reader>,
+    live: &dyn Fn() -> bool,
+) -> Result<(Report, Ending, Option<String>)> {
+    let port = port(ctx, job);
+    let mut log = Ctx::append_private(&ctx.job_file(&job.name, run.log))?;
+    let mut child = start(ctx, job, run, cmd, stdin)?;
     let stdout = child.stdout.take().context("stdout")?;
     let (answers, rx, _stop) = listen(ctx, run, stdout);
 
@@ -904,9 +927,20 @@ fn drive(
     let mut asking = false;
     std::thread::scope(|scope| -> Result<()> {
         let _withdraw = Withdraw(&wanted);
+        let mut looked_at = Instant::now();
         loop {
-            let wait =
-                silent_after.saturating_sub(heard_at.elapsed()).min(deadline.saturating_duration_since(Instant::now()));
+            if looked_at.elapsed() >= LIVE_LOOK {
+                looked_at = Instant::now();
+                if !live() {
+                    // bwrap's --die-with-parent and pid namespace take everything inside with it.
+                    let _ = child.kill();
+                    break;
+                }
+            }
+            let wait = silent_after
+                .saturating_sub(heard_at.elapsed())
+                .min(deadline.saturating_duration_since(Instant::now()))
+                .min(LIVE_LOOK);
             match rx.recv_timeout(wait) {
                 Ok(Heard::Line(Ok(line))) => {
                     heard_at = Instant::now();
@@ -959,8 +993,14 @@ fn drive(
                 }
                 Ok(Heard::Line(Err(_)) | Heard::End) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    (ending.silent, ending.timed_out) =
-                        if Instant::now() >= deadline { (false, true) } else { (true, false) };
+                    // The wait is cut short to look at `live`: only a limit that has passed ends the run.
+                    (ending.silent, ending.timed_out) = if Instant::now() >= deadline {
+                        (false, true)
+                    } else if heard_at.elapsed() >= silent_after {
+                        (true, false)
+                    } else {
+                        continue;
+                    };
                     // bwrap's --die-with-parent and pid namespace take everything inside with it.
                     let _ = child.kill();
                     break;

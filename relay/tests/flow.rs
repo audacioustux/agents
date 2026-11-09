@@ -1184,8 +1184,17 @@ fn a_decision_for_a_resumed_job_or_a_dead_runner_is_refused_and_the_job_is_reape
     ok(&relay(&env, &["queue", "add", "orphan", "--text", "Make a change."]), "queue");
     let (id, _) = parked(&env, "orphan");
     assert_eq!(job(&env, "orphan")["status"], "checking");
-    let pid = job(&env, "orphan")["runner"][0].as_u64().unwrap();
+    let runner = job(&env, "orphan")["runner"].clone();
+    let (pid, started) = (runner[0].as_u64().unwrap(), runner[1].as_u64().unwrap());
     assert!(Command::new("kill").args(["-9", &pid.to_string()]).status().unwrap().success());
+    // The signal is delivered asynchronously: answer only once the runner is gone.
+    for _ in 0..100 {
+        if !alive(pid, started) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!alive(pid, started), "the runner did not die");
     let out = relay(&env, &["decide", "answer", &id, "--action", "accept"]);
     assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
     // Refused for the dead runner, or, once the dispatcher reaped it, for the failed job.

@@ -2,7 +2,7 @@
 //! owner's switches. Emits: account-enabled, reading. Readings come from each
 //! harness's quota command (no model call) and from what sessions stream.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
@@ -15,7 +15,7 @@ use crate::ctx::Ctx;
 use crate::harness::{Home, Identity, Meters, SignIn};
 use crate::os::Role;
 use crate::sandbox;
-use crate::systems::dispatch::{may_use, model_for, seats_taken};
+use crate::systems::dispatch::{Room, may_use, model_for};
 use crate::world::{AccountState, Job, Status, World};
 
 /// The capability to write quota's port; only this module can make one.
@@ -218,21 +218,17 @@ impl Row<'_> {
     }
 }
 
-/// How an account stands for `model`: its state cell, the meter that decides, and whether it would take the job.
-fn judge(
-    a: &Home,
-    st: Option<&AccountState>,
-    model: Option<&str>,
-    limits: &Limits,
-    now: u64,
-) -> (String, String, Floor, bool) {
+/// How an account stands for `model`: its state cell, the meter that decides, and whether it
+/// would take the job, by the dispatcher's own judgment ([`Room::admit`]): a full seat is not ready.
+fn judge(room: &Room, a: &Home, model: Option<&str>, limits: &Limits, now: u64) -> (String, String, Floor, bool) {
     let h = harness_of(a);
-    let fit = accounts::fit(a, st, model, limits, now);
-    let ready = fit.is_ok();
-    let state = match fit {
+    let st = room.account(&a.key());
+    let admitted = room.admit(limits, a, model, now);
+    let ready = admitted.is_ok();
+    let state = match admitted {
         Ok(_) if !h.caps().quota => "ready (unmetered)".to_owned(),
         Ok(_) => "ready".to_owned(),
-        Err(r) => refusal_cell(&r, st),
+        Err(r) => r.busy.into_iter().chain(r.fit.as_ref().map(|f| refusal_cell(f, st))).collect::<Vec<_>>().join(", "),
     };
     let deciding = st.and_then(|s| {
         let governing = h.meters_for(model, &s.meters).ok()?;
@@ -271,7 +267,10 @@ pub fn wanted(world: &World, account: &Home) -> bool {
 }
 
 pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
-    let v = accounts_view(ctx, world);
+    let neighbours = ctx.neighbours();
+    let others: Vec<&World> = neighbours.iter().collect();
+    let room = room_for(Rules::Project(ctx), world, &others);
+    let v = accounts_in(Rules::Project(ctx), &room, world, &others);
     ctx.reply(&v.json, &v.text())
 }
 
@@ -294,10 +293,6 @@ impl AccountsView {
     }
 }
 
-pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
-    accounts_among(Rules::Project(ctx), world, &ctx.neighbours())
-}
-
 /// Whose rules judge whether an account would take a job.
 #[derive(Debug, Clone, Copy)]
 pub enum Rules<'a> {
@@ -318,29 +313,27 @@ impl<'a> Rules<'a> {
     }
 }
 
-/// As [`accounts_view`], for `world` among the other projects' folds, already read
+/// The room `rules` judge accounts and jobs in, for `world` among the other projects' folds
 /// (outside any project, `world` is empty and `others` are all of them).
-pub fn accounts_among<'a>(
-    rules: Rules<'_>,
-    world: &World,
-    others: impl IntoIterator<Item = &'a World> + Clone,
-) -> AccountsView {
-    let mut world = world.clone();
-    world.hear_accounts(others.clone());
-    let found = match rules {
-        Rules::Project(ctx) => accounts::discover(&ctx.cfg),
-        Rules::MachineWide => accounts::discover_all(),
-    };
-    accounts::settle(&mut world, &found);
-    let others: Vec<&World> = others.into_iter().collect();
-    let elsewhere = seats_taken(others.iter().copied());
+pub fn room_for(rules: Rules<'_>, world: &World, others: &[&World]) -> Room {
     match rules {
         Rules::Project(ctx) => {
-            let mut v = view(&ctx.cfg, &found, &world, &others, &elsewhere, now_micros());
+            Room::new(&ctx.cfg, world, others, crate::systems::dispatch::disk_ok(&ctx.cfg.limits, &ctx.clones))
+        }
+        Rules::MachineWide => Room::machine_wide(world, others),
+    }
+}
+
+/// The accounts' view for `world` among the other projects' folds, already read, judged by
+/// `rules` in `room` (from [`room_for`] with the same rules and folds).
+pub fn accounts_in(rules: Rules<'_>, room: &Room, world: &World, others: &[&World]) -> AccountsView {
+    match rules {
+        Rules::Project(ctx) => {
+            let mut v = view(&ctx.cfg, room, world, others, now_micros());
             v.missing(&ctx.cfg.missing_harnesses());
             v
         }
-        Rules::MachineWide => machine_wide(&found, &world, &elsewhere, now_micros()),
+        Rules::MachineWide => machine_wide(room, now_micros()),
     }
 }
 
@@ -362,13 +355,13 @@ impl AccountsView {
 }
 
 /// Every account on the machine as all projects know it, judged by none of them.
-fn machine_wide(found: &[Home], world: &World, elsewhere: &BTreeMap<String, usize>, now: u64) -> AccountsView {
-    let twins = accounts::twins(found);
+fn machine_wide(room: &Room, now: u64) -> AccountsView {
+    let found = room.found();
     let rows: Vec<Row<'_>> = found
         .iter()
         .map(|a| {
             let key = a.key();
-            let st = world.accounts.get(&key);
+            let st = room.account(&key);
             let state = accounts::shared_refusal(harness_of(a), st, now)
                 .map_or_else(|| "not limited".to_owned(), |r| refusal_cell(&r, st));
             let tightest = st
@@ -377,17 +370,15 @@ fn machine_wide(found: &[Home], world: &World, elsewhere: &BTreeMap<String, usiz
                     accounts::tightest(&all, &s.meters, secs(now))
                 })
                 .map_or(String::new(), |(k, m)| accounts::meter_line(k, m));
-            let seat = accounts::seat(&twins, &key);
-            let running = elsewhere.iter().filter(|(k, _)| accounts::seat(&twins, k) == seat).map(|(_, n)| n).sum();
             Row {
-                same_as: twins.get(&key).cloned(),
+                same_as: room.twin_of(&key).cloned(),
                 identity: match accounts::sign_in(a) {
                     SignIn::As(id) => Some(id),
                     SignIn::Out | SignIn::Unknown => None,
                 },
+                running: room.running_on(&key),
                 account: key,
                 state,
-                running,
                 meters: st.map(|s| &s.meters),
                 read_at: st.and_then(|s| s.read_at),
                 tightest,
@@ -408,59 +399,52 @@ fn machine_wide(found: &[Home], world: &World, elsewhere: &BTreeMap<String, usiz
     AccountsView { json, head, cells, ready }
 }
 
-/// The view of `found` in `world` (which has heard its neighbours), with the models the other
-/// projects' jobs ask for (`others`) and the seats they hold (`elsewhere`), at `now` (bus time).
-fn view(
-    cfg: &Config,
-    found: &[Home],
-    world: &World,
-    others: &[&World],
-    elsewhere: &BTreeMap<String, usize>,
-    now: u64,
-) -> AccountsView {
+/// The model a running job runs, as its dispatch recorded it, else (a record from before the
+/// model was) the one it names on `harness`.
+fn running_model(j: &Job, harness: &str) -> Option<String> {
+    j.model.clone().or_else(|| j.models.get(harness).cloned())
+}
+
+/// The view of the accounts in `room`, with the models the jobs of `world` and of the other
+/// projects (`others`) ask for, at `now` (bus time).
+fn view(cfg: &Config, room: &Room, world: &World, others: &[&World], now: u64) -> AccountsView {
     let limits = &cfg.limits;
-    let twins = accounts::twins(found);
     let row = |a: &Home| {
         let key = a.key();
-        let st = world.accounts.get(&key);
+        let st = room.account(&key);
         // The dispatcher's own judgment, for the configured model and every other one its jobs ask for.
         let model = cfg.harness(a.harness).model;
-        let (state, tightest, floor, ready) = judge(a, st, model.as_deref(), limits, now);
-        let asks = |j: &&Job| match j.status {
-            Status::Queued => may_use(j, a),
-            Status::Running => j.account.as_ref() == Some(&key),
-            _ => false,
-        };
-        // Another project's job that names no model asks for its own config's, which is not known
+        let (state, tightest, floor, ready) = judge(room, a, model.as_deref(), limits, now);
+        let runs_here = |j: &&Job| j.status == Status::Running && j.account.as_ref() == Some(&key);
+        // A running job asks for what its dispatch recorded, whichever project it is. A queued job
+        // of another project that names no model asks for its own config's, which is not known
         // here; one that names a model asks for it on this machine's accounts like ours do.
-        let theirs = others.iter().flat_map(|w| w.jobs().values()).filter(asks).filter_map(|j| j.models.get(a.harness));
-        let asked: BTreeSet<String> = world
-            .jobs()
-            .values()
-            .filter(asks)
-            .filter_map(|j| model_for(cfg, j, a.harness))
+        let running = world.jobs().values().chain(others.iter().flat_map(|w| w.jobs().values())).filter(runs_here);
+        let queued = |j: &&Job| j.status == Status::Queued && may_use(j, a);
+        let ours = world.jobs().values().filter(queued).filter_map(|j| model_for(cfg, j, a.harness));
+        let theirs =
+            others.iter().flat_map(|w| w.jobs().values()).filter(queued).filter_map(|j| j.models.get(a.harness));
+        let asked: BTreeSet<String> = running
+            .filter_map(|j| running_model(j, a.harness))
+            .chain(ours)
             .chain(theirs.cloned())
             .filter(|m| Some(m) != model.as_ref())
             .collect();
         let by_model = asked
             .into_iter()
             .map(|m| {
-                let (state, tightest, floor, ready) = judge(a, st, Some(&m), limits, now);
+                let (state, tightest, floor, ready) = judge(room, a, Some(&m), limits, now);
                 Judged { model: m, state, tightest, floor, ready }
             })
             .collect();
-        // Twins share their seats: a session on either is a session on both.
-        let seat = accounts::seat(&twins, &key);
-        let here = |k: &str| accounts::seat(&twins, k) == seat;
-        let running =
-            world.jobs().values().filter(|j| j.status == Status::Running && j.account.as_deref().is_some_and(here));
         let identity = match accounts::sign_in(a) {
             SignIn::As(id) => Some(id),
             SignIn::Out | SignIn::Unknown => None,
         };
         Row {
-            running: running.count() + elsewhere.iter().filter(|(k, _)| here(k)).map(|(_, n)| n).sum::<usize>(),
-            same_as: twins.get(&key).cloned(),
+            // Twins share their seats: a session on either is a session on both.
+            running: room.running_on(&key),
+            same_as: room.twin_of(&key).cloned(),
             identity,
             account: key,
             state,
@@ -472,7 +456,7 @@ fn view(
             by_model,
         }
     };
-    let rows: Vec<Row<'_>> = found.iter().map(row).collect();
+    let rows: Vec<Row<'_>> = room.found().iter().map(row).collect();
     let names: Vec<_> = cfg.harnesses().iter().map(|h| h.id()).collect();
     let l = &cfg.limits;
     let near = l
@@ -492,6 +476,8 @@ fn view(
 mod tests {
     use std::path::PathBuf;
 
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::config::tempdir;
     use crate::harness::Meter;
@@ -506,6 +492,12 @@ mod tests {
         let text = format!("name = \"demo\"\n[harness.omp]\nmodel = \"{model}\"\n");
         let cfg = Config::parse(&text, d.path()).unwrap();
         (d, cfg)
+    }
+
+    /// The view of `found` in `world` among `others`, with `world`'s account states as they are.
+    fn view_of(cfg: &Config, found: &[Home], world: &World, others: &[&World]) -> AccountsView {
+        let room = Room::of(found.to_vec(), world.accounts.clone(), world, others, true);
+        view(cfg, &room, world, others, NOW)
     }
 
     fn omp() -> Home {
@@ -547,7 +539,7 @@ mod tests {
     fn the_configured_model_alone_renders_as_one_row() {
         let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
         let jobs = [queued("a", None), queued("b", Some("minimax-code/MiniMax-M3.1-Flash"))];
-        let v = view(&cfg, &[omp()], &world(&jobs), &[], &BTreeMap::new(), NOW);
+        let v = view_of(&cfg, &[omp()], &world(&jobs), &[]);
         assert_eq!(crate::systems::view::table(&v.cells), ["omp:default  ready  4% minimax-code/General 7 Day"]);
         assert_eq!(v.ready, [true]);
         assert!(v.json["accounts"][0].get("byModel").is_none(), "{}", v.json);
@@ -557,7 +549,7 @@ mod tests {
     fn a_model_another_projects_job_asks_for_is_judged_too() {
         let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
         let theirs = world(&[queued("a", Some("openai-codex/gpt-6.1-sol")), queued("b", None)]);
-        let v = view(&cfg, &[omp()], &world(&[]), &[&theirs], &BTreeMap::new(), NOW);
+        let v = view_of(&cfg, &[omp()], &world(&[]), &[&theirs]);
         assert_eq!(v.cells.len(), 2, "{:?}", v.cells);
         assert_eq!((v.cells[1][0].as_str(), v.cells[1][2].as_str()), ("  for openai-codex/gpt-6.1-sol", "at floor"));
         assert_eq!(v.ready, [true, false]);
@@ -567,7 +559,7 @@ mod tests {
     fn a_model_judged_as_its_account_is_no_sub_row_of_its_own() {
         let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
         let jobs = [queued("a", Some("minimax-code/MiniMax-M3.5"))];
-        let v = view(&cfg, &[omp()], &world(&jobs), &[], &BTreeMap::new(), NOW);
+        let v = view_of(&cfg, &[omp()], &world(&jobs), &[]);
         assert_eq!(v.cells.len(), 1, "the sub-row would repeat its account's row: {:?}", v.cells);
         assert_eq!(v.json["accounts"][0]["byModel"][0]["model"], "minimax-code/MiniMax-M3.5", "--json keeps it");
     }
@@ -576,7 +568,7 @@ mod tests {
     fn a_queued_jobs_model_at_floor_shows_the_hold() {
         let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
         let jobs = [queued("a", Some("openai-codex/gpt-6.1-sol")), queued("b", Some("openai-codex/gpt-6.1-sol"))];
-        let v = view(&cfg, &[omp()], &world(&jobs), &[], &BTreeMap::new(), NOW);
+        let v = view_of(&cfg, &[omp()], &world(&jobs), &[]);
         let resets = accounts::fmt_time(secs(NOW) + 3_600);
         assert_eq!(
             crate::systems::view::table(&v.cells),
@@ -611,7 +603,7 @@ mod tests {
         }
         w.accounts.get_mut("claude:c").unwrap().signed_out = true;
         w.accounts.get_mut("claude:c").unwrap().signed_at = Some(NOW);
-        let v = view(&cfg, &found, &w, &[], &BTreeMap::new(), NOW);
+        let v = view_of(&cfg, &found, &w, &[]);
         let table = v.text();
         let (first, third) = (v.json["accounts"][0]["identity"]["id"].as_str().unwrap(), &v.json["accounts"][2]);
         assert!(table.contains(&format!("claude:a  Ultra #{first}  ready")), "{table}");
@@ -624,10 +616,40 @@ mod tests {
         }
     }
 
+    /// Audit finding 14: the pane judges an account as the dispatcher does, its seats too, so an
+    /// account whose seats are full is not `ready`, while one of its other providers still is.
+    #[test]
+    fn an_account_with_no_free_seat_is_not_ready() {
+        let d = tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let text =
+            "name = \"demo\"\n[limits]\nper_account = 1\n[harness.omp]\nmodel = \"minimax-code/MiniMax-M3.1-Flash\"\n";
+        let cfg = Config::parse(text, d.path()).unwrap();
+        let running = Job {
+            name: "r".into(),
+            status: Status::Running,
+            account: Some(omp().key()),
+            model: Some("minimax-code/MiniMax-M3.1-Flash".into()),
+            provider: "minimax-code".into(),
+            ..Job::default()
+        };
+        let v = view_of(&cfg, &[omp()], &world(std::slice::from_ref(&running)), &[]);
+        assert_eq!(v.json["accounts"][0]["state"], "busy (1 of 1 seat on minimax-code)", "{}", v.json);
+        assert_eq!(v.json["accounts"][0]["running"], 1);
+        assert_eq!(v.ready, [false], "the dispatcher would start nothing there on this model");
+        // The same session on another project's bus fills the same seat.
+        let theirs = world(&[Job {
+            runner: Some((std::process::id(), crate::os::start_time(std::process::id()).unwrap())),
+            ..running
+        }]);
+        let v = view_of(&cfg, &[omp()], &world(&[]), &[&theirs]);
+        assert_eq!(v.ready, [false], "{}", v.json);
+    }
+
     #[test]
     fn the_state_cell_does_not_repeat_the_meter() {
         let (_d, cfg) = cfg("openai-codex/gpt-6.1-sol");
-        let v = view(&cfg, &[omp()], &world(&[]), &[], &BTreeMap::new(), NOW);
+        let v = view_of(&cfg, &[omp()], &world(&[]), &[]);
         let resets = accounts::fmt_time(secs(NOW) + 3_600);
         assert_eq!(v.cells[0][2], "at floor");
         assert_eq!(v.cells[0][4], format!("100% openai-codex/5 hours, resets {resets}"));

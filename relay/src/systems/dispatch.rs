@@ -9,20 +9,22 @@
 //! a minute with nothing queued or running.
 //! Every system that emits wakes it, so it never has to be started by hand.
 
-use std::collections::BTreeMap;
+mod room;
+
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Subcommand;
 
-use crate::accounts::{self, STALE_MICROS, harness_of};
+use crate::accounts::{STALE_MICROS, harness_of};
 use crate::bus::{DispatchEvent, now_micros};
-use crate::config::{Config, Profile};
+use crate::config::{Config, Limits, Profile};
 use crate::ctx::Ctx;
 use crate::harness::{Harness, Home};
 use crate::os::{self, Role};
 use crate::world::{AccountState, DAY_MICROS, Job, Status, Wait, World};
+pub use room::{Hold, Room, Start};
 
 /// The longest sleep. Only a runner that dies without a word (one started by
 /// an earlier dispatcher, or killed outright) waits this long to be reaped.
@@ -192,18 +194,22 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     // Accounts belong to the machine: what other projects learned of them, and
     // the seats their sessions hold, count here too. Their jobs stay theirs.
     let neighbours = ctx.neighbours();
-    world.hear_accounts(&neighbours);
-    let elsewhere = seats_held(&ctx.cfg, &neighbours);
-    let found = accounts::discover(&ctx.cfg);
-    accounts::settle(&mut world, &found);
-    refresh_stale(ctx, &world, &found)?;
+    let others: Vec<&World> = neighbours.iter().collect();
+    let mut room = Room::new(&ctx.cfg, &world, &others, disk_ok(&ctx.cfg.limits, &ctx.clones));
+    refresh_stale(ctx, &room, &world)?;
     let mut held = Held::default();
-    let plan = plan(&ctx.cfg, &ctx.clones, &world, &elsewhere, &found, now_micros(), &mut held);
-    for (job, account) in plan {
+    for Start { job, account, model, provider } in plan(&ctx.cfg, &mut room, &world, now_micros(), &mut held) {
         let (pid, gate) = ctx.spawn_gated(&["session", "run", &job], &ctx.job_file(&job, "runner.log"))?;
         let started = os::start_time(pid).unwrap_or(0);
-        // The runner reads its account from this event, so it waits at the gate until it is written.
-        port.emit(DispatchEvent::Dispatched { job, account, runner_pid: pid, runner_started: started })?;
+        // The runner reads its account and model from this event, so it waits at the gate until it is written.
+        port.emit(DispatchEvent::Dispatched {
+            job,
+            account,
+            model,
+            provider,
+            runner_pid: pid,
+            runner_started: started,
+        })?;
         drop(gate);
     }
     let held_due = ask_held(ctx, &world, &held)?;
@@ -211,7 +217,7 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     // one held by a runner (checking too) is watched until it ends or is reaped.
     let busy = world.jobs().values().any(|j| world.moves_on_its_own(j));
     let waiting = world.jobs().values().any(|j| world.startable(j));
-    let states: Vec<_> = found.iter().map(|a| (harness_of(a), world.accounts.get(&a.key()))).collect();
+    let states: Vec<_> = room.found().iter().map(|a| (harness_of(a), room.account(&a.key()))).collect();
     let due = next_due(&states, waiting, now_micros());
     Ok((busy, Held(held.0, None, Vec::new()), [due, held.1, held_due].into_iter().flatten().min()))
 }
@@ -264,47 +270,23 @@ fn next_due(accounts: &[(&dyn Harness, Option<&AccountState>)], waiting: bool, n
     times.into_iter().filter(|&t| t > now_us).min()
 }
 
-/// The seats live runners hold in `worlds`: each one's account and, for omp, provider.
-pub fn seats_held(cfg: &Config, worlds: &[World]) -> Vec<(String, String)> {
-    let mut held = Vec::new();
-    for j in worlds.iter().flat_map(|w| w.jobs().values()) {
-        if j.status == Status::Running
-            && let (Some(account), Some((pid, started))) = (&j.account, j.runner)
-            && os::same_process(pid, started)
-        {
-            held.push((account.clone(), provider_on(cfg, j, account)));
-        }
-    }
-    held
-}
-
-/// Sessions running on each account in `worlds`, counting only jobs their
-/// fold says run and whose runner is still alive.
-pub fn seats_taken<'a>(worlds: impl IntoIterator<Item = &'a World>) -> BTreeMap<String, usize> {
-    let mut seats = BTreeMap::new();
-    for j in worlds.into_iter().flat_map(|w| w.jobs().values()) {
-        if j.status == Status::Running
-            && let (Some(account), Some((pid, started))) = (&j.account, j.runner)
-            && os::same_process(pid, started)
-        {
-            *seats.entry(account.clone()).or_default() += 1;
-        }
-    }
-    seats
-}
-
 /// Starts a quota reading for accounts whose reading is old and that a
 /// waiting job may run on: `claude /usage` is not free to call, and a job
 /// pinned to one harness says nothing about another's accounts.
-fn refresh_stale(ctx: &Ctx, world: &World, found: &[Home]) -> Result<()> {
+fn refresh_stale(ctx: &Ctx, room: &Room, world: &World) -> Result<()> {
     let now = now_micros();
-    if found.iter().any(|a| {
-        crate::systems::quota::wanted(world, a) && accounts::due(harness_of(a), world.accounts.get(&a.key()), now)
+    if room.found().iter().any(|a| {
+        crate::systems::quota::wanted(world, a) && crate::accounts::due(harness_of(a), room.account(&a.key()), now)
     }) {
         // `quota refresh` holds its own role, so overlapping passes start it once.
         ctx.spawn_self(&["quota", "refresh", "--stale", "--wanted"], &ctx.state.join("quota.log"))?;
     }
     Ok(())
+}
+
+/// Whether free disk under the clones (`clones`) lets a build job start: unmeasured is not enough.
+pub fn disk_ok(limits: &Limits, clones: &Path) -> bool {
+    limits.min_free_disk_gb <= 0.0 || os::free_disk_gb(clones).is_some_and(|gb| gb >= limits.min_free_disk_gb)
 }
 
 /// Why a job of profile `name` may not start at `now_us`, with when (bus time) that
@@ -336,47 +318,20 @@ pub fn profile_hold(
     Some((format!("profile {name}: {count} started in 24h (max {max}){at}"), Some(slot)))
 }
 
-/// Which queued jobs start now, and where. Pure apart from reading machine
-/// gauges. `elsewhere` is the seats other projects hold: they count against
-/// `limits.per_account`, but not against this project's `max_running`. `now_us`
+/// Which queued jobs start now, where, and on what model. Pure apart from reading the load
+/// average. Each job is judged by `room.judge` (the same judgment the board's reasons show), and
+/// each start is booked in `room` before the next job is judged. The seats other projects hold
+/// count against `limits.per_account`, but not against this project's `max_running`. `now_us`
 /// is bus time, so a profile's daily window can be judged at any moment.
-fn plan(
-    cfg: &Config,
-    clones: &Path,
-    world: &World,
-    elsewhere: &[(String, String)],
-    found: &[Home],
-    now_us: u64,
-    held: &mut Held,
-) -> Vec<(String, String)> {
+fn plan(cfg: &Config, room: &mut Room, world: &World, now_us: u64, held: &mut Held) -> Vec<Start> {
     let limits = &cfg.limits;
-    let mut running: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut starts = world.profile_starts.clone();
-    for p in world.jobs().values().filter(|j| j.status.has_runner()).filter_map(|j| j.profile.as_deref()) {
-        *running.entry(p).or_default() += 1;
-    }
-    // Homes signed in as one account share a seat budget, held under the first one's key.
-    let twins = accounts::twins(found);
-    let seat = |key: &str, provider: &str| seat_key(accounts::seat(&twins, key), provider);
-    let mut load: BTreeMap<String, usize> = BTreeMap::new();
-    for (key, provider) in elsewhere {
-        *load.entry(seat(key, provider)).or_default() += 1;
-    }
-    let mut total = 0;
-    for j in world.jobs().values().filter(|j| j.status == Status::Running) {
-        let account = j.account.as_deref().unwrap_or_default();
-        *load.entry(seat(account, &provider_on(cfg, j, account))).or_default() += 1;
-        total += 1;
-    }
+    let mut total = world.jobs().values().filter(|j| j.status == Status::Running).count();
     if let (Some(max), Some(now)) = (limits.max_load, os::load_average())
         && now > max
     {
         held.0.push(format!("load {now:.1} is above {max}"));
         return Vec::new();
     }
-    // Unmeasured is not the same as enough.
-    let disk_ok =
-        limits.min_free_disk_gb <= 0.0 || os::free_disk_gb(clones).is_some_and(|gb| gb >= limits.min_free_disk_gb);
     let mut queued: Vec<&Job> = world.jobs().values().filter(|j| j.status == Status::Queued).collect();
     queued.sort_by_key(|j| j.created_at);
     let mut out = Vec::new();
@@ -391,92 +346,21 @@ fn plan(
             }
             continue;
         }
-        let profile = j.profile.as_deref().and_then(|n| cfg.profiles.get(n).map(|p| (n, p)));
-        if let Some((n, p)) = profile.filter(|_| !j.forced)
-            && let Some((why, until)) = profile_hold(
-                n,
-                p,
-                running.get(n).copied().unwrap_or(0),
-                starts.get(n).map_or(&[], Vec::as_slice),
-                now_us,
-            )
-        {
-            held.0.push(format!("{}: {why}", j.name));
-            held.1 = [held.1, until].into_iter().flatten().min();
-            held.2.push(j.name.clone());
-            continue;
-        }
-        if !j.readonly() && !disk_ok {
-            held.0.push(format!("{}: free disk below {} GB", j.name, limits.min_free_disk_gb));
-            held.2.push(j.name.clone());
-            continue;
-        }
-        // Every account of every harness the job allows, judged the same way:
-        // on the meters its harness says govern the job's model there.
-        let mut why = Vec::new();
-        let mut fits: Vec<(&Home, f64)> = Vec::new();
-        for a in found.iter().filter(|a| may_use(j, a)) {
-            let model = model_for(cfg, j, a.harness);
-            let provider = provider_of(model.as_deref(), a.harness);
-            let taken = load.get(&seat(&a.key(), provider)).copied().unwrap_or(0);
-            // Every cause appears, so a busy account that is also at its floor says both.
-            let mut causes = Vec::new();
-            if taken >= limits.per_account {
-                let on = if provider.is_empty() { String::new() } else { format!(" on {provider}") };
-                causes.push(format!("busy ({taken} of {} seat{}{on})", limits.per_account, plural(limits.per_account)));
+        let home = match room.judge(cfg, j, now_us) {
+            Ok(fits) => choose(j, &fits).cloned(),
+            Err(Hold { why, until }) => {
+                held.0.push(format!("{}: {why}", j.name));
+                held.1 = [held.1, until].into_iter().flatten().min();
+                held.2.push(j.name.clone());
+                continue;
             }
-            match accounts::fit(a, world.accounts.get(&a.key()), model.as_deref(), limits, now_us) {
-                Ok(score) if causes.is_empty() => fits.push((a, score)),
-                Ok(_) => {}
-                Err(r) => causes.push(r.describe()),
-            }
-            if !causes.is_empty() {
-                why.push(format!("{} {}", a.key(), causes.join(", ")));
-            }
-        }
-        let Some(a) = choose(j, &fits) else {
-            let why = if why.is_empty() { "the job's harness or pin allows no account".into() } else { why.join("; ") };
-            held.0.push(format!("{}: no account has room ({why})", j.name));
-            held.2.push(j.name.clone());
-            continue;
         };
-        let key = a.key();
-        total += 1;
-        if let Some((n, _)) = profile {
-            *running.entry(n).or_default() += 1;
-            starts.entry(n.to_owned()).or_default().push(now_us);
+        if let Some(home) = home {
+            total += 1;
+            out.push(room.take(cfg, j, &home, now_us));
         }
-        out.push((j.name.clone(), key.clone()));
-        let provider = provider_of(model_for(cfg, j, a.harness).as_deref(), a.harness).to_owned();
-        *load.entry(seat(&key, &provider)).or_default() += 1;
     }
     out
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
-}
-
-/// What a seat is counted against. A claude account has one budget of seats.
-/// An omp profile serves several providers, each with a quota of its own, so
-/// its seats are counted per provider (the model's prefix before `/`).
-fn seat_key(account: &str, provider: &str) -> String {
-    if provider.is_empty() { account.to_owned() } else { format!("{account}/{provider}") }
-}
-
-/// The provider whose quota a `model` draws on, for the harnesses that have
-/// several (omp); empty for the others, and for a model with no prefix.
-fn provider_of<'m>(model: Option<&'m str>, harness: &str) -> &'m str {
-    if harness != "omp" {
-        return "";
-    }
-    model.and_then(|m| m.split_once('/')).map_or("", |(provider, _)| provider)
-}
-
-/// The provider a running `job` holds a seat on at `account` (`harness:label`).
-fn provider_on(cfg: &Config, job: &Job, account: &str) -> String {
-    let harness = account.split_once(':').map_or(account, |(h, _)| h);
-    provider_of(model_for(cfg, job, harness).as_deref(), harness).to_owned()
 }
 
 /// Whether `job` may run on `account`: the job allows its harness, and any pin names it.
@@ -503,9 +387,11 @@ fn choose<'a>(job: &Job, fits: &[(&'a Home, f64)]) -> Option<&'a Home> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use super::*;
+    use crate::accounts;
     use crate::harness::Meter;
 
     fn home(harness: &'static str, label: &str) -> Home {
@@ -579,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn only_live_runners_hold_seats() {
+    fn only_live_runners_hold_seats_in_another_project() {
         let me = std::process::id();
         let started = os::start_time(me).unwrap();
         let running = |name: &str, account: &str, runner| Job {
@@ -591,17 +477,19 @@ mod tests {
         };
         let mut one = World::default();
         for j in [
-            running("a", "c:x", Some((me, started))),
-            running("b", "c:x", Some((me, started + 1))),
-            running("c", "c:y", None),
-            Job { status: Status::Done, ..running("d", "c:y", Some((me, started))) },
+            running("a", "claude:x", Some((me, started))),
+            running("b", "claude:x", Some((me, started + 1))),
+            running("c", "claude:y", None),
+            Job { status: Status::Done, ..running("d", "claude:y", Some((me, started))) },
         ] {
             one.jobs_mut().insert(j.name.clone(), j);
         }
         let mut two = World::default();
-        two.jobs_mut().insert("a".into(), running("a", "c:x", Some((me, started))));
-        let seats = seats_taken(&[one, two]);
-        assert_eq!(seats, BTreeMap::from([("c:x".to_owned(), 2)]), "a dead runner or a finished job holds none");
+        two.jobs_mut().insert("a".into(), running("a", "claude:x", Some((me, started))));
+        let found = vec![home("claude", "x"), home("claude", "y")];
+        let room = Room::of(found, BTreeMap::new(), &World::default(), &[&one, &two], true);
+        let seats = (room.running_on("claude:x"), room.running_on("claude:y"));
+        assert_eq!(seats, (2, 0), "a dead runner or a finished job holds none");
     }
 
     #[test]
@@ -677,10 +565,34 @@ mod tests {
         (world, vec![home("omp", "default")])
     }
 
-    fn plan_omp(cfg: &Config, world: &World, found: &[Home]) -> (Vec<(String, String)>, Held) {
+    /// The plan for `world` among `others`, and why the rest are held.
+    fn plan_among(cfg: &Config, world: &World, others: &[&World], found: &[Home]) -> (Vec<(String, String)>, Held) {
         let mut held = Held::default();
-        let out = plan(cfg, Path::new("/"), world, &[], found, NOW_US, &mut held);
-        (out, held)
+        let mut room = Room::of(found.to_vec(), world.accounts.clone(), world, others, true);
+        let out = plan(cfg, &mut room, world, NOW_US, &mut held);
+        (out.into_iter().map(|s| (s.job, s.account)).collect(), held)
+    }
+
+    fn plan_omp(cfg: &Config, world: &World, found: &[Home]) -> (Vec<(String, String)>, Held) {
+        plan_among(cfg, world, &[], found)
+    }
+
+    /// Another project's job, running on `omp:default` with a live runner (this process), as its
+    /// own dispatch recorded it: `model` and its provider.
+    fn theirs(name: &str, model: Option<&str>) -> World {
+        let me = std::process::id();
+        let mut w = World::default();
+        let j = Job {
+            name: name.into(),
+            status: Status::Running,
+            account: Some("omp:default".into()),
+            model: model.map(Into::into),
+            provider: crate::accounts::provider_of(model, "omp").to_owned(),
+            runner: Some((me, os::start_time(me).unwrap())),
+            ..Job::default()
+        };
+        w.jobs_mut().insert(j.name.clone(), j);
+        w
     }
 
     #[test]
@@ -702,12 +614,46 @@ mod tests {
     fn a_seat_held_by_another_project_counts_against_its_provider() {
         let (_d, cfg) = omp_config("");
         let (world, found) = omp_world(&[("sol", Status::Queued, "openai-codex/gpt-6.1")], 0.1, 0.1);
-        let other = |provider: &str| vec![("omp:default".to_owned(), provider.to_owned())];
-        let mut held = Held::default();
-        let out = plan(&cfg, Path::new("/"), &world, &other("minimax-code"), &found, NOW_US, &mut held);
+        let (out, _) = plan_among(&cfg, &world, &[&theirs("x", Some("minimax-code/M3"))], &found);
         assert_eq!(out.len(), 1, "another provider's seat is no obstacle");
-        let out = plan(&cfg, Path::new("/"), &world, &other("openai-codex"), &found, NOW_US, &mut held);
+        let (out, _) = plan_among(&cfg, &world, &[&theirs("x", Some("openai-codex/gpt-6.2"))], &found);
         assert_eq!(out.len(), 0);
+    }
+
+    /// Audit finding 10: another project's job that names no model runs on its own config's model,
+    /// which this project cannot know. Its seat is the provider its dispatch recorded, not this
+    /// project's default, so this project does not start a second session on that provider.
+    #[test]
+    fn another_projects_seat_is_the_provider_its_dispatch_recorded_not_our_default() {
+        let (_d, cfg) = omp_config("[harness.omp]\nenabled = true\nmodel = \"minimax-code/M3\"\n");
+        let (world, found) = omp_world(&[("sol", Status::Queued, "openai-codex/gpt-6.1")], 0.1, 0.1);
+        // Their job names no model of its own; their config ran it on openai-codex.
+        let mut other = theirs("x", Some("openai-codex/gpt-6.2"));
+        other.jobs_mut().get_mut("x").unwrap().models.clear();
+        let (out, held) = plan_among(&cfg, &world, &[&other], &found);
+        assert_eq!(out, [], "per_account = 1 on openai-codex is taken");
+        assert_eq!(held.0, ["sol: no account has room (omp:default busy (1 of 1 seat on openai-codex))"]);
+        // And a job of ours on our default provider still has its own seat there.
+        let (world, found) = omp_world(&[("mm", Status::Queued, "minimax-code/M3")], 0.1, 0.1);
+        let (out, _) = plan_among(&cfg, &world, &[&other], &found);
+        assert_eq!(out.len(), 1, "their seat is not booked under our default's provider");
+    }
+
+    /// The dispatch records the model and provider it resolved, for the session, the seats and the boards.
+    #[test]
+    fn a_start_records_the_model_and_provider_it_was_judged_on() {
+        let (_d, cfg) = omp_config("[harness.omp]\nenabled = true\nmodel = \"minimax-code/M3\"\n");
+        let (mut world, found) = omp_world(&[("a", Status::Queued, "x")], 0.1, 0.1);
+        world.jobs_mut().get_mut("a").unwrap().models.clear();
+        let mut room = Room::of(found, world.accounts.clone(), &world, &[], true);
+        let starts = plan(&cfg, &mut room, &world, NOW_US, &mut Held::default());
+        let want = Start {
+            job: "a".into(),
+            account: "omp:default".into(),
+            model: Some("minimax-code/M3".into()),
+            provider: "minimax-code".into(),
+        };
+        assert_eq!(starts, [want]);
     }
 
     #[test]

@@ -10,6 +10,7 @@ use super::draw::draw;
 use super::pane::Step;
 use super::ui::{Action, Id, Ui};
 use crate::config::{Config, tempdir};
+use crate::systems::dispatch::Room;
 use crate::systems::quota::AccountsView;
 use crate::systems::view::machine::{Machine, Project};
 use crate::world::{Decision, Job, Status, World};
@@ -86,7 +87,15 @@ fn accounts(n: usize) -> AccountsView {
 
 impl Fixture {
     fn board(&self, ui: &Ui, accounts_n: usize) -> Board {
-        Board::new(&self.cfg, &self.machine, accounts(accounts_n), ui.shown.all, ui.shown.everywhere, NOW)
+        Board::new(
+            &self.cfg,
+            &self.machine,
+            &Room::default(),
+            accounts(accounts_n),
+            ui.shown.all,
+            ui.shown.everywhere,
+            NOW,
+        )
     }
 
     fn answer(&self, project: &str, job: &str, text: &str) {

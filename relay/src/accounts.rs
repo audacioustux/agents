@@ -69,6 +69,16 @@ pub fn seat<'a>(twins: &'a BTreeMap<String, String>, account: &'a str) -> &'a st
     twins.get(account).map_or(account, String::as_str)
 }
 
+/// The provider whose quota a `model` draws on, for the harnesses that have
+/// several (omp); empty for the others, and for a model with no prefix. A seat
+/// on an omp account is counted per provider, since each has a quota of its own.
+pub fn provider_of<'m>(model: Option<&'m str>, harness: &str) -> &'m str {
+    if harness != "omp" {
+        return "";
+    }
+    model.and_then(|m| m.split_once('/')).map_or("", |(provider, _)| provider)
+}
+
 /// Brings what `world` knows of each home in line with what the home's files
 /// say now (call it after `hear_accounts`). A home with no sign-in is marked
 /// so; one whose sign-in changed since it was last read is read again, and is

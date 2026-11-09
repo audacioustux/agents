@@ -139,7 +139,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)) |
 | `relay view events` | The merged event log |
 | `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |
-| `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it; a fresh reading; switches |
+| `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it, judged as the dispatcher judges it (a full account is `busy`, not `ready`); a fresh reading; switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout), noting when no review has accepted its tip / delete its clone and records |
 | `relay land gc [--dry-run]` | Remove what finished jobs no longer need: build outputs, old clones, old logs ([disk](#disk)) |
 | `relay probe [--account H:L]` | Sandbox self-test for one account of each harness, with controls |
@@ -207,8 +207,14 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   share (sign-in, limits, the latest reading, sessions running), and none called `ready`,
   since the floor, seats, exclusions and `quota disable` that decide it are each project's.
   Other projects are read, never written: a job's row and pane come from its own
-  project's fold and jobs directory, so only the profile hold that a queued job's
-  own config would name is left out.
+  project's fold and jobs directory, so what holds another project's queued job
+  (which only its own config can judge) is left out; its dependencies still show.
+- **Why a job waits.** A queued job's row and pane say what holds it, judged as the
+  dispatcher judges it: what it waits for, else its profile's limit (not once a
+  `held` decision forced it past), free disk, or every account's cause
+  (`no account has room (claude:a busy (1 of 1 seat); claude:b reading is stale)`).
+  A retried or requeued job has no account until its next start, so its account
+  column says `-` and its model column lists every harness it may run on.
 - **What stays put.** The selection follows a job by name as rows move; a failed
   read keeps the last good board with the cause in red in the title, and the next
   read retries; columns are a fixed set (project when every project shows, job, state,
@@ -281,8 +287,8 @@ state, and both run anywhere: outside a project (no `--config`, `$RELAY_CONFIG` 
 `relay view status` and `view watch` show a job's profile where it has one, else
 the model it names, and in a `model` column after it the model the job runs, short
 (`claude-opus-5-5` is `opus-5.5`, `openai-codex/gpt-6-luna` is `luna`): the harness
-of its account while it runs (or once it has run, while that harness is still one of the job's), else every harness it may run on, comma-separated; a harness the job names no model on shows its configured one (another project's job shows only the models it names);
-the job pane has the full id and the effort. `--json` carries both (`profile`, `models`), and each job's `kind` (`build`, `read` or `review`), `readonly` and `acceptance` (`none`, a `check`, a `check-red-first` or the job it is a `review-of`).
+of its account while it runs (or once it has run, while that harness is still one of the job's), with the model its dispatch recorded, else every harness it may run on, comma-separated (a job back in the queue has no account until it starts again); a harness the job names no model on shows its configured one (another project's queued job shows only the models it names);
+the job pane has the full id and the effort. `--json` carries both (`profile`, `models`, and `model` and `provider`: what its latest dispatch resolved), and each job's `kind` (`build`, `read` or `review`), `readonly` and `acceptance` (`none`, a `check`, a `check-red-first` or the job it is a `review-of`).
 
 ## Hooks
 
@@ -743,6 +749,10 @@ same 10 minutes. An account is used only when:
 - it is not limited or signed out;
 - it has a free seat.
 
+The accounts pane makes the same judgment, seats included, so an account it calls
+`ready` is one the dispatcher would start a session on; a full one says
+`busy (1 of 1 seat on openai-codex)`.
+
 Quota that resets soon is lost if unused, so the floor can loosen near a reset:
 
 ```toml
@@ -773,7 +783,10 @@ too: `limits.per_account` counts the sessions every project runs on the
 account (for omp, on the account *and provider*: one profile serves several
 providers, each with a quota of its own, so a `minimax-code/...` review does not
 hold the seat an `openai-codex/...` job needs; two jobs on one provider still
-share it), and one machine-wide lock keeps two dispatchers from giving out the
+share it). A seat is the account and provider the job's dispatch recorded
+(`dispatched` carries the model and provider it resolved), so another project's
+job that names no model counts on the provider its own config chose, not this
+project's default. One machine-wide lock keeps two dispatchers from giving out the
 same seat. Each dispatcher's doorbell rings for every project's events.
 Whether an account is used at all (`relay quota enable` and `disable`) and
 `limits.max_running` stay per project.

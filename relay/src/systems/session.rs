@@ -28,7 +28,7 @@ use crate::sandbox::{self, Mounts};
 use crate::supervised::Supervised;
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request, Reviewing};
-use crate::systems::dispatch;
+use crate::systems::dispatch::Room;
 use crate::world::{Job, World};
 
 mod bar;
@@ -258,7 +258,8 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     }
 }
 
-/// The account the job was dispatched to, and the model it runs there.
+/// The account the job was dispatched to, and the model it runs there: the one its dispatch
+/// recorded, so the session runs what its seat was judged and counted on.
 fn seat<'a>(ctx: &Ctx, job: &Job, found: &'a [Home]) -> Step<Seat<'a>> {
     let Some(key) = job.account.clone() else {
         return ControlFlow::Break((Outcome::Failed, Some("dispatched without an account".into())));
@@ -268,7 +269,8 @@ fn seat<'a>(ctx: &Ctx, job: &Job, found: &'a [Home]) -> Step<Seat<'a>> {
     };
     let harness = harness_of(home);
     let conf = ctx.cfg.harness(harness.id());
-    let model = crate::systems::dispatch::model_for(&ctx.cfg, job, harness.id());
+    // A dispatch from before the model was recorded resolved it by this same config.
+    let model = job.model.clone().or_else(|| crate::systems::dispatch::model_for(&ctx.cfg, job, harness.id()));
     if let Some(reason) = model.as_deref().and_then(|m| ctx.cfg.session.banned(m)) {
         return ControlFlow::Break((Outcome::Failed, Some(format!("model banned: {reason}"))));
     }
@@ -637,41 +639,29 @@ fn await_seat(
     }
 }
 
-/// An account of `harness` that may take a session for `model`: another
-/// than the worker's and idle where there is one, so no worker grades itself.
-/// Whether it is idle is the dispatcher's count: the live sessions of every
-/// project against `limits.per_account`, homes of one sign-in sharing a seat budget.
+/// An account of `harness` that may take a session for `model`: another than the worker's where
+/// one admits it, so no worker grades itself, else the worker's own. Whether one admits it is the
+/// dispatcher's judgment ([`Room::admit`]): its quota, and a seat free under `limits.per_account`
+/// among every project's sessions, the worker's own run's seat given back first.
 /// Also whether some account of the harness has a quota reading that is old, so none can be trusted.
 fn checker_home(ctx: &Ctx, job: &Job, harness: &str, model: Option<&str>) -> (Option<Home>, bool) {
     let model = model.map(str::to_owned).or_else(|| ctx.cfg.harness(harness).model);
     let Ok(world) = ctx.world() else { return (None, false) };
     let now = now_micros();
-    let found = accounts::discover(&ctx.cfg);
-    let stale = found.iter().filter(|h| h.harness == harness).any(|h| {
-        let state = world.accounts.get(&h.key());
+    let neighbours = ctx.neighbours();
+    let mut room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
+    if let Some(worker) = world.jobs().get(&job.name) {
+        room.free(worker);
+    }
+    let homes = || room.found().iter().filter(|h| h.harness == harness);
+    let stale = homes().any(|h| {
+        let state = room.account(&h.key());
         !state.is_some_and(|s| s.unsigned) && accounts::due(harness_of(h), state, now)
     });
-    // The same judgment the dispatcher makes: a check never spends past an
-    // account's floor or on a reading it cannot trust.
-    let usable: Vec<&Home> = found
-        .iter()
-        .filter(|h| h.harness == harness)
-        .filter(|h| accounts::fit(h, world.accounts.get(&h.key()), model.as_deref(), &ctx.cfg.limits, now).is_ok())
-        .collect();
-    let twins = accounts::twins(&found);
-    let mut load: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut worlds = ctx.neighbours();
-    worlds.push(world);
-    for (account, n) in dispatch::seats_taken(&worlds) {
-        *load.entry(accounts::seat(&twins, &account).to_owned()).or_default() += n;
-    }
-    let worker = |h: &&&Home| job.account.as_deref() == Some(h.key().as_str());
-    let busy =
-        |h: &&&Home| load.get(accounts::seat(&twins, &h.key())).copied().unwrap_or(0) >= ctx.cfg.limits.per_account;
-    // Another idle account, else the worker's own, whose seat its ended run
-    // just freed; never a seat another job holds.
-    let home = usable.iter().find(|h| !worker(h) && !busy(h)).or_else(|| usable.iter().find(worker));
-    (home.map(|h| (*h).clone()), stale)
+    let admits = |h: &&Home| room.admit(&ctx.cfg.limits, h, model.as_deref(), now).is_ok();
+    let worker = |h: &&Home| job.account.as_deref() == Some(h.key().as_str());
+    let home = homes().filter(admits).find(|h| !worker(h)).or_else(|| homes().filter(admits).find(worker));
+    (home.cloned(), stale)
 }
 
 /// The session to resume, when the job has one its history can follow here:

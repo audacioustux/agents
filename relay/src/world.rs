@@ -74,7 +74,16 @@ pub struct Job {
     /// The clean commit the last attempt of a read-only job read.
     #[serde(default)]
     pub ran_at: Option<String>,
+    /// The account its dispatch gave it. A job back in the queue has none: the next dispatch
+    /// chooses again (the account that last wrote its session is `transcript_account`).
     pub account: Option<String>,
+    /// The model its latest dispatch resolved on that account (`DispatchEvent::Dispatched`): what
+    /// its session runs, the seat it holds and what the boards show, whichever project reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The provider whose seat that dispatch took (omp's model prefix); empty for one seat budget.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider: String,
     /// The session the last attempt ran in, once one started.
     pub session_id: Option<String>,
     /// The account (`harness:label`) that last wrote this session.
@@ -225,6 +234,26 @@ impl Job {
     /// the job's until it exits.
     pub fn runner_alive(&self) -> bool {
         self.runner.is_some_and(|(pid, started)| crate::os::same_process(pid, started))
+    }
+
+    /// The seat a running job holds, as its dispatch recorded it: its account, and the provider
+    /// (empty for an account with one seat budget). A run recorded before the provider was falls
+    /// back to the provider of the model the job itself names, never to a config's default.
+    pub fn seat(&self) -> Option<(&str, &str)> {
+        if self.status != Status::Running {
+            return None;
+        }
+        let account = self.account.as_deref()?;
+        if !self.provider.is_empty() || self.model.is_some() {
+            return Some((account, &self.provider));
+        }
+        let harness = account.split_once(':').map_or(account, |(h, _)| h);
+        Some((account, crate::accounts::provider_of(self.models.get(harness).map(String::as_str), harness)))
+    }
+
+    /// Back in the queue at `t`: no account until a dispatch gives it one.
+    fn requeue(&mut self, t: u64) {
+        (self.status, self.queued_at, self.account) = (Status::Queued, t, None);
     }
 
     /// Resumed by hand during its check: what its runner still says changes
@@ -813,8 +842,7 @@ impl World {
                     if j.status == Status::Checking {
                         j.runner = None;
                     }
-                    j.status = Status::Queued;
-                    j.queued_at = t;
+                    j.requeue(t);
                     j.message = Some(message.clone());
                     j.reason = None;
                     j.stop_requested = false;
@@ -877,7 +905,7 @@ impl World {
 
     fn apply_dispatch(&mut self, t: u64, e: &DispatchEvent) {
         match e {
-            DispatchEvent::Dispatched { job, account, runner_pid, runner_started } => {
+            DispatchEvent::Dispatched { job, account, model, provider, runner_pid, runner_started } => {
                 if let Some(profile) = self.jobs.get(job).and_then(|j| j.profile.clone()) {
                     let starts = self.profile_starts.entry(profile).or_default();
                     starts.push(t);
@@ -886,6 +914,7 @@ impl World {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.status = Status::Running;
                     j.account = Some(account.clone());
+                    (j.model, j.provider) = (model.clone(), provider.clone());
                     j.runner = Some((*runner_pid, *runner_started));
                     j.started_at = Some(t);
                     j.attempts += 1;
@@ -1017,7 +1046,7 @@ impl World {
                         Outcome::Retry | Outcome::Rerun => Status::Queued,
                     };
                     if j.status == Status::Queued {
-                        j.queued_at = t;
+                        j.requeue(t);
                     }
                     if *outcome == Outcome::Rerun {
                         j.reruns += 1;
@@ -1333,6 +1362,46 @@ mod tests {
         assert_eq!(w.jobs["a"].status, Status::Queued);
     }
 
+    /// Audit findings 10 and 15: a dispatch records the model and provider its seat is on, and a
+    /// job that goes back in the queue has no account until the next dispatch chooses one.
+    #[test]
+    fn a_dispatch_records_its_seat_and_a_requeue_gives_the_account_back() {
+        let dispatched = st(
+            2,
+            Event::Dispatch(DispatchEvent::Dispatched {
+                job: "a".into(),
+                account: "omp:default".into(),
+                model: Some("openai-codex/gpt-6.1".into()),
+                provider: "openai-codex".into(),
+                runner_pid: 1,
+                runner_started: 1,
+            }),
+        );
+        let w = World::fold(&[st(1, queued("a")), dispatched.clone()]);
+        let j = &w.jobs["a"];
+        assert_eq!(j.seat(), Some(("omp:default", "openai-codex")));
+        assert_eq!(j.model.as_deref(), Some("openai-codex/gpt-6.1"));
+        for back in [ended("a", Outcome::Retry), ended("a", Outcome::Rerun)] {
+            let w = World::fold(&[st(1, queued("a")), dispatched.clone(), st(3, back)]);
+            let j = &w.jobs["a"];
+            assert_eq!((j.status, j.account.as_deref(), j.seat()), (Status::Queued, None, None), "{j:?}");
+            assert_eq!(j.model.as_deref(), Some("openai-codex/gpt-6.1"), "what it last ran stays known");
+        }
+        let resumed = Event::Queue(QueueEvent::Resumed {
+            job: "a".into(),
+            message: "go on".into(),
+            budget_usd: None,
+            models: BTreeMap::new(),
+        });
+        let w = World::fold(&[st(1, queued("a")), dispatched, st(3, ended("a", Outcome::Failed)), st(4, resumed)]);
+        assert_eq!(w.jobs["a"].account, None, "resumed by hand: queued, no account");
+        // An event from before the seat was recorded still folds; its seat is the job's own model's provider.
+        let old = r#"{"type":"dispatched","job":"a","account":"claude:w","runner_pid":1,"runner_started":1}"#;
+        let old: DispatchEvent = serde_json::from_str(old).unwrap();
+        let w = World::fold(&[st(1, queued("a")), st(2, Event::Dispatch(old))]);
+        assert_eq!((w.jobs["a"].seat(), w.jobs["a"].model.as_deref()), (Some(("claude:w", "")), None));
+    }
+
     #[test]
     fn a_profiles_starts_are_kept_for_a_day_and_outlive_the_job() {
         let mut q = queued("a");
@@ -1345,6 +1414,8 @@ mod tests {
                 Event::Dispatch(DispatchEvent::Dispatched {
                     job: job.into(),
                     account: "claude:a".into(),
+                    model: None,
+                    provider: String::new(),
                     runner_pid: 1,
                     runner_started: 1,
                 }),
@@ -1396,6 +1467,8 @@ mod tests {
             Event::Dispatch(DispatchEvent::Dispatched {
                 job: job.into(),
                 account: "c:w".into(),
+                model: None,
+                provider: String::new(),
                 runner_pid: 7,
                 runner_started: 1,
             })
@@ -1454,6 +1527,8 @@ mod tests {
                 Event::Dispatch(DispatchEvent::Dispatched {
                     job: "a".into(),
                     account: "x".into(),
+                    model: None,
+                    provider: String::new(),
                     runner_pid: 9,
                     runner_started: 1,
                 }),
@@ -1510,6 +1585,8 @@ mod tests {
                 Event::Dispatch(DispatchEvent::Dispatched {
                     job: "a".into(),
                     account: "x".into(),
+                    model: None,
+                    provider: String::new(),
                     runner_pid: 9,
                     runner_started: 1,
                 }),
@@ -1538,6 +1615,8 @@ mod tests {
         let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
             job: "a".into(),
             account: "x".into(),
+            model: None,
+            provider: String::new(),
             runner_pid: 9,
             runner_started: 1,
         });
@@ -1592,6 +1671,8 @@ mod tests {
                 Event::Dispatch(DispatchEvent::Dispatched {
                     job: "a".into(),
                     account: "x".into(),
+                    model: None,
+                    provider: String::new(),
                     runner_pid: 9,
                     runner_started: t,
                 }),
@@ -1639,6 +1720,8 @@ mod tests {
             Event::Dispatch(DispatchEvent::Dispatched {
                 job: "a".into(),
                 account: "x".into(),
+                model: None,
+                provider: String::new(),
                 runner_pid: 9,
                 runner_started: 2,
             }),
@@ -1656,6 +1739,8 @@ mod tests {
                 Event::Dispatch(DispatchEvent::Dispatched {
                     job: "a".into(),
                     account: "x".into(),
+                    model: None,
+                    provider: String::new(),
                     runner_pid: 9,
                     runner_started: t,
                 }),
@@ -1692,6 +1777,8 @@ mod tests {
         let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
             job: "a".into(),
             account: "x".into(),
+            model: None,
+            provider: String::new(),
             runner_pid: 9,
             runner_started: 1,
         });
@@ -1730,6 +1817,8 @@ mod tests {
         let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
             job: "a".into(),
             account: "x".into(),
+            model: None,
+            provider: String::new(),
             runner_pid: 9,
             runner_started: 1,
         });
@@ -1798,6 +1887,8 @@ mod tests {
             let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
                 job: first.into(),
                 account: "x".into(),
+                model: None,
+                provider: String::new(),
                 runner_pid: 9,
                 runner_started: 1,
             });
@@ -1853,6 +1944,8 @@ mod tests {
         let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
             job: "a".into(),
             account: "x".into(),
+            model: None,
+            provider: String::new(),
             runner_pid: 9,
             runner_started: 1,
         });
@@ -1867,6 +1960,8 @@ mod tests {
             Event::Dispatch(DispatchEvent::Dispatched {
                 job: "a".into(),
                 account: "x".into(),
+                model: None,
+                provider: String::new(),
                 runner_pid: 9,
                 runner_started: 1,
             })

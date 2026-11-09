@@ -500,6 +500,8 @@ mod tests {
             Event::Dispatch(DispatchEvent::Dispatched {
                 job: job.into(),
                 account: "claude:a".into(),
+                model: None,
+                provider: String::new(),
                 runner_pid: 1,
                 runner_started: 1,
             })

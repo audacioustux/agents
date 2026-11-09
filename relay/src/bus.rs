@@ -129,13 +129,20 @@ pub enum DispatchEvent {
     Dispatched {
         job: String,
         account: String,
+        /// The model the job runs on `account`, as the dispatching project's config resolved it.
+        /// Every reader of the run (its session, the seats it holds, the boards) takes it from
+        /// here, so another project never resolves it through a config that is not the job's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// The provider whose seat the run holds (omp's model prefix); empty for a harness whose
+        /// account has one seat budget. Absent from events written before it was recorded.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        provider: String,
         runner_pid: u32,
         runner_started: u64,
     },
     /// The runner is gone without an `ended` event.
-    Reaped {
-        job: String,
-    },
+    Reaped { job: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

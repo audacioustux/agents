@@ -1139,8 +1139,14 @@ mod tests {
         let ctx = project(&dir);
         let queued = r#"{"t":1,"type":"queued","job":"a","task":"x","readonly":false,"effort":null,"budget_usd":1.0,"pinned":null}"#;
         std::fs::write(ctx.bus.join("queue.ndjson"), format!("{queued}\n")).unwrap();
-        let dispatched =
-            DispatchEvent::Dispatched { job: "a".into(), account: "c:w".into(), runner_pid: 7, runner_started: 1 };
+        let dispatched = DispatchEvent::Dispatched {
+            job: "a".into(),
+            account: "c:w".into(),
+            model: None,
+            provider: String::new(),
+            runner_pid: 7,
+            runner_started: 1,
+        };
         append(&ctx, "dispatch.ndjson", 2, dispatched);
         let asked = DecideEvent::DecisionRequested {
             id: "d".into(),

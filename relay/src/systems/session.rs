@@ -25,6 +25,7 @@ use crate::harness::{Harness, Home, Invocation, Permissions, Reader, Session, Ta
 use crate::hostdir::HostDir;
 use crate::os;
 use crate::sandbox::{self, Mounts};
+use crate::supervised::{Group, Supervised};
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request, Reviewing};
 use crate::systems::dispatch;
@@ -198,6 +199,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         log: "log.ndjson",
         stderr: "stderr.log",
         measure: work.clone.iter().map(SessionRepo::path).chain([work.tmp.as_path()]).collect(),
+        group: Group::Runner,
     };
     let (report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
@@ -554,6 +556,7 @@ pub fn consult(
             log: "check.ndjson",
             stderr: "check-stderr.log",
             measure: Vec::new(),
+            group: Group::Own,
         };
         let ran = drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader(), live)
             .map(|(report, ending, _)| (report, ending));
@@ -742,6 +745,8 @@ struct Run<'a> {
     stderr: &'a str,
     /// What to measure while it runs, for a job's worker: its clone (a build job) and its `/tmp`.
     measure: Vec<&'a Path>,
+    /// The worker stays in the runner's group, so `queue stop` reaches it; a decision's agent has its own.
+    group: Group,
 }
 
 /// What the runner hears while it drives a session: a line of output, the
@@ -876,18 +881,45 @@ fn listen(
 }
 
 /// Starts the session, its stderr to the job's file and `stdin` fed by a thread of its own.
-fn start(ctx: &Ctx, job: &Job, run: &Run<'_>, cmd: &mut Command, stdin: Option<&str>) -> Result<std::process::Child> {
-    let mut child = cmd
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+fn start(ctx: &Ctx, job: &Job, run: &Run<'_>, cmd: &mut Command, stdin: Option<&str>) -> Result<Supervised> {
+    cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
-        .stderr(Ctx::append_private(&ctx.job_file(&job.name, run.stderr))?)
-        .spawn()
-        .context("starting the session")?;
-    if let (Some(text), Some(mut pipe)) = (stdin.map(str::to_owned), child.stdin.take()) {
+        .stderr(Ctx::append_private(&ctx.job_file(&job.name, run.stderr))?);
+    let mut child = Supervised::spawn(cmd, run.group).context("starting the session")?;
+    if let (Some(text), Some(mut pipe)) = (stdin.map(str::to_owned), child.child().stdin.take()) {
         // A writer thread, so a full pipe cannot block reading the output.
         std::thread::spawn(move || pipe.write_all(text.as_bytes()));
     }
     Ok(child)
+}
+
+/// The end of a drive: once its output has closed a session may run on, so it is supervised still,
+/// under the same limits (withdrawal, the deadline, silence since `heard_at`), until it has exited.
+fn settle(
+    child: &mut Supervised,
+    ending: &mut Ending,
+    live: &dyn Fn() -> bool,
+    deadline: Instant,
+    heard_at: Instant,
+    silent_after: Duration,
+) -> Result<()> {
+    let limits = || {
+        if !live() {
+            Some((false, false))
+        } else if Instant::now() >= deadline {
+            Some((false, true))
+        } else {
+            (heard_at.elapsed() >= silent_after).then_some((true, false))
+        }
+    };
+    ending.exit_ok = match child.finish(|| true, limits)? {
+        Ok(status) => status.success(),
+        Err((silent, timed_out)) => {
+            (ending.silent, ending.timed_out) = (ending.silent || silent, ending.timed_out || timed_out);
+            false
+        }
+    };
+    Ok(())
 }
 
 /// How often a drive asks `live` whether its session is still wanted.
@@ -912,7 +944,7 @@ fn drive(
     let port = port(ctx, job);
     let mut log = Ctx::append_private(&ctx.job_file(&job.name, run.log))?;
     let mut child = start(ctx, job, run, cmd, stdin)?;
-    let stdout = child.stdout.take().context("stdout")?;
+    let stdout = child.child().stdout.take().context("stdout")?;
     let (answers, rx, _stop) = listen(ctx, run, stdout);
 
     let silent_after = Duration::from_secs(ctx.cfg.limits.silent_minutes * 60);
@@ -933,7 +965,7 @@ fn drive(
                 looked_at = Instant::now();
                 if !live() {
                     // bwrap's --die-with-parent and pid namespace take everything inside with it.
-                    let _ = child.kill();
+                    child.kill();
                     break;
                 }
             }
@@ -959,7 +991,7 @@ fn drive(
                     }
                     if r.cost_usd > run.budget_usd {
                         ending.over_budget = true;
-                        let _ = child.kill();
+                        child.kill();
                         break;
                     }
                 }
@@ -968,7 +1000,7 @@ fn drive(
                     DiskStep::Stop(why) => {
                         disk = Some(why);
                         // bwrap's --die-with-parent and pid namespace take everything inside with it.
-                        let _ = child.kill();
+                        child.kill();
                         break;
                     }
                     DiskStep::Ask(req, handlers, why) => {
@@ -988,7 +1020,7 @@ fn drive(
                         continue;
                     };
                     disk = Some(why);
-                    let _ = child.kill();
+                    child.kill();
                     break;
                 }
                 Ok(Heard::Line(Err(_)) | Heard::End) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1002,14 +1034,14 @@ fn drive(
                         continue;
                     };
                     // bwrap's --die-with-parent and pid namespace take everything inside with it.
-                    let _ = child.kill();
+                    child.kill();
                     break;
                 }
             }
         }
         Ok(())
     })?;
-    ending.exit_ok = child.wait()?.success();
+    settle(&mut child, &mut ending, live, deadline, heard_at, silent_after)?;
     Ok((reader.report().clone(), ending, disk))
 }
 

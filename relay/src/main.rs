@@ -21,6 +21,7 @@ mod host;
 mod hostdir;
 mod os;
 mod sandbox;
+mod supervised;
 mod systems;
 mod world;
 

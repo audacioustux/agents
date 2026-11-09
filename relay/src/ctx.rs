@@ -432,6 +432,10 @@ impl Ctx {
     fn reap(&self, mut child: Child) {
         let bell = self.bus.join(".exited");
         std::thread::spawn(move || {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "relay started it detached and never waits on its answer: reaped so it leaves no zombie"
+            )]
             let _ = child.wait();
             let _ = std::fs::write(bell, "");
         });

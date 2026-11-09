@@ -228,6 +228,7 @@ fn run_pager(pager: &str, text: &str) -> Result<()> {
         .with_context(|| format!("starting the pager {pager}"))?;
     // A pager that quits before reading it all closes the pipe; that is no failure.
     let _ = child.stdin.take().context("the pager's stdin")?.write_all(text.as_bytes());
+    #[allow(clippy::disallowed_methods, reason = "the pager, in the user's foreground until they quit it")]
     let status = child.wait().with_context(|| format!("waiting for {pager}"))?;
     pager_outcome(pager, status)
 }

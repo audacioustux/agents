@@ -750,8 +750,7 @@ fn ask_agent(ctx: &Ctx, job: &Job, a: &Agent, req: &Request, live: &dyn Fn() -> 
 
 /// The most a `command:` handler may print.
 const COMMAND_ANSWER_BYTES: u64 = 64 * 1024;
-/// How often a running `command:` handler is looked at, and how many looks between asking whether it is still wanted.
-const COMMAND_LOOK: Duration = Duration::from_millis(100);
+/// How many looks at a running `command:` handler (`supervised::LOOK` apart) between asking whether it is still wanted.
 const LOOKS_PER_ASK: u32 = 10;
 /// Past `command_timeout_seconds`: `timeout -k 5`'s own grace, and a second more.
 const COMMAND_GRACE: Duration = Duration::from_secs(6);
@@ -770,53 +769,34 @@ fn ask_command(
     live: &dyn Fn() -> bool,
 ) -> Said {
     let run = || -> Result<String> {
-        use std::os::unix::process::CommandExt as _;
         let mut cmd = env.command("timeout");
-        cmd.args(["-k", "5"]).arg(timeout.as_secs().max(1).to_string()).args(argv).process_group(0);
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
+        cmd.args(["-k", "5"]).arg(timeout.as_secs().max(1).to_string()).args(argv);
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = crate::supervised::Supervised::spawn(&mut cmd, crate::supervised::Group::Own)
             .with_context(|| format!("starting {}", argv.join(" ")))?;
         let input = serde_json::to_vec(req)?;
-        if let Some(mut stdin) = child.stdin.take() {
+        if let Some(mut stdin) = child.child().stdin.take() {
             std::thread::spawn(move || stdin.write_all(&input));
         }
-        let stdout = child.stdout.take().context("stdout")?;
+        let stdout = child.child().stdout.take().context("stdout")?;
         let reader = std::thread::spawn(move || {
             let mut out = Vec::new();
             stdout.take(COMMAND_ANSWER_BYTES + 1).read_to_end(&mut out).map(|_| out)
         });
-        // Done only when the command has exited and its output is closed: a helper it left in the
-        // background can hold the output open after the leader is gone. Until then a withdrawal, or the
-        // timeout and its grace passing, kills the whole group, with or without its leader.
+        // Supervised until it has exited and its output has closed: a withdrawal, or the timeout and its
+        // grace passing, kills the whole group, with or without its leader.
         let deadline = Instant::now() + timeout + COMMAND_GRACE;
-        let (mut status, mut looks) = (None, 0);
-        loop {
-            if status.is_none() {
-                status = child.try_wait()?;
-            }
-            if status.is_some() && reader.is_finished() {
-                break;
-            }
+        let mut looks = 0;
+        let stop = || {
             looks += 1;
-            let late = Instant::now() >= deadline;
-            if late || looks % LOOKS_PER_ASK == 0 && !live() {
-                let _ = crate::os::kill_group(child.id());
-                if status.is_none() {
-                    let _ = child.wait();
-                }
-                // The reader is not joined: whatever outside the group may still hold the output is not waited for.
-                anyhow::bail!(if late {
-                    "still running, or holding its output open, past the timeout"
-                } else {
-                    "withdrawn while it ran"
-                });
+            if Instant::now() >= deadline {
+                Some("still running, or holding its output open, past the timeout")
+            } else {
+                (looks % LOOKS_PER_ASK == 0 && !live()).then_some("withdrawn while it ran")
             }
-            std::thread::sleep(COMMAND_LOOK);
-        }
-        let status = status.context("exited")?;
+        };
+        // Stopped, the reader is not joined: whatever outside the group may hold the output is not waited for.
+        let status = child.finish(|| reader.is_finished(), stop)?.map_err(anyhow::Error::msg)?;
         let out = reader.join().map_err(|_| anyhow::anyhow!("reading its answer"))??;
         anyhow::ensure!(out.len() as u64 <= COMMAND_ANSWER_BYTES, "answered more than {COMMAND_ANSWER_BYTES} bytes");
         anyhow::ensure!(status.success(), "exited with {status}");
@@ -1492,6 +1472,25 @@ mod tests {
         let started = std::time::Instant::now();
         assert_eq!(ask_command(&stubborn, &r, t, &none, &|| true).action, Action::Defer);
         assert!(started.elapsed() < Duration::from_secs(15), "killed after the grace");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `command:` handler is supervised until it has exited and its output has closed: withdrawn, it
+    /// is killed with its whole group, whether it runs on, closed its output, or left a helper holding it.
+    #[test]
+    fn a_command_handler_is_supervised_until_it_exited_and_its_output_closed() {
+        let dir = std::env::temp_dir().join(format!("relay-cmd-supervised-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\ncat >/dev/null\n{body}\n")).unwrap();
+            Command::new("chmod").arg("755").arg(&p).status().unwrap();
+            vec![p.display().to_string()]
+        };
+        let r = req(Point::Cap, 0.0, 1.0);
+        let full = crate::host::RelayEnv::of([("PATH", "/usr/bin:/bin"), ("HOME", "/h")]);
+        let none = full.without(&regex::Regex::new("^$").unwrap());
+        let t = Duration::from_secs(1);
         // PR #39 review, issue 2: withdrawn while it runs, the whole group is killed at once.
         let pid_file = dir.join("slow.pid");
         let slow =
@@ -1549,6 +1548,25 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(dead(&helper), "the helper went with the group");
+        // PR #39 third review, issue 1: one that closes its output and runs on is still withdrawn.
+        let closed_pid = dir.join("closed.pid");
+        let closes = script("closes", &format!("echo $$ >{}\nexec >&-\nsleep 20", closed_pid.display()));
+        let wanted = std::cell::Cell::new(true);
+        let live = || {
+            if closed_pid.exists() {
+                wanted.set(false);
+            }
+            wanted.get()
+        };
+        let started = std::time::Instant::now();
+        let s = ask_command(&closes, &r, Duration::from_secs(120), &none, &live);
+        assert!(s.why.contains("withdrawn"), "{}", s.why);
+        assert!(started.elapsed() < Duration::from_secs(10), "not waited for: {:?}", started.elapsed());
+        let closer = std::fs::read_to_string(&closed_pid).unwrap().trim().to_owned();
+        assert!((0..50).any(|_| dead(&closer) || {
+            std::thread::sleep(Duration::from_millis(100));
+            false
+        }));
         // Wanted all along, a helper holding the output is not waited for past the timeout and its grace.
         let started = std::time::Instant::now();
         let s = ask_command(&script("lingers", "sleep 20 &\necho '{\"action\": \"wait\"}'"), &r, t, &none, &|| true);

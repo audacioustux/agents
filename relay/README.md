@@ -340,6 +340,9 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   last message, the job's earlier decisions and the JSON shape of each allowed
   action. `limits.checker` with `budget_growth` above 1 is shorthand for
   `cap = ["rule", "agent:checker"]` (see [checkpoints](#checkpoints)).
+  Its session, in a process group of its own, is watched until it has exited,
+  not only until its output closes, and is killed with its group once its
+  decision is withdrawn or goes stale, or a limit passes.
 - `command:<argv>`: runs the program (argv split on spaces, with no quoting) on
   the host with the request as JSON on stdin, and reads one JSON object from
   stdout: `{"action": "continue", "budget": 20, "why": "..."}` (`cost_usd`

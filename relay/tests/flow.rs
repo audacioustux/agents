@@ -1745,6 +1745,45 @@ fn a_disk_handler_still_deciding_when_the_run_ends_is_stopped_with_it() {
     assert!(step["why"].as_str().unwrap().starts_with("withdrawn"), "{d}");
 }
 
+/// PR #39 third review, issue 1: an `agent:` disk handler whose session closes its output and runs on
+/// is still supervised: stopped with the run, not waited for. Unsandboxed, as bubblewrap holds the
+/// output open itself until its child exits.
+#[test]
+fn an_agent_handler_that_closes_its_output_and_runs_on_is_stopped_with_the_run() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("agent-linger", false);
+    let hooks = "[hooks]\ndisk = [\"agent:checker\"]\n[profiles.checker]\nharness = \"claude\"\nbudget = 0.5\n\
+                 [sandbox]\nenabled = false\n";
+    configure(&env, "job_disk_gb = 0.00001\njob_ceiling_usd = 5.0\n", hooks);
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(env.repo.join("relay.toml"), conf.replace("[session]\n", "[session]\nmax_hours = 0.002\n")).unwrap();
+    // The worker runs on a and holds; the agent, on b, answers and lingers with its output closed.
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 50, false);
+    std::fs::write(env.home.join(".claude.a/hold"), "").unwrap();
+    std::fs::write(env.home.join(".claude.b/linger"), "").unwrap();
+    std::fs::write(env.home.join(".claude.b/decision"), r#"{"action": "wait", "why": "plenty"}"#).unwrap();
+    ok(&relay(&env, &["queue", "add", "grows", "--text", "Make a change."]), "queue");
+    let pid_file = env.home.join(".claude.b/linger.pid");
+    appears(&pid_file);
+    let j = wait_for(&env, "grows");
+    assert_eq!((j["status"].as_str(), j["reason"].as_str()), (Some("failed"), Some("ran past its time limit; ended")));
+    let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+    let gone = || {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        stat.is_empty() || stat.contains(") Z ")
+    };
+    for _ in 0..50 {
+        if gone() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(gone(), "the lingering agent went with its group");
+}
+
 fn events(env: &Env) -> Vec<serde_json::Value> {
     let out = relay(env, &["view", "events"]);
     String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| serde_json::from_str(l).ok()).collect()

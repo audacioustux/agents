@@ -7,4 +7,9 @@ disallowed-methods = [
     { path = "std::env::vars", reason = "the caller's environment: build from config with host::Environ" },
     { path = "std::env::vars_os", reason = "the caller's environment: build from config with host::Environ" },
     { path = "std::env::home_dir", reason = "use accounts::home(), the one reading of the caller's home" },
+    # A session or a decision handler waited for unsupervised can close its output and run on, or leave
+    # a helper holding it, past every limit and withdrawal (PR #39 reviews): wait through `supervised`.
+    { path = "std::process::Child::wait", reason = "wait through supervised::Supervised, or allow it with a reason" },
+    { path = "std::process::Child::try_wait", reason = "wait through supervised::Supervised, or allow it with a reason" },
+    { path = "std::process::Child::wait_with_output", reason = "wait through supervised::Supervised, or allow it with a reason" },
 ]

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::config::Config;
+use crate::systems::dispatch::Room;
 use crate::systems::quota::AccountsView;
 use crate::systems::view::machine::{Machine, Project};
 use crate::systems::view::{self, decision_cells, listed, row_cells};
@@ -85,8 +86,17 @@ pub const ACCOUNTS: [Column; 5] =
     [col("account", 22), col("signed in as", 18), col("state", 24), col("sessions", 10), col("deciding meter", 0)];
 
 impl Board {
-    /// The board of the projects `m` shows (`everywhere`, or ours alone), recent jobs or `all`.
-    pub fn new(cfg: &Config, m: &Machine, accounts: AccountsView, all: bool, everywhere: bool, now: u64) -> Self {
+    /// The board of the projects `m` shows (`everywhere`, or ours alone), recent jobs or `all`; ours
+    /// judged in `room`.
+    pub fn new(
+        cfg: &Config,
+        m: &Machine,
+        room: &Room,
+        accounts: AccountsView,
+        all: bool,
+        everywhere: bool,
+        now: u64,
+    ) -> Self {
         let everywhere = everywhere || !m.projects.iter().any(|p| p.own);
         let shown: Vec<&Project> = m.shown(everywhere).collect();
         // The decisions waiting, found once per project rather than once per job.
@@ -100,7 +110,7 @@ impl Board {
             .into_iter()
             .map(|(p, j)| {
                 let on = waiting.get(&(p.name.as_str(), j.name.as_str())).map_or(&[][..], Vec::as_slice);
-                entry(cfg, p, j, on, everywhere, now)
+                entry(cfg, room, p, j, on, everywhere, now)
             })
             .collect();
         let older = listed(shown.iter().copied(), true, now).len() - listed(shown.iter().copied(), false, now).len();
@@ -150,14 +160,14 @@ impl Board {
     }
 }
 
-fn entry(cfg: &Config, p: &Project, j: &Job, waiting: &[&Decision], everywhere: bool, now: u64) -> Entry {
-    let cells = row_cells(cfg, p, j, everywhere, now);
+fn entry(cfg: &Config, room: &Room, p: &Project, j: &Job, waiting: &[&Decision], everywhere: bool, now: u64) -> Entry {
+    let cells = row_cells(cfg, room, p, j, everywhere, now);
     Entry {
         key: Key { project: p.name.clone(), name: j.name.clone() },
         status: j.status,
         cells: dashed(cells),
         task: j.task.clone(),
-        head: head(cfg, p, j, waiting, now),
+        head: head(cfg, room, p, j, waiting, now),
         jobs_dir: p.jobs.clone(),
     }
 }
@@ -169,7 +179,7 @@ fn dashed(cells: Vec<String>) -> Vec<String> {
 
 /// What a job's pane says under its task: where it stands, what it runs as, why it waits or
 /// ended, its checks, reviews and notes, and the decisions it waits on.
-fn head(cfg: &Config, p: &Project, j: &Job, waiting: &[&Decision], now: u64) -> Vec<String> {
+fn head(cfg: &Config, room: &Room, p: &Project, j: &Job, waiting: &[&Decision], now: u64) -> Vec<String> {
     let place = j.account.as_deref().map_or_else(|| "waiting for an account".to_owned(), |a| format!("on {a}"));
     let mut stand = vec![format!("{} {place}", j.status.as_str())];
     if j.attempts > 1 {
@@ -184,7 +194,7 @@ fn head(cfg: &Config, p: &Project, j: &Job, waiting: &[&Decision], now: u64) -> 
     stand.extend(j.branch.clone());
     let mut head = vec![stand.join(" · ")];
     head.extend(runs_as(p.own.then_some(cfg), j));
-    if let Some(r) = view::reason(p.own.then_some(cfg), &p.world, j, now) {
+    if let Some(r) = view::reason(p.own.then_some((cfg, room)), &p.world, j, now) {
         head.push(if j.status == Status::Queued { r } else { format!("why: {r}") });
     }
     head.extend(view::notes(j));

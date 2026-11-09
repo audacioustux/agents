@@ -7,7 +7,8 @@ use anyhow::{Context as _, Result};
 
 use crate::config::Config;
 use crate::ctx::Ctx;
-use crate::systems::quota::{AccountsView, Rules, accounts_among};
+use crate::systems::dispatch::Room;
+use crate::systems::quota::{AccountsView, Rules, accounts_in, room_for};
 use crate::world::World;
 
 /// Where a board reads: the project relay runs in, if any, among every project on this machine.
@@ -75,12 +76,28 @@ impl Machine {
         self.projects.iter().filter(move |p| everywhere || p.own || !any_own)
     }
 
+    /// The room the project relay runs in (`home`) judges its jobs and accounts in: the accounts as
+    /// all the projects know them, and every project's seats. Outside every project, every account
+    /// on the machine, judged by none.
+    pub fn room(&self, home: Option<&Ctx>) -> Room {
+        room_for(Rules::of(home), self.own(), &self.others())
+    }
+
     /// Every account's room, as all the projects know it, for every model their jobs ask for: judged
-    /// by the rules of the project relay runs in (`home`), or by none outside every project.
-    pub fn accounts(&self, home: Option<&Ctx>) -> AccountsView {
-        let empty = World::default();
-        let own = self.projects.iter().find(|p| p.own).map_or(&empty, |p| &p.world);
-        accounts_among(Rules::of(home), own, self.projects.iter().filter(|p| !p.own).map(|p| &p.world))
+    /// by the rules of the project relay runs in (`home`) in `room` (from [`Machine::room`]), or by
+    /// none outside every project.
+    pub fn accounts(&self, home: Option<&Ctx>, room: &Room) -> AccountsView {
+        accounts_in(Rules::of(home), room, self.own(), &self.others())
+    }
+
+    /// The fold of the project relay runs in; an empty one outside any project.
+    pub fn own(&self) -> &World {
+        static EMPTY: std::sync::LazyLock<World> = std::sync::LazyLock::new(World::default);
+        self.projects.iter().find(|p| p.own).map_or(&EMPTY, |p| &p.world)
+    }
+
+    fn others(&self) -> Vec<&World> {
+        self.projects.iter().filter(|p| !p.own).map(|p| &p.world).collect()
     }
 }
 

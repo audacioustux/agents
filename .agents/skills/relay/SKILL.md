@@ -88,8 +88,11 @@ For a person watching, `relay view watch` is the live board (`?` lists its keys,
 show every project on the machine, and their accounts machine-wide: none is called
 `ready`, since only a project's own rules can say that. The board's `model` column (after `as`, the profile
 and effort) is the model each job runs in short form, `opus-5.5` for `claude-opus-5-5`; a job
-with no account yet lists every harness's model, and `--model` or a fork can make it differ from
-its profile's. `view status --json` has the full ids (`models`) and `effort`.
+with no account yet (a retried or requeued one too, until it starts again) lists every harness's
+model, and `--model` or a fork can make it differ from its profile's. `view status --json` has the
+full ids (`models`; `model` is what its latest dispatch ran) and `effort`. A queued job's row says
+what holds it, as the dispatcher judges it. Polling `view status --json` also starts a reading of
+stale accounts, named in a top-level `refreshing` list (absent when none) beside the state.
 
 **Acceptance.** A build is judged by what it declares, not by its own report:
 

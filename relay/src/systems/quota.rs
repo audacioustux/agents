@@ -2,7 +2,7 @@
 //! owner's switches. Emits: account-enabled, reading. Readings come from each
 //! harness's quota command (no model call) and from what sessions stream.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
@@ -15,7 +15,7 @@ use crate::ctx::Ctx;
 use crate::harness::{Home, Identity, Meters, SignIn};
 use crate::os::Role;
 use crate::sandbox;
-use crate::systems::dispatch::{may_use, model_for, seats_taken};
+use crate::systems::dispatch::{Room, may_use, model_for};
 use crate::world::{AccountState, Job, Status, World};
 
 /// The capability to write quota's port; only this module can make one.
@@ -30,7 +30,7 @@ impl crate::bus::Source for Source {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
-    /// Each account's room.
+    /// Each account's room. Starts a reading of any that is stale, and says so.
     Show,
     /// Read every account's quota now (or only stale readings).
     Refresh {
@@ -39,6 +39,10 @@ pub enum Cmd {
         /// Only accounts some queued job may run on: a reading nobody waits for is not taken.
         #[arg(long)]
         wanted: bool,
+        /// Read the accounts this project asked for (`start_refresh`) until none is left. What
+        /// relay starts in the background; not for use by hand.
+        #[arg(long, hide = true, conflicts_with_all = ["stale", "wanted"])]
+        pending: bool,
     },
     /// Let relay use an account (`harness:label`) again, for example after signing it back in.
     Enable { account: String },
@@ -48,8 +52,9 @@ pub enum Cmd {
 
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Show => show(ctx, &ctx.world()?),
-        Cmd::Refresh { stale, wanted } => refresh(ctx, stale, wanted),
+        Cmd::Show => show(ctx, &ctx.world()?, true),
+        Cmd::Refresh { pending: true, .. } => drain(ctx),
+        Cmd::Refresh { stale, wanted, .. } => refresh(ctx, stale, wanted),
         Cmd::Enable { account } => toggle(ctx, account, true),
         Cmd::Disable { account } => toggle(ctx, account, false),
     }
@@ -61,33 +66,171 @@ fn toggle(ctx: &Ctx, account: String, enabled: bool) -> Result<()> {
     }
     ctx.port(&Source(())).emit(QuotaEvent::AccountEnabled { account, enabled })?;
     ctx.wake_dispatch()?;
-    show(ctx, &ctx.world()?)
+    show(ctx, &ctx.world()?, false)
 }
 
-fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
-    // One reader at a time: overlapping requests from dispatch passes collapse into this one.
-    let Some(_role) = Role::try_take(&ctx.state.join("quota.lock"))? else {
-        return ctx.reply(&serde_json::json!({ "skipped": "a reading is already being taken" }), "");
-    };
-    // A reading another project took recently is as good as one of ours.
-    let mut world = ctx.world()?;
-    world.hear_accounts(&ctx.neighbours());
-    let found = accounts::discover(&ctx.cfg);
-    accounts::settle(&mut world, &found);
-    let now = now_micros();
-    let state = |a: &Home| world.accounts.get(&a.key());
-    let mut todo: Vec<Home> = found
+/// The quota reader's role. Accounts belong to the machine, so there is one reader on it, whichever
+/// project asks: two projects never read one account at once.
+fn reader_lock(ctx: &Ctx) -> std::path::PathBuf {
+    ctx.state_root.join("quota.lock")
+}
+
+/// The accounts in `room` a reading would be taken of: those that report quota and are signed in;
+/// with `only_stale`, only those whose reading is due; with `only_wanted`, only those a queued job
+/// of `world` may run on; with `only`, only those keys. One home of each sign-in, preferring one
+/// not known signed out.
+fn to_read(room: &Room, world: &World, select: &Select<'_>, now: u64) -> Vec<Home> {
+    let Select { only_stale, only_wanted, only } = *select;
+    let state = |a: &Home| room.account(&a.key());
+    let mut todo: Vec<Home> = room
+        .found()
         .iter()
         .filter(|a| harness_of(a).caps().quota && !state(a).is_some_and(|s| s.unsigned))
         .filter(|a| !only_stale || accounts::due(harness_of(a), state(a), now))
-        .filter(|a| !only_wanted || wanted(&world, a))
+        .filter(|a| !only_wanted || wanted(world, a))
+        .filter(|a| only.is_none_or(|keys| keys.contains(&a.key())))
         .cloned()
         .collect();
-    // Homes signed in as one account share a reading: one of them is read, preferring one not known signed out.
+    // Homes signed in as one account share a reading: one of them is read.
     todo.sort_by_key(|a| state(a).is_some_and(|s| s.signed_out));
-    let twins = accounts::twins(&found);
     let mut seen = BTreeSet::new();
-    todo.retain(|a| seen.insert(accounts::seat(&twins, &a.key()).to_owned()));
+    todo.retain(|a| seen.insert(room.twin_of(&a.key()).cloned().unwrap_or_else(|| a.key())));
+    todo
+}
+
+/// The accounts this project asked to have read that no reader has taken yet: a set (one key per
+/// line in `<state>/quota.pending`), changed only under its lock. Requests add to it
+/// ([`start_refresh`]); this project's drainer ([`drain`]) empties it, reading each, before it exits.
+struct Pending<'a>(&'a Ctx);
+
+impl Pending<'_> {
+    /// `f` on the set, under its lock; written back when `f` changed it.
+    fn with<T>(&self, f: impl FnOnce(&mut BTreeSet<String>) -> T) -> Result<T> {
+        let _lock = Role::take(&self.0.state.join("quota.pending.lock"))?;
+        let file = self.0.state.join("quota.pending");
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let mut set: BTreeSet<String> = text.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect();
+        let before = set.clone();
+        let out = f(&mut set);
+        if set != before {
+            let text: String = set.iter().map(|k| k.clone() + "\n").collect();
+            Ctx::write_private(&file, text.as_bytes())?;
+        }
+        Ok(out)
+    }
+
+    fn add(&self, keys: &[String]) -> Result<()> {
+        self.with(|set| set.extend(keys.iter().cloned()))
+    }
+
+    fn take(&self) -> Result<BTreeSet<String>> {
+        self.with(std::mem::take)
+    }
+
+    fn is_empty(&self) -> Result<bool> {
+        self.with(|set| set.is_empty())
+    }
+}
+
+/// The role of this project's drainer: one at a time reads what it asked for.
+fn drainer_lock(ctx: &Ctx) -> std::path::PathBuf {
+    ctx.state.join("quota.drainer.lock")
+}
+
+/// Asks for a reading of every account in `room` whose reading is due (with `wanted`, only of
+/// accounts a queued job of `world` may run on), and returns them: each is in this project's
+/// pending set, which a drainer it starts (unless one is at work, which will see them) reads to
+/// the last before it exits, so every account returned is one a reader will read. The one way
+/// relay starts a reading on its own: the dispatcher, a checker waiting for a seat, and every
+/// command that shows the accounts.
+pub fn start_refresh(ctx: &Ctx, room: &Room, world: &World, wanted: bool) -> Result<Vec<String>> {
+    let select = Select { only_stale: true, only_wanted: wanted, only: None };
+    let due: Vec<String> = to_read(room, world, &select, now_micros()).iter().map(Home::key).collect();
+    if due.is_empty() {
+        return Ok(due);
+    }
+    Pending(ctx).add(&due)?;
+    // A drainer at work looks at the set again after it lets go of its role, so it sees these.
+    if Role::try_take(&drainer_lock(ctx))?.is_some() {
+        ctx.spawn_self(&["quota", "refresh", "--pending"], &ctx.state.join("quota.log"))?;
+    }
+    Ok(due)
+}
+
+/// This project's drainer: reads what is pending until nothing is, waiting for the machine's
+/// reader in turn. It looks once more after letting go of its role, so a request made as it was
+/// finishing (which found the role taken and started no drainer) is not left behind.
+fn drain(ctx: &Ctx) -> Result<()> {
+    let pending = Pending(ctx);
+    loop {
+        let Some(role) = Role::try_take(&drainer_lock(ctx))? else { return Ok(()) };
+        loop {
+            let asked = pending.take()?;
+            if asked.is_empty() {
+                break;
+            }
+            let r = read_accounts(ctx, &Select { only_stale: true, only_wanted: false, only: Some(&asked) })?;
+            out!(
+                "{} pending {}: {}",
+                crate::os::stamp(),
+                asked.iter().cloned().collect::<Vec<_>>().join(", "),
+                r.json()
+            );
+        }
+        drop(role);
+        if pending.is_empty()? {
+            return Ok(());
+        }
+    }
+}
+
+/// Which accounts a reading takes: see [`to_read`].
+#[derive(Clone, Copy)]
+struct Select<'a> {
+    only_stale: bool,
+    only_wanted: bool,
+    only: Option<&'a BTreeSet<String>>,
+}
+
+/// What a reading took: the accounts read (also those another reader read while this one
+/// waited), those that gave no reading, and those found signed out.
+struct Taken {
+    read: Vec<String>,
+    unreadable: Vec<String>,
+    signed_out: Vec<String>,
+}
+
+impl Taken {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({ "read": self.read, "unreadable": self.unreadable, "signedOut": self.signed_out })
+    }
+}
+
+fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
+    let t = read_accounts(ctx, &Select { only_stale, only_wanted, only: None })?;
+    let mut text = Vec::new();
+    if !t.unreadable.is_empty() {
+        text.push(format!("no reading: {}", t.unreadable.join(", ")));
+    }
+    if !t.signed_out.is_empty() {
+        text.push(format!("signed out: {}", t.signed_out.join(", ")));
+    }
+    ctx.reply(&t.json(), &text.join("\n"))
+}
+
+/// Takes the readings `select` names. One reader on the machine at a time: one that finds another
+/// at work waits for it, then takes only what that one did not, so it never ends without the
+/// readings it was asked for.
+fn read_accounts(ctx: &Ctx, select: &Select<'_>) -> Result<Taken> {
+    let asked = now_micros();
+    let _role = Role::take(&reader_lock(ctx))?;
+    // A reading another project took recently is as good as one of ours.
+    let world = ctx.world()?;
+    let neighbours = ctx.neighbours();
+    let room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
+    let now = now_micros();
+    let meanwhile = |a: &Home| room.account(&a.key()).and_then(|s| s.read_at).is_some_and(|t| t >= asked);
+    let (taken, todo): (Vec<Home>, Vec<Home>) = to_read(&room, &world, select, now).into_iter().partition(meanwhile);
     let port = ctx.port(&Source(()));
     // In parallel: one reading can take a minute and a half.
     let readings: Vec<_> = std::thread::scope(|s| {
@@ -95,7 +238,8 @@ fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
         handles.into_iter().filter_map(|h| h.join().ok()).collect()
     });
     let now_s = secs(now);
-    let (mut read, mut unreadable, mut signed_out) = (Vec::new(), Vec::new(), Vec::new());
+    let mut read: Vec<String> = taken.iter().map(Home::key).collect();
+    let (mut unreadable, mut signed_out) = (Vec::new(), Vec::new());
     for (home, text) in readings {
         let h = harness_of(home);
         let meters = text.as_deref().map(|t| h.parse_quota(t, now_s)).unwrap_or_default();
@@ -116,14 +260,7 @@ fn refresh(ctx: &Ctx, only_stale: bool, only_wanted: bool) -> Result<()> {
             port.emit(QuotaEvent::Unreadable { account })?;
         }
     }
-    let mut text = Vec::new();
-    if !unreadable.is_empty() {
-        text.push(format!("no reading: {}", unreadable.join(", ")));
-    }
-    if !signed_out.is_empty() {
-        text.push(format!("signed out: {}", signed_out.join(", ")));
-    }
-    ctx.reply(&serde_json::json!({ "read": read, "unreadable": unreadable, "signedOut": signed_out }), &text.join("\n"))
+    Ok(Taken { read, unreadable, signed_out })
 }
 
 fn read(ctx: &Ctx, home: &Home) -> Option<String> {
@@ -218,21 +355,17 @@ impl Row<'_> {
     }
 }
 
-/// How an account stands for `model`: its state cell, the meter that decides, and whether it would take the job.
-fn judge(
-    a: &Home,
-    st: Option<&AccountState>,
-    model: Option<&str>,
-    limits: &Limits,
-    now: u64,
-) -> (String, String, Floor, bool) {
+/// How an account stands for `model`: its state cell, the meter that decides, and whether it
+/// would take the job, by the dispatcher's own judgment ([`Room::admit`]): a full seat is not ready.
+fn judge(room: &Room, a: &Home, model: Option<&str>, limits: &Limits, now: u64) -> (String, String, Floor, bool) {
     let h = harness_of(a);
-    let fit = accounts::fit(a, st, model, limits, now);
-    let ready = fit.is_ok();
-    let state = match fit {
+    let st = room.account(&a.key());
+    let admitted = room.admit(limits, a, model, now);
+    let ready = admitted.is_ok();
+    let state = match admitted {
         Ok(_) if !h.caps().quota => "ready (unmetered)".to_owned(),
         Ok(_) => "ready".to_owned(),
-        Err(r) => refusal_cell(&r, st),
+        Err(r) => r.busy.into_iter().chain(r.fit.as_ref().map(|f| refusal_cell(f, st))).collect::<Vec<_>>().join(", "),
     };
     let deciding = st.and_then(|s| {
         let governing = h.meters_for(model, &s.meters).ok()?;
@@ -270,8 +403,15 @@ pub fn wanted(world: &World, account: &Home) -> bool {
     world.jobs().values().any(|j| world.startable(j) && may_use(j, account))
 }
 
-pub fn show(ctx: &Ctx, world: &World) -> Result<()> {
-    let v = accounts_view(ctx, world);
+/// Every account's room; with `refresh`, a reading of each stale one is started first, and the view says so.
+pub fn show(ctx: &Ctx, world: &World, refresh: bool) -> Result<()> {
+    let neighbours = ctx.neighbours();
+    let others: Vec<&World> = neighbours.iter().collect();
+    let room = room_for(Rules::Project(ctx), world, &others);
+    let mut v = accounts_in(Rules::Project(ctx), &room, world, &others);
+    if refresh {
+        v.refreshing(start_refresh(ctx, &room, world, false)?);
+    }
     ctx.reply(&v.json, &v.text())
 }
 
@@ -288,14 +428,18 @@ pub struct AccountsView {
 }
 
 impl AccountsView {
+    /// Says that a reading of `accounts` is being taken, in the head and in `--json` (`refreshing`).
+    pub fn refreshing(&mut self, accounts: Vec<String>) {
+        if !accounts.is_empty() {
+            self.head = format!("{}; refreshing {}", self.head, accounts.join(", "));
+            self.json["refreshing"] = accounts.into();
+        }
+    }
+
     pub fn text(&self) -> String {
         let lines = crate::systems::view::table(&self.cells).into_iter().map(|l| format!("  {l}"));
         std::iter::once(self.head.clone()).chain(lines).collect::<Vec<_>>().join("\n")
     }
-}
-
-pub fn accounts_view(ctx: &Ctx, world: &World) -> AccountsView {
-    accounts_among(Rules::Project(ctx), world, &ctx.neighbours())
 }
 
 /// Whose rules judge whether an account would take a job.
@@ -318,29 +462,27 @@ impl<'a> Rules<'a> {
     }
 }
 
-/// As [`accounts_view`], for `world` among the other projects' folds, already read
+/// The room `rules` judge accounts and jobs in, for `world` among the other projects' folds
 /// (outside any project, `world` is empty and `others` are all of them).
-pub fn accounts_among<'a>(
-    rules: Rules<'_>,
-    world: &World,
-    others: impl IntoIterator<Item = &'a World> + Clone,
-) -> AccountsView {
-    let mut world = world.clone();
-    world.hear_accounts(others.clone());
-    let found = match rules {
-        Rules::Project(ctx) => accounts::discover(&ctx.cfg),
-        Rules::MachineWide => accounts::discover_all(),
-    };
-    accounts::settle(&mut world, &found);
-    let others: Vec<&World> = others.into_iter().collect();
-    let elsewhere = seats_taken(others.iter().copied());
+pub fn room_for(rules: Rules<'_>, world: &World, others: &[&World]) -> Room {
     match rules {
         Rules::Project(ctx) => {
-            let mut v = view(&ctx.cfg, &found, &world, &others, &elsewhere, now_micros());
+            Room::new(&ctx.cfg, world, others, crate::systems::dispatch::disk_ok(&ctx.cfg.limits, &ctx.clones))
+        }
+        Rules::MachineWide => Room::machine_wide(world, others),
+    }
+}
+
+/// The accounts' view for `world` among the other projects' folds, already read, judged by
+/// `rules` in `room` (from [`room_for`] with the same rules and folds).
+pub fn accounts_in(rules: Rules<'_>, room: &Room, world: &World, others: &[&World]) -> AccountsView {
+    match rules {
+        Rules::Project(ctx) => {
+            let mut v = view(&ctx.cfg, room, world, others, now_micros());
             v.missing(&ctx.cfg.missing_harnesses());
             v
         }
-        Rules::MachineWide => machine_wide(&found, &world, &elsewhere, now_micros()),
+        Rules::MachineWide => machine_wide(room, now_micros()),
     }
 }
 
@@ -362,13 +504,13 @@ impl AccountsView {
 }
 
 /// Every account on the machine as all projects know it, judged by none of them.
-fn machine_wide(found: &[Home], world: &World, elsewhere: &BTreeMap<String, usize>, now: u64) -> AccountsView {
-    let twins = accounts::twins(found);
+fn machine_wide(room: &Room, now: u64) -> AccountsView {
+    let found = room.found();
     let rows: Vec<Row<'_>> = found
         .iter()
         .map(|a| {
             let key = a.key();
-            let st = world.accounts.get(&key);
+            let st = room.account(&key);
             let state = accounts::shared_refusal(harness_of(a), st, now)
                 .map_or_else(|| "not limited".to_owned(), |r| refusal_cell(&r, st));
             let tightest = st
@@ -377,17 +519,15 @@ fn machine_wide(found: &[Home], world: &World, elsewhere: &BTreeMap<String, usiz
                     accounts::tightest(&all, &s.meters, secs(now))
                 })
                 .map_or(String::new(), |(k, m)| accounts::meter_line(k, m));
-            let seat = accounts::seat(&twins, &key);
-            let running = elsewhere.iter().filter(|(k, _)| accounts::seat(&twins, k) == seat).map(|(_, n)| n).sum();
             Row {
-                same_as: twins.get(&key).cloned(),
+                same_as: room.twin_of(&key).cloned(),
                 identity: match accounts::sign_in(a) {
                     SignIn::As(id) => Some(id),
                     SignIn::Out | SignIn::Unknown => None,
                 },
+                running: room.running_on(&key),
                 account: key,
                 state,
-                running,
                 meters: st.map(|s| &s.meters),
                 read_at: st.and_then(|s| s.read_at),
                 tightest,
@@ -408,59 +548,52 @@ fn machine_wide(found: &[Home], world: &World, elsewhere: &BTreeMap<String, usiz
     AccountsView { json, head, cells, ready }
 }
 
-/// The view of `found` in `world` (which has heard its neighbours), with the models the other
-/// projects' jobs ask for (`others`) and the seats they hold (`elsewhere`), at `now` (bus time).
-fn view(
-    cfg: &Config,
-    found: &[Home],
-    world: &World,
-    others: &[&World],
-    elsewhere: &BTreeMap<String, usize>,
-    now: u64,
-) -> AccountsView {
+/// The model a running job runs, as its dispatch recorded it, else (a record from before the
+/// model was) the one it names on `harness`.
+fn running_model(j: &Job, harness: &str) -> Option<String> {
+    j.model.clone().or_else(|| j.models.get(harness).cloned())
+}
+
+/// The view of the accounts in `room`, with the models the jobs of `world` and of the other
+/// projects (`others`) ask for, at `now` (bus time).
+fn view(cfg: &Config, room: &Room, world: &World, others: &[&World], now: u64) -> AccountsView {
     let limits = &cfg.limits;
-    let twins = accounts::twins(found);
     let row = |a: &Home| {
         let key = a.key();
-        let st = world.accounts.get(&key);
+        let st = room.account(&key);
         // The dispatcher's own judgment, for the configured model and every other one its jobs ask for.
         let model = cfg.harness(a.harness).model;
-        let (state, tightest, floor, ready) = judge(a, st, model.as_deref(), limits, now);
-        let asks = |j: &&Job| match j.status {
-            Status::Queued => may_use(j, a),
-            Status::Running => j.account.as_ref() == Some(&key),
-            _ => false,
-        };
-        // Another project's job that names no model asks for its own config's, which is not known
+        let (state, tightest, floor, ready) = judge(room, a, model.as_deref(), limits, now);
+        let runs_here = |j: &&Job| j.status == Status::Running && j.account.as_ref() == Some(&key);
+        // A running job asks for what its dispatch recorded, whichever project it is. A queued job
+        // of another project that names no model asks for its own config's, which is not known
         // here; one that names a model asks for it on this machine's accounts like ours do.
-        let theirs = others.iter().flat_map(|w| w.jobs().values()).filter(asks).filter_map(|j| j.models.get(a.harness));
-        let asked: BTreeSet<String> = world
-            .jobs()
-            .values()
-            .filter(asks)
-            .filter_map(|j| model_for(cfg, j, a.harness))
+        let running = world.jobs().values().chain(others.iter().flat_map(|w| w.jobs().values())).filter(runs_here);
+        let queued = |j: &&Job| j.status == Status::Queued && may_use(j, a);
+        let ours = world.jobs().values().filter(queued).filter_map(|j| model_for(cfg, j, a.harness));
+        let theirs =
+            others.iter().flat_map(|w| w.jobs().values()).filter(queued).filter_map(|j| j.models.get(a.harness));
+        let asked: BTreeSet<String> = running
+            .filter_map(|j| running_model(j, a.harness))
+            .chain(ours)
             .chain(theirs.cloned())
             .filter(|m| Some(m) != model.as_ref())
             .collect();
         let by_model = asked
             .into_iter()
             .map(|m| {
-                let (state, tightest, floor, ready) = judge(a, st, Some(&m), limits, now);
+                let (state, tightest, floor, ready) = judge(room, a, Some(&m), limits, now);
                 Judged { model: m, state, tightest, floor, ready }
             })
             .collect();
-        // Twins share their seats: a session on either is a session on both.
-        let seat = accounts::seat(&twins, &key);
-        let here = |k: &str| accounts::seat(&twins, k) == seat;
-        let running =
-            world.jobs().values().filter(|j| j.status == Status::Running && j.account.as_deref().is_some_and(here));
         let identity = match accounts::sign_in(a) {
             SignIn::As(id) => Some(id),
             SignIn::Out | SignIn::Unknown => None,
         };
         Row {
-            running: running.count() + elsewhere.iter().filter(|(k, _)| here(k)).map(|(_, n)| n).sum::<usize>(),
-            same_as: twins.get(&key).cloned(),
+            // Twins share their seats: a session on either is a session on both.
+            running: room.running_on(&key),
+            same_as: room.twin_of(&key).cloned(),
             identity,
             account: key,
             state,
@@ -472,7 +605,7 @@ fn view(
             by_model,
         }
     };
-    let rows: Vec<Row<'_>> = found.iter().map(row).collect();
+    let rows: Vec<Row<'_>> = room.found().iter().map(row).collect();
     let names: Vec<_> = cfg.harnesses().iter().map(|h| h.id()).collect();
     let l = &cfg.limits;
     let near = l
@@ -492,6 +625,8 @@ fn view(
 mod tests {
     use std::path::PathBuf;
 
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::config::tempdir;
     use crate::harness::Meter;
@@ -506,6 +641,12 @@ mod tests {
         let text = format!("name = \"demo\"\n[harness.omp]\nmodel = \"{model}\"\n");
         let cfg = Config::parse(&text, d.path()).unwrap();
         (d, cfg)
+    }
+
+    /// The view of `found` in `world` among `others`, with `world`'s account states as they are.
+    fn view_of(cfg: &Config, found: &[Home], world: &World, others: &[&World]) -> AccountsView {
+        let room = Room::of(found.to_vec(), world.accounts.clone(), world, others, true);
+        view(cfg, &room, world, others, NOW)
     }
 
     fn omp() -> Home {
@@ -547,7 +688,7 @@ mod tests {
     fn the_configured_model_alone_renders_as_one_row() {
         let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
         let jobs = [queued("a", None), queued("b", Some("minimax-code/MiniMax-M3.1-Flash"))];
-        let v = view(&cfg, &[omp()], &world(&jobs), &[], &BTreeMap::new(), NOW);
+        let v = view_of(&cfg, &[omp()], &world(&jobs), &[]);
         assert_eq!(crate::systems::view::table(&v.cells), ["omp:default  ready  4% minimax-code/General 7 Day"]);
         assert_eq!(v.ready, [true]);
         assert!(v.json["accounts"][0].get("byModel").is_none(), "{}", v.json);
@@ -557,7 +698,7 @@ mod tests {
     fn a_model_another_projects_job_asks_for_is_judged_too() {
         let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
         let theirs = world(&[queued("a", Some("openai-codex/gpt-6.1-sol")), queued("b", None)]);
-        let v = view(&cfg, &[omp()], &world(&[]), &[&theirs], &BTreeMap::new(), NOW);
+        let v = view_of(&cfg, &[omp()], &world(&[]), &[&theirs]);
         assert_eq!(v.cells.len(), 2, "{:?}", v.cells);
         assert_eq!((v.cells[1][0].as_str(), v.cells[1][2].as_str()), ("  for openai-codex/gpt-6.1-sol", "at floor"));
         assert_eq!(v.ready, [true, false]);
@@ -567,7 +708,7 @@ mod tests {
     fn a_model_judged_as_its_account_is_no_sub_row_of_its_own() {
         let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
         let jobs = [queued("a", Some("minimax-code/MiniMax-M3.5"))];
-        let v = view(&cfg, &[omp()], &world(&jobs), &[], &BTreeMap::new(), NOW);
+        let v = view_of(&cfg, &[omp()], &world(&jobs), &[]);
         assert_eq!(v.cells.len(), 1, "the sub-row would repeat its account's row: {:?}", v.cells);
         assert_eq!(v.json["accounts"][0]["byModel"][0]["model"], "minimax-code/MiniMax-M3.5", "--json keeps it");
     }
@@ -576,7 +717,7 @@ mod tests {
     fn a_queued_jobs_model_at_floor_shows_the_hold() {
         let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
         let jobs = [queued("a", Some("openai-codex/gpt-6.1-sol")), queued("b", Some("openai-codex/gpt-6.1-sol"))];
-        let v = view(&cfg, &[omp()], &world(&jobs), &[], &BTreeMap::new(), NOW);
+        let v = view_of(&cfg, &[omp()], &world(&jobs), &[]);
         let resets = accounts::fmt_time(secs(NOW) + 3_600);
         assert_eq!(
             crate::systems::view::table(&v.cells),
@@ -611,7 +752,7 @@ mod tests {
         }
         w.accounts.get_mut("claude:c").unwrap().signed_out = true;
         w.accounts.get_mut("claude:c").unwrap().signed_at = Some(NOW);
-        let v = view(&cfg, &found, &w, &[], &BTreeMap::new(), NOW);
+        let v = view_of(&cfg, &found, &w, &[]);
         let table = v.text();
         let (first, third) = (v.json["accounts"][0]["identity"]["id"].as_str().unwrap(), &v.json["accounts"][2]);
         assert!(table.contains(&format!("claude:a  Ultra #{first}  ready")), "{table}");
@@ -624,10 +765,57 @@ mod tests {
         }
     }
 
+    /// Audit finding 14: the pane judges an account as the dispatcher does, its seats too, so an
+    /// account whose seats are full is not `ready`, while one of its other providers still is.
+    #[test]
+    fn an_account_with_no_free_seat_is_not_ready() {
+        let d = tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let text =
+            "name = \"demo\"\n[limits]\nper_account = 1\n[harness.omp]\nmodel = \"minimax-code/MiniMax-M3.1-Flash\"\n";
+        let cfg = Config::parse(text, d.path()).unwrap();
+        let running = Job {
+            name: "r".into(),
+            status: Status::Running,
+            account: Some(omp().key()),
+            model: Some("minimax-code/MiniMax-M3.1-Flash".into()),
+            provider: "minimax-code".into(),
+            ..Job::default()
+        };
+        let v = view_of(&cfg, &[omp()], &world(std::slice::from_ref(&running)), &[]);
+        assert_eq!(v.json["accounts"][0]["state"], "busy (1 of 1 seat on minimax-code)", "{}", v.json);
+        assert_eq!(v.json["accounts"][0]["running"], 1);
+        assert_eq!(v.ready, [false], "the dispatcher would start nothing there on this model");
+        // The same session on another project's bus fills the same seat.
+        let theirs = world(&[Job {
+            runner: Some((std::process::id(), crate::os::start_time(std::process::id()).unwrap())),
+            ..running
+        }]);
+        let v = view_of(&cfg, &[omp()], &world(&[]), &[&theirs]);
+        assert_eq!(v.ready, [false], "{}", v.json);
+    }
+
+    /// A request for an account already pending adds nothing; the drainer takes them all at once.
+    #[test]
+    fn pending_requests_are_a_set_the_drainer_empties() {
+        let d = tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let cfg = Config::parse("name = \"demo\"\n", d.path()).unwrap();
+        let ctx = Ctx::unclaimed(cfg, d.path().join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        std::fs::create_dir_all(&ctx.state).unwrap();
+        let pending = Pending(&ctx);
+        assert!(pending.is_empty().unwrap());
+        pending.add(&["claude:a".into()]).unwrap();
+        pending.add(&["claude:b".into(), "claude:a".into()]).unwrap();
+        let taken: Vec<String> = pending.take().unwrap().into_iter().collect();
+        assert_eq!(taken, ["claude:a", "claude:b"]);
+        assert!(pending.is_empty().unwrap() && pending.take().unwrap().is_empty());
+    }
+
     #[test]
     fn the_state_cell_does_not_repeat_the_meter() {
         let (_d, cfg) = cfg("openai-codex/gpt-6.1-sol");
-        let v = view(&cfg, &[omp()], &world(&[]), &[], &BTreeMap::new(), NOW);
+        let v = view_of(&cfg, &[omp()], &world(&[]), &[]);
         let resets = accounts::fmt_time(secs(NOW) + 3_600);
         assert_eq!(v.cells[0][2], "at floor");
         assert_eq!(v.cells[0][4], format!("100% openai-codex/5 hours, resets {resets}"));

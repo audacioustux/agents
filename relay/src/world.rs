@@ -74,7 +74,16 @@ pub struct Job {
     /// The clean commit the last attempt of a read-only job read.
     #[serde(default)]
     pub ran_at: Option<String>,
+    /// The account its dispatch gave it. A job back in the queue has none: the next dispatch
+    /// chooses again (the account that last wrote its session is `transcript_account`).
     pub account: Option<String>,
+    /// The model its latest dispatch resolved on that account (`DispatchEvent::Dispatched`): what
+    /// its session runs, the seat it holds and what the boards show, whichever project reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The provider whose seat that dispatch took (omp's model prefix); empty for one seat budget.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider: String,
     /// The session the last attempt ran in, once one started.
     pub session_id: Option<String>,
     /// The account (`harness:label`) that last wrote this session.
@@ -225,6 +234,25 @@ impl Job {
     /// the job's until it exits.
     pub fn runner_alive(&self) -> bool {
         self.runner.is_some_and(|(pid, started)| crate::os::same_process(pid, started))
+    }
+
+    /// The seat a running job holds, as its dispatch recorded it: its account, and what it draws
+    /// on there. A run recorded before the model was falls back to the model the job itself names,
+    /// never to a config's default; one with no provider either way draws on an unknown one
+    /// (`Draws::Unknown`), which counts against every provider of the account until it ends.
+    pub fn seat(&self) -> Option<(&str, crate::accounts::Draws)> {
+        if self.status != Status::Running {
+            return None;
+        }
+        let account = self.account.as_deref()?;
+        let harness = account.split_once(':').map_or(account, |(h, _)| h);
+        let model = self.model.as_deref().or_else(|| self.models.get(harness).map(String::as_str));
+        Some((account, crate::accounts::draws(model, &self.provider, harness)))
+    }
+
+    /// Back in the queue at `t`: no account until a dispatch gives it one.
+    fn requeue(&mut self, t: u64) {
+        (self.status, self.queued_at, self.account) = (Status::Queued, t, None);
     }
 
     /// Resumed by hand during its check: what its runner still says changes
@@ -380,7 +408,10 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 
 /// Bump whenever the fold's meaning changes (`apply`, `current`, what `World`
 /// holds, how a mark is kept), so checkpoints folded the old way are discarded.
-const FOLD_VERSION: u32 = 12;
+/// `tests::the_fold_version_moves_with_the_fold` pins it to what the fold makes of a
+/// fixed bus, so a fold that changes without a bump fails the tests.
+/// 13: `dispatched` records the model and provider; a job back in the queue has no account.
+const FOLD_VERSION: u32 = 13;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -813,8 +844,7 @@ impl World {
                     if j.status == Status::Checking {
                         j.runner = None;
                     }
-                    j.status = Status::Queued;
-                    j.queued_at = t;
+                    j.requeue(t);
                     j.message = Some(message.clone());
                     j.reason = None;
                     j.stop_requested = false;
@@ -877,7 +907,7 @@ impl World {
 
     fn apply_dispatch(&mut self, t: u64, e: &DispatchEvent) {
         match e {
-            DispatchEvent::Dispatched { job, account, runner_pid, runner_started } => {
+            DispatchEvent::Dispatched { job, account, model, provider, runner_pid, runner_started } => {
                 if let Some(profile) = self.jobs.get(job).and_then(|j| j.profile.clone()) {
                     let starts = self.profile_starts.entry(profile).or_default();
                     starts.push(t);
@@ -886,6 +916,7 @@ impl World {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.status = Status::Running;
                     j.account = Some(account.clone());
+                    (j.model, j.provider) = (model.clone(), provider.clone());
                     j.runner = Some((*runner_pid, *runner_started));
                     j.started_at = Some(t);
                     j.attempts += 1;
@@ -1017,7 +1048,7 @@ impl World {
                         Outcome::Retry | Outcome::Rerun => Status::Queued,
                     };
                     if j.status == Status::Queued {
-                        j.queued_at = t;
+                        j.requeue(t);
                     }
                     if *outcome == Outcome::Rerun {
                         j.reruns += 1;
@@ -1227,6 +1258,7 @@ mod tests {
         assert_eq!(review.after, ["dep"], "only a relay that cannot judge the job waits on the gate");
     }
     use super::*;
+    use crate::accounts::Draws;
 
     fn st(t: u64, event: Event) -> Stamped {
         Stamped { t, event, from: None }
@@ -1292,6 +1324,71 @@ mod tests {
         Event::Session(SessionEvent::Ended { job: job.into(), outcome, cost_usd: 0.0, turns: 1, reason: None })
     }
 
+    /// FNV-1a: a digest that is the same on every build, unlike `std`'s hasher.
+    fn fnv(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
+    }
+
+    /// Copilot review of PR #41, finding 3: a fold that changes what it makes of the bus without a
+    /// `FOLD_VERSION` bump leaves old checkpoints standing. This pins each version to the digest of
+    /// the fold of a fixed bus (a dispatch, a run that ends, retries and is resumed by hand, a
+    /// limit, a reading). When the fold changes, the digest does: bump `FOLD_VERSION` and add the
+    /// new pair; never change a pair already recorded.
+    #[test]
+    fn the_fold_version_moves_with_the_fold() {
+        const PINNED: &[(u32, u64)] = &[(13, 0x1d75_bf1b_971c_dfd9)];
+        let dispatched = |t, model: Option<&str>| {
+            st(
+                t,
+                Event::Dispatch(DispatchEvent::Dispatched {
+                    job: "a".into(),
+                    account: "omp:w".into(),
+                    model: model.map(Into::into),
+                    provider: model.and_then(|m| m.split_once('/')).map_or("", |(p, _)| p).into(),
+                    runner_pid: 7,
+                    runner_started: 1,
+                }),
+            )
+        };
+        let resumed = Event::Queue(QueueEvent::Resumed {
+            job: "a".into(),
+            message: "go on".into(),
+            budget_usd: Some(2.0),
+            models: BTreeMap::from([("omp".to_owned(), "minimax-code/M3".to_owned())]),
+        });
+        let reading = Event::Quota(QuotaEvent::Reading {
+            account: "omp:w".into(),
+            meters: BTreeMap::from([(
+                "openai-codex/5 hours".to_owned(),
+                crate::harness::Meter { utilization: 0.5, resets_at: Some(99) },
+            )]),
+            sign_in: None,
+        });
+        let events = [
+            st(1, queued("a")),
+            st(2, queued("b")),
+            dispatched(3, Some("openai-codex/gpt-6.1")),
+            st(4, Event::Session(SessionEvent::Limited { account: "omp:w".into(), until: 50 })),
+            st(5, ended("a", Outcome::Retry)),
+            dispatched(6, None),
+            st(7, ended("a", Outcome::Failed)),
+            st(8, resumed),
+            st(9, reading),
+        ];
+        let digest = fnv(serde_json::to_string(&World::fold(&events)).unwrap().as_bytes());
+        let (version, pinned) = *PINNED.last().unwrap();
+        assert_eq!(version, FOLD_VERSION, "pin the digest of FOLD_VERSION {FOLD_VERSION}: {digest:#x}");
+        assert_eq!(
+            digest,
+            pinned,
+            "the fold changed ({digest:#x}): bump FOLD_VERSION and add ({}, {digest:#x}) to PINNED",
+            FOLD_VERSION + 1
+        );
+        let mut versions: Vec<u32> = PINNED.iter().map(|p| p.0).collect();
+        versions.dedup();
+        assert_eq!(versions.len(), PINNED.len(), "one digest per version");
+    }
+
     #[test]
     fn a_collected_clone_leaves_the_branch_and_the_size_is_kept() {
         let dir = crate::ctx::SessionRepo::new("/c/a");
@@ -1333,6 +1430,46 @@ mod tests {
         assert_eq!(w.jobs["a"].status, Status::Queued);
     }
 
+    /// Audit findings 10 and 15: a dispatch records the model and provider its seat is on, and a
+    /// job that goes back in the queue has no account until the next dispatch chooses one.
+    #[test]
+    fn a_dispatch_records_its_seat_and_a_requeue_gives_the_account_back() {
+        let dispatched = st(
+            2,
+            Event::Dispatch(DispatchEvent::Dispatched {
+                job: "a".into(),
+                account: "omp:default".into(),
+                model: Some("openai-codex/gpt-6.1".into()),
+                provider: "openai-codex".into(),
+                runner_pid: 1,
+                runner_started: 1,
+            }),
+        );
+        let w = World::fold(&[st(1, queued("a")), dispatched.clone()]);
+        let j = &w.jobs["a"];
+        assert_eq!(j.seat(), Some(("omp:default", Draws::Provider("openai-codex".into()))));
+        assert_eq!(j.model.as_deref(), Some("openai-codex/gpt-6.1"));
+        for back in [ended("a", Outcome::Retry), ended("a", Outcome::Rerun)] {
+            let w = World::fold(&[st(1, queued("a")), dispatched.clone(), st(3, back)]);
+            let j = &w.jobs["a"];
+            assert_eq!((j.status, j.account.as_deref(), j.seat()), (Status::Queued, None, None), "{j:?}");
+            assert_eq!(j.model.as_deref(), Some("openai-codex/gpt-6.1"), "what it last ran stays known");
+        }
+        let resumed = Event::Queue(QueueEvent::Resumed {
+            job: "a".into(),
+            message: "go on".into(),
+            budget_usd: None,
+            models: BTreeMap::new(),
+        });
+        let w = World::fold(&[st(1, queued("a")), dispatched, st(3, ended("a", Outcome::Failed)), st(4, resumed)]);
+        assert_eq!(w.jobs["a"].account, None, "resumed by hand: queued, no account");
+        // An event from before the seat was recorded still folds; its seat is the job's own model's provider.
+        let old = r#"{"type":"dispatched","job":"a","account":"claude:w","runner_pid":1,"runner_started":1}"#;
+        let old: DispatchEvent = serde_json::from_str(old).unwrap();
+        let w = World::fold(&[st(1, queued("a")), st(2, Event::Dispatch(old))]);
+        assert_eq!((w.jobs["a"].seat(), w.jobs["a"].model.as_deref()), (Some(("claude:w", Draws::Account)), None));
+    }
+
     #[test]
     fn a_profiles_starts_are_kept_for_a_day_and_outlive_the_job() {
         let mut q = queued("a");
@@ -1345,6 +1482,8 @@ mod tests {
                 Event::Dispatch(DispatchEvent::Dispatched {
                     job: job.into(),
                     account: "claude:a".into(),
+                    model: None,
+                    provider: String::new(),
                     runner_pid: 1,
                     runner_started: 1,
                 }),
@@ -1396,6 +1535,8 @@ mod tests {
             Event::Dispatch(DispatchEvent::Dispatched {
                 job: job.into(),
                 account: "c:w".into(),
+                model: None,
+                provider: String::new(),
                 runner_pid: 7,
                 runner_started: 1,
             })
@@ -1454,6 +1595,8 @@ mod tests {
                 Event::Dispatch(DispatchEvent::Dispatched {
                     job: "a".into(),
                     account: "x".into(),
+                    model: None,
+                    provider: String::new(),
                     runner_pid: 9,
                     runner_started: 1,
                 }),
@@ -1510,6 +1653,8 @@ mod tests {
                 Event::Dispatch(DispatchEvent::Dispatched {
                     job: "a".into(),
                     account: "x".into(),
+                    model: None,
+                    provider: String::new(),
                     runner_pid: 9,
                     runner_started: 1,
                 }),
@@ -1538,6 +1683,8 @@ mod tests {
         let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
             job: "a".into(),
             account: "x".into(),
+            model: None,
+            provider: String::new(),
             runner_pid: 9,
             runner_started: 1,
         });
@@ -1592,6 +1739,8 @@ mod tests {
                 Event::Dispatch(DispatchEvent::Dispatched {
                     job: "a".into(),
                     account: "x".into(),
+                    model: None,
+                    provider: String::new(),
                     runner_pid: 9,
                     runner_started: t,
                 }),
@@ -1639,6 +1788,8 @@ mod tests {
             Event::Dispatch(DispatchEvent::Dispatched {
                 job: "a".into(),
                 account: "x".into(),
+                model: None,
+                provider: String::new(),
                 runner_pid: 9,
                 runner_started: 2,
             }),
@@ -1656,6 +1807,8 @@ mod tests {
                 Event::Dispatch(DispatchEvent::Dispatched {
                     job: "a".into(),
                     account: "x".into(),
+                    model: None,
+                    provider: String::new(),
                     runner_pid: 9,
                     runner_started: t,
                 }),
@@ -1692,6 +1845,8 @@ mod tests {
         let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
             job: "a".into(),
             account: "x".into(),
+            model: None,
+            provider: String::new(),
             runner_pid: 9,
             runner_started: 1,
         });
@@ -1730,6 +1885,8 @@ mod tests {
         let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
             job: "a".into(),
             account: "x".into(),
+            model: None,
+            provider: String::new(),
             runner_pid: 9,
             runner_started: 1,
         });
@@ -1798,6 +1955,8 @@ mod tests {
             let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
                 job: first.into(),
                 account: "x".into(),
+                model: None,
+                provider: String::new(),
                 runner_pid: 9,
                 runner_started: 1,
             });
@@ -1853,6 +2012,8 @@ mod tests {
         let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
             job: "a".into(),
             account: "x".into(),
+            model: None,
+            provider: String::new(),
             runner_pid: 9,
             runner_started: 1,
         });
@@ -1867,6 +2028,8 @@ mod tests {
             Event::Dispatch(DispatchEvent::Dispatched {
                 job: "a".into(),
                 account: "x".into(),
+                model: None,
+                provider: String::new(),
                 runner_pid: 9,
                 runner_started: 1,
             })
@@ -2188,6 +2351,28 @@ mod tests {
             // Unreadable is the same as missing.
             std::fs::write(&b.file, "{").unwrap();
             assert_eq!(b.load(), b.full());
+        }
+
+        /// Copilot review of PR #41, finding 3: a checkpoint folded by fold 12, before a job back in
+        /// the queue lost its account, is folded again from the bus rather than advanced.
+        #[test]
+        fn a_checkpoint_from_before_requeues_cleared_the_account_is_folded_again() {
+            let b = Fixture::new();
+            let retried = r#"{"t":3,"type":"ended","job":"a","outcome":"retry","cost_usd":0.0,"turns":1,"reason":null}
+"#;
+            b.append("queue.ndjson", &queued(1, "a"));
+            b.append("dispatch.ndjson", &dispatched(2, "a"));
+            b.append("session/a.1.ndjson", retried);
+            assert_eq!(b.load().jobs["a"].account, None);
+            // What fold 12 made of the same bus: queued again, its old account kept.
+            let mut c = b.checkpoint();
+            c["version"] = format!("{}+fold12", env!("CARGO_PKG_VERSION")).into();
+            c["world"]["jobs"]["a"]["account"] = "c:w".into();
+            std::fs::write(&b.file, serde_json::to_vec(&c).unwrap()).unwrap();
+            let w = b.load();
+            assert_eq!((w.jobs["a"].status, w.jobs["a"].account.as_deref()), (Status::Queued, None));
+            assert_eq!(w, b.full());
+            assert_eq!(b.checkpoint()["version"], fold_version());
         }
 
         #[test]

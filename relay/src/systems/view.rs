@@ -11,6 +11,8 @@ use clap::Subcommand;
 use crate::bus::now_micros;
 use crate::config::Config;
 use crate::ctx::Ctx;
+use crate::systems::dispatch::Room;
+use crate::systems::quota::AccountsView;
 use crate::world::{Job, Wait, World};
 use machine::{Machine, Scope};
 
@@ -110,26 +112,64 @@ fn world_json(world: &World) -> Result<serde_json::Value> {
 
 fn status(scope: Scope<'_>, json: bool, all: bool, everywhere: bool) -> Result<()> {
     if json {
-        let v = match scope.home {
-            Some(ctx) if !everywhere => world_json(&ctx.world()?)?,
+        let (mut v, refreshing) = match scope.home {
+            Some(ctx) if !everywhere => {
+                let world = ctx.world()?;
+                let neighbours = ctx.neighbours();
+                let refreshing = refresh_shown(ctx, &world, &neighbours.iter().collect::<Vec<_>>())?;
+                (world_json(&world)?, refreshing)
+            }
             _ => {
                 let m = scope.read()?;
                 let projects: serde_json::Map<String, serde_json::Value> =
                     m.projects.iter().map(|p| Ok((p.name.clone(), world_json(&p.world)?))).collect::<Result<_>>()?;
-                serde_json::json!({ "projects": projects, "unreadable": m.unreadable })
+                let refreshing = match scope.home {
+                    Some(ctx) => refresh_shown(
+                        ctx,
+                        m.own(),
+                        &m.projects.iter().filter(|p| !p.own).map(|p| &p.world).collect::<Vec<_>>(),
+                    )?,
+                    None => Vec::new(),
+                };
+                (serde_json::json!({ "projects": projects, "unreadable": m.unreadable }), refreshing)
             }
         };
+        // Beside the folded state, never in it: the accounts whose reading was asked for, as `quota show --json` says.
+        if !refreshing.is_empty() {
+            v["refreshing"] = refreshing.into();
+        }
         out!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    let text = board(scope.cfg, scope.home, &scope.read()?, all, everywhere);
+    let m = scope.read()?;
+    let room = m.room(scope.home);
+    let accounts = shown_accounts(scope, &m, &room)?;
+    let text = board(scope.cfg, &m, &room, &accounts, all, everywhere);
     // On a terminal, one screen line per line; piped, every line whole.
     let width = crate::os::terminal_size().map(|(cols, _)| cols);
     out!("{}", fit(&text, width));
     Ok(())
 }
 
-/// Redraws the board whenever the bus changes, and every few seconds for the clocks.
+/// Asks for a reading of each stale account of the project relay runs in (`ctx`), judged by its
+/// rules among `others` (`quota::start_refresh`, which reads one at most once per staleness
+/// window), and returns those whose reading was asked for. What every view of the accounts does,
+/// `view status --json` included: an orchestrator that only polls that still gets fresh readings.
+fn refresh_shown(ctx: &Ctx, world: &World, others: &[&World]) -> Result<Vec<String>> {
+    let room = crate::systems::quota::room_for(crate::systems::quota::Rules::Project(ctx), world, others);
+    crate::systems::quota::start_refresh(ctx, &room, world, false)
+}
+
+/// The accounts as a board shows them; in a project, a reading of each stale one is started
+/// first (`quota::start_refresh`), and the view says so: a reading is taken when it is shown.
+pub fn shown_accounts(scope: Scope<'_>, m: &Machine, room: &Room) -> Result<AccountsView> {
+    let mut v = m.accounts(scope.home, room);
+    if let Some(ctx) = scope.home {
+        v.refreshing(crate::systems::quota::start_refresh(ctx, room, m.own(), false)?);
+    }
+    Ok(v)
+}
+
 /// Rows as aligned text: each column as wide as its widest cell, a column
 /// empty in every row left out, and the last column never padded.
 pub fn table(rows: &[Vec<String>]) -> Vec<String> {
@@ -208,14 +248,17 @@ pub fn kind(j: &Job) -> String {
 /// it may run on, which is all the enabled harnesses when it names none. A requeue or reroute
 /// that moves a job off its old account's harness thus shows the new harness at once.
 ///
-/// Which model: [`crate::systems::dispatch::model_for`], the rule dispatch runs by, so a harness
+/// Which model: on its account's harness, the one its dispatch recorded (any project's job), and
+/// otherwise [`crate::systems::dispatch::model_for`], the rule dispatch runs by, so a harness
 /// the job sets no model on shows the configured one. That needs the project's config (`cfg`),
 /// which only the project relay runs in has loaded: without it (another project's job in the
 /// every-project view) only the models the job itself names show, the defaults being unknown.
+/// A job back in the queue has no account, so it shows every harness it may run on.
 pub fn models(cfg: Option<&Config>, j: &Job) -> Vec<(String, String)> {
     let ran = j.account.as_deref().and_then(|a| a.split(':').next());
     let narrowed =
         ran.filter(|r| j.status.has_runner() || j.harnesses.is_empty() || j.harnesses.iter().any(|h| h == r));
+    let recorded = narrowed.and(j.model.as_ref());
     let eligible: Vec<String> = match (narrowed, cfg) {
         (Some(r), _) => vec![r.to_owned()],
         (None, _) if !j.harnesses.is_empty() => j.harnesses.clone(),
@@ -225,9 +268,10 @@ pub fn models(cfg: Option<&Config>, j: &Job) -> Vec<(String, String)> {
     eligible
         .into_iter()
         .filter_map(|h| {
-            let model = match cfg {
-                Some(cfg) => crate::systems::dispatch::model_for(cfg, j, &h),
-                None => j.models.get(&h).cloned(),
+            let model = match (recorded, cfg) {
+                (Some(m), _) => Some(m.clone()),
+                (None, Some(cfg)) => crate::systems::dispatch::model_for(cfg, j, &h),
+                (None, None) => j.models.get(&h).cloned(),
             };
             model.map(|m| (h, m))
         })
@@ -268,22 +312,14 @@ fn model_cell(cfg: Option<&Config>, j: &Job) -> String {
     shorts.join(",")
 }
 
-/// Why a queued job's profile holds it back now, by `max_running` or `max_per_day`.
-fn profile_hold(cfg: &Config, world: &World, j: &Job, now: u64) -> Option<String> {
-    let name = j.profile.as_deref()?;
-    let p = cfg.profiles.get(name)?;
-    let running = world.jobs().values().filter(|o| o.status.has_runner() && o.profile.as_deref() == Some(name)).count();
-    let starts = world.profile_starts.get(name).map_or(&[][..], Vec::as_slice);
-    crate::systems::dispatch::profile_hold(name, p, running, starts, now).map(|(why, _)| why)
-}
-
-/// Why a job waits or ended: a queued job's dependencies or, with its project's `cfg`, the
-/// profile limit that holds it; else the reason recorded.
-pub fn reason(cfg: Option<&Config>, world: &World, j: &Job, now: u64) -> Option<String> {
+/// Why a job waits or ended: a queued job's dependencies or, with its project's config and the
+/// room it is judged in (`own`), what holds it there, as the dispatcher judges it
+/// ([`Room::hold`]: a profile limit, free disk, or every account's cause); else the reason recorded.
+pub fn reason(own: Option<(&Config, &Room)>, world: &World, j: &Job, now: u64) -> Option<String> {
     let queued = j.status == crate::world::Status::Queued;
     let waits = if queued { Wait::summary(&world.waits(j)) } else { None };
-    let held = if queued && waits.is_none() { cfg.and_then(|c| profile_hold(c, world, j, now)) } else { None };
-    waits.or(held).or_else(|| j.reason.clone())
+    let held = if queued && waits.is_none() { own.and_then(|(c, room)| room.hold(c, j, now)) } else { None };
+    waits.or(held.map(|h| h.why)).or_else(|| j.reason.clone())
 }
 
 /// What a job's row says after its task and reason: its latest checkpoint, check and review,
@@ -297,14 +333,16 @@ pub fn notes(j: &Job) -> Vec<String> {
 }
 
 /// A job's cells: name, status, account, profile (or model) with effort, its model (short form),
-/// since when, spend, disk, and its task with its [`reason`] and [`notes`].
-pub fn job_cells(cfg: Option<&Config>, world: &World, j: &Job, now: u64) -> Vec<String> {
+/// since when, spend, disk, and its task with its [`reason`] and [`notes`]. `own` is its project's
+/// config and room, when it is the project relay runs in.
+pub fn job_cells(own: Option<(&Config, &Room)>, world: &World, j: &Job, now: u64) -> Vec<String> {
+    let cfg = own.map(|(c, _)| c);
     let since = match j.status {
         crate::world::Status::Running | crate::world::Status::Checking => j.started_at,
         crate::world::Status::Queued => j.ended_at.or(Some(j.created_at)),
         _ => j.ended_at,
     };
-    let reason = reason(cfg, world, j, now).map(|r| format!("[{r}]"));
+    let reason = reason(own, world, j, now).map(|r| format!("[{r}]"));
     let task = std::iter::once(j.task.clone()).chain(reason).chain(notes(j)).collect::<Vec<_>>().join("  ");
     vec![
         j.name.clone(),
@@ -348,9 +386,10 @@ fn collected(j: &Job) -> Option<&'static str> {
     }
 }
 
-/// A listed job's cells, its project's name first when the board shows every project.
-pub fn row_cells(cfg: &Config, p: &machine::Project, j: &Job, everywhere: bool, now: u64) -> Vec<String> {
-    let cells = job_cells(p.own.then_some(cfg), &p.world, j, now);
+/// A listed job's cells, its project's name first when the board shows every project. `room` is
+/// the one ours is judged in.
+pub fn row_cells(cfg: &Config, room: &Room, p: &machine::Project, j: &Job, everywhere: bool, now: u64) -> Vec<String> {
+    let cells = job_cells(p.own.then_some((cfg, room)), &p.world, j, now);
     if everywhere { std::iter::once(p.name.clone()).chain(cells).collect() } else { cells }
 }
 
@@ -378,11 +417,11 @@ pub fn decision_cells<'a>(
 }
 
 /// The jobs and accounts, as text.
-fn board(cfg: &Config, home: Option<&Ctx>, m: &Machine, all: bool, everywhere: bool) -> String {
+fn board(cfg: &Config, m: &Machine, room: &Room, accounts: &AccountsView, all: bool, everywhere: bool) -> String {
     let now = now_micros();
     let everywhere = everywhere || !m.projects.iter().any(|p| p.own);
     let jobs = listed(m.shown(everywhere), all, now);
-    let rows: Vec<Vec<String>> = jobs.iter().map(|(p, j)| row_cells(cfg, p, j, everywhere, now)).collect();
+    let rows: Vec<Vec<String>> = jobs.iter().map(|(p, j)| row_cells(cfg, room, p, j, everywhere, now)).collect();
     let mut lines = vec![if everywhere {
         "jobs in every project".to_owned()
     } else {
@@ -411,7 +450,7 @@ fn board(cfg: &Config, home: Option<&Ctx>, m: &Machine, all: bool, everywhere: b
         lines.extend(m.unreadable.iter().map(|u| format!("  unreadable: {u}")));
     }
     lines.push(String::new());
-    lines.push(m.accounts(home).text());
+    lines.push(accounts.text());
     lines.join("\n")
 }
 
@@ -654,6 +693,61 @@ mod tests {
         j.status = Status::Running;
         let want = crate::systems::dispatch::model_for(&cfg, &j, "omp").unwrap();
         assert_eq!(models(Some(&cfg), &j), [("omp".to_owned(), want)]);
+    }
+
+    /// A config with claude alone, one seat per account, and a profile of at most one running job.
+    fn one_seat() -> (crate::config::tempdir::Dir, crate::config::Config) {
+        let dir = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let toml = "name = \"demo\"\n[limits]\nper_account = 1\nmin_free_disk_gb = 0\n\
+                    [harness.omp]\nenabled = false\n[profiles.hunt]\nmax_running = 1\n";
+        let cfg = crate::config::Config::parse(toml, dir.path()).unwrap();
+        (dir, cfg)
+    }
+
+    const NOW: u64 = 1_800_000_000 * 1_000_000;
+
+    /// One claude account, read just now, with `jobs`; and the room they are judged in.
+    fn claude_room(jobs: &[crate::world::Job]) -> (crate::world::World, crate::systems::dispatch::Room) {
+        let mut w = crate::world::World::default();
+        let read = crate::world::AccountState { read_at: Some(NOW - 1), ..Default::default() };
+        w.accounts.insert("claude:a".into(), read);
+        for j in jobs {
+            w.jobs_mut().insert(j.name.clone(), j.clone());
+        }
+        let home = crate::harness::Home { harness: "claude", label: "a".into(), dir: "/x".into() };
+        let room = crate::systems::dispatch::Room::of(vec![home], w.accounts.clone(), &w, &[], true);
+        (w, room)
+    }
+
+    /// Audit finding 15: the board says why a queued job is held as the dispatcher judges it:
+    /// every account's cause, not only a profile limit; and a forced job no longer shows the
+    /// profile limit a decision let it past.
+    #[test]
+    fn a_queued_job_shows_what_holds_it_as_dispatch_judges_it() {
+        use crate::world::{Job, Status};
+        let (_dir, cfg) = one_seat();
+        let running = Job {
+            name: "r".into(),
+            status: Status::Running,
+            account: Some("claude:a".into()),
+            profile: Some("hunt".into()),
+            ..Job::default()
+        };
+        let waiting = Job { name: "q".into(), status: Status::Queued, ..Job::default() };
+        let (w, room) = claude_room(&[running, waiting.clone()]);
+        let reason = |j: &Job| super::reason(Some((&cfg, &room)), &w, j, NOW);
+        assert_eq!(reason(&waiting).as_deref(), Some("no account has room (claude:a busy (1 of 1 seat))"));
+        let hunt = Job { profile: Some("hunt".into()), ..waiting.clone() };
+        assert_eq!(reason(&hunt).as_deref(), Some("profile hunt: 1 running (max 1)"));
+        let forced = Job { forced: true, ..hunt };
+        assert_eq!(
+            reason(&forced).as_deref(),
+            Some("no account has room (claude:a busy (1 of 1 seat))"),
+            "forced past its profile, it waits only for a seat"
+        );
+        let (w, room) = claude_room(std::slice::from_ref(&waiting));
+        assert_eq!(super::reason(Some((&cfg, &room)), &w, &waiting, NOW), None, "nothing holds it");
     }
 
     #[test]

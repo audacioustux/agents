@@ -625,8 +625,11 @@ impl Config {
         self.origins = origins;
     }
 
-    /// The model `job` last ran on, or would run on, when that is known.
+    /// The model `job` last ran on (as its dispatch recorded it), or would run on, when that is known.
     pub fn model_of(&self, job: &crate::world::Job) -> Option<String> {
+        if let Some(model) = &job.model {
+            return Some(model.clone());
+        }
         let account = job.transcript_account.as_deref().or(job.account.as_deref());
         let harness = account.and_then(|a| a.split(':').next()).or(match job.harnesses.as_slice() {
             [only] => Some(only.as_str()),

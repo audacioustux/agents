@@ -124,7 +124,8 @@ means `stop` with no model asked; `limits.job_ceiling_usd` bounds the total.
 that run alone.
 `--after A,B` waits for jobs to be `done`, not landed: landing is your step. If
 one fails or stops, the job shows `waits for A (failed)` and never starts on
-its own: queue A again, or `relay queue release NAME [--from A]`.
+its own (`view result --wait` on it exits 4 with that line): queue A again, or
+`relay queue release NAME [--from A]`.
 
 ### Hooks: deciding for relay
 

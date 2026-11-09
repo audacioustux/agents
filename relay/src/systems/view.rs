@@ -530,13 +530,24 @@ fn job(world: &World, name: &str) -> Result<Job> {
 
 /// The job once it has ended. Sleeps on the doorbell between reads, and wakes
 /// the dispatcher whenever the bus has been quiet, so the wait cannot outlive it.
+/// A live job that does not move on its own (`World::moves_on_its_own`: queued
+/// behind a dependency that will never be done) would never end: that is a
+/// conflict (exit 4), naming what it waits for.
 fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
     let bell = ctx.doorbell()?;
     let mut quiet = true;
     loop {
-        let j = job(&ctx.world()?, name)?;
+        let world = ctx.world()?;
+        let j = job(&world, name)?;
         if !j.status.is_live() {
             return Ok(j);
+        }
+        if !world.moves_on_its_own(&j) {
+            let why = Wait::summary(&world.waits(&j)).unwrap_or_else(|| "cannot start on its own".into());
+            fail!(
+                Conflict,
+                "{name} {why}, so it will not end on its own: queue that job again, or relay queue release {name}"
+            );
         }
         if quiet {
             ctx.wake_dispatch()?;

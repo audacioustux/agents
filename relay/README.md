@@ -68,7 +68,8 @@ session ended `done`, landed or not: landing stays your step. A build job
 waiting for build jobs starts from their branch (below). A dependency that fails,
 is stopped, dequeued or cleaned away before it was done never finishes, so the
 dependent shows `waits for a (failed)` and does not start on its own, nor keep
-the dispatcher awake. Queue the dependency again (or `queue resume` it), or
+the dispatcher awake; `view result --wait` on it exits 4 with that line rather
+than wait forever. Queue the dependency again (or `queue resume` it), or
 `relay queue release NAME [--from a]`. Only existing jobs can be named, so there
 are no cycles.
 
@@ -133,7 +134,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one. A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
-| `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends |
+| `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends, and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |
 | `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)) |
 | `relay view events` | The merged event log |
 | `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |

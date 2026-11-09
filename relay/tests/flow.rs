@@ -566,6 +566,12 @@ fn a_job_whose_dependency_failed_is_blocked_until_released() {
     assert_eq!((late["status"].as_str(), late["attempts"].as_u64()), (Some("queued"), Some(0)), "{late}");
     assert_eq!(late["pending"][0]["blocked"], true);
     assert!(board(&env).contains("[waits for base (failed)]"), "{}", board(&env));
+    // Audit finding 11: waiting for its end returns at once, since it never ends on its own.
+    let mut cmd = Command::new("timeout");
+    cmd.args(["20", env!("CARGO_BIN_EXE_relay"), "view", "result", "late", "--wait", "--json"]);
+    let out = relay_cmd(&env, &mut cmd);
+    assert_eq!(out.status.code(), Some(4), "a blocked job is a conflict, not a hang: {}", stderr(&out));
+    assert!(stderr(&out).contains("waits for base (failed)"), "{}", stderr(&out));
 
     let out = relay(&env, &["queue", "release", "late", "--from", "elsewhere"]);
     assert_eq!(out.status.code(), Some(2), "it does not wait for that");

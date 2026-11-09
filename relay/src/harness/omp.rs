@@ -2,7 +2,8 @@
 //! `~/.omp/profiles/<name>`, selected by `OMP_PROFILE`. One home reaches
 //! many providers, metered apart by `omp usage`, so the meters that govern a
 //! task are its model's provider's. Its read-only mode is approval-gated
-//! (it asks), not a removed capability, and it cannot fork a session.
+//! (it asks), not a removed capability, and it cannot fork a session. It runs
+//! on `bun` (`#!/usr/bin/env bun`), its helper program.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -39,6 +40,12 @@ impl Harness for Omp {
 
     fn caps(&self) -> Caps {
         Caps { read_only_by_capability: false, fork: false, preset_session_id: false, budget: false, quota: true }
+    }
+
+    /// omp is a `cli.js` with `#!/usr/bin/env bun`, so every run needs a `bun` it can start from any
+    /// directory: found and recorded with omp, and first on its runs' `PATH`.
+    fn helpers(&self) -> &'static [&'static str] {
+        &["bun"]
     }
 
     fn identity(&self) -> &'static str {

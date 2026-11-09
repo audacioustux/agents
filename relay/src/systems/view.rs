@@ -631,9 +631,25 @@ mod tests {
     fn both() -> (crate::config::tempdir::Dir, crate::config::Config) {
         let dir = crate::config::tempdir::Dir::new();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
-        let toml = "name = \"demo\"\n[harness.claude]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\n\
-                    [harness.omp]\nenabled = true\nmodel = \"openai-codex/gpt-6-luna\"\n";
-        let cfg = crate::config::Config::parse(toml, dir.path()).unwrap();
+        // Both harnesses as programs of the test's own, and omp's `bun` recorded: whatever this machine has.
+        let program = |name: &str| {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.path().join(name);
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let (claude, omp, bun) = (program("claude"), program("omp"), program("bun"));
+        let record = dir.path().join("programs.json");
+        std::fs::write(&record, serde_json::json!({ "bun": bun }).to_string()).unwrap();
+        let toml = format!(
+            "name = \"demo\"\n[harness.claude]\nenabled = true\nprogram = {:?}\nmodel = \"claude-sonnet-5-5\"\n\
+             [harness.omp]\nenabled = true\nprogram = {:?}\nmodel = \"openai-codex/gpt-6-luna\"\n",
+            claude.display().to_string(),
+            omp.display().to_string()
+        );
+        let mut cfg = crate::config::Config::parse(&toml, dir.path()).unwrap();
+        cfg.programs = Some(record);
         (dir, cfg)
     }
 

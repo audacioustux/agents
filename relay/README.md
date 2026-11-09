@@ -735,6 +735,19 @@ a `[harness.<id>]` table for whose program is not found is shown on the board an
 directory), set `program`, or delete its line from `programs.json` and run any relay
 command from a shell that has it.
 
+A harness whose program is a script also has helper programs, the interpreters its
+`#!/usr/bin/env` line names: `bun` for omp, `node` for puku. They are found and recorded the
+same way, by the first command that finds the harness, and come first on the `PATH` of every
+run of that harness (its sessions, quota readings and `relay probe`'s check), so a session never
+runs whatever interpreter an earlier `PATH` directory holds. A helper is never a mise shim
+(`~/.local/share/mise/shims/bun`, a link to `mise`): a shim chooses its version from the mise
+config of the directory it runs in, and fails (`No version is set for shim: bun`) where none
+pins it, which is where sessions run. Run the first relay command from a shell where mise has put
+the real binary on `PATH` (an activated mise does), or delete the helper's line from
+`programs.json` to find it again. A harness whose helper is not found is not used: one the
+config names (`[harness.omp]`) is shown as `program not found: bun`, one it does not name is left
+out, as one whose program is not found is.
+
 Who a claude directory is signed in as comes from its `.claude.json`
 (`oauthAccount`), read locally, never by a call. relay shows only the plan and
 the first 6 hex characters of a hash of the account id (`Ultra #76de9d`), and

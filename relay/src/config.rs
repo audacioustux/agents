@@ -847,8 +847,8 @@ impl Config {
     }
 
     /// Every harness this config expects, with its programs as this machine has them, in registry
-    /// order: one not turned off whose program is found, or one `[harness.X]` names (so a missing
-    /// program is shown, never silently dropped). The one place a harness's programs are looked up:
+    /// order: one not turned off whose programs (its own and its helpers) are all found, or one
+    /// `[harness.X]` names (so a missing program or helper is shown, never silently dropped). The one place a harness's programs are looked up:
     /// its own, and, once that is found, each helper its runs need ([`crate::harness::Harness::helpers`]),
     /// so the first command that asks records them all, before any child runs on a narrower `PATH`.
     pub fn harness_programs(&self) -> Vec<HarnessPrograms> {
@@ -864,12 +864,13 @@ impl Config {
                 let program = crate::host::resolve(self.programs.as_deref(), name.as_os_str());
                 let found = matches!(program, crate::host::Program::Found(_));
                 let helpers = if found {
-                    let resolve = |n: &&'static str| crate::host::resolve(self.programs.as_deref(), n.as_ref());
+                    let resolve = |n: &&'static str| crate::host::resolve_helper(self.programs.as_deref(), n.as_ref());
                     h.helpers().iter().map(|n| (*n, resolve(n))).collect()
                 } else {
                     Vec::new()
                 };
-                (conf.is_some() || found).then_some(HarnessPrograms { harness: h, program, helpers })
+                let programs = HarnessPrograms { harness: h, program, helpers };
+                (conf.is_some() || programs.missing().is_none()).then_some(programs)
             })
             .collect()
     }
@@ -894,13 +895,16 @@ impl Config {
         harness: &str,
         mut inv: crate::harness::Invocation,
     ) -> Result<crate::harness::Invocation, crate::harness::Refusal> {
-        let resolve = |name: &std::ffi::OsStr| match crate::host::resolve(self.programs.as_deref(), name) {
+        let found = |program: crate::host::Program| match program {
             crate::host::Program::Found(p) => Ok(p.into_os_string()),
             crate::host::Program::Missing(what) => Err(crate::harness::Refusal(format!(
                 "harness {harness}: program not found: {}",
                 what.to_string_lossy()
             ))),
         };
+        let resolve = |name: &std::ffi::OsStr| found(crate::host::resolve(self.programs.as_deref(), name));
+        // A helper is never a mise shim ([`crate::host::resolve_helper`]).
+        let helper = |name: &std::ffi::OsStr| found(crate::host::resolve_helper(self.programs.as_deref(), name));
         // The harness's own program: what runs, or what a script that runs hands over to (puku's quota).
         let at = inv.command_arg;
         let slot = match at {
@@ -916,7 +920,7 @@ impl Config {
         // script's interpreter, what that script's `puku-cli` launcher runs on, and a session's.
         let helpers = crate::harness::by_id(harness)?.helpers();
         for name in helpers {
-            if let Some(dir) = PathBuf::from(resolve(name.as_ref())?).parent() {
+            if let Some(dir) = PathBuf::from(helper(name.as_ref())?).parent() {
                 inv.path_first.push(dir.to_path_buf());
             }
         }
@@ -929,7 +933,7 @@ impl Config {
                     inv.program.to_string_lossy()
                 )));
             }
-            inv.program = resolve(&inv.program)?;
+            inv.program = helper(&inv.program)?;
         }
         Ok(inv)
     }
@@ -1044,7 +1048,9 @@ mod tests {
         let gone = Config::parse("name = \"x\"\n[harness.omp]\nprogram = \"/opt/x/omp\"\n", d.path()).unwrap();
         assert!(gone.locate("omp", crate::harness::Invocation::new("omp")).unwrap_err().0.contains("/opt/x/omp"));
         assert!(!gone.harnesses().iter().any(|h| h.id() == "omp"), "not usable");
-        assert_eq!(gone.missing_harnesses(), [("omp", "/opt/x/omp".to_owned())], "but shown");
+        // (Only omp's row: a harness this machine has with a helper missing is shown too.)
+        let omp_rows = |c: &Config| c.missing_harnesses().into_iter().filter(|(h, _)| *h == "omp").collect::<Vec<_>>();
+        assert_eq!(omp_rows(&gone), [("omp", "/opt/x/omp".to_owned())], "but shown");
         // A relative path is the config directory's (`pinned` is there), wherever relay runs from; a bare
         // name stays a name.
         let rel = Config::parse(
@@ -1059,7 +1065,7 @@ mod tests {
         );
         assert_eq!(rel.harness("omp").program, Some(PathBuf::from("omp-beta")));
         let off = Config::parse("name = \"x\"\n[harness.omp]\nenabled = false\nprogram = \"/opt/x/omp\"\n", d.path());
-        assert!(off.unwrap().missing_harnesses().is_empty(), "a harness turned off is not missing");
+        assert!(omp_rows(&off.unwrap()).is_empty(), "a harness turned off is not missing");
         // A script handing over to the harness: the harness's program as configured, and the script's
         // interpreter, which must be one of its helpers, as this machine's record has it.
         let conf = format!("name = \"x\"\n[harness.puku]\nprogram = \"{}\"\n", pinned.display());

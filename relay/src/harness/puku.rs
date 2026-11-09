@@ -381,8 +381,9 @@ mod tests {
     /// The script under the installed node, where there is one, against a local server.
     #[test]
     fn the_usage_script_asks_with_the_homes_token_and_prints_only_the_quota() {
-        if std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("skipped: node is not installed");
+        // A node that runs here: a mise shim on PATH may be there and still fail outside a pinned project.
+        if !std::process::Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("skipped: no node runs here");
             return;
         }
         // A temporary directory holding a space and a quote, as a TMPDIR may.

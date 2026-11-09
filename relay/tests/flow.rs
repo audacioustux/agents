@@ -126,6 +126,15 @@ fn setup(tag: &str, omp: bool) -> Env {
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&state).unwrap();
     std::fs::write(state.join("gc.last"), "").unwrap();
     let stub = |h: &str| repo.join(".stub").join(h).display().to_string();
+    if omp {
+        // omp runs on `bun`, its helper; the stub needs none, but omp is usable only with one recorded,
+        // whatever this machine's PATH has (a mise shim alone is not one).
+        use std::os::unix::fs::PermissionsExt;
+        let bun = repo.join(".stub/bun");
+        std::fs::write(&bun, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
+        std::fs::set_permissions(&bun, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(root.join("state/relay/programs.json"), serde_json::json!({ "bun": bun }).to_string()).unwrap();
+    }
     let omp_conf = if omp {
         format!("[harness.omp]\nenabled = true\nprogram = \"{}\"\nmodel = \"stub/m1\"\n", stub("omp"))
     } else {
@@ -1196,6 +1205,67 @@ fn a_puku_job_with_its_own_home_runs_on_the_accounts_sign_in() {
     assert_eq!((j["status"].as_str(), j["account"].as_str()), (Some("done"), Some("puku:p")), "{j}");
     assert!(env.home.join(".config/pukucode.p/renewed").exists(), "the session renewed the account's sign-in");
     assert!(!job_home.join(".config").exists(), "nothing looked for a sign-in under the job's HOME");
+}
+
+/// The #38 regression: omp's program is a `cli.js` with `#!/usr/bin/env bun`, and the `PATH` relay
+/// builds for children reaches `bun` only through mise's shim, which fails outside a directory whose
+/// mise config pins it (`mise ERROR No version is set for shim: bun`). `bun` is omp's helper: the
+/// first command finds the real one on its caller's `PATH`, past the shim, records it, and every
+/// omp run (`relay probe`'s check, the quota reading, the session) finds that one first.
+#[test]
+fn omp_runs_on_the_recorded_bun_never_on_a_mise_shim() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("omp-bun", true);
+    // A first run: nothing recorded, not even the stub bun `setup` records for omp.
+    std::fs::remove_file(env.root.join("state/relay/programs.json")).unwrap();
+    let bin = env.repo.join(".stub-bun");
+    std::fs::create_dir_all(bin.join("shims")).unwrap();
+    std::fs::create_dir_all(bin.join("bun-bin")).unwrap();
+    let script = |path: &Path, text: &str| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // mise, and its shim for bun, failing as they do where nothing pins bun.
+    script(
+        &bin.join("mise"),
+        "#!/bin/sh\necho \"mise ERROR No version is set for shim: $(basename \"$0\")\" >&2\nexit 1\n",
+    );
+    std::os::unix::fs::symlink(bin.join("mise"), bin.join("shims/bun")).unwrap();
+    // The real bun stands in by running the script it is handed with sh.
+    script(&bin.join("bun-bin/bun"), "#!/bin/sh\nexec /bin/sh \"$@\"\n");
+    // omp as the npm package has it: a script that names bun on its #! line.
+    let stub_omp = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/stub-omp.sh")).unwrap();
+    let omp = bin.join("omp");
+    script(&omp, &stub_omp.replacen("#!/bin/sh", "#!/usr/bin/env bun", 1));
+    // Children run on a PATH with the shim and no real bun, as #38's built PATH has mise's shims.
+    let runner = std::env::var("PATH").unwrap();
+    let no_bun: Vec<PathBuf> = std::env::split_paths(&runner).filter(|d| !d.join("bun").exists()).collect();
+    let children = std::env::join_paths(std::iter::once(bin.join("shims")).chain(no_bun.iter().cloned())).unwrap();
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml"))
+        .unwrap()
+        .replace(
+            &format!("program = {:?}", env.repo.join(".stub/omp").display().to_string()),
+            &format!("program = {:?}", omp.display().to_string()),
+        )
+        .replace(&format!("PATH = {runner:?}"), &format!("PATH = {:?}", children.to_string_lossy()));
+    assert!(conf.contains(".stub-bun/omp") && conf.contains(".stub-bun/shims"), "{conf}");
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+    omp_default(&env.home, 20, false);
+    // The first command's caller has the shim first, the real bun after it.
+    let caller = std::env::join_paths([bin.join("shims"), bin.join("bun-bin")].into_iter().chain(no_bun)).unwrap();
+    let probe = relay_from(&env, &caller, &[], &["probe"]);
+    ok(&probe, "probe");
+    let p = String::from_utf8_lossy(&probe.stdout);
+    assert!(p.contains("== omp:default") && !p.contains("No version is set"), "{p}");
+    let known: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(env.root.join("state/relay/programs.json")).unwrap()).unwrap();
+    assert_eq!(known["bun"].as_str(), bin.join("bun-bin/bun").to_str(), "the real one, past the shim: {known}");
+    ok(&relay(&env, &["queue", "add", "o", "--text", "Look.", "--readonly", "--harness", "omp"]), "queue");
+    let j = wait_for(&env, "o");
+    assert_eq!((j["status"].as_str(), j["account"].as_str()), (Some("done"), Some("omp:default")), "{j}");
 }
 
 /// Adds `limits` under `[limits]` and appends `extra` to the project's config.
@@ -3387,6 +3457,9 @@ fn a_harness_found_once_is_found_from_a_shell_whose_path_lacks_it() {
     let bin = env.root.join("mise/installs/omp/bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::copy(env.repo.join(".stub/omp"), bin.join("omp")).unwrap();
+    // With the `bun` it runs on, a helper found and recorded with it.
+    std::fs::write(bin.join("bun"), "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
+    std::fs::set_permissions(bin.join("bun"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let (full, bare) = (caller_path(&[&bin]), caller_path(&[]));
     let both = vec!["claude".to_owned(), "omp".to_owned()];
     assert_eq!(harnesses_seen(&relay_from(&env, &full, &[], &["--json", "quota", "show"])).0, both);

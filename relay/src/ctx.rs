@@ -537,6 +537,30 @@ impl SessionRepo {
 }
 
 #[cfg(test)]
+impl Ctx {
+    /// A context over `<state_root>/<name>` and `<data_root>/<name>`, for a test that plans paths and
+    /// opens nothing: it claims no state directory and creates none.
+    pub(crate) fn unclaimed(cfg: Config, cfg_path: PathBuf, state_root: PathBuf, data_root: PathBuf) -> Self {
+        let (state, data) = (state_root.join(&cfg.name), data_root.join(&cfg.name));
+        Self {
+            bus: state.join("bus"),
+            jobs: state.join("jobs"),
+            clones: data.join("clones"),
+            caches: data.join("caches"),
+            scratch: data.join("scratch"),
+            git_dirs: Vec::new(),
+            state,
+            state_root,
+            data_root,
+            cfg,
+            cfg_path,
+            json: false,
+            _claim: Claim(()),
+        }
+    }
+}
+
+#[cfg(test)]
 mod git_tests {
     use super::*;
 

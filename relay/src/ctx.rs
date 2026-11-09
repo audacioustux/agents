@@ -52,42 +52,63 @@ struct Claim(());
 
 impl Claim {
     /// Claims `state` (which exists, owner-only) for `repo` (canonical), or refuses because another
-    /// repository has. A directory from before claims were recorded is claimed by the first
-    /// command that opens it. Two first commands racing: one records, the other reads it.
+    /// repository has. A record already there is only read, so a full or read-only state file system
+    /// still opens for its own repository. A directory from before claims were recorded is claimed
+    /// by the first command that opens it; two first commands racing: one records, the other reads it.
     fn take(state: &Path, repo: &Path) -> Result<Self> {
-        use std::os::unix::ffi::OsStrExt;
         let file = state.join(REPO_FILE);
-        let mut line = repo.as_os_str().as_bytes().to_vec();
-        line.push(b'\n');
-        // Written aside, then linked into place: the record appears whole or not at all, and a
-        // link never replaces one that is there.
-        let tmp = state.join(format!("{REPO_FILE}.{}.tmp", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
-        let written = (|| {
-            use std::io::Write;
-            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
-            f.write_all(&line)?;
-            f.sync_all()?;
-            std::fs::hard_link(&tmp, &file)
-        })();
-        let _ = std::fs::remove_file(&tmp);
-        match written {
-            Ok(()) => return Ok(Self(())),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e).with_context(|| format!("recording the repository in {}", file.display())),
+        match Self::read(&file) {
+            Ok(recorded) => return Self::check(state, repo, &file, &recorded),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
         }
-        // Read without following a link: the record is relay's own file, never a pointer elsewhere.
+        match Self::publish(state, repo, &file) {
+            Ok(()) => Ok(Self(())),
+            // Another command recorded one first: it is the record.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let recorded = Self::read(&file).with_context(|| format!("reading {}", file.display()))?;
+                Self::check(state, repo, &file, &recorded)
+            }
+            Err(e) => Err(e).with_context(|| format!("recording the repository in {}", file.display())),
+        }
+    }
+
+    /// The record, read without following a link: it is relay's own file, never a pointer elsewhere.
+    fn read(file: &Path) -> std::io::Result<Vec<u8>> {
         let mut recorded = Vec::new();
         std::io::Read::read_to_end(
             &mut std::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
-                .open(&file)
-                .with_context(|| format!("reading {}", file.display()))?,
+                .open(file)?,
             &mut recorded,
-        )
-        .with_context(|| format!("reading {}", file.display()))?;
-        let recorded = recorded.strip_suffix(b"\n").unwrap_or(&recorded);
+        )?;
+        Ok(recorded)
+    }
+
+    /// Records `repo` at `file`: written aside, then linked into place, so the record appears whole
+    /// or not at all, and a link never replaces one that is there (`AlreadyExists`).
+    fn publish(state: &Path, repo: &Path, file: &Path) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+        let mut line = repo.as_os_str().as_bytes().to_vec();
+        line.push(b'\n');
+        let tmp = state.join(format!("{REPO_FILE}.{}.tmp", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let written = (|| {
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+            f.write_all(&line)?;
+            f.sync_all()?;
+            std::fs::hard_link(&tmp, file)
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        written
+    }
+
+    /// The claim when `recorded` names `repo`, else the refusal naming both.
+    fn check(state: &Path, repo: &Path, file: &Path, recorded: &[u8]) -> Result<Self> {
+        use std::os::unix::ffi::OsStrExt;
+        let recorded = recorded.strip_suffix(b"\n").unwrap_or(recorded);
         let recorded = Path::new(std::ffi::OsStr::from_bytes(recorded));
         anyhow::ensure!(
             recorded == repo,
@@ -528,6 +549,23 @@ mod claim_tests {
         assert!(e.contains(&state.display().to_string()), "{e}");
         // The refusal changed nothing: the first repository still owns it.
         Claim::take(&state, &a).unwrap();
+    }
+
+    /// Review of PR #37: an existing record is validated without writing anything, so a state file
+    /// system that is full (relay's disk floor) or read-only still opens for its own repository.
+    #[test]
+    fn an_existing_claim_is_validated_without_writing() {
+        let (_d, state, a, b) = dirs();
+        Claim::take(&state, &a).unwrap();
+        std::fs::set_permissions(&state, Permissions::from_mode(0o500)).unwrap();
+        let writable = std::fs::write(state.join("probe"), "").is_ok();
+        let (mine, theirs) = (Claim::take(&state, &a), Claim::take(&state, &b));
+        std::fs::set_permissions(&state, Permissions::from_mode(0o700)).unwrap();
+        assert!(!writable, "the fixture's state directory is still writable (running as root?)");
+        mine.unwrap();
+        // Another repository is still refused for what it is, not for the directory being read-only.
+        let e = format!("{:#}", theirs.unwrap_err());
+        assert!(e.contains("belongs to the repository") && e.contains(&a.display().to_string()), "{e}");
     }
 
     /// A state directory from before claims were recorded belongs to the first repository to open it.

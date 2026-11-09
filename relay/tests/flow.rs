@@ -564,6 +564,7 @@ fn a_job_whose_dependency_failed_is_blocked_until_released() {
     ok(&relay(&env, &["queue", "add", "base", "--text", "One.", "--readonly"]), "queue base");
     ok(&relay(&env, &["queue", "add", "late", "--text", "Two.", "--readonly", "--after", "base"]), "queue late");
     ok(&relay(&env, &["queue", "add", "free", "--text", "Three.", "--readonly", "--after", "base,base"]), "queue free");
+    ok(&relay(&env, &["queue", "add", "last", "--text", "Four.", "--readonly", "--after", "late"]), "queue last");
     until(&env, "base", "failed");
     std::fs::remove_file(&fail).unwrap();
     std::thread::sleep(Duration::from_secs(2));
@@ -577,12 +578,20 @@ fn a_job_whose_dependency_failed_is_blocked_until_released() {
     let out = relay_cmd(&env, &mut cmd);
     assert_eq!(out.status.code(), Some(4), "a blocked job is a conflict, not a hang: {}", stderr(&out));
     assert!(stderr(&out).contains("waits for base (failed)"), "{}", stderr(&out));
+    // PR #39 review: one further down the chain is blocked too, though what it waits for is only queued.
+    let mut cmd = Command::new("timeout");
+    cmd.args(["20", env!("CARGO_BIN_EXE_relay"), "view", "result", "last", "--wait", "--json"]);
+    let out = relay_cmd(&env, &mut cmd);
+    assert_eq!(out.status.code(), Some(4), "the chain is blocked, not a hang: {}", stderr(&out));
+    assert!(stderr(&out).contains("waits for late (blocked)"), "{}", stderr(&out));
+    assert!(board(&env).contains("[waits for late (blocked)]"), "{}", board(&env));
 
     let out = relay(&env, &["queue", "release", "late", "--from", "elsewhere"]);
     assert_eq!(out.status.code(), Some(2), "it does not wait for that");
     ok(&relay(&env, &["queue", "release", "late", "--from", "base"]), "release");
     assert_eq!(job(&env, "late")["after"], serde_json::json!([]));
     assert_eq!(wait_for(&env, "late")["status"], "done");
+    assert_eq!(wait_for(&env, "last")["status"], "done", "released with it, the chain goes on");
     assert_eq!(job(&env, "free")["status"], "queued", "release was for late only");
     let out = relay(&env, &["queue", "release", "late"]);
     assert_eq!(out.status.code(), Some(4), "nothing left to release");

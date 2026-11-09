@@ -68,7 +68,8 @@ session ended `done`, landed or not: landing stays your step. A build job
 waiting for build jobs starts from their branch (below). A dependency that fails,
 is stopped, dequeued or cleaned away before it was done never finishes, so the
 dependent shows `waits for a (failed)` and does not start on its own, nor keep
-the dispatcher awake; `view result --wait` on it exits 4 with that line rather
+the dispatcher awake. So does every job queued behind it, however deep the chain
+(`waits for b (blocked)`), and jobs that wait for each other (`a cycle`); `view result --wait` on it exits 4 with that line rather
 than wait forever. Queue the dependency again (or `queue resume` it), or
 `relay queue release NAME [--from a]`. Only existing jobs can be named, so there
 are no cycles.

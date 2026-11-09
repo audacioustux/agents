@@ -454,17 +454,32 @@ impl World {
     /// The jobs `job` still waits for. A dependency that is done, or was done
     /// when it was cleaned away, is not among them; landing it is a later step.
     pub fn waits(&self, job: &Job) -> Vec<Wait> {
+        self.waits_along(job, &mut vec![job.name.as_str()])
+    }
+
+    /// `waits`, with `path` the jobs that lead here. A queued dependency is blocked when anything it
+    /// waits for is, however deep (`waits for b (blocked)`), and one already on the path is a cycle,
+    /// which never starts either.
+    fn waits_along<'a>(&'a self, job: &Job, path: &mut Vec<&'a str>) -> Vec<Wait> {
         let wait = |name: &String, state: &str, blocked| Wait { job: name.clone(), state: state.into(), blocked };
-        job.after
-            .iter()
-            .filter_map(|a| match self.jobs.get(a) {
-                Some(d) if d.status == Status::Done => None,
-                Some(d) if d.status.is_live() => Some(wait(a, d.status.as_str(), false)),
-                Some(d) if d.reason.as_deref() == Some("dequeued") => Some(wait(a, "dequeued", true)),
-                Some(d) => Some(wait(a, d.status.as_str(), true)),
+        let mut out = Vec::new();
+        for a in &job.after {
+            out.extend(match self.jobs.get_key_value(a) {
+                Some((_, d)) if d.status == Status::Done => None,
+                Some((name, _)) if path.contains(&name.as_str()) => Some(wait(a, "a cycle", true)),
+                Some((name, d)) if d.status == Status::Queued => {
+                    path.push(name);
+                    let stuck = self.waits_along(d, path).iter().any(|w| w.blocked);
+                    path.pop();
+                    Some(if stuck { wait(a, "blocked", true) } else { wait(a, d.status.as_str(), false) })
+                }
+                Some((_, d)) if d.status.is_live() => Some(wait(a, d.status.as_str(), false)),
+                Some((_, d)) if d.reason.as_deref() == Some("dequeued") => Some(wait(a, "dequeued", true)),
+                Some((_, d)) => Some(wait(a, d.status.as_str(), true)),
                 None => Some(wait(a, "gone", true)),
-            })
-            .collect()
+            });
+        }
+        out
     }
 
     /// Whether `job` is queued with every dependency done: the dispatcher may give it a seat.
@@ -1545,6 +1560,35 @@ mod tests {
         // Blocked behind the failed job: live, but it waits for the operator.
         let w = World::fold(&[failed, vec![st(5, queued_after("b", &["a"]))]].concat());
         assert!(w.blocked(&w.jobs["b"]) && !w.moves_on_its_own(&w.jobs["b"]));
+    }
+
+    /// PR #39 review: blocking reaches through a chain of queued jobs, and a cycle never starts.
+    #[test]
+    fn a_job_behind_a_blocked_job_is_blocked_too() {
+        let reaped = Event::Dispatch(DispatchEvent::Reaped { job: "a".into() });
+        let dispatched = Event::Dispatch(DispatchEvent::Dispatched {
+            job: "a".into(),
+            account: "x".into(),
+            runner_pid: 9,
+            runner_started: 1,
+        });
+        let chain = vec![
+            st(1, queued("a")),
+            st(2, queued_after("b", &["a"])),
+            st(3, queued_after("c", &["b"])),
+            st(4, queued_after("d", &["a", "c"])),
+        ];
+        let w = World::fold(&chain);
+        assert!(["b", "c", "d"].iter().all(|n| !w.blocked(&w.jobs[*n])), "a is queued: all of them wait");
+        let w = World::fold(&[chain, vec![st(5, dispatched), st(6, reaped)]].concat());
+        assert!(w.blocked(&w.jobs["b"]));
+        let c = &w.jobs["c"];
+        assert!(w.blocked(c) && !w.moves_on_its_own(c), "c waits for b, which waits for a failed job");
+        assert_eq!(Wait::summary(&w.waits(c)).as_deref(), Some("waits for b (blocked)"));
+        assert_eq!(Wait::summary(&w.waits(&w.jobs["d"])).as_deref(), Some("waits for a (failed), c (blocked)"));
+        // Two queued jobs that wait for each other never start.
+        let w = World::fold(&[st(1, queued_after("x", &["y"])), st(2, queued_after("y", &["x"]))]);
+        assert!(w.blocked(&w.jobs["x"]) && w.blocked(&w.jobs["y"]));
     }
 
     #[test]

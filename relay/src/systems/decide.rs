@@ -620,8 +620,8 @@ pub fn decide(
 }
 
 /// As `decide`, for as long as `wanted` says the caller still wants the answer. Once it does not,
-/// or once the decision no longer asks about the job as it is (`World::asks_now`: resumed, reaped,
-/// a new attempt), no handler is asked, a parked one stops waiting, and `fallback` stands.
+/// or once the decision no longer asks about the job as it is (`World::still_asks`: resumed, reaped,
+/// a new attempt, forgotten), no handler is asked, a parked one stops waiting, and `fallback` stands.
 pub fn decide_while(
     ctx: &Ctx,
     job: &Job,
@@ -648,9 +648,9 @@ pub fn decide_while(
         if !wanted() {
             return Some("withdrawn: the run it was asked for has ended");
         }
+        // Not on record any more (its job was forgotten) counts as withdrawn too.
         let w = ctx.world().ok()?;
-        let stale = w.decisions.get(&req.id).is_some_and(|d| !w.asks_now(d));
-        stale.then_some("withdrawn: the job has moved on since it was asked")
+        (!w.still_asks(&req.id)).then_some("withdrawn: the job has moved on since it was asked")
     };
     // A handler at work hears of it as soon as the decision is withdrawn or goes stale, and stops.
     let live = || gone().is_none();
@@ -725,7 +725,7 @@ impl Decided {
     pub fn carry<R>(&self, ctx: &Ctx, act: impl FnOnce(&World, Action, &str) -> Result<R>) -> Result<Option<R>> {
         let _lock = ctx.jobs_lock()?;
         let world = ctx.world()?;
-        if !world.decisions.get(&self.id).is_some_and(|d| world.asks_now(d)) {
+        if !world.still_asks(&self.id) {
             return Ok(None);
         }
         act(&world, self.action.clone(), &self.why).map(Some)

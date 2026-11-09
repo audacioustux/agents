@@ -654,6 +654,13 @@ impl World {
         })
     }
 
+    /// Whether decision `id` is still on record and asks about its job as it is ([`World::asks_now`]).
+    /// A decision of a job that was forgotten (dequeued and cleaned) is no longer on record: it asks
+    /// about nothing, and a handler still at work on it is withdrawn.
+    pub fn still_asks(&self, id: &str) -> bool {
+        self.decisions.get(id).is_some_and(|d| self.asks_now(d))
+    }
+
     /// Whether decision `d` waits for the orchestrator at `now` (bus time): parked, unanswered, and
     /// still about its job as it is (`asks_now`). The fold hears an answer only then; whether the
     /// process that waits for it is alive is not the fold's to know (`decide::unanswerable`).
@@ -1920,6 +1927,26 @@ mod tests {
         ]);
         assert_eq!(w.accounts["x"].limited_until, Some(200));
         assert!(!w.accounts["x"].signed_out);
+    }
+
+    /// PR #39 sixth review, issue 3: a `held` decision of a queued job asks about it until the job is
+    /// forgotten; then it asks about nothing, not even a new job of the same name.
+    #[test]
+    fn a_forgotten_jobs_decision_no_longer_asks() {
+        let asked = Event::Decide(DecideEvent::DecisionRequested {
+            id: "d".into(),
+            job: "a".into(),
+            point: Point::Held,
+            created: 1,
+            attempt: 0,
+            waiter: None,
+        });
+        let mut evs = vec![st(1, queued("a")), st(2, asked)];
+        assert!(World::fold(&evs).still_asks("d"), "asked about the queued job as it is");
+        evs.push(st(3, Event::Land(LandEvent::Forgotten { job: "a".into() })));
+        assert!(!World::fold(&evs).still_asks("d"), "forgotten, it asks about nothing");
+        evs.push(st(4, queued("a")));
+        assert!(!World::fold(&evs).still_asks("d"), "nor about a new job of the same name");
     }
 
     #[test]

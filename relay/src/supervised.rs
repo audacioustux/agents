@@ -30,23 +30,20 @@ const SUPERVISOR_LOOK: Duration = Duration::from_millis(25);
 
 /// A command that runs `program` under `relay supervise`, tied to this process as its runner: add
 /// its arguments, environment, directory and pipes as for `program` itself, which inherits them all.
+///
+/// In unit tests it is `program` alone, leading its group as the supervisor would: they exercise
+/// the runner's side, which needs no relay executable. The supervisor itself is the real binary's,
+/// and tested as that (`tests/supervise.rs`, and end to end in `tests/flow.rs`).
+#[cfg_attr(test, allow(clippy::unnecessary_wraps, reason = "only the real supervisor can fail to be found"))]
 pub fn command(program: impl AsRef<OsStr>) -> io::Result<Command> {
-    let mut c = Command::new(supervisor()?);
-    c.args(["supervise", "--parent", &std::process::id().to_string(), "--"]).arg(program);
-    Ok(c)
-}
-
-/// The relay binary that supervises. A unit test runs in a test binary under `target/<profile>/deps`;
-/// cargo builds relay itself beside it for the integration tests.
-fn supervisor() -> io::Result<std::path::PathBuf> {
     #[cfg(not(test))]
-    return crate::os::own_binary();
-    #[cfg(test)]
     {
-        let exe = std::env::current_exe()?;
-        let relay = exe.parent().and_then(std::path::Path::parent).map(|d| d.join("relay"));
-        relay.filter(|p| p.exists()).ok_or_else(|| io::Error::other("relay is not built beside the tests"))
+        let mut c = Command::new(crate::os::own_binary()?);
+        c.args(["supervise", "--parent", &std::process::id().to_string(), "--"]).arg(program);
+        Ok(c)
     }
+    #[cfg(test)]
+    Ok(Command::new(program))
 }
 
 #[derive(Debug)]
@@ -59,6 +56,7 @@ impl Supervised {
     /// Starts `cmd`, made by [`command`], as the leader of a process group of its own.
     pub fn spawn(cmd: &mut Command) -> io::Result<Self> {
         use std::os::unix::process::CommandExt as _;
+        #[cfg(not(test))]
         debug_assert_eq!(cmd.get_args().next(), Some(OsStr::new("supervise")), "made by supervised::command");
         let child = cmd.process_group(0).spawn()?;
         Ok(Self { child, exited: None })
@@ -81,17 +79,28 @@ impl Supervised {
         }
     }
 
+    /// Whether the child (the supervisor, its group's leader) has ended, leaving it unreaped.
+    fn leader_ended(&self) -> io::Result<bool> {
+        use rustix::process::{WaitId, WaitIdOptions, waitid};
+        let pid = i32::try_from(self.child.id()).ok().and_then(Pid::from_raw).ok_or_else(|| io::Error::other("pid"))?;
+        let ended = waitid(WaitId::Pid(pid), WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT)?;
+        Ok(ended.is_some())
+    }
+
     /// Waits until the child has exited and `closed` says its output has closed, asking `stop` every
     /// [`LOOK`]. `Ok(Err(why))`: `stop` answered first, and the child's group was killed.
-    /// `Ok(Ok(status))`: it ended on its own (and its supervisor ended what it left in its group).
+    /// `Ok(Ok(status))`: it ended, however it ended, and whatever it left in its group was killed.
     pub fn finish<S>(
         &mut self,
         closed: impl Fn() -> bool,
         mut stop: impl FnMut() -> Option<S>,
     ) -> io::Result<Result<ExitStatus, S>> {
         loop {
-            if self.exited.is_none() {
-                #[allow(clippy::disallowed_methods, reason = "the supervisor's own look")]
+            if self.exited.is_none() && self.leader_ended()? {
+                // Whatever is left in its group (all of it, if the supervisor was killed) goes before it
+                // is reaped: until then its pid, and so the group id, can be no one else's.
+                let _ = crate::os::kill_group(self.child.id());
+                #[allow(clippy::disallowed_methods, reason = "the supervisor reaps a child that has ended")]
                 let status = self.child.try_wait()?;
                 self.exited = status;
             }
@@ -208,6 +217,9 @@ fn exit_code(status: ExitStatus) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    //! The runner's side, with `sh` standing in for the supervisor as the leader of its group
+    //! ([`command`]); the supervisor itself is tested in `tests/supervise.rs`.
+
     use super::*;
 
     fn sh(script: &str) -> Command {
@@ -258,71 +270,37 @@ mod tests {
         assert!(eventually(|| gone(&s.child.id().to_string())));
     }
 
-    /// PR #39 fifth review: a handler's background grandchild is gone when the handler is stopped, and
-    /// when the handler exits on its own, even holding the handler's output: its supervisor ends it.
+    /// A background grandchild goes with the group when the child is stopped.
     #[test]
-    fn a_handlers_background_grandchild_goes_when_it_is_stopped_or_exits() {
+    fn a_background_grandchild_goes_when_the_child_is_stopped() {
         let dir = crate::config::tempdir::Dir::new();
         let pid = dir.path().join("stopped.pid");
         let mut s = Supervised::spawn(&mut sh(&format!("sleep 300 & echo $! >{}; sleep 300", pid.display()))).unwrap();
         let grandchild = read_pid(&pid);
         assert_eq!(s.finish(|| false, || Some("stop")).unwrap().unwrap_err(), "stop");
         assert!(eventually(|| gone(&grandchild)), "stopped, the grandchild went with the group");
-
-        let pid = dir.path().join("exited.pid");
-        let mut s = Supervised::spawn(&mut sh(&format!("sleep 300 & echo $! >{}", pid.display()))).unwrap();
-        let mut out = s.child().stdout.take().unwrap();
-        let reader = std::thread::spawn(move || std::io::Read::read_to_end(&mut out, &mut Vec::new()));
-        let started = std::time::Instant::now();
-        let r = s.finish(|| reader.is_finished(), || (started.elapsed() > Duration::from_secs(10)).then_some("stop"));
-        assert!(r.unwrap().unwrap().success(), "it exited, and the grandchild holding its output was ended");
-        assert!(gone(&read_pid(&pid)), "the grandchild went when the handler exited");
     }
 
-    /// PR #39 fifth review, gaps 1 and 3: nothing is recorded, and a runner killed at once after it
-    /// started a handler (before the supervisor has even looked) or while the handler works takes the
-    /// handler's whole group with it. The "runner" here is a shell that starts the supervisor and is
-    /// killed with SIGKILL.
+    /// PR #39 sixth review, issue 2: the supervisor (the group's leader) is killed while the rest of
+    /// its group runs on, holding the output. The runner sees it end without reaping it, kills what
+    /// is left while the unreaped leader still pins the group id, and only then reaps it: nothing
+    /// survives to the timeout, and the output closes.
     #[test]
-    fn a_handler_goes_with_its_runner_however_soon_the_runner_is_killed() {
+    fn a_killed_supervisor_takes_the_rest_of_its_group_with_it() {
         let dir = crate::config::tempdir::Dir::new();
-        let relay = supervisor().unwrap();
-        for wait_for_handler in [false, true] {
-            let tag = if wait_for_handler { "working" } else { "at-once" };
-            let (sup, handler, grandchild) = (
-                dir.path().join(format!("{tag}.sup")),
-                dir.path().join(format!("{tag}.handler")),
-                dir.path().join(format!("{tag}.gc")),
-            );
-            let inner =
-                format!("echo $$ >{}; sleep 300 & echo $! >{}; sleep 300", handler.display(), grandchild.display());
-            let wait = if wait_for_handler {
-                format!("while [ ! -s {} ]; do sleep 0.05; done; ", grandchild.display())
-            } else {
-                String::new()
-            };
-            let runner = format!(
-                "\"$0\" supervise --parent $$ -- sh -c '{inner}' & echo $! >{}; {wait}kill -9 $$",
-                sup.display()
-            );
-            let mut sh = Command::new("sh");
-            sh.arg("-c").arg(&runner).arg(&relay);
-            #[allow(clippy::disallowed_methods, reason = "a test's stand-in runner, which kills itself")]
-            let status = sh.status().unwrap();
-            assert!(!status.success());
-            let sup = read_pid(&sup);
-            assert!(eventually(|| gone(&sup)), "{tag}: the supervisor ended");
-            for f in [&handler, &grandchild] {
-                if let Ok(pid) = std::fs::read_to_string(f) {
-                    assert!(eventually(|| gone(pid.trim())), "{tag}: {} went with the runner", f.display());
-                }
-            }
-            if wait_for_handler {
-                assert!(grandchild.exists(), "the handler was at work when its runner was killed");
-            }
-            let pgid = sup.parse().unwrap();
-            assert!(eventually(|| crate::os::group_members(pgid).is_empty()), "{tag}: nothing is left in its group");
-        }
+        let pid = dir.path().join("left.pid");
+        let mut s = Supervised::spawn(&mut sh(&format!("sleep 300 & echo $! >{}; sleep 300", pid.display()))).unwrap();
+        let left = read_pid(&pid);
+        let mut out = s.child().stdout.take().unwrap();
+        let reader = std::thread::spawn(move || std::io::Read::read_to_end(&mut out, &mut Vec::new()));
+        let leader = rustix::process::Pid::from_raw(s.child.id().cast_signed()).unwrap();
+        rustix::process::kill_process(leader, Signal::KILL).unwrap();
+        let started = std::time::Instant::now();
+        let r =
+            s.finish(|| reader.is_finished(), || (started.elapsed() > Duration::from_secs(10)).then_some("timeout"));
+        let status = r.unwrap().expect("ended once the rest of its group was killed, before the timeout");
+        assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(9));
+        assert!(eventually(|| gone(&left)), "the rest of the group went with the leader");
     }
 
     /// Done on its own once it exited and its output closed, with its exit code; dropped unreaped, it is killed.
@@ -334,8 +312,6 @@ mod tests {
         assert!(s.finish(|| reader.is_finished(), || None::<()>).unwrap().unwrap().success());
         let mut s = Supervised::spawn(&mut sh("exit 3")).unwrap();
         assert_eq!(s.finish(|| true, || None::<()>).unwrap().unwrap().code(), Some(3));
-        let mut s = Supervised::spawn(&mut command("no-such-program-anywhere").unwrap()).unwrap();
-        assert_eq!(s.finish(|| true, || None::<()>).unwrap().unwrap().code(), Some(127));
         let s = Supervised::spawn(&mut sh("sleep 30")).unwrap();
         let pid = s.child.id().to_string();
         drop(s);

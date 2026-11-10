@@ -92,7 +92,7 @@ static DECISIONS: [Column; 5] =
 const ACCOUNTS: [Column; 5] =
     [col("account", 24), col("signed in as", 18), col("state", 24), col("room/day", 8), col("run", 3)];
 /// The most a meter's column is widened to: its whole bar and tail.
-const GAUGE: usize = gauge::BAR + 12;
+const GAUGE: usize = gauge::BAR + gauge::TAIL;
 
 impl Board {
     /// The board of the projects `m` shows (`everywhere`, or ours alone), recent jobs or `all`; ours

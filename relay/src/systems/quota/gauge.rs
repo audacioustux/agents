@@ -10,8 +10,9 @@ use crate::harness::Meter;
 /// The cells a bar takes when there is room, and the fewest it shrinks to.
 pub const BAR: usize = 12;
 pub const MIN_BAR: usize = 5;
-/// What follows the bar: ` 100%* 1d17h`, the time left padded to five columns.
-const TAIL: usize = 12;
+/// What follows the bar: ` 100%* 1d17h`, the time left padded to five columns. A longer time
+/// left (a monthly meter's `29d23h`) makes it wider.
+pub const TAIL: usize = 12;
 
 /// What a board shows where an account has no such meter.
 pub const MISSING: &str = "·";
@@ -82,17 +83,18 @@ impl Gauge {
         format!("{}{}", self.bar(cells), self.tail(self.governing))
     }
 
-    /// The gauge in `width` columns, its bar shrunk first (to [`MIN_BAR`]), coloured by its
-    /// [`Tone`] and bold when it decides.
+    /// The gauge in `width` columns, its bar shrunk first (to [`MIN_BAR`]) so the whole tail
+    /// fits, coloured by its [`Tone`] and bold when it decides.
     pub fn line(&self, width: usize) -> Line<'static> {
-        let cells = width.saturating_sub(TAIL).clamp(MIN_BAR, BAR);
+        let tail = self.tail(false);
+        let cells = width.saturating_sub(tail.chars().count()).clamp(MIN_BAR, BAR);
         let colour = match self.tone() {
             Tone::Room => Color::Green,
             Tone::Over => Color::Red,
             Tone::Near => Color::Yellow,
         };
         let style = if self.governing { Style::new().fg(colour).bold() } else { Style::new().fg(colour) };
-        let tail: String = self.tail(false).chars().take(width.saturating_sub(cells)).collect();
+        let tail: String = tail.chars().take(width.saturating_sub(cells)).collect();
         Line::from(vec![
             Span::styled(self.bar(cells).chars().take(width).collect::<String>(), style),
             Span::styled(tail, style),
@@ -182,6 +184,16 @@ mod tests {
         assert_eq!(text(gauge(0.31, Some(0.9)).line(9)), "█▌░░│  31", "never fewer than five cells");
         let bold = Gauge { governing: true, ..gauge(0.31, Some(0.9)) }.line(24);
         assert!(bold.spans.iter().all(|s| s.style.add_modifier.contains(ratatui::style::Modifier::BOLD)));
+    }
+
+    /// A monthly meter can be `29d23h` from its reset: its tail is wider, and the bar gives way.
+    #[test]
+    fn a_monthly_reset_keeps_its_unit() {
+        let g = Gauge { left: Some(29 * 86_400 + 23 * 3600), ..gauge(0.31, Some(0.9)) };
+        assert_eq!(g.text(12), "███▊░░░░░░│░  31%  29d23h");
+        let text = |l: Line<'_>| l.spans.iter().map(|s| s.content.to_string()).collect::<String>();
+        assert_eq!(text(g.line(24)), "███▍░░░░░│░  31%  29d23h", "a bar a cell shorter, the whole time left");
+        assert_eq!(text(g.line(18)), "█▌░░│  31%  29d23h", "at five cells, still whole");
     }
 
     #[test]

@@ -1601,14 +1601,14 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "d110fe285166b2dccd350aa49f72d25474d37535d7b4e5f4aab8543e2804e9c4",
+          "sha256": "2200b548a2da60ee09ce0288bd1d1e132a6bb91becd426d5235302b9f897bffd",
           "upstream": {
             "status": "rewritten"
           }
         }
       },
       "decisions": [
-        "2026-11-10: added 'Headlines make a claim the page keeps': the competitor-swap test, tied to the ambiguity ground under 'a deliberate brand voice is not a defect'; the page keeping the claim; a brand line kept beside a specific one. Plus its detection row and headlines in the description. Prompted by critiquing-visual-design, which hands headlines here."
+        "2026-11-10: added 'Headlines make a claim the page keeps': the competitor swap as a prompt (shared capability is not vagueness; a rewrite only when headline and copy leave a first-time reader unsure, after review on PR 44), tied to the ambiguity ground under 'a deliberate brand voice is not a defect'; the page keeping the claim; a brand line kept beside a specific one. Plus its detection row and headlines in the description. Prompted by critiquing-visual-design, which hands headlines here."
       ],
       "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
       "owned": true
@@ -1925,7 +1925,7 @@
       "note": "2026-11-10: written test-first at the owner's request. Inspiration: three short lists by the designer Charles Liu (ways to unslop AI designs, AI design slop indicators, backgrounds that make a design less flat), shared by the owner; restated as prompts for looking, not reproduced. The owner's framing is the skill's premise: something is slop only if it looks weird, inconsistent, aesthetically not pleasing, or practically ruins something; the lists say what to measure and rethink, not what to follow or avoid. Most rules already had owners and stay there; this skill owns the judgement, the evidence a finding carries, and the composition questions no sibling covered. Tests (Sonnet unless noted) used rendered fixtures: an orders dashboard whose list-like items each do a job, a clean copy of it, and a landing page with ten planted defects. RED, 7 runs: list matches reported as 'confirmed slop' (a brand gradient, per-row status pills, table row rules), seven of them on the clean copy; offered the corpus, no reviewer opened a skill; a three-bullet request answered with vibes and false facts about the render. With the skill, 11 runs over the initial text, two refactor rounds and two review rounds: the dashboard's planted defects reported first and measured, list items kept with their jobs named, no list-match findings on the clean copy; loopholes closed for an installed owner left unread, header rules counted as the same role as row rules, a count of findings never written down, the answer to a list growing past the items present plus one line for those absent, and an unpleasant look reported with nothing to point at (under 'it is ugly, don't tell me it is fine', the last run named elements for every finding and labelled the rest preference). Known limit: Sonnet missed the 16/16/6 card radii and the non-concentric inset band in every run, and the icon styles in the post-review run; one Opus run, on the first refactor's text, found all ten.",
       "files": {
         "SKILL.md": {
-          "sha256": "6627a3c1412728bdd7a13be35f5ebb8d4f76b27126553be2d45fe5b28b0f09c6"
+          "sha256": "a9c863d59549f5daea62cfa288fcd25199071a45b589e4b7d23d4be9d4d0e821"
         }
       }
     }

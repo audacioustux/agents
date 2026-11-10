@@ -1597,13 +1597,15 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "32edd29ba6b55e85e526b983ac8ec4e558e5ae5594ce9b2d5ed6602ec23fcdc3",
+          "sha256": "d110fe285166b2dccd350aa49f72d25474d37535d7b4e5f4aab8543e2804e9c4",
           "upstream": {
             "status": "rewritten"
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-11-10: added 'Headlines make a claim the page keeps': the competitor-swap test, tied to the ambiguity ground under 'a deliberate brand voice is not a defect'; the page keeping the claim; a brand line kept beside a specific one. Plus its detection row and headlines in the description. Prompted by critiquing-visual-design, which hands headlines here."
+      ],
       "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
       "owned": true
     },

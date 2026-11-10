@@ -1,6 +1,6 @@
 ---
 name: writing-interface-copy
-description: Use when writing or reviewing user-facing copy - labels, errors, empty states, settings, toggles, confirmations, and button text - for voice consistency, plain wording, and translation safety.
+description: Use when writing or reviewing user-facing copy - headlines, labels, errors, empty states, settings, toggles, confirmations, and button text - for voice consistency, plain wording, and translation safety.
 uses:
   - name: refining-typography
     source: audacioustux/agents
@@ -40,6 +40,10 @@ Write "you", not "the user". In errors, "we" reads as deflection: prefer "Unable
 Choose words a tired reader gets on the first pass, and delete every word that does no work. No idioms, no colloquialisms, no humor that won't translate.
 
 The one rule worth memorizing exactly: never assemble a sentence from fragments around a variable, such as `"You have " + n + " new messages"`. Word order and pluralization rules change per language, so a fragment-built sentence breaks in translation even when it reads fine in the source. Use one complete templated string with proper pluralization handling, not a concatenation.
+
+## Headlines make a claim the page keeps
+
+A headline says what this product does for this reader, specifically enough that a rival could not use it unchanged. Put a competitor's name in its place: if the line is still true, it has not said anything yet, and the reader is left unsure what this product does, which is the ambiguity that justifies raising a brand line at all. "The future of invoicing" survives the swap; "Invoices that chase late payers for you" does not. The page under it then has to keep the claim, since a headline promising speed above a six-step form reads as a broken promise. A deliberate brand line can stay when a specific line beside it does this work.
 
 ## Verb-first buttons
 
@@ -96,3 +100,4 @@ A placeholder shows the expected format: `name@example.com`, `DD/MM/YYYY`. It va
 | Mixed title case and sentence case on the same element type | Pick sentence case and apply it everywhere for that type |
 | An error that repeats "we" | Rewrite from the reader's perspective, drop the pronoun |
 | An empty state holding a stat or notice found nowhere else | Move that content out of the empty state before it ships |
+| A headline that stays true with a competitor's name swapped in, and no specific line beside it | Rewrite it, or add a line beside it that names what this product does for this reader |

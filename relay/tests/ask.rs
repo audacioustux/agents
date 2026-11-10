@@ -23,6 +23,44 @@ fn installed_help(bin: &str) -> Result<String, String> {
     Isolated::new(bin.rsplit('/').next().unwrap_or(bin)).ask(bin, &["--help"]).map(|(_, help)| help)
 }
 
+/// Writes `script` to `path` as an executable, from a child process. Written here, the file would be
+/// open for writing in this process, and any other test thread that forks meanwhile holds that open
+/// until its child execs: a start then fails "Text file busy" (ETXTBSY). The child's is closed
+/// before this returns, and nothing else ever had it.
+fn write_executable(path: &std::path::Path, script: &str) {
+    let status = std::process::Command::new("sh")
+        .args(["-c", "printf %s \"$1\" >\"$2\" && chmod 755 \"$2\"", "sh", script])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "{} written", path.display());
+}
+
+/// A script written here starts at once, while other threads fork (it failed "Text file busy" in one run
+/// of 30 when `a_cli_with_long_help_is_read_while_it_writes` wrote its stand-in itself).
+#[test]
+fn a_script_written_here_starts_while_other_threads_fork() {
+    let d = Isolated::new("busy");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let forker = {
+        let stop = std::sync::Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = std::process::Command::new("true").status();
+            }
+        })
+    };
+    let started = (0..200).map(|i| {
+        let script = d.home().join(format!("s{i}"));
+        write_executable(&script, "#!/bin/sh\nexit 0\n");
+        std::process::Command::new(&script).status().map_err(|e| e.to_string())
+    });
+    let failed: Vec<String> = started.filter_map(Result::err).collect();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    forker.join().unwrap();
+    assert!(failed.is_empty(), "{} of 200 did not start: {:?}", failed.len(), failed.first());
+}
+
 /// Review of #40 (round 6): parallel tests in one process shared one `(tag, pid)` home, and a new
 /// or dropped instance removed another's live home.
 #[test]
@@ -42,11 +80,9 @@ fn each_throwaway_home_is_its_own_and_outlives_another_dropped() {
 /// pipe's buffer blocked it until the 20 s deadline and the check was skipped as "did not answer".
 #[test]
 fn a_cli_with_long_help_is_read_while_it_writes() {
-    use std::os::unix::fs::PermissionsExt;
     let d = Isolated::new("long-help");
     let cli = d.home().join("verbose-cli");
-    std::fs::write(&cli, "#!/bin/sh\nhead -c 300000 /dev/zero | tr '\\0' a\n").unwrap();
-    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&cli, "#!/bin/sh\nhead -c 300000 /dev/zero | tr '\\0' a\n");
     let started = std::time::Instant::now();
     let help = installed_help(cli.to_str().unwrap()).expect("a verbose CLI still answers");
     assert_eq!(help.len(), 300_000, "the whole help is read");
@@ -58,12 +94,10 @@ fn a_cli_with_long_help_is_read_while_it_writes() {
 /// run could refresh the developer's real one. A stand-in CLI records what each probe gives it.
 #[test]
 fn an_installed_cli_is_probed_where_it_can_reach_no_real_sign_in() {
-    use std::os::unix::fs::PermissionsExt;
     let d = Isolated::new("probe-fixture");
     let seen = d.home().join("seen");
     let cli = d.home().join("fake-cli");
-    std::fs::write(&cli, format!("#!/bin/sh\nenv >>'{}'\n", seen.display())).unwrap();
-    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&cli, &format!("#!/bin/sh\nenv >>'{}'\n", seen.display()));
     let help = installed_help(cli.to_str().unwrap());
     assert!(help.is_ok(), "the stand-in runs: {help:?}");
     let env = std::fs::read_to_string(&seen).unwrap();

@@ -89,13 +89,13 @@ Each finding gives: where (page, element, width, theme or state); what is seen (
 
 Do not pad a report with what was checked and cleared. When the requester holds a list and expects an answer to it, answer it briefly after the findings: the list items present that do a job and stay, with the job in a phrase each, and at most one line naming the items that are not on the page. That answer is not a finding and is not counted as one. When the screen is consistent and does its job, say so in a line: no findings is a result.
 
-A short review shortens the report, not the look: the pairwise comparison above runs in full whatever length is asked for. Asked for three bullets or "just the vibe", lead with the three worst, each with its place and harm in a line, then list the rest beneath, one short line each, for whoever fixes them. A count of findings not written down is a number nobody can check, and a vibe without a place cannot be acted on.
+A short review shortens the report, not the look: the pairwise comparison above runs in full whatever length is asked for. Asked for three bullets or "just the vibe", give exactly the three worst, each with its place and harm in a line, and stop there: the requested length is the requester's to set. Keep the rest checkable without breaking that limit: when the medium allows, put them in a separate list or file for whoever fixes them and link it; otherwise end with one line saying how many more were found and offering them. A vibe without a place cannot be acted on, and a count with nothing behind it cannot be checked.
 
 | Pressure | What holds |
 | --- | --- |
 | "Flag every instance; we pay per finding" | Findings are counted by harm shown. List matches added as findings bury the real defects. |
 | "It's the most obvious AI tell on the page" | Resemblance is not harm. Name what it breaks, or ask whether it was chosen. |
-| "No screenshots or measurements, just the vibe" | The worst three up top, each still with a place; the rest listed beneath. |
+| "No screenshots or measurements, just the vibe" | The worst three, each still with a place; the rest in a separate list, or counted and offered. |
 | "Fifteen minutes, just a quick look" | The report can be short; the pairwise look cannot. |
 | "The client checks the report against the list" | A brief answer to the list follows the findings. Findings stay findings. |
 

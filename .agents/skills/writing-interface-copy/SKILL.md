@@ -43,7 +43,7 @@ The one rule worth memorizing exactly: never assemble a sentence from fragments 
 
 ## Headlines make a claim the page keeps
 
-A headline says what this product does for this reader, specifically enough that a rival could not use it unchanged. Put a competitor's name in its place: if the line is still true, it has not said anything yet, and the reader is left unsure what this product does, which is the ambiguity that justifies raising a brand line at all. "The future of invoicing" survives the swap; "Invoices that chase late payers for you" does not. The page under it then has to keep the claim, since a headline promising speed above a six-step form reads as a broken promise. A deliberate brand line can stay when a specific line beside it does this work.
+A headline says what this product does for this reader, plainly enough that a first-time reader knows what the page offers before reading further. Swapping a competitor's name in is a quick prompt, not the test: a line that stays true of every product in the category ("The future of invoicing") usually names no job at all, while a line a rival could also truthfully use is still clear when it names the job ("Invoices that chase late payers for you"). Shared capability is not vagueness. Recommend a rewrite only when the headline and the copy under it together leave the reader unsure what this product does, which is the ambiguity that justifies raising a brand line at all. The page under it then has to keep the claim, since a headline promising speed above a six-step form reads as a broken promise. A deliberate brand line can stay when a specific line beside it does this work.
 
 ## Verb-first buttons
 
@@ -100,4 +100,4 @@ A placeholder shows the expected format: `name@example.com`, `DD/MM/YYYY`. It va
 | Mixed title case and sentence case on the same element type | Pick sentence case and apply it everywhere for that type |
 | An error that repeats "we" | Rewrite from the reader's perspective, drop the pronoun |
 | An empty state holding a stat or notice found nowhere else | Move that content out of the empty state before it ships |
-| A headline that stays true with a competitor's name swapped in, and no specific line beside it | Rewrite it, or add a line beside it that names what this product does for this reader |
+| A headline and the copy under it that together leave a first-time reader unsure what this product does (a line true of every product in the category is the usual sign) | Rewrite it to name the job, or add a line beside it that does |

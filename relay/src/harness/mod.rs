@@ -53,13 +53,6 @@ pub struct Identity {
     pub stamp: String,
 }
 
-impl Identity {
-    /// `Ultra #76de9d`.
-    pub fn label(&self) -> String {
-        if self.plan.is_empty() { format!("#{}", self.id) } else { format!("{} #{}", self.plan, self.id) }
-    }
-}
-
 /// What a home's own files say about its sign-in, read with no call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignIn {

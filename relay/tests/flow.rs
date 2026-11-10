@@ -1026,7 +1026,8 @@ fn two_homes_signed_in_as_one_account_share_a_seat_and_the_board_says_so() {
 
     let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
     let json = String::from_utf8_lossy(&relay(&env, &["quota", "show", "--json"]).stdout).into_owned();
-    assert!(table.contains("same sign-in as claude:a") && table.contains("Ultra #"), "{table}");
+    // Who each is signed in as is in --json; the table says which are one account.
+    assert!(table.contains("same sign-in as claude:a"), "{table}");
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["accounts"][1]["sameAs"], "claude:a", "{json}");
     assert_eq!(v["accounts"][0]["identity"]["plan"], "Ultra");
@@ -1060,7 +1061,10 @@ fn a_session_that_lapsed_is_signed_out_until_a_reading_succeeds() {
     std::fs::write(&usage, good).unwrap();
     ok(&relay(&env, &["quota", "refresh"]), "refresh again");
     let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
-    assert!(!table.contains("signed out") && table.contains("ready"), "{table}");
+    // Usable again: ready, or already busy with the job that waited for it (the dispatcher
+    // may start it between the refresh and the show).
+    let usable = table.contains("ready") || table.contains("busy (1 of 1 seat)");
+    assert!(!table.contains("signed out") && usable, "{table}");
     assert_eq!(wait_for(&env, "look")["status"], "done");
 }
 
@@ -1137,7 +1141,7 @@ fn a_puku_session_runs_on_its_own_home_and_sign_in_and_sees_no_other() {
 
     let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
     let json = String::from_utf8_lossy(&relay(&env, &["quota", "show", "--json"]).stdout).into_owned();
-    assert!(table.contains("puku:p") && table.contains("puku:q") && table.contains("seven_day"), "{table}");
+    assert!(table.contains("puku:p") && table.contains("puku:q") && table.contains("7 days"), "{table}");
     for secret in [SECRET_EMAIL, "puku-user-p", "\"fake\""] {
         assert!(!table.contains(secret) && !json.contains(secret), "{secret} leaked:\n{table}\n{json}");
     }
@@ -3011,8 +3015,9 @@ fn a_meter_about_to_reset_has_the_looser_floor_and_quota_says_so() {
     configure(&env, near, "");
     omp_meter(&env.home, 91, "10h");
     let table = stated(&env);
-    assert!(table.contains("floor 90%, 98% within 12h of a reset"), "{table}");
-    assert!(table.contains("ready") && table.contains("(floor 98%, resets in 10h)"), "{table}");
+    assert!(table.contains("floor 90% (98% in the last 12h before a reset)"), "{table}");
+    // The floor mark in the last cell: 98%, not the 90% it would be a day off.
+    assert!(table.contains("ready") && table.contains("█▉│  91%* 10h"), "{table}");
     let json: serde_json::Value = serde_json::from_slice(&relay(&env, &["quota", "show", "--json"]).stdout).unwrap();
     assert_eq!(json["accounts"][0]["floor"], 0.98, "{json}");
     assert_eq!(json["accounts"][0]["floorWhy"], "floor 98%, resets in 10h", "{json}");

@@ -11,7 +11,8 @@ use super::pane::Step;
 use super::ui::{Action, Id, Ui};
 use crate::config::{Config, tempdir};
 use crate::systems::dispatch::Room;
-use crate::systems::quota::AccountsView;
+use crate::systems::quota::gauge::Gauge;
+use crate::systems::quota::{AccountsView, Shown};
 use crate::systems::view::machine::{Machine, Project};
 use crate::world::{Decision, Job, Status, World};
 
@@ -74,14 +75,18 @@ fn fixture(ours: &[Job], theirs: &[Job]) -> Fixture {
 }
 
 fn accounts(n: usize) -> AccountsView {
-    let row = |i: usize| {
-        vec![format!("claude:a{i}"), "Ultra #f4bd75".into(), "ready".into(), String::new(), "29% seven_day".into()]
+    let row = |i: usize| Shown {
+        account: format!("  claude:a{i}"),
+        state: "ready".into(),
+        meter: "7 days".into(),
+        gauge: Some(Gauge { used: 0.29, floor: Some(0.9), left: Some(86_400), governing: true }),
+        ready: true,
+        ..Shown::default()
     };
     AccountsView {
         json: serde_json::Value::Null,
-        head: "accounts on claude (floor 90%, 1 session(s) each)".into(),
-        cells: (0..n).map(row).collect(),
-        ready: vec![true; n],
+        head: "accounts on claude · floor 90% · 1 session(s) each · next pick: none".into(),
+        rows: (0..n).map(row).collect(),
     }
 }
 
@@ -91,7 +96,7 @@ impl Fixture {
             &self.cfg,
             &self.machine,
             &Room::default(),
-            accounts(accounts_n),
+            &accounts(accounts_n),
             ui.shown.all,
             ui.shown.everywhere,
             NOW,
@@ -158,7 +163,7 @@ fn the_board_fits_80x24_and_120x40_with_headings_keys_and_a_zoned_clock() {
             assert!(keys.contains(hint), "{w}x{h}: {hint} missing from {keys}");
         }
         assert!(fr.iter().any(|l| l.contains("claude:a1")), "the accounts");
-        assert_eq!(b.accounts[0][3], "-", "an empty cell says so");
+        assert_eq!(b.accounts[0][4], "-", "an empty cell says so");
         // The model column follows `as`; the short form shows in the row, and the harness that ran
         // (claude) narrows a job with an account, while one without shows both.
         let heading = fr[1].find("as ").expect("as");
@@ -513,4 +518,115 @@ fn the_pagers_stderr_is_the_boards() {
     let ours = std::fs::read_link("/proc/self/fd/2").unwrap();
     let check = format!("test \"$(readlink /proc/$$/fd/2)\" = '{}' || exit 9", ours.display());
     super::run_pager(&check, "text").unwrap();
+}
+
+/// Two accounts: one picked next with one meter, room on it; one stale with two, over its floor on
+/// the one that decides and near it on the other, a sub-row.
+fn gauged() -> AccountsView {
+    let g = |used, left, governing| Some(Gauge { used, floor: Some(0.9), left: Some(left), governing });
+    let rows = vec![
+        Shown {
+            account: "▸ claude:ifty".into(),
+            state: "ready".into(),
+            meter: "7 days".into(),
+            gauge: g(0.28, 149 * 3600, true),
+            room: "12%/d".into(),
+            running: "1".into(),
+            ready: true,
+            sub: false,
+        },
+        Shown {
+            account: "  claude:tj".into(),
+            state: "stale (read 3h ago)".into(),
+            meter: "7 days".into(),
+            gauge: g(0.95, 41 * 3600, true),
+            room: "—".into(),
+            running: "0".into(),
+            ..Shown::default()
+        },
+        Shown { meter: "5 hours".into(), gauge: g(0.85, 57 * 60, false), sub: true, ..Shown::default() },
+    ];
+    AccountsView {
+        json: serde_json::Value::Null,
+        head: "accounts on claude · floor 90% · 1 session(s) each · next pick ▸ claude:ifty".into(),
+        rows,
+    }
+}
+
+/// The accounts pane draws each meter as a gauge: a bar with `│` at its floor, green with room,
+/// yellow within ten points of the floor, red at it, the meter that decides in bold.
+#[test]
+fn the_accounts_pane_draws_gauges() {
+    use ratatui::style::{Color, Modifier};
+    let (fr, buf) = accounts_pane(&gauged(), 120);
+    let top = usize::from(row_of(&fr, "next pick"));
+    let pane: Vec<&str> = fr[top..top + 6].iter().map(String::as_str).collect();
+    assert_eq!(
+        pane,
+        [
+            "┌ accounts on claude · floor 90% · 1 session(s) each · next pick ▸ claude:ifty ────────────────────────────────────────┐",
+            "│account        state                meter    gauge                     room/day  run                                  │",
+            "│▸ claude:ifty  ready                7 days   ███▍░░░░░░│░  28%  6d5h   12%/d     1                                    │",
+            "│  claude:tj    stale (read 3h ago)  7 days   ██████████│▍  95%  1d17h  —         0                                    │",
+            "│                                    5 hours  ██████████│░  85%  57m                                                   │",
+            "└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+        ]
+    );
+    // The first `│` on a line is the pane's border; the next, the gauge's floor mark.
+    let mark = |y: usize| {
+        let x = fr[y].char_indices().filter(|(_, c)| *c == '│').nth(1).map(|(i, _)| fr[y][..i].chars().count());
+        &buf[(u16::try_from(x.unwrap()).unwrap(), u16::try_from(y).unwrap())]
+    };
+    let (ifty, tj, tj_5h) = (mark(top + 2), mark(top + 3), mark(top + 4));
+    assert_eq!(ifty.fg, Color::Green, "28%: room");
+    assert_eq!(tj_5h.fg, Color::Yellow, "85%: within ten points of the floor");
+    assert_eq!(tj.fg, Color::Red, "95%: over it");
+    assert!(tj.modifier.contains(Modifier::BOLD) && !tj_5h.modifier.contains(Modifier::BOLD), "the one that decides");
+}
+
+/// The board `w` columns wide showing the accounts `v`, as text and as drawn.
+fn accounts_pane(v: &AccountsView, w: u16) -> (Vec<String>, ratatui::buffer::Buffer) {
+    let fixture = two_jobs();
+    let mut ui = Ui::new(false, false, true);
+    let board = Board::new(&fixture.cfg, &fixture.machine, &Room::default(), v, false, false, NOW);
+    ui.sync(&board);
+    let mut term = Terminal::new(TestBackend::new(w, 40)).unwrap();
+    term.draw(|fr| draw(fr, &board, &mut ui)).unwrap();
+    let buf = term.backend().buffer().clone();
+    let fr = (0..40).map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect()).collect();
+    (fr, buf)
+}
+
+/// How many cells the bar takes after `name` on `row`.
+fn bar_after(row: &str, name: &str) -> usize {
+    let after = &row[row.rfind(name).unwrap_or_else(|| panic!("{name}: {row}")) + name.len()..];
+    after.trim_start().chars().take_while(|c| !c.is_whitespace()).count()
+}
+
+/// A long account name and a busy state beside a meter's: the bar gives way, down to five cells,
+/// before the account's or the meter's name is cut.
+#[test]
+fn the_bars_give_way_before_a_name_is_cut() {
+    let with = |account: &str, meter: &str| {
+        let mut v = gauged();
+        (v.rows[0].account, v.rows[0].state, v.rows[0].meter) =
+            (account.into(), "busy (1 of 1 seat)".into(), meter.into());
+        v
+    };
+    let whole = |w: u16, account: &str, meter: &str| {
+        let (fr, _) = accounts_pane(&with(account, meter), w);
+        let row = fr[usize::from(row_of(&fr, account))].clone();
+        assert!(
+            row.contains(&format!("│{account}  busy (1 of 1 seat)   {meter}  ")) && !row.contains('…'),
+            "{w}: {row}"
+        );
+        bar_after(&row, meter)
+    };
+    let gemini = "google-antigravity/Gemini (Weekly)";
+    assert_eq!(whole(120, "▸ claude:tangim.thepenguins", gemini), 8, "four cells given up, no name cut");
+    assert_eq!(whole(100, "▸ claude:tangim.penguins", "openai-codex/7 days"), 6, "at 100 columns too");
+    // Where a name must be cut, the bar is already at its shortest.
+    let (fr, _) = accounts_pane(&with("▸ claude:tangim.thepenguins", gemini), 100);
+    let row = &fr[usize::from(row_of(&fr, "claude:tangim"))];
+    assert_eq!(bar_after(row, "…"), 5, "a name cut, its bar at five cells: {row}");
 }

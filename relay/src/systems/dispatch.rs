@@ -318,10 +318,8 @@ fn plan(cfg: &Config, room: &mut Room, world: &World, now_us: u64, held: &mut He
         held.0.push(format!("load {now:.1} is above {max}"));
         return Vec::new();
     }
-    let mut queued: Vec<&Job> = world.jobs().values().filter(|j| j.status == Status::Queued).collect();
-    queued.sort_by_key(|j| j.created_at);
     let mut out = Vec::new();
-    for j in queued {
+    for j in queue(world) {
         if total >= limits.max_running {
             break;
         }
@@ -347,6 +345,26 @@ fn plan(cfg: &Config, room: &mut Room, world: &World, now_us: u64, held: &mut He
         }
     }
     out
+}
+
+/// The queued jobs, oldest first: the order [`plan`] judges them in.
+fn queue(world: &World) -> Vec<&Job> {
+    let mut queued: Vec<&Job> = world.jobs().values().filter(|j| j.status == Status::Queued).collect();
+    queued.sort_by_key(|j| j.created_at);
+    queued
+}
+
+/// The account the next start would take, by [`plan`]'s own judgment and choice, with the job it
+/// would start: the first queued job free of waits that `room` admits somewhere. With no such job
+/// queued, the account a job that asks for nothing would get. `None` when every queued job free
+/// of waits is held. The load average and `max_running` aside: they say when, not where.
+pub fn next_pick(cfg: &Config, room: &Room, world: &World, now_us: u64) -> Option<(Option<String>, String)> {
+    let pick = |j: &Job| room.judge(cfg, j, now_us).ok().and_then(|fits| choose(j, &fits).map(Home::key));
+    let free: Vec<&Job> = queue(world).into_iter().filter(|j| world.waits(j).is_empty()).collect();
+    if free.is_empty() {
+        return pick(&Job::default()).map(|a| (None, a));
+    }
+    free.into_iter().find_map(|j| pick(j).map(|a| (Some(j.name.clone()), a)))
 }
 
 /// Whether `job` may run on `account`: the job allows its harness, and any pin names it.
@@ -549,6 +567,38 @@ mod tests {
             world.jobs_mut().insert(j.name.clone(), j);
         }
         (world, vec![home("omp", "default")])
+    }
+
+    /// The board's next pick is the first start a pass would make: the first job not held, on
+    /// the account [`choose`] gives it; with nothing queued, the best-scoring account.
+    #[test]
+    fn the_next_pick_is_the_start_plan_would_make() {
+        let (_d, cfg) = omp_config("[harness.omp]\nenabled = false\n");
+        let reset = |hours: i64| Some(i64::try_from(NOW_US / 1_000_000).unwrap() + hours * 3600);
+        let mut world = World::default();
+        for (label, utilization, hours) in [("a", 0.5, 24), ("b", 0.2, 144)] {
+            let meters = [("seven_day".to_owned(), Meter { utilization, resets_at: reset(hours) })].into();
+            let st = AccountState { read_at: Some(NOW_US - 1), meters, ..Default::default() };
+            world.accounts.insert(format!("claude:{label}"), st);
+        }
+        let found = vec![home("claude", "a"), home("claude", "b")];
+        let pick = |w: &World| next_pick(&cfg, &Room::of(found.clone(), w.accounts.clone(), w, &[], true), w, NOW_US);
+        assert_eq!(pick(&world), Some((None, "claude:a".into())), "room that would be lost at a reset first");
+        // The oldest job may use no account found, so it is held; the next resumes a session on b.
+        let held = Job { name: "held".into(), pinned: Some("claude:gone".into()), ..Job::default() };
+        let resume = Job {
+            name: "resume".into(),
+            created_at: 1,
+            session_id: Some("s".into()),
+            transcript_account: Some("claude:b".into()),
+            ..Job::default()
+        };
+        for j in [held, resume] {
+            world.jobs_mut().insert(j.name.clone(), Job { status: Status::Queued, ..j });
+        }
+        let (starts, _) = plan_omp(&cfg, &world, &found);
+        assert_eq!(starts[0], ("resume".to_owned(), "claude:b".to_owned()));
+        assert_eq!(pick(&world), Some((Some(starts[0].0.clone()), starts[0].1.clone())));
     }
 
     /// The plan for `world` among `others`, and why the rest are held.

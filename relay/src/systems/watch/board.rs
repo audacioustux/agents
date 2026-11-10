@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use crate::config::Config;
 use crate::systems::dispatch::Room;
 use crate::systems::quota::AccountsView;
+use crate::systems::quota::gauge::{self, Gauge};
 use crate::systems::view::machine::{Machine, Project};
 use crate::systems::view::{self, decision_cells, listed, row_cells};
 use crate::world::{Decision, Job, Status};
@@ -54,7 +55,11 @@ pub struct Board {
     pub jobs: Vec<Entry>,
     pub decisions: Vec<Vec<String>>,
     pub accounts_head: String,
+    /// A row per account, then a sub-row per other meter and per other model, under
+    /// [`ACCOUNTS`], each gauge as text for its width.
     pub accounts: Vec<Vec<String>>,
+    /// The same rows' meters, drawn as gauges where the text says them.
+    pub gauges: Vec<Option<Gauge>>,
     pub ready: Vec<bool>,
     /// What an empty jobs list or accounts pane says instead.
     pub no_jobs: String,
@@ -64,11 +69,11 @@ pub struct Board {
 }
 
 const fn col(head: &'static str, cap: usize) -> Column {
-    Column { head, cap }
+    Column { head: std::borrow::Cow::Borrowed(head), cap, yields: 0 }
 }
 
 /// The jobs' columns, the project's first when the board shows every project.
-const JOBS: [Column; 10] = [
+static JOBS: [Column; 10] = [
     col("project", 16),
     col("job", 28),
     col("state", 8),
@@ -80,10 +85,25 @@ const JOBS: [Column; 10] = [
     col("disk", 7),
     col("task", 0),
 ];
-const DECISIONS: [Column; 5] =
+static DECISIONS: [Column; 5] =
     [col("project", 16), col("decision", 30), col("job", 28), col("point", 16), col("until", 0)];
-pub const ACCOUNTS: [Column; 5] =
-    [col("account", 22), col("signed in as", 18), col("state", 24), col("sessions", 10), col("deciding meter", 0)];
+/// The accounts' columns. The gauge's is widened to its whole bar and tail, and gives way, down to
+/// its bar at its shortest, before the account or meter name is cut.
+pub static ACCOUNTS: [Column; 6] = [
+    col("account", 32),
+    col("state", 24),
+    // As wide as the longest name: when room runs short the gauge gives way first, then the widest.
+    col("meter", usize::MAX),
+    Column {
+        head: std::borrow::Cow::Borrowed("gauge"),
+        cap: gauge::BAR + gauge::TAIL,
+        yields: gauge::MIN_BAR + gauge::TAIL,
+    },
+    col("room/day", 8),
+    col("run", 3),
+];
+/// Where the gauge is among [`ACCOUNTS`].
+const GAUGE_COLUMN: usize = 3;
 
 impl Board {
     /// The board of the projects `m` shows (`everywhere`, or ours alone), recent jobs or `all`; ours
@@ -92,7 +112,7 @@ impl Board {
         cfg: &Config,
         m: &Machine,
         room: &Room,
-        accounts: AccountsView,
+        accounts: &AccountsView,
         all: bool,
         everywhere: bool,
         now: u64,
@@ -136,13 +156,15 @@ impl Board {
             ),
             jobs,
             accounts_head: format!(" {} ", accounts.head),
-            // An account's empty cell says `-`; a sub-row for another model leaves blank what it shares.
+            // An account's empty cell says `-`; a sub-row leaves blank what its account's row says.
             accounts: accounts
-                .cells
+                .cells(|g| g.text(gauge::BAR))
                 .into_iter()
-                .map(|r| if r.first().is_some_and(|c| c.starts_with("  ")) { r } else { dashed(r) })
+                .zip(&accounts.rows)
+                .map(|(cells, r)| if r.sub { cells } else { dashed(cells) })
                 .collect(),
-            ready: accounts.ready,
+            gauges: accounts.rows.iter().map(|r| r.gauge.clone()).collect(),
+            ready: accounts.rows.iter().map(|r| r.ready).collect(),
             unreadable: if everywhere { m.unreadable.clone() } else { Vec::new() },
         }
     }
@@ -157,6 +179,11 @@ impl Board {
 
     pub fn find(&self, key: &Key) -> Option<usize> {
         self.jobs.iter().position(|e| e.key == *key)
+    }
+
+    /// The gauge in the accounts' row `row`, column `col`, if a meter is drawn there.
+    pub fn gauge(&self, row: usize, col: usize) -> Option<&Gauge> {
+        self.gauges.get(row).filter(|_| col == GAUGE_COLUMN)?.as_ref()
     }
 }
 

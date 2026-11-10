@@ -6,8 +6,8 @@ use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Clear, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
-    TableState, Wrap,
+    Block, BorderType, Cell, Clear, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Table, TableState, Wrap,
 };
 
 use super::board::{ACCOUNTS, Board};
@@ -36,7 +36,7 @@ pub fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
     let rows: Vec<&[String]> = b.jobs.iter().map(|e| e.cells.as_slice()).collect();
     let selected = ui.selected.is_some().then_some(ui.index);
     let style = |i: usize| status_style(b.jobs[i].status);
-    let t = Tabled { cols: b.job_columns(), rows: &rows, style, selected, empty: "" };
+    let t = Tabled { cols: b.job_columns(), rows: &rows, style, selected, empty: "", gauge: None };
     table_pane(f, ui.pane_mut(Id::Jobs), jobs, jobs_block, &t);
 
     if b.decisions.is_empty() {
@@ -44,7 +44,14 @@ pub fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
     } else {
         let title = Line::from(" decisions waiting · relay decide answer ID --action ... ".bold());
         let yellow = |_| Style::new().fg(Color::Yellow);
-        let t = Tabled { cols: b.decision_columns(), rows: &b.decisions, style: yellow, selected: None, empty: "" };
+        let t = Tabled {
+            cols: b.decision_columns(),
+            rows: &b.decisions,
+            style: yellow,
+            selected: None,
+            empty: "",
+            gauge: None,
+        };
         table_pane(f, ui.pane_mut(Id::Decisions), decisions, frame(Id::Decisions, title), &t);
     }
 
@@ -58,7 +65,16 @@ pub fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
 
     let ready = |i: usize| if b.ready[i] { Style::new().fg(Color::Green) } else { Style::new() };
     let title = Line::from(b.accounts_head.clone());
-    let t = Tabled { cols: &ACCOUNTS, rows: &b.accounts, style: ready, selected: None, empty: &b.no_accounts };
+    // A meter is a gauge, coloured by how near its floor it is, whatever the row's colour.
+    let gauge = |row: usize, col: usize, w: usize| b.gauge(row, col).map(|g| g.line(w));
+    let t = Tabled {
+        cols: &ACCOUNTS,
+        rows: &b.accounts,
+        style: ready,
+        selected: None,
+        empty: &b.no_accounts,
+        gauge: Some(&gauge),
+    };
     table_pane(f, ui.pane_mut(Id::Accounts), accounts, frame(Id::Accounts, title), &t);
 
     ui.keys = key_line(f, keys, ui);
@@ -106,14 +122,18 @@ fn status_style(s: Status) -> Style {
     }
 }
 
+/// A cell drawn as styled text rather than its row's text: given its row, column and width.
+type Drawn<'a> = &'a dyn Fn(usize, usize, usize) -> Option<Line<'static>>;
+
 /// What a table pane holds: its rows under a heading per column, each row's style, the selected
-/// row, and what it says when it has none.
+/// row, what it says when it has none, and which cells are drawn otherwise.
 struct Tabled<'a, R, S> {
     cols: &'a [Column],
     rows: &'a [R],
     style: S,
     selected: Option<usize>,
     empty: &'a str,
+    gauge: Option<Drawn<'a>>,
 }
 
 /// A pane of rows under a heading row: columns fitted to the width (each cut with `…`), the rows in
@@ -125,7 +145,7 @@ fn table_pane<R: AsRef<[String]>, S: Fn(usize) -> Style>(
     block: Block<'_>,
     t: &Tabled<'_, R, S>,
 ) {
-    let Tabled { cols, rows, style, selected, empty } = t;
+    let Tabled { cols, rows, style, selected, empty, gauge } = t;
     let (selected, empty) = (*selected, *empty);
     let inner = block.inner(area);
     let view = usize::from(inner.height.saturating_sub(1));
@@ -135,10 +155,14 @@ fn table_pane<R: AsRef<[String]>, S: Fn(usize) -> Style>(
     let bar = usize::from(pane.rows > pane.view);
     let mark = if selected.is_some() { MARK.chars().count() } else { 0 };
     let w = widths(cols, rows, usize::from(inner.width).saturating_sub(bar + mark), GAP.into());
-    let heading = Row::new(cols.iter().zip(&w).map(|(c, &w)| cut(c.head, w))).style(Style::new().bold());
+    let heading = Row::new(cols.iter().zip(&w).map(|(c, &w)| cut(&c.head, w))).style(Style::new().bold());
+    let cell = |i: usize, c: usize, s: &str, w: usize| match gauge.and_then(|g| g(i, c, w)) {
+        Some(line) => Cell::from(line),
+        None => Cell::from(cut(s, w)),
+    };
     let shown = rows.iter().enumerate().skip(pane.offset).take(view).map(|(i, r)| {
         let st = if Some(i) == selected { style(i).add_modifier(Modifier::REVERSED) } else { style(i) };
-        Row::new(r.as_ref().iter().zip(&w).map(|(s, &w)| cut(s, w))).style(st)
+        Row::new(r.as_ref().iter().zip(&w).enumerate().map(|(c, (s, &w))| cell(i, c, s, w))).style(st)
     });
     let position = match selected {
         Some(i) if !rows.is_empty() => Some(format!("{} of {}", i + 1, rows.len())),
@@ -245,7 +269,8 @@ const HELP: &[&str] = &[
     "The wheel scrolls the pane under it; a click selects a job or focuses a pane.",
     "The board takes the mouse: hold Shift to select text.",
     "Jobs: green running, yellow queued, cyan checking, red failed.",
-    "Accounts: green ready.",
+    "Accounts: green ready; ▸ the account the next start takes.",
+    "Meters: │ is the floor, bold decides; yellow near the floor, red at it.",
     "since: how long a job has run, been queued, or been over.",
 ];
 

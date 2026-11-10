@@ -25,6 +25,12 @@ mod supervised;
 mod systems;
 mod world;
 
+/// How a test runs a real CLI (`node` here): in a throwaway home ([`isolated::Isolated`]), shared
+/// with `tests/ask.rs`.
+#[cfg(test)]
+#[path = "../tests/support/isolated.rs"]
+mod isolated;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 

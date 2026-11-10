@@ -2,7 +2,8 @@
 //! `~/.omp/profiles/<name>`, selected by `OMP_PROFILE`. One home reaches
 //! many providers, metered apart by `omp usage`, so the meters that govern a
 //! task are its model's provider's. Its read-only mode is approval-gated
-//! (it asks), not a removed capability, and it cannot fork a session.
+//! (it asks), not a removed capability, and it cannot fork a session. It runs
+//! on `bun` (`#!/usr/bin/env bun`), its helper program.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -13,7 +14,7 @@ use serde_json::Value;
 use crate::harness::claude::strip_ansi;
 use crate::harness::report::{Report, duration_seconds};
 use crate::harness::{
-    Caps, Harness, Home, Invocation, Meter, Meters, Permissions, Reader, Refusal, Session, Task, printable,
+    Caps, Harness, Home, Invocation, Kind, Meter, Meters, Permissions, Reader, Refusal, Session, Task, printable,
 };
 
 #[derive(Debug)]
@@ -39,6 +40,12 @@ impl Harness for Omp {
 
     fn caps(&self) -> Caps {
         Caps { read_only_by_capability: false, fork: false, preset_session_id: false, budget: false, quota: true }
+    }
+
+    /// omp is a `cli.js` with `#!/usr/bin/env bun`, so every run needs a `bun` it can start from any
+    /// directory: found and recorded with omp, and first on its runs' `PATH`.
+    fn helpers(&self) -> &'static [&'static str] {
+        &["bun"]
     }
 
     fn identity(&self) -> &'static str {
@@ -72,10 +79,9 @@ impl Harness for Omp {
         vec![home.dir.clone()]
     }
 
-    fn protected(&self, home: &Home) -> Vec<PathBuf> {
-        const CONFIG: [&str; 10] = [
-            "agent/config.yml",
-            "agent/models.yml",
+    fn protected_kinds(&self, home: &Home) -> Vec<(PathBuf, Kind)> {
+        const FILES: [&str; 2] = ["agent/config.yml", "agent/models.yml"];
+        const DIRS: [&str; 8] = [
             "agent/agents",
             "agent/skills",
             "agent/managed-skills",
@@ -88,7 +94,11 @@ impl Harness for Omp {
         // The default profile is `~/.omp`, which holds every other profile: a session there that could
         // make `profiles/<name>` would have relay discover it as an account.
         let profiles = (home.label == "default").then(|| home.dir.join("profiles"));
-        CONFIG.iter().map(|c| home.dir.join(c)).chain(profiles).collect()
+        let files = FILES.iter().map(|c| (home.dir.join(c), Kind::File));
+        files
+            .chain(DIRS.iter().map(|c| (home.dir.join(c), Kind::Dir)))
+            .chain(profiles.map(|p| (p, Kind::Dir)))
+            .collect()
     }
 
     fn invocation(&self, home: &Home, task: &Task<'_>) -> Result<Invocation, Refusal> {

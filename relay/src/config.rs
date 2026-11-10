@@ -552,13 +552,21 @@ pub fn positive(x: f64) -> bool {
 
 /// `AUTH` only as a whole word, so `GH_AUTH` and `SSH_AUTH_SOCK` go but `GIT_AUTHOR_NAME` stays.
 const DEFAULT_ENV_DENY: &str =
-    "(?i)TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|_KEY$|(^|_)AUTH($|_)|COOKIE|SESSION|^CLAUDE|^ANTHROPIC";
+    "(?i)TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|_KEY$|(^|_)AUTH($|_)|COOKIE|SESSION|^CLAUDE|^ANTHROPIC|^PUKU";
 
 #[cfg(test)]
 #[test]
 fn default_env_deny() {
     let re = regex::Regex::new(DEFAULT_ENV_DENY).unwrap();
-    for gone in ["GITHUB_TOKEN", "GH_AUTH", "SSH_AUTH_SOCK", "AWS_SECRET_ACCESS_KEY", "OPENAI_API_KEY", "CLAUDECODE"] {
+    for gone in [
+        "GITHUB_TOKEN",
+        "GH_AUTH",
+        "SSH_AUTH_SOCK",
+        "AWS_SECRET_ACCESS_KEY",
+        "OPENAI_API_KEY",
+        "CLAUDECODE",
+        "PUKU_WORKER_URL",
+    ] {
         assert!(re.is_match(gone), "{gone}");
     }
     for kept in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "PATH", "HOME", "LANG", "KEYBOARD"] {
@@ -760,7 +768,20 @@ impl Config {
             "hooks.seat_wait_minutes must not be negative"
         );
         self.validate_disk()?;
-        regex::Regex::new(&self.sandbox.env_deny).context("sandbox.env_deny")?;
+        let deny = regex::Regex::new(&self.sandbox.env_deny).context("sandbox.env_deny")?;
+        for k in self.session.env.keys() {
+            ensure!(valid_env_name(k), "session.env name {k:?} is not a variable name");
+            // Refused, not dropped: a session never gets a variable the deny list names, and an entry
+            // that silently did nothing (or, as it once did, got through) is worse than an error.
+            if let Some(m) = deny.find(k) {
+                bail!(
+                    "session.env {k} matches sandbox.env_deny {:?} (at {:?}), so no session may get it: \
+                     remove it, or narrow sandbox.env_deny",
+                    self.sandbox.env_deny,
+                    m.as_str()
+                );
+            }
+        }
         for p in self.sandbox.hide_home.iter().chain(&self.sandbox.caches) {
             if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
                 bail!("{} must be a path inside $HOME, written relative to it", p.display());
@@ -822,16 +843,15 @@ impl Config {
                 "gc.build_outputs entry {path:?} must be a path inside the clone, such as \"target\""
             );
         }
-        for k in self.session.env.keys() {
-            ensure!(valid_env_name(k), "session.env name {k:?} is not a variable name");
-        }
         Ok(())
     }
 
-    /// Every harness this config expects, with its program as this machine has it, in registry
-    /// order: one not turned off whose program is found, or one `[harness.X]` names (so a missing
-    /// program is shown, never silently dropped). The one place a harness's program is looked up.
-    pub fn harness_programs(&self) -> Vec<(&'static dyn crate::harness::Harness, crate::host::Program)> {
+    /// Every harness this config expects, with its programs as this machine has them, in registry
+    /// order: one not turned off whose programs (its own and its helpers) are all found, or one
+    /// `[harness.X]` names (so a missing program or helper is shown, never silently dropped). The one place a harness's programs are looked up:
+    /// its own, and, once that is found, each helper its runs need ([`crate::harness::Harness::helpers`]),
+    /// so the first command that asks records them all, before any child runs on a narrower `PATH`.
+    pub fn harness_programs(&self) -> Vec<HarnessPrograms> {
         crate::harness::ALL
             .iter()
             .copied()
@@ -840,27 +860,30 @@ impl Config {
                 if conf.and_then(|c| c.enabled) == Some(false) {
                     return None;
                 }
-                let name = conf.and_then(|c| c.program.clone()).unwrap_or_else(|| PathBuf::from(h.id()));
+                let name = conf.and_then(|c| c.program.clone()).unwrap_or_else(|| PathBuf::from(h.program()));
                 let program = crate::host::resolve(self.programs.as_deref(), name.as_os_str());
-                (conf.is_some() || matches!(program, crate::host::Program::Found(_))).then_some((h, program))
+                let found = matches!(program, crate::host::Program::Found(_));
+                let helpers = if found {
+                    let resolve = |n: &&'static str| crate::host::resolve_helper(self.programs.as_deref(), n.as_ref());
+                    h.helpers().iter().map(|n| (*n, resolve(n))).collect()
+                } else {
+                    Vec::new()
+                };
+                let programs = HarnessPrograms { harness: h, program, helpers };
+                (conf.is_some() || programs.missing().is_none()).then_some(programs)
             })
             .collect()
     }
 
-    /// The harnesses relay may use: those [`Config::harness_programs`] found, in registry order.
+    /// The harnesses relay may use: those whose programs [`Config::harness_programs`] all found, in
+    /// registry order.
     pub fn harnesses(&self) -> Vec<&'static dyn crate::harness::Harness> {
-        let found = self.harness_programs().into_iter();
-        found.filter(|(_, p)| matches!(p, crate::host::Program::Found(_))).map(|(h, _)| h).collect()
+        self.harness_programs().into_iter().filter(|p| p.missing().is_none()).map(|p| p.harness).collect()
     }
 
-    /// The harnesses this config expects whose program is not found, each with what was looked for.
-    pub fn missing_harnesses(&self) -> Vec<(&'static str, String)> {
-        let all = self.harness_programs().into_iter();
-        all.filter_map(|(h, p)| match p {
-            crate::host::Program::Missing(what) => Some((h.id(), what.to_string_lossy().into_owned())),
-            crate::host::Program::Found(_) => None,
-        })
-        .collect()
+    /// The harnesses this config expects with a program or helper not found, each with what it lacks.
+    pub fn missing_harnesses(&self) -> Vec<(&'static str, Missing)> {
+        self.harness_programs().into_iter().filter_map(|p| Some((p.harness.id(), p.missing()?))).collect()
     }
 
     /// `inv` run by its harness's program as this machine has it ([`Config::harness_programs`]):
@@ -871,17 +894,51 @@ impl Config {
         harness: &str,
         mut inv: crate::harness::Invocation,
     ) -> Result<crate::harness::Invocation, crate::harness::Refusal> {
-        let name = self.harness(harness).program.map_or_else(|| inv.program.clone(), PathBuf::into_os_string);
-        match crate::host::resolve(self.programs.as_deref(), &name) {
-            crate::host::Program::Found(p) => {
-                inv.program = p.into_os_string();
-                Ok(inv)
-            }
+        let found = |program: crate::host::Program| match program {
+            crate::host::Program::Found(p) => Ok(p.into_os_string()),
             crate::host::Program::Missing(what) => Err(crate::harness::Refusal(format!(
                 "harness {harness}: program not found: {}",
                 what.to_string_lossy()
             ))),
+        };
+        let resolve = |name: &std::ffi::OsStr| found(crate::host::resolve(self.programs.as_deref(), name));
+        // A helper is never a mise shim ([`crate::host::resolve_helper`]), and one not found says so.
+        let helper = |name: &'static str| match crate::host::resolve_helper(self.programs.as_deref(), name.as_ref()) {
+            crate::host::Program::Found(p) => Ok(p.into_os_string()),
+            crate::host::Program::Missing(_) => {
+                Err(crate::harness::Refusal(Missing::Helper { name }.refusal(harness, self.programs.as_deref())))
+            }
+        };
+        // The harness's own program: what runs, or what a script that runs hands over to (puku's quota).
+        let at = inv.command_arg;
+        let slot = match at {
+            Some(i) => inv
+                .args
+                .get_mut(i)
+                .ok_or_else(|| crate::harness::Refusal(format!("harness {harness}: no argument {i}")))?,
+            None => &mut inv.program,
+        };
+        let name = self.harness(harness).program.map_or_else(|| slot.clone(), PathBuf::into_os_string);
+        *slot = resolve(&name)?;
+        // Every run of the harness finds its helpers first on its `PATH`, as recorded: the quota
+        // script's interpreter, what that script's `puku-cli` launcher runs on, and a session's.
+        let helpers = crate::harness::by_id(harness)?.helpers();
+        for name in helpers {
+            if let Some(dir) = PathBuf::from(helper(name)?).parent() {
+                inv.path_first.push(dir.to_path_buf());
+            }
         }
+        // Such a script's interpreter is one of the harness's helpers, found as its program is.
+        if at.is_some() {
+            let Some(name) = helpers.iter().find(|n| inv.program == **n) else {
+                return Err(crate::harness::Refusal(format!(
+                    "harness {harness}: {} is not one of its helper programs",
+                    inv.program.to_string_lossy()
+                )));
+            };
+            inv.program = helper(name)?;
+        }
+        Ok(inv)
     }
 
     pub fn harness(&self, id: &str) -> HarnessConf {
@@ -891,6 +948,75 @@ impl Config {
     /// Directories hidden inside the sandbox.
     pub fn hidden_dirs(&self) -> Vec<PathBuf> {
         self.sandbox.hide.clone().unwrap_or_else(|| self.repo.parent().map(Path::to_path_buf).into_iter().collect())
+    }
+}
+
+/// A harness's programs as this machine has them ([`Config::harness_programs`]).
+#[derive(Debug, Clone)]
+pub struct HarnessPrograms {
+    pub harness: &'static dyn crate::harness::Harness,
+    /// Its own program.
+    pub program: crate::host::Program,
+    /// Each helper by name; looked up only once its own program is found.
+    pub helpers: Vec<(&'static str, crate::host::Program)>,
+}
+
+impl HarnessPrograms {
+    /// Its own program, then its helpers.
+    pub fn all(&self) -> impl Iterator<Item = &crate::host::Program> {
+        std::iter::once(&self.program).chain(self.helpers.iter().map(|(_, p)| p))
+    }
+
+    /// What it lacks first, its own program before a helper: the harness is usable only with none.
+    pub fn missing(&self) -> Option<Missing> {
+        if let crate::host::Program::Missing(what) = &self.program {
+            return Some(Missing::Program(what.clone()));
+        }
+        self.helpers.iter().find_map(|(name, p)| match p {
+            crate::host::Program::Missing(_) => Some(Missing::Helper { name }),
+            crate::host::Program::Found(_) => None,
+        })
+    }
+}
+
+/// What a harness lacks to run here ([`HarnessPrograms::missing`]). The two are kept apart because
+/// their remedies differ: `[harness.<id>] program` names the harness's own command, never a helper
+/// it runs on, so a missing `bun` set there would replace omp with its interpreter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Missing {
+    /// Its own command: what was looked for (a configured path, or its name).
+    Program(std::ffi::OsString),
+    /// A helper its command runs on ([`crate::harness::Harness::helpers`]: `bun` for omp), by name.
+    Helper { name: &'static str },
+}
+
+impl Missing {
+    /// The board's cell: `program not found: /opt/x/omp`, `helper not found: bun`.
+    pub fn cell(&self) -> String {
+        match self {
+            Self::Program(what) => format!("program not found: {}", what.to_string_lossy()),
+            Self::Helper { name } => format!("helper not found: {name}"),
+        }
+    }
+
+    /// Why harness `id` cannot run, and how to make what it lacks available. `record` is this
+    /// machine's record of programs (`programs.json`), where a helper's path is kept.
+    pub fn refusal(&self, id: &str, record: Option<&Path>) -> String {
+        match self {
+            Self::Program(what) => format!(
+                "harness {id}: program not found: {} (set [harness.{id}] program to its path)",
+                what.to_string_lossy()
+            ),
+            Self::Helper { name } => {
+                let record = record.map_or_else(|| "relay's programs.json".to_owned(), |r| r.display().to_string());
+                format!(
+                    "harness {id}: helper not found: {name}, which {id}'s command runs on. Put a real {name} on \
+                     PATH (an installed binary, not a mise shim, which fails where no mise config pins it) and run \
+                     any relay command from that shell, or set \"{name}\" in {record} to its absolute path. \
+                     [harness.{id}] program names {id}'s own command, never {name}."
+                )
+            }
+        }
     }
 }
 
@@ -969,7 +1095,9 @@ mod tests {
         let gone = Config::parse("name = \"x\"\n[harness.omp]\nprogram = \"/opt/x/omp\"\n", d.path()).unwrap();
         assert!(gone.locate("omp", crate::harness::Invocation::new("omp")).unwrap_err().0.contains("/opt/x/omp"));
         assert!(!gone.harnesses().iter().any(|h| h.id() == "omp"), "not usable");
-        assert_eq!(gone.missing_harnesses(), [("omp", "/opt/x/omp".to_owned())], "but shown");
+        // (Only omp's row: a harness this machine has with a helper missing is shown too.)
+        let omp_rows = |c: &Config| c.missing_harnesses().into_iter().filter(|(h, _)| *h == "omp").collect::<Vec<_>>();
+        assert_eq!(omp_rows(&gone), [("omp", Missing::Program("/opt/x/omp".into()))], "but shown");
         // A relative path is the config directory's (`pinned` is there), wherever relay runs from; a bare
         // name stays a name.
         let rel = Config::parse(
@@ -984,7 +1112,54 @@ mod tests {
         );
         assert_eq!(rel.harness("omp").program, Some(PathBuf::from("omp-beta")));
         let off = Config::parse("name = \"x\"\n[harness.omp]\nenabled = false\nprogram = \"/opt/x/omp\"\n", d.path());
-        assert!(off.unwrap().missing_harnesses().is_empty(), "a harness turned off is not missing");
+        assert!(omp_rows(&off.unwrap()).is_empty(), "a harness turned off is not missing");
+        // A script handing over to the harness: the harness's program as configured, and the script's
+        // interpreter, which must be one of its helpers, as this machine's record has it.
+        let conf = format!("name = \"x\"\n[harness.puku]\nprogram = \"{}\"\n", pinned.display());
+        let mut puku = Config::parse(&conf, d.path()).unwrap();
+        let (node, record) = (d.path().join("node"), d.path().join("programs.json"));
+        std::fs::copy(&pinned, &node).unwrap();
+        std::fs::write(&record, serde_json::json!({ "node": node }).to_string()).unwrap();
+        puku.programs = Some(record);
+        let script = puku.locate("puku", crate::harness::Invocation::script("node", &["-e", "x"], "puku-cli")).unwrap();
+        assert_eq!(script.program, node.as_os_str());
+        assert_eq!(script.args, [std::ffi::OsStr::new("-e"), std::ffi::OsStr::new("x"), pinned.as_os_str()]);
+        let sh = cfg.locate("claude", crate::harness::Invocation::script("sh", &["-c", "x"], "claude"));
+        assert_eq!(sh.unwrap_err().0, "harness claude: sh is not one of its helper programs");
+    }
+
+    /// Review of #40: a `[session.env]` entry that `sandbox.env_deny` names is refused when the config is
+    /// loaded, by name and pattern, for every pattern alike (it would never reach a session).
+    #[test]
+    fn a_session_env_entry_the_deny_list_names_is_refused_at_load() {
+        let d = repo();
+        for (name, at) in
+            [("PUKU_WORKER_URL", "PUKU"), ("CLAUDE_CODE_X", "CLAUDE"), ("NPM_TOKEN", "TOKEN"), ("GH_AUTH", "_AUTH")]
+        {
+            let text = format!("name = \"x\"\n[session.env]\n{name} = \"v\"\n");
+            let e = format!("{:#}", Config::parse(&text, d.path()).unwrap_err());
+            assert!(e.contains(name) && e.contains(DEFAULT_ENV_DENY) && e.contains(&format!("{at:?}")), "{e}");
+        }
+        // A project's own deny list is the one applied, and what it does not name is kept.
+        let own = "name = \"x\"\n[sandbox]\nenv_deny = \"^SECRET_\"\n[session.env]\nSECRET_A = \"v\"\n";
+        assert!(format!("{:#}", Config::parse(own, d.path()).unwrap_err()).contains("^SECRET_"));
+        let kept = "name = \"x\"\n[session.env]\nGIT_AUTHOR_NAME = \"a\"\nPATH = \"/bin\"\n";
+        assert_eq!(Config::parse(kept, d.path()).unwrap().session.env.len(), 2);
+    }
+
+    /// Review of #40: a missing helper is not fixed by `[harness.<id>] program` (that would replace
+    /// omp with bun); its refusal says how to make the helper available instead.
+    #[test]
+    fn a_missing_helper_is_refused_with_its_own_remedy() {
+        let record = Path::new("/s/relay/programs.json");
+        let helper = Missing::Helper { name: "bun" }.refusal("omp", Some(record));
+        assert!(helper.starts_with("harness omp: helper not found: bun"), "{helper}");
+        assert!(helper.contains("not a mise shim") && helper.contains("on PATH"), "{helper}");
+        assert!(helper.contains("\"bun\" in /s/relay/programs.json"), "how to repair its record: {helper}");
+        assert!(!helper.contains("set [harness.omp] program"), "never the command's remedy: {helper}");
+        let program = Missing::Program("/opt/x/omp".into()).refusal("omp", Some(record));
+        assert_eq!(program, "harness omp: program not found: /opt/x/omp (set [harness.omp] program to its path)");
+        assert_eq!(Missing::Helper { name: "bun" }.cell(), "helper not found: bun");
     }
 
     fn repo() -> tempdir::Dir {

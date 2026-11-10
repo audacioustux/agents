@@ -115,6 +115,9 @@ fn setup(tag: &str, omp: bool) -> Env {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     std::fs::copy(here.join("tests/stub-claude.sh"), repo.join(".stub/claude")).unwrap();
     std::fs::copy(here.join("tests/stub-omp.sh"), repo.join(".stub/omp")).unwrap();
+    std::fs::copy(here.join("tests/stub-puku.sh"), repo.join(".stub/puku-cli")).unwrap();
+    std::fs::create_dir_all(repo.join(".stub/node-bin")).unwrap();
+    std::fs::copy(here.join("tests/stub-puku.sh"), repo.join(".stub/node-bin/node")).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
@@ -123,6 +126,15 @@ fn setup(tag: &str, omp: bool) -> Env {
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&state).unwrap();
     std::fs::write(state.join("gc.last"), "").unwrap();
     let stub = |h: &str| repo.join(".stub").join(h).display().to_string();
+    if omp {
+        // omp runs on `bun`, its helper; the stub needs none, but omp is usable only with one recorded,
+        // whatever this machine's PATH has (a mise shim alone is not one).
+        use std::os::unix::fs::PermissionsExt;
+        let bun = repo.join(".stub/bun");
+        std::fs::write(&bun, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
+        std::fs::set_permissions(&bun, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(root.join("state/relay/programs.json"), serde_json::json!({ "bun": bun }).to_string()).unwrap();
+    }
     let omp_conf = if omp {
         format!("[harness.omp]\nenabled = true\nprogram = \"{}\"\nmodel = \"stub/m1\"\n", stub("omp"))
     } else {
@@ -1066,6 +1078,220 @@ fn a_home_with_no_sign_in_is_never_chosen() {
     assert_eq!(j["account"], "claude:b", "a has more room but is not signed in: {j}");
     let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
     assert!(table.contains("claude:a") && table.contains("not signed in"), "{table}");
+}
+
+/// A puku-cli home, `~/.puku-cli.<label>`, signed in under `APP_NAME=pukucode.<label>`, whose weekly
+/// chat quota is `used_pct` used and resets in 2100.
+fn puku_account(home: &Path, label: &str, used_pct: u32) {
+    let d = home.join(format!(".puku-cli.{label}"));
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("usage"),
+        format!(
+            r#"{{"chat":{{"windows":{{"weekly":{{"limit":100,"used":{used_pct},"resetsAt":"2100-01-01T00:00:00Z"}}}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let s = home.join(format!(".config/pukucode.{label}"));
+    std::fs::create_dir_all(&s).unwrap();
+    std::fs::write(
+        s.join("session.json"),
+        format!(
+            r#"{{"accessToken":"fake","refreshToken":"fake","expiresAt":1,"createdAt":1,"user":{{"id":"puku-user-{label}","email":"{SECRET_EMAIL}","provider":"github"}}}}"#
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_puku_session_runs_on_its_own_home_and_sign_in_and_sees_no_other() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("puku", false);
+    // The quota script's `node` is found as a harness's program is: this machine's record says the stub.
+    std::fs::create_dir_all(env.root.join("state/relay")).unwrap();
+    std::fs::write(
+        env.root.join("state/relay/programs.json"),
+        serde_json::json!({ "node": env.repo.join(".stub/node-bin/node") }).to_string(),
+    )
+    .unwrap();
+    let stub = env.repo.join(".stub/puku-cli");
+    configure(&env, "", &format!("[harness.puku]\nprogram = \"{}\"\n", stub.display()));
+    puku_account(&env.home, "p", 10);
+    puku_account(&env.home, "q", 95);
+    let probe = relay(&env, &["probe"]);
+    ok(&probe, "probe");
+    assert!(String::from_utf8_lossy(&probe.stdout).contains("== puku:p"));
+
+    ok(&relay(&env, &["queue", "add", "look", "--text", "Look.", "--readonly"]), "queue");
+    let j = wait_for(&env, "look");
+    assert_eq!((j["status"].as_str(), j["account"].as_str()), (Some("done"), Some("puku:p")), "{j}");
+    let r = result(&env, "look");
+    assert!(r.contains("ran on .puku-cli.p with 1 transcript turns"), "{r}");
+    let argv = std::fs::read_to_string(env.home.join(".puku-cli.p/argv")).unwrap();
+    assert!(argv.contains("--god-mode") && argv.contains("--output-format stream-json"), "{argv}");
+    assert!(env.home.join(".config/pukucode.p/renewed").exists(), "its sign-in is writable, to renew");
+    let seen = std::fs::read_to_string(env.home.join(".puku-cli.p/sign-ins-seen")).unwrap();
+    assert!(seen.contains("pukucode.p/session.json") && !seen.contains("pukucode.q"), "{seen}");
+
+    let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
+    let json = String::from_utf8_lossy(&relay(&env, &["quota", "show", "--json"]).stdout).into_owned();
+    assert!(table.contains("puku:p") && table.contains("puku:q") && table.contains("seven_day"), "{table}");
+    for secret in [SECRET_EMAIL, "puku-user-p", "\"fake\""] {
+        assert!(!table.contains(secret) && !json.contains(secret), "{secret} leaked:\n{table}\n{json}");
+    }
+}
+
+/// Review of #40: on a first run, with nothing recorded, puku's `node` was looked up only by the quota
+/// reader, a child of the dispatcher running on the config's `PATH`, which lacks the directory the
+/// caller's shell found it in. A harness's helpers are its programs: the foreground command that
+/// first finds the harness records them, so the dispatcher's reading runs that `node`.
+#[test]
+fn a_first_run_records_pukus_node_where_the_caller_found_it() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("puku-first", false);
+    let record = env.root.join("state/relay/programs.json");
+    assert!(!record.exists(), "a first run: nothing recorded");
+    let stub = env.repo.join(".stub/puku-cli");
+    configure(&env, "", &format!("[harness.puku]\nprogram = \"{}\"\n", stub.display()));
+    puku_account(&env.home, "p", 10);
+    // The caller's shell has the stub `node` first; the config's `PATH`, which children run on, has not.
+    let node_dir = env.repo.join(".stub/node-bin");
+    let caller = std::env::join_paths(
+        std::iter::once(node_dir.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let queued = relay_from(&env, &caller, &[], &["queue", "add", "look", "--text", "Look.", "--readonly"]);
+    ok(&queued, "queue");
+    let j = wait_for(&env, "look");
+    assert_eq!((j["status"].as_str(), j["account"].as_str()), (Some("done"), Some("puku:p")), "{j}");
+    let known: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    assert_eq!(known["node"].as_str(), node_dir.join("node").to_str(), "{known}");
+    // Re-review of #40: the session's `#!/usr/bin/env node` launcher runs that `node` too, not one an
+    // earlier `PATH` directory holds (the config's `PATH` has the machine's own).
+    let seen = std::fs::read_to_string(env.home.join(".puku-cli.p/node-seen")).unwrap();
+    assert_eq!(seen.trim(), node_dir.join("node").to_str().unwrap(), "the recorded node comes first");
+}
+
+/// Re-review of #40: a job whose `[session.env]` names its own `HOME` still runs on the account's
+/// sign-in, which lives under the user's home: relay found the account there, so the quota script, its
+/// renewal and the session look there too, never under the job's `HOME`.
+#[test]
+fn a_puku_job_with_its_own_home_runs_on_the_accounts_sign_in() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("puku-home", false);
+    std::fs::create_dir_all(env.root.join("state/relay")).unwrap();
+    std::fs::write(
+        env.root.join("state/relay/programs.json"),
+        serde_json::json!({ "node": env.repo.join(".stub/node-bin/node") }).to_string(),
+    )
+    .unwrap();
+    let job_home = env.root.join("job-home");
+    std::fs::create_dir_all(&job_home).unwrap();
+    let stub = env.repo.join(".stub/puku-cli");
+    configure(&env, "", &format!("[harness.puku]\nprogram = \"{}\"\n", stub.display()));
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    let conf =
+        conf.replace("[session.env]\n", &format!("[session.env]\nHOME = {:?}\n", job_home.display().to_string()));
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+    puku_account(&env.home, "p", 10);
+    ok(&relay(&env, &["queue", "add", "look", "--text", "Look.", "--readonly"]), "queue");
+    let j = wait_for(&env, "look");
+    assert_eq!((j["status"].as_str(), j["account"].as_str()), (Some("done"), Some("puku:p")), "{j}");
+    assert!(env.home.join(".config/pukucode.p/renewed").exists(), "the session renewed the account's sign-in");
+    assert!(!job_home.join(".config").exists(), "nothing looked for a sign-in under the job's HOME");
+}
+
+/// The #38 regression: omp's program is a `cli.js` with `#!/usr/bin/env bun`, and the `PATH` relay
+/// builds for children reaches `bun` only through mise's shim, which fails outside a directory whose
+/// mise config pins it (`mise ERROR No version is set for shim: bun`). `bun` is omp's helper: the
+/// first command finds the real one on its caller's `PATH`, past the shim, records it, and every
+/// omp run (`relay probe`'s check, the quota reading, the session) finds that one first.
+#[test]
+fn omp_runs_on_the_recorded_bun_never_on_a_mise_shim() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("omp-bun", true);
+    // A first run: nothing recorded, not even the stub bun `setup` records for omp.
+    std::fs::remove_file(env.root.join("state/relay/programs.json")).unwrap();
+    let bin = env.repo.join(".stub-bun");
+    std::fs::create_dir_all(bin.join("shims")).unwrap();
+    std::fs::create_dir_all(bin.join("bun-bin")).unwrap();
+    let script = |path: &Path, text: &str| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // mise, and its shim for bun, failing as they do where nothing pins bun.
+    script(
+        &bin.join("mise"),
+        "#!/bin/sh\necho \"mise ERROR No version is set for shim: $(basename \"$0\")\" >&2\nexit 1\n",
+    );
+    std::os::unix::fs::symlink(bin.join("mise"), bin.join("shims/bun")).unwrap();
+    // The real bun stands in by running the script it is handed with sh.
+    script(&bin.join("bun-bin/bun"), "#!/bin/sh\nexec /bin/sh \"$@\"\n");
+    // omp as the npm package has it: a script that names bun on its #! line.
+    let stub_omp = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/stub-omp.sh")).unwrap();
+    let omp = bin.join("omp");
+    script(&omp, &stub_omp.replacen("#!/bin/sh", "#!/usr/bin/env bun", 1));
+    // Children run on a PATH with the shim and no real bun, as #38's built PATH has mise's shims.
+    let runner = std::env::var("PATH").unwrap();
+    let no_bun: Vec<PathBuf> = std::env::split_paths(&runner).filter(|d| !d.join("bun").exists()).collect();
+    let children = std::env::join_paths(std::iter::once(bin.join("shims")).chain(no_bun.iter().cloned())).unwrap();
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml"))
+        .unwrap()
+        .replace(
+            &format!("program = {:?}", env.repo.join(".stub/omp").display().to_string()),
+            &format!("program = {:?}", omp.display().to_string()),
+        )
+        .replace(&format!("PATH = {runner:?}"), &format!("PATH = {:?}", children.to_string_lossy()));
+    assert!(conf.contains(".stub-bun/omp") && conf.contains(".stub-bun/shims"), "{conf}");
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+    omp_default(&env.home, 20, false);
+    // The first command's caller has the shim first, the real bun after it.
+    let caller = std::env::join_paths([bin.join("shims"), bin.join("bun-bin")].into_iter().chain(no_bun)).unwrap();
+    let probe = relay_from(&env, &caller, &[], &["probe"]);
+    ok(&probe, "probe");
+    let p = String::from_utf8_lossy(&probe.stdout);
+    assert!(p.contains("== omp:default") && !p.contains("No version is set"), "{p}");
+    let known: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(env.root.join("state/relay/programs.json")).unwrap()).unwrap();
+    assert_eq!(known["bun"].as_str(), bin.join("bun-bin/bun").to_str(), "the real one, past the shim: {known}");
+    ok(&relay(&env, &["queue", "add", "o", "--text", "Look.", "--readonly", "--harness", "omp"]), "queue");
+    let j = wait_for(&env, "o");
+    assert_eq!((j["status"].as_str(), j["account"].as_str()), (Some("done"), Some("omp:default")), "{j}");
+}
+
+/// Review of #40: a job asked of a harness whose helper is missing is refused with the helper's own
+/// remedy, never `[harness.omp] program` (which would replace omp with bun), and the board says which.
+#[test]
+fn a_harness_missing_its_helper_is_refused_with_how_to_provide_it() {
+    if ["/usr/bin/bun", "/bin/bun"].iter().any(|p| Path::new(p).exists()) {
+        eprintln!("skipped: this machine's /usr/bin has a bun");
+        return;
+    }
+    let env = setup("no-helper", false);
+    let omp = env.repo.join(".stub/omp").display().to_string();
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap().replace(
+        "[harness.omp]\nenabled = false\n",
+        &format!("[harness.omp]\nprogram = {omp:?}\nmodel = \"stub/m1\"\n"),
+    );
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+    // A first run, from a shell with no bun at all.
+    let bare = caller_path(&[]);
+    let out = relay_from(&env, &bare, &[], &["queue", "add", "o", "--text", "x", "--readonly", "--harness", "omp"]);
+    assert_eq!(out.status.code(), Some(5), "refused: {}", stderr(&out));
+    let why = stderr(&out);
+    assert!(why.contains("helper not found: bun") && why.contains("not a mise shim"), "{why}");
+    assert!(why.contains("programs.json") && !why.contains("set [harness.omp] program"), "{why}");
+    let board = String::from_utf8_lossy(&relay_from(&env, &bare, &[], &["quota", "show"]).stdout).into_owned();
+    assert!(board.contains("helper not found: bun"), "{board}");
 }
 
 /// Adds `limits` under `[limits]` and appends `extra` to the project's config.
@@ -3257,6 +3483,9 @@ fn a_harness_found_once_is_found_from_a_shell_whose_path_lacks_it() {
     let bin = env.root.join("mise/installs/omp/bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::copy(env.repo.join(".stub/omp"), bin.join("omp")).unwrap();
+    // With the `bun` it runs on, a helper found and recorded with it.
+    std::fs::write(bin.join("bun"), "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
+    std::fs::set_permissions(bin.join("bun"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let (full, bare) = (caller_path(&[&bin]), caller_path(&[]));
     let both = vec!["claude".to_owned(), "omp".to_owned()];
     assert_eq!(harnesses_seen(&relay_from(&env, &full, &[], &["--json", "quota", "show"])).0, both);

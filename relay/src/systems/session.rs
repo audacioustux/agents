@@ -153,11 +153,20 @@ fn dev_env(shell: &[String], deny: &regex::Regex, dir: &Path) -> Result<Vec<(OsS
 
 /// The job's environment, in layers: the project's development environment
 /// (`session.env_shell`) underneath, `session.env` over it, and the harness's
-/// own variables (the account) over both.
+/// own variables (the account) over both. Both of the job's layers pass `sandbox.env_deny`, as
+/// [`crate::sandbox::session_env`]'s base does: only the harness's own variables may name what it
+/// denies (`CLAUDE_CONFIG_DIR`). A `session.env` entry it names is refused at load; one that got past
+/// that would still be dropped here.
 fn layer_env(ctx: &Ctx, inv: &mut Invocation, cwd: &Path) -> Result<()> {
     let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
     let dev = dev_env(&ctx.cfg.session.env_shell, &deny, cwd)?;
-    let session_env = ctx.cfg.session.env.iter().map(|(k, v)| (OsString::from(k), Some(OsString::from(v))));
+    let session_env = ctx
+        .cfg
+        .session
+        .env
+        .iter()
+        .filter(|(k, _)| !deny.is_match(k))
+        .map(|(k, v)| (OsString::from(k), Some(OsString::from(v))));
     inv.env = dev.into_iter().chain(session_env).chain(std::mem::take(&mut inv.env)).collect();
     Ok(())
 }
@@ -1273,5 +1282,41 @@ mod dev_env_tests {
         assert!(env.iter().all(|(k, _)| !k.to_string_lossy().contains("welcome")), "the banner is not a variable");
         assert!(super::dev_env(&["false".to_owned()], &deny, std::path::Path::new("/")).is_err());
         assert_eq!(super::dev_env(&[], &deny, std::path::Path::new("/")).unwrap(), Vec::new());
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    use std::ffi::OsString;
+
+    use super::layer_env;
+    use crate::config::{Config, tempdir::Dir};
+    use crate::ctx::Ctx;
+    use crate::harness::Invocation;
+
+    /// Review of #40: `[session.env]` entries that `sandbox.env_deny` names never reach a worker. They
+    /// are refused at load; this checks the environment a session is built with (the job's layers, then
+    /// `sandbox::session_env`) holds none even when one gets past the config, while the harness's own
+    /// variables, which the filter would remove, still arrive.
+    #[test]
+    fn denied_session_env_never_reaches_the_worker() {
+        let d = Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let mut cfg = Config::parse("name = \"t\"\n[session.env]\nFROM_CONFIG = \"yes\"\n", &repo).unwrap();
+        for (k, v) in [("PUKU_WORKER_URL", "https://evil.invalid"), ("CLAUDE_CODE_X", "1"), ("NPM_TOKEN", "t")] {
+            cfg.session.env.insert(k.into(), v.into());
+        }
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        let mut inv = Invocation::new("puku-cli");
+        inv.env.push(("PUKU_CONFIG_DIR".into(), Some("/h/.puku-cli".into())));
+        layer_env(&ctx, &mut inv, &repo).unwrap();
+        let env: Vec<(OsString, OsString)> = crate::sandbox::session_env(&ctx, &inv);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string_lossy().into_owned());
+        for denied in ["PUKU_WORKER_URL", "CLAUDE_CODE_X", "NPM_TOKEN"] {
+            assert_eq!(get(denied), None, "{denied} reached the worker");
+        }
+        assert_eq!(get("FROM_CONFIG").as_deref(), Some("yes"));
+        assert_eq!(get("PUKU_CONFIG_DIR").as_deref(), Some("/h/.puku-cli"), "the harness's own variable");
     }
 }

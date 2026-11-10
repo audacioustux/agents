@@ -1,8 +1,15 @@
-//! Claude Code. Homes are config dirs (`~/.claude`, `~/.claude.<label>`,
+//! Claude Code, and the CLIs built from it that keep its protocol (puku-cli).
+//! One [`ClaudeCode`] serves them all, told apart by the program, the prefix
+//! of their homes, the variable that selects one and where the sign-in and
+//! the quota come from ([`Account`]).
+//!
+//! Claude Code's homes are config dirs (`~/.claude`, `~/.claude.<label>`,
 //! selected by `CLAUDE_CONFIG_DIR`); quota comes from `claude -p /usage`
 //! and from `rate_limit_event`s; transcripts live in the home, under
 //! `projects/<cwd key>/<session>.jsonl`.
 
+use std::ffi::OsString;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -12,14 +19,82 @@ use sha2::{Digest, Sha256};
 
 use crate::harness::report::{Report, parse_reset};
 use crate::harness::{
-    Caps, Harness, Home, Identity, Invocation, Meter, Meters, Permissions, Reader, Refusal, Session, SignIn, Task,
-    read_json,
+    Caps, Harness, Home, Identity, Invocation, Kind, Meter, Meters, Permissions, Reader, Refusal, Session, SignIn,
+    Task, read_json,
 };
 
 const PREFIX: &str = ".claude";
 
+/// A Claude Code CLI: Claude Code itself, or one built from it.
 #[derive(Debug)]
-pub struct Claude;
+pub struct ClaudeCode {
+    pub id: &'static str,
+    /// Its command.
+    pub program: &'static str,
+    /// Homes are `<user home>/<prefix>` (`default`) and `<prefix>.<label>`.
+    pub prefix: &'static str,
+    /// The variable naming the home a run uses.
+    pub config_env: &'static str,
+    pub identity: &'static str,
+    /// The flag that turns every permission check off.
+    pub skip_permissions: &'static str,
+    /// The files in a home the host later runs or obeys, besides executable scripts.
+    pub config_files: &'static [&'static str],
+    /// The directories in a home the host later runs or obeys.
+    pub config_dirs: &'static [&'static str],
+    pub account: &'static dyn Account,
+}
+
+/// Where a Claude Code CLI keeps its sign-in, and how its quota is read.
+pub trait Account: Sync + fmt::Debug {
+    /// Whether the home's sign-in can renew itself. One that cannot expires
+    /// within hours, so it is not offered.
+    fn can_refresh(&self, home: &Home) -> bool;
+    fn sign_in(&self, home: &Home) -> SignIn;
+    fn lapsed(&self, text: &str) -> bool;
+    /// Variables a run on `home` needs besides the one naming the home: where its sign-in is, when
+    /// that is not in the home. Every run takes them through [`ClaudeCode::run_env`].
+    fn env(&self, _home: &Home) -> Vec<(OsString, Option<OsString>)> {
+        Vec::new()
+    }
+    /// Where every home's sign-in lives when that is outside the home.
+    fn sign_in_paths(&self, _user_home: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    /// Where this home's sign-in lives when that is outside the home. A run
+    /// writes it when it renews the sign-in.
+    fn sign_in_dir(&self, _home: &Home) -> Option<PathBuf> {
+        None
+    }
+    fn quota(&self, cli: &ClaudeCode, home: &Home) -> Invocation;
+    fn parse_quota(&self, text: &str, now_s: i64) -> Meters;
+    /// Programs its quota reading runs besides the CLI ([`Harness::helpers`]).
+    fn helpers(&self) -> &'static [&'static str] {
+        &[]
+    }
+}
+
+#[allow(non_upper_case_globals)]
+pub const Claude: ClaudeCode = ClaudeCode {
+    id: "claude",
+    program: "claude",
+    prefix: PREFIX,
+    config_env: "CLAUDE_CONFIG_DIR",
+    identity: "You are Claude",
+    skip_permissions: "--dangerously-skip-permissions",
+    config_files: &["settings.json", "settings.local.json", "CLAUDE.md"],
+    config_dirs: &["hooks", "plugins", "skills", "commands", "agents", "output-styles"],
+    account: &ClaudeAccount,
+};
+
+impl ClaudeCode {
+    /// What every run on `home` (a session, a quota reading and whatever that starts) is told about
+    /// its account: the home, and where the sign-in is ([`Account::env`]). Built here alone, so no run
+    /// can look for the account somewhere relay's own reading of it ([`Account::sign_in`]) did not.
+    pub fn run_env(&self, home: &Home) -> Vec<(OsString, Option<OsString>)> {
+        std::iter::once((self.config_env.into(), Some(home.dir.clone().into()))).chain(self.account.env(home)).collect()
+    }
+}
 
 /// `.claude` is `default`; `.claude.work` is `work`.
 pub fn label_for(entry: &str, prefix: &str) -> Option<String> {
@@ -31,11 +106,68 @@ pub fn label_for(entry: &str, prefix: &str) -> Option<String> {
     (!label.is_empty()).then(|| label.to_owned())
 }
 
-/// A sign-in without a refresh token expires within hours, so it is not offered.
-fn can_refresh(dir: &Path) -> bool {
-    read_json(&dir.join(".credentials.json"))
-        .and_then(|v| v.pointer("/claudeAiOauth/refreshToken").and_then(Value::as_str).map(|t| !t.is_empty()))
-        .unwrap_or(false)
+pub(crate) fn digest(text: &str) -> String {
+    Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().concat()
+}
+
+/// Claude Code's own sign-in: `.credentials.json` and `.claude.json` in the home.
+#[derive(Debug)]
+pub struct ClaudeAccount;
+
+impl Account for ClaudeAccount {
+    fn can_refresh(&self, home: &Home) -> bool {
+        read_json(&home.dir.join(".credentials.json"))
+            .and_then(|v| v.pointer("/claudeAiOauth/refreshToken").and_then(Value::as_str).map(|t| !t.is_empty()))
+            .unwrap_or(false)
+    }
+
+    fn sign_in(&self, home: &Home) -> SignIn {
+        let file = read_json(&home.dir.join(".claude.json"));
+        let account = file.as_ref().and_then(|v| v.get("oauthAccount"));
+        let field = |k: &str| account.and_then(|a| a.get(k)).and_then(Value::as_str).filter(|s| !s.is_empty());
+        let Some(uuid) = field("accountUuid") else { return SignIn::Out };
+        let plan = field("planDisplayName").or(field("billingType")).unwrap_or_default().to_owned();
+        let fetched = account.and_then(|a| a.get("profileFetchedAt")).map(Value::to_string).unwrap_or_default();
+        let stamp = digest(
+            &[uuid, field("organizationUuid").unwrap_or(""), &plan, field("billingType").unwrap_or(""), &fetched]
+                .join("\n"),
+        );
+        SignIn::As(Identity { plan, id: digest(uuid)[..6].to_owned(), stamp: stamp[..12].to_owned() })
+    }
+
+    fn lapsed(&self, text: &str) -> bool {
+        static WORDS: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r"(?i)not logged in|please run /login|(session|token|login|sign-?in|credentials?)[^\n]{0,40}expired|expired[^\n]{0,40}(session|token|login)|unauthori[sz]ed|authentication_error|invalid (api key|authentication)|failed to authenticate",
+            )
+            .expect("regex")
+        });
+        WORDS.is_match(&strip_ansi(text))
+    }
+
+    fn quota(&self, cli: &ClaudeCode, home: &Home) -> Invocation {
+        let mut i = Invocation::new(cli.program);
+        i.args(["-p", "/usage", "--strict-mcp-config", "--setting-sources", "project,local"]);
+        i.env.extend(cli.run_env(home));
+        i
+    }
+
+    fn parse_quota(&self, text: &str, now_s: i64) -> Meters {
+        static LINE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"^Current (week \(all models\)|session):\s+(\d+)% used(?:\s+·\s+resets\s+(.+?))?\s*$")
+                .expect("regex")
+        });
+        let clean = strip_ansi(text);
+        let mut out = Meters::new();
+        for line in clean.lines() {
+            let Some(c) = LINE.captures(line.trim()) else { continue };
+            let key = if c[1].starts_with("week") { "seven_day" } else { "five_hour" };
+            let used: f64 = c[2].parse().unwrap_or(0.0);
+            let resets_at = c.get(3).and_then(|r| parse_reset(&format!("resets {}", r.as_str()), now_s));
+            out.insert(key.into(), Meter { utilization: used / 100.0, resets_at });
+        }
+        out
+    }
 }
 
 /// Tools that schedule the session's own later turns. Nothing is there to take
@@ -43,7 +175,7 @@ fn can_refresh(dir: &Path) -> bool {
 /// replaces the report the session already gave.
 const SELF_SCHEDULING: &str = "ScheduleWakeup,CronCreate,CronDelete,RemoteTrigger";
 
-fn session_args(i: &mut Invocation, task: &Task<'_>) {
+fn session_args(i: &mut Invocation, task: &Task<'_>, skip_permissions: &str) {
     i.arg("-p");
     if task.events {
         // stream-json keeps every result, so a later wake-up cannot overwrite
@@ -54,7 +186,7 @@ fn session_args(i: &mut Invocation, task: &Task<'_>) {
         i.args(["--strict-mcp-config", "--setting-sources", "project,local", "--disable-slash-commands"]);
     }
     match task.permissions {
-        Permissions::Unrestricted => i.arg("--dangerously-skip-permissions"),
+        Permissions::Unrestricted => i.arg(skip_permissions),
         Permissions::ReadOnly => i.args(["--permission-mode", "plan"]),
         Permissions::EditsOnly => i.args(["--permission-mode", "acceptEdits"]),
     };
@@ -86,9 +218,17 @@ fn session_args(i: &mut Invocation, task: &Task<'_>) {
     i.stdin = Some(task.prompt.to_owned());
 }
 
-impl Harness for Claude {
+impl Harness for ClaudeCode {
     fn id(&self) -> &'static str {
-        "claude"
+        self.id
+    }
+
+    fn program(&self) -> &'static str {
+        self.program
+    }
+
+    fn helpers(&self) -> &'static [&'static str] {
+        self.account.helpers()
     }
 
     fn caps(&self) -> Caps {
@@ -96,7 +236,7 @@ impl Harness for Claude {
     }
 
     fn identity(&self) -> &'static str {
-        "You are Claude"
+        self.identity
     }
 
     fn homes(&self, user_home: &Path) -> Vec<Home> {
@@ -105,11 +245,15 @@ impl Harness for Claude {
             .flatten()
             .flatten()
             .filter_map(|e| e.file_name().into_string().ok())
-            .filter_map(|name| label_for(&name, PREFIX).map(|l| (l, user_home.join(&name))))
-            .filter(|(_, d)| d.is_dir() && can_refresh(d))
+            .filter_map(|name| label_for(&name, self.prefix).map(|l| (l, user_home.join(&name))))
+            .filter(|(_, d)| d.is_dir())
             .collect();
         entries.sort();
-        entries.into_iter().map(|(label, dir)| Home { harness: "claude", label, dir }).collect()
+        entries
+            .into_iter()
+            .map(|(label, dir)| Home { harness: self.id, label, dir })
+            .filter(|h| self.account.can_refresh(h))
+            .collect()
     }
 
     fn home_paths(&self, user_home: &Path) -> Vec<PathBuf> {
@@ -118,29 +262,19 @@ impl Harness for Claude {
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(PREFIX))
+            .filter(|e| e.file_name().to_string_lossy().starts_with(self.prefix))
             .map(|e| e.path())
+            .chain(self.account.sign_in_paths(user_home))
             .collect()
     }
 
     fn writable(&self, home: &Home, _user_home: &Path) -> Vec<PathBuf> {
-        vec![home.dir.clone()]
+        std::iter::once(home.dir.clone()).chain(self.account.sign_in_dir(home)).collect()
     }
 
-    fn protected(&self, home: &Home) -> Vec<PathBuf> {
+    fn protected_kinds(&self, home: &Home) -> Vec<(PathBuf, Kind)> {
         // `.claude.json` (which can name MCP servers) stays writable: claude
         // replaces it by rename, which a read-only mount would break.
-        const CONFIG: [&str; 9] = [
-            "settings.json",
-            "settings.local.json",
-            "CLAUDE.md",
-            "hooks",
-            "plugins",
-            "skills",
-            "commands",
-            "agents",
-            "output-styles",
-        ];
         let scripts = std::fs::read_dir(&home.dir).into_iter().flatten().flatten().filter(|e| {
             use std::os::unix::fs::PermissionsExt;
             let p = e.path();
@@ -148,40 +282,23 @@ impl Harness for Claude {
                 && (p.extension().is_some_and(|x| x == "sh")
                     || e.metadata().is_ok_and(|m| m.permissions().mode() & 0o111 != 0))
         });
-        CONFIG.iter().map(|c| home.dir.join(c)).chain(scripts.map(|e| e.path())).collect()
+        let files = self.config_files.iter().map(|c| (home.dir.join(c), Kind::File));
+        let dirs = self.config_dirs.iter().map(|c| (home.dir.join(c), Kind::Dir));
+        files.chain(dirs).chain(scripts.map(|e| (e.path(), Kind::File))).collect()
     }
 
     fn sign_in(&self, home: &Home) -> SignIn {
-        let file = read_json(&home.dir.join(".claude.json"));
-        let account = file.as_ref().and_then(|v| v.get("oauthAccount"));
-        let field = |k: &str| account.and_then(|a| a.get(k)).and_then(Value::as_str).filter(|s| !s.is_empty());
-        let Some(uuid) = field("accountUuid") else { return SignIn::Out };
-        let digest = |text: &str| {
-            Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().concat()
-        };
-        let plan = field("planDisplayName").or(field("billingType")).unwrap_or_default().to_owned();
-        let fetched = account.and_then(|a| a.get("profileFetchedAt")).map(Value::to_string).unwrap_or_default();
-        let stamp = digest(
-            &[uuid, field("organizationUuid").unwrap_or(""), &plan, field("billingType").unwrap_or(""), &fetched]
-                .join("\n"),
-        );
-        SignIn::As(Identity { plan, id: digest(uuid)[..6].to_owned(), stamp: stamp[..12].to_owned() })
+        self.account.sign_in(home)
     }
 
     fn lapsed(&self, text: &str) -> bool {
-        static WORDS: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(
-                r"(?i)not logged in|please run /login|(session|token|login|sign-?in|credentials?)[^\n]{0,40}expired|expired[^\n]{0,40}(session|token|login)|unauthori[sz]ed|authentication_error|invalid (api key|authentication)|failed to authenticate",
-            )
-            .expect("regex")
-        });
-        WORDS.is_match(&strip_ansi(text))
+        self.account.lapsed(text)
     }
 
     fn invocation(&self, home: &Home, task: &Task<'_>) -> Result<Invocation, Refusal> {
-        let mut i = Invocation::new("claude");
-        session_args(&mut i, task);
-        i.env.push(("CLAUDE_CONFIG_DIR".into(), Some(home.dir.clone().into())));
+        let mut i = Invocation::new(self.program);
+        session_args(&mut i, task, self.skip_permissions);
+        i.env.extend(self.run_env(home));
         i.env.push(("DISABLE_AUTOUPDATER".into(), Some("1".into())));
         Ok(i)
     }
@@ -191,27 +308,11 @@ impl Harness for Claude {
     }
 
     fn quota(&self, home: &Home) -> Option<Invocation> {
-        let mut i = Invocation::new("claude");
-        i.args(["-p", "/usage", "--strict-mcp-config", "--setting-sources", "project,local"]);
-        i.env.push(("CLAUDE_CONFIG_DIR".into(), Some(home.dir.clone().into())));
-        Some(i)
+        Some(self.account.quota(self, home))
     }
 
     fn parse_quota(&self, text: &str, now_s: i64) -> Meters {
-        static LINE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"^Current (week \(all models\)|session):\s+(\d+)% used(?:\s+·\s+resets\s+(.+?))?\s*$")
-                .expect("regex")
-        });
-        let clean = strip_ansi(text);
-        let mut out = Meters::new();
-        for line in clean.lines() {
-            let Some(c) = LINE.captures(line.trim()) else { continue };
-            let key = if c[1].starts_with("week") { "seven_day" } else { "five_hour" };
-            let used: f64 = c[2].parse().unwrap_or(0.0);
-            let resets_at = c.get(3).and_then(|r| parse_reset(&format!("resets {}", r.as_str()), now_s));
-            out.insert(key.into(), Meter { utilization: used / 100.0, resets_at });
-        }
-        out
+        self.account.parse_quota(text, now_s)
     }
 
     fn meters_for<'m>(&self, _model: Option<&str>, meters: &'m Meters) -> Result<Vec<&'m Meter>, Refusal> {

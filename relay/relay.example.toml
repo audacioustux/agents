@@ -24,7 +24,7 @@ max_retries = 1          # automatic retries for a session that died with no out
 [accounts]
 # Every signed-in home of every enabled harness is an account, named harness:label
 # (claude:default for ~/.claude, claude:work for ~/.claude.work, omp:default for
-# ~/.omp, omp:work for ~/.omp/profiles/work). These are never used:
+# ~/.omp, omp:work for ~/.omp/profiles/work, puku:work for ~/.puku-cli.work). These are never used:
 exclude = []
 
 # One table per harness, all with the same keys. A harness is enabled by
@@ -41,6 +41,10 @@ exclude = []
 #
 # [harness.omp]
 # model = "openai-codex/gpt-5.2"  # omp meters quota per provider, so its model must name one
+#
+# [harness.puku]
+# program = "/home/me/.local/share/mise/installs/npm-puku-puku-cli/latest/bin/puku-cli"  # when not on PATH
+# model = "puku-ai-2.8"
 
 # Disk: on with these defaults even when this section is absent (see README, Disk).
 [gc]

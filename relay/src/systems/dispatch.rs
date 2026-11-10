@@ -581,6 +581,46 @@ mod tests {
         w
     }
 
+    /// puku accounts are judged by the one [`Room::admit`] as claude's are: one seat budget per account
+    /// whatever the model (never per provider, as omp's), a fresh reading below the floor, and every
+    /// meter governing whatever model the job names.
+    #[test]
+    fn a_puku_account_is_admitted_as_a_claude_one_is() {
+        let (_d, cfg) = omp_config("");
+        let reset = i64::try_from(NOW_US / 1_000_000).unwrap() + 3600;
+        let state = |utilization| AccountState {
+            read_at: Some(NOW_US - 1),
+            meters: [("seven_day".to_owned(), Meter { utilization, resets_at: Some(reset) })].into(),
+            ..Default::default()
+        };
+        let room = |accounts: &[(&str, AccountState)], world: &World| {
+            let found = vec![home("puku", "p"), home("claude", "c")];
+            let heard = accounts.iter().map(|(k, a)| ((*k).to_owned(), a.clone())).collect();
+            Room::of(found, heard, world, &[], true)
+        };
+        let both = [("puku:p", state(0.1)), ("claude:c", state(0.1))];
+        let r = room(&both, &World::default());
+        assert!(r.admit(&cfg.limits, &home("puku", "p"), Some("puku-ai-2.8"), NOW_US).is_ok());
+        assert!(r.admit(&cfg.limits, &home("claude", "c"), Some("claude-opus-5-5"), NOW_US).is_ok());
+        // One running session takes the account's one seat, on any model, as on claude.
+        let mut world = World::default();
+        let j = Job {
+            name: "a".into(),
+            status: Status::Running,
+            account: Some("puku:p".into()),
+            models: BTreeMap::from([("puku".to_owned(), "puku-ai-2.7".to_owned())]),
+            ..Job::default()
+        };
+        world.jobs_mut().insert(j.name.clone(), j);
+        let busy = room(&both, &world).admit(&cfg.limits, &home("puku", "p"), Some("puku-ai-2.8"), NOW_US);
+        assert_eq!(busy.unwrap_err().busy.as_deref(), Some("busy (1 of 1 seat)"), "no provider in it");
+        // At its floor, or never read, it takes nothing.
+        let full = room(&[("puku:p", state(0.95))], &World::default());
+        assert!(full.admit(&cfg.limits, &home("puku", "p"), Some("puku-ai-2.8"), NOW_US).unwrap_err().fit.is_some());
+        let unread = room(&[], &World::default());
+        assert!(unread.admit(&cfg.limits, &home("puku", "p"), Some("puku-ai-2.8"), NOW_US).is_err());
+    }
+
     #[test]
     fn an_omp_account_has_a_seat_per_provider() {
         let (_d, cfg) = omp_config("");

@@ -1,32 +1,85 @@
 //! `relay ask`, end to end, in --dry-run (which never starts the child CLI).
-//! The `omp` checks run the installed omp, so a renamed flag in an omp
-//! release fails here instead of in a caller's request. They skip, saying
-//! why, when omp is not installed or does not run (a shim whose runtime is gone).
-
-use std::process::Command;
+//! The `omp`, `claude` and `puku` checks run the installed CLI, so a renamed flag in a
+//! release fails here instead of in a caller's request. They skip, saying why, when it is
+//! not installed or does not run (a shim whose runtime is gone). Every run here, relay's and
+//! each CLI's, is in a throwaway home ([`isolated::Isolated`]), so none can reach the
+//! developer's sign-ins or relay state.
 
 fn bridge(args: &[&str]) -> (i32, serde_json::Value, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_relay")).arg("ask").args(args).output().unwrap();
+    let home = Isolated::new("ask");
+    let mut cmd = home.command(env!("CARGO_BIN_EXE_relay"));
+    let out = cmd.current_dir(env!("CARGO_MANIFEST_DIR")).arg("ask").args(args).output().unwrap();
     let json = serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
     (out.status.code().unwrap_or(-1), json, String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
-/// `bin --help`, when `bin` is an installed program that runs; otherwise why there is none to ask.
-/// A program on PATH that cannot start (a mise shim for an omp whose `bun` is not installed) is
-/// no installed CLI: its help says nothing about its flags, so the checks skip rather than report
-/// a renamed flag that is not one.
+#[path = "support/isolated.rs"]
+mod isolated;
+use isolated::Isolated;
+
+/// `bin --help`, asked where it can reach no real sign-in ([`Isolated::ask`]); otherwise why there
+/// is none to ask, and the check skips saying so. Every check of an installed CLI here goes through it.
 fn installed_help(bin: &str) -> Result<String, String> {
-    let on_path =
-        Command::new("sh").args(["-c", &format!("command -v {bin} >/dev/null")]).status().is_ok_and(|s| s.success());
-    if !on_path {
-        return Err(format!("{bin} is not installed"));
+    Isolated::new(bin.rsplit('/').next().unwrap_or(bin)).ask(bin, &["--help"]).map(|(_, help)| help)
+}
+
+/// Review of #40 (round 6): parallel tests in one process shared one `(tag, pid)` home, and a new
+/// or dropped instance removed another's live home.
+#[test]
+fn each_throwaway_home_is_its_own_and_outlives_another_dropped() {
+    let a = Isolated::new("same-tag");
+    let b = Isolated::new("same-tag");
+    assert_ne!(a.home(), b.home(), "two instances with one tag get distinct homes");
+    std::fs::write(a.home().join("mine"), "a").unwrap();
+    let a_home = a.home().to_path_buf();
+    drop(b);
+    assert!(a_home.join("mine").exists(), "dropping one instance leaves the other's home alone");
+    drop(a);
+    assert!(!a_home.exists(), "an instance removes its own home");
+}
+
+/// Review of #40 (round 6): stdout was read only after the CLI exited, so help longer than a
+/// pipe's buffer blocked it until the 20 s deadline and the check was skipped as "did not answer".
+#[test]
+fn a_cli_with_long_help_is_read_while_it_writes() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = Isolated::new("long-help");
+    let cli = d.home().join("verbose-cli");
+    std::fs::write(&cli, "#!/bin/sh\nhead -c 300000 /dev/zero | tr '\\0' a\n").unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let started = std::time::Instant::now();
+    let help = installed_help(cli.to_str().unwrap()).expect("a verbose CLI still answers");
+    assert_eq!(help.len(), 300_000, "the whole help is read");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "well inside the deadline");
+}
+
+/// Review of #40: the installed-CLI checks probed `puku-cli --version` with the caller's own
+/// `HOME`, `PUKU_CONFIG_DIR` and `APP_NAME`, and puku renews an expired sign-in on start, so a test
+/// run could refresh the developer's real one. A stand-in CLI records what each probe gives it.
+#[test]
+fn an_installed_cli_is_probed_where_it_can_reach_no_real_sign_in() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = Isolated::new("probe-fixture");
+    let seen = d.home().join("seen");
+    let cli = d.home().join("fake-cli");
+    std::fs::write(&cli, format!("#!/bin/sh\nenv >>'{}'\n", seen.display())).unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let help = installed_help(cli.to_str().unwrap());
+    assert!(help.is_ok(), "the stand-in runs: {help:?}");
+    let env = std::fs::read_to_string(&seen).unwrap();
+    let vars: Vec<(&str, &str)> = env.lines().filter_map(|l| l.split_once('=')).collect();
+    assert!(vars.len() >= 10, "the probe ran: {env}");
+    let home = vars.iter().find(|(k, _)| *k == "HOME").unwrap().1;
+    assert!(home.contains("relay-isolated-") && !home.contains("probe-fixture"), "a throwaway home: {home}");
+    for (k, v) in &vars {
+        let pinned = ["CLAUDE_CONFIG_DIR", "PUKU_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"];
+        if pinned.contains(k) {
+            assert!(v.starts_with(home), "{k}={v} is outside the throwaway home");
+        }
+        let allowed = ["PATH", "HOME", "TMPDIR", "LANG", "APP_NAME", "XDG_CACHE_HOME", "PWD", "SHLVL", "_", "OLDPWD"];
+        assert!(pinned.contains(k) || allowed.contains(k), "{k} was inherited from the caller");
     }
-    let out = Command::new(bin).arg("--help").output().map_err(|e| format!("{bin} does not start: {e}"))?;
-    if !out.status.success() && out.stdout.is_empty() {
-        let why = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-        return Err(format!("{bin} is on PATH but does not run: {why}"));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    assert!(vars.contains(&("APP_NAME", "relay-isolated")));
 }
 
 #[test]
@@ -82,6 +135,7 @@ fn omp_argv_matches_the_installed_omp() {
     assert_eq!(j["prompt"]["delivery"], "file");
     assert!(cmd.last().unwrap().starts_with('@'), "the prompt is a file the message names");
     assert_eq!(cmd[cmd.iter().position(|a| *a == "--model").unwrap() + 1], "opus");
+
     // Every flag the bridge builds, and the escape hatch its resume error names.
     for flag in [
         "--print",
@@ -112,6 +166,7 @@ fn claude_argv_matches_the_installed_claude() {
             return;
         }
     };
+
     // Every flag the claude adapter builds, for the bridge and for relay.
     for flag in [
         "--print",
@@ -133,5 +188,44 @@ fn claude_argv_matches_the_installed_claude() {
         "--disallowedTools",
     ] {
         assert!(help.contains(flag), "claude --help no longer lists {flag}");
+    }
+}
+
+#[test]
+fn puku_argv_matches_the_installed_puku() {
+    let (code, j, err) = bridge(&["puku", "ask", "secret question text", "--dry-run"]);
+    assert_eq!(code, 0, "{err}");
+    let cmd: Vec<&str> = j["command"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(&cmd[..4], ["puku-cli", "-p", "--permission-mode", "plan"]);
+    assert_eq!(j["prompt"]["delivery"], "stdin");
+    // Every puku-cli start but --version renews an expired sign-in: this one can reach none.
+    let help = match installed_help("puku-cli") {
+        Ok(help) => help,
+        Err(why) => {
+            eprintln!("skipped: {why}");
+            return;
+        }
+    };
+    // Every flag the puku adapter builds: claude's, with --god-mode for --dangerously-skip-permissions.
+    for flag in [
+        "--print",
+        "--output-format",
+        "--verbose",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "--disable-slash-commands",
+        "--god-mode",
+        "--permission-mode",
+        "--max-budget-usd",
+        "--append-system-prompt",
+        "--model",
+        "--effort",
+        "--name",
+        "--session-id",
+        "--resume",
+        "--fork-session",
+        "--disallowedTools",
+    ] {
+        assert!(help.contains(flag), "puku-cli --help no longer lists {flag}");
     }
 }

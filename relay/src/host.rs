@@ -48,26 +48,51 @@ pub fn executable(path: &Path) -> bool {
 /// finds, which is then recorded: a later caller whose `PATH` lacks it finds the same program,
 /// and one whose `PATH` has another does not replace it. With no record (`None`), `PATH` alone.
 pub fn resolve(record: Option<&Path>, name: &OsStr) -> Program {
+    resolve_as(record, name, &executable)
+}
+
+/// A harness's helper ([`crate::harness::Harness::helpers`]: the interpreter its launcher's
+/// `#!/usr/bin/env` line names) as [`resolve`] finds a program, except that a mise shim is never
+/// the answer, recorded or on `PATH`: a shim picks its version from the mise config of whatever
+/// directory it runs in, and fails (`No version is set for shim`) where none pins it, such as a
+/// session's clone or relay's state directory. The real binary an activated mise put on the
+/// caller's `PATH` (`~/.local/share/mise/installs/bun/<v>/bin/bun`) is found and recorded instead;
+/// with only a shim, the helper is missing, and shown so.
+pub fn resolve_helper(record: Option<&Path>, name: &OsStr) -> Program {
+    // A launcher finds its helper by name (`#!/usr/bin/env node`) in the recorded file's directory, so
+    // a recorded file under another name (`/opt/node/node-v22`) could not serve it: it is passed over.
+    resolve_as(record, name, &|p: &Path| executable(p) && !mise_shim(p) && p.file_name() == Some(name))
+}
+
+/// Whether `path` is a mise shim: a link to the `mise` executable under another name.
+pub fn mise_shim(path: &Path) -> bool {
+    let named = |p: &Path| p.file_name().is_some_and(|n| n == "mise");
+    path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())
+        && !named(path)
+        && std::fs::canonicalize(path).is_ok_and(|t| named(&t))
+}
+
+fn resolve_as(record: Option<&Path>, name: &OsStr, runs: &dyn Fn(&Path) -> bool) -> Program {
     let as_path = Path::new(name);
     if name.is_empty() || as_path.components().count() != 1 {
-        let found = !name.is_empty() && as_path.is_absolute() && executable(as_path);
+        let found = !name.is_empty() && as_path.is_absolute() && runs(as_path);
         return if found { Program::Found(as_path.to_path_buf()) } else { Program::Missing(name.to_owned()) };
     }
     let key = name.to_string_lossy().into_owned();
-    if let Some(p) = recorded(&record.map(read).unwrap_or_default(), &key) {
+    if let Some(p) = recorded(&record.map(read).unwrap_or_default(), &key, runs) {
         return Program::Found(p);
     }
-    let Some(found) = on_path(name) else { return Program::Missing(name.to_owned()) };
+    let Some(found) = on_path(name, runs) else { return Program::Missing(name.to_owned()) };
     // A record that cannot be had or written is found again next time.
     match record.and_then(Held::take) {
-        Some(held) => held.record(key, found),
+        Some(held) => held.record(key, found, runs),
         None => Program::Found(found),
     }
 }
 
-/// What the record says of `key`, if it is a program that can still run.
-fn recorded(known: &BTreeMap<String, PathBuf>, key: &str) -> Option<PathBuf> {
-    known.get(key).filter(|p| p.is_absolute() && executable(p)).cloned()
+/// What the record says of `key`, if it is a program that can still run (and that `runs` accepts).
+fn recorded(known: &BTreeMap<String, PathBuf>, key: &str, runs: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
+    known.get(key).filter(|p| p.is_absolute() && runs(p)).cloned()
 }
 
 /// The record, read under its lock (`programs.lock` beside it) and held until written: the one way
@@ -104,8 +129,8 @@ impl Held {
 
     /// Records `found` for `key`, unless another relay recorded a program that can run since this
     /// one looked: then that one stands, and is the answer.
-    fn record(mut self, key: String, found: PathBuf) -> Program {
-        if let Some(p) = recorded(&self.known, &key) {
+    fn record(mut self, key: String, found: PathBuf, runs: &dyn Fn(&Path) -> bool) -> Program {
+        if let Some(p) = recorded(&self.known, &key, runs) {
             return Program::Found(p);
         }
         self.known.insert(key, found.clone());
@@ -125,11 +150,11 @@ impl Held {
 /// Where `name` is on relay's own `PATH`, skipping relative entries (they would name a
 /// different file from every other directory).
 #[allow(clippy::disallowed_methods, reason = "the one read of a caller's PATH: what it finds is recorded")]
-fn on_path(name: &OsStr) -> Option<PathBuf> {
+fn on_path(name: &OsStr, runs: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?)
         .filter(|d| d.is_absolute())
         .map(|d| d.join(name))
-        .find(|p| executable(p))
+        .find(|p| runs(p))
 }
 
 fn read(record: &Path) -> BTreeMap<String, PathBuf> {
@@ -278,15 +303,21 @@ fn account(uid: u32) -> Option<(String, String)> {
 }
 
 /// The `PATH` when `session.env` names none: relay's own directory, the user's tool directories
-/// (`~/.local/bin`, `~/bin`, `~/.cargo/bin`, mise's shims, the Nix profile), each found harness
-/// program's directory (for its interpreter), then the system's. Only those that exist, in that order.
+/// (`~/.local/bin`, `~/bin`, `~/.cargo/bin`, mise's shims, the Nix profile), the directory of each
+/// found harness program and helper (for its interpreter: puku-cli runs on `node`), then the system's. Only those that exist, in that order.
 pub fn default_path(cfg: &Config, home: &Path) -> OsString {
     let own = crate::os::own_binary().ok().and_then(|p| p.parent().map(Path::to_path_buf));
     let user = [".local/bin", "bin", ".cargo/bin", ".local/share/mise/shims", ".nix-profile/bin"].map(|d| home.join(d));
-    let harnesses = cfg.harness_programs().into_iter().filter_map(|(_, p)| match p {
-        Program::Found(p) => p.parent().map(Path::to_path_buf),
-        Program::Missing(_) => None,
-    });
+    let programs = cfg.harness_programs();
+    let found: Vec<PathBuf> = programs
+        .iter()
+        .flat_map(crate::config::HarnessPrograms::all)
+        .filter_map(|p| match p {
+            Program::Found(p) => p.parent().map(Path::to_path_buf),
+            Program::Missing(_) => None,
+        })
+        .collect();
+    let harnesses = found.into_iter();
     let system = [
         "/nix/var/nix/profiles/default/bin",
         "/run/current-system/sw/bin",
@@ -303,7 +334,7 @@ pub fn default_path(cfg: &Config, home: &Path) -> OsString {
 
 /// A `PATH` of `dirs` in order, without repeats. A directory whose name holds `:` cannot be written in a
 /// Unix `PATH`, so it is left out, never the whole list with it.
-fn path_of(dirs: impl IntoIterator<Item = PathBuf>) -> OsString {
+pub(crate) fn path_of(dirs: impl IntoIterator<Item = PathBuf>) -> OsString {
     use std::os::unix::ffi::OsStrExt as _;
     let mut kept: Vec<PathBuf> = Vec::new();
     for d in dirs {
@@ -378,11 +409,54 @@ mod tests {
         assert_eq!(resolve(None, OsStr::new("no-such-program-xyz")), Program::Missing("no-such-program-xyz".into()));
     }
 
+    /// A mise shim (a link to `mise` under the tool's name) is a program, but never a helper: it fails
+    /// wherever no mise config pins the tool, which is where sessions run.
+    #[test]
+    fn a_helper_is_never_a_mise_shim() {
+        let d = crate::config::tempdir::Dir::new();
+        let mise = program(d.path(), "mise", 0o755);
+        std::fs::create_dir(d.path().join("shims")).unwrap();
+        let shim = d.path().join("shims/bun");
+        std::os::unix::fs::symlink(&mise, &shim).unwrap();
+        let real = program(d.path(), "bun", 0o755);
+        std::fs::create_dir(d.path().join("linked")).unwrap();
+        let linked = d.path().join("linked/bun");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        assert!(mise_shim(&shim) && !mise_shim(&mise) && !mise_shim(&real) && !mise_shim(&linked));
+        let record = d.path().join("programs.json");
+        std::fs::write(&record, serde_json::json!({ "bun": shim }).to_string()).unwrap();
+        assert_eq!(resolve(Some(&record), OsStr::new("bun")), Program::Found(shim.clone()), "a program may be one");
+        assert_ne!(resolve_helper(Some(&record), OsStr::new("bun")), Program::Found(shim.clone()), "a helper not");
+        std::fs::write(&record, serde_json::json!({ "bun": linked }).to_string()).unwrap();
+        assert_eq!(resolve_helper(Some(&record), OsStr::new("bun")), Program::Found(linked), "a link to a real one is");
+    }
+
+    /// Review of #40: a launcher finds its helper by name in the directory relay puts on its PATH, so
+    /// a record of `node` as `/opt/node/node-v22` would pass discovery and still leave `#!/usr/bin/env
+    /// node` without it. Such a record is passed over, never returned.
+    #[test]
+    fn a_helper_recorded_under_another_name_is_passed_over() {
+        let d = crate::config::tempdir::Dir::new();
+        let misnamed = program(d.path(), "node-v22", 0o755);
+        let record = d.path().join("programs.json");
+        std::fs::write(&record, serde_json::json!({ "node": misnamed }).to_string()).unwrap();
+        assert_eq!(
+            resolve(Some(&record), OsStr::new("node")),
+            Program::Found(misnamed.clone()),
+            "a program is run by path"
+        );
+        assert_ne!(resolve_helper(Some(&record), OsStr::new("node")), Program::Found(misnamed), "a helper not");
+        std::fs::create_dir(d.path().join("named")).unwrap();
+        let named = program(&d.path().join("named"), "node", 0o755);
+        std::fs::write(&record, serde_json::json!({ "node": named }).to_string()).unwrap();
+        assert_eq!(resolve_helper(Some(&record), OsStr::new("node")), Program::Found(named));
+    }
+
     #[test]
     fn concurrent_discoveries_all_stay_in_the_record() {
         let common =
             ["sh", "cat", "ls", "env", "true", "false", "echo", "mkdir", "rm", "cp", "mv", "ln", "sort", "head"];
-        let names: Vec<&str> = common.into_iter().filter(|n| on_path(OsStr::new(n)).is_some()).collect();
+        let names: Vec<&str> = common.into_iter().filter(|n| on_path(OsStr::new(n), &executable).is_some()).collect();
         assert!(names.len() >= 6, "too few programs on PATH to race: {names:?}");
         let d = crate::config::tempdir::Dir::new();
         for round in 0..20 {
@@ -396,6 +470,39 @@ mod tests {
             let known = read(&record);
             let lost: Vec<&&str> = names.iter().filter(|n| !known.contains_key(**n)).collect();
             assert!(lost.is_empty(), "round {round}: a concurrent writer dropped {lost:?}");
+        }
+    }
+
+    /// Review of #40: a helper a harness runs (puku's `node`) in a directory of its own is recorded with
+    /// the harness and its directory is on the `PATH` children get, so a sanitized child still runs it.
+    #[test]
+    fn a_harness_helper_is_recorded_and_its_directory_is_on_the_default_path() {
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let (cli_dir, node_dir) = (d.path().join("puku/bin"), d.path().join("opt node/bin"));
+        std::fs::create_dir_all(&cli_dir).unwrap();
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let cli = program(&cli_dir, "puku-cli", 0o755);
+        let node = program(&node_dir, "node", 0o755);
+        let record = d.path().join("programs.json");
+        std::fs::write(&record, serde_json::json!({ "node": node }).to_string()).unwrap();
+        let conf = format!("name = \"x\"\n[harness.puku]\nprogram = \"{}\"\n", cli.display());
+        let mut cfg = Config::parse(&conf, d.path()).unwrap();
+        cfg.programs = Some(record.clone());
+        let puku = cfg.harness_programs().into_iter().find(|p| p.harness.id() == "puku").unwrap();
+        assert_eq!(puku.helpers, [("node", Program::Found(node.clone()))]);
+        assert!(puku.missing().is_none() && cfg.harnesses().iter().any(|h| h.id() == "puku"));
+        let path = default_path(&cfg, d.path());
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert!(dirs.contains(&node_dir) && dirs.contains(&cli_dir), "{path:?}");
+        // A helper that cannot be found leaves the harness shown as missing it, and unused.
+        std::fs::remove_file(&node).unwrap();
+        std::fs::write(&record, serde_json::json!({ "node": node }).to_string()).unwrap();
+        let without = cfg.harness_programs().into_iter().find(|p| p.harness.id() == "puku").unwrap();
+        if let (_, Program::Missing(_)) = &without.helpers[0] {
+            let rows: Vec<_> = cfg.missing_harnesses().into_iter().filter(|(h, _)| *h == "puku").collect();
+            assert_eq!(rows, [("puku", crate::config::Missing::Helper { name: "node" })]);
+            assert!(!cfg.harnesses().iter().any(|h| h.id() == "puku"));
         }
     }
 

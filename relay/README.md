@@ -1,7 +1,7 @@
 # relay
 
 Queue coding-agent tasks for any git repository and let them run unattended:
-each task is a headless session of an agent harness (Claude Code or omp)
+each task is a headless session of an agent harness (Claude Code, omp or puku-cli)
 inside a bubblewrap sandbox, on whichever account of whichever
 harness has the most quota to spare. When an account runs out mid-task, the
 session moves on: to another account of the same harness with its transcript,
@@ -26,7 +26,9 @@ Linux only. It replaces `lanes`, the Deno runner that was here before. See
   `timeout` from coreutils.
 - At least one harness, signed in once per account: `claude` per
   `CLAUDE_CONFIG_DIR=~/.claude.work claude`, `omp` per profile
-  (`~/.omp/profiles/<name>`).
+  (`~/.omp/profiles/<name>`), `puku-cli` per config dir and sign-in
+  (`PUKU_CONFIG_DIR=~/.puku-cli.work APP_NAME=pukucode.work puku-cli auth login`). puku also
+  needs `node`, which it runs on anyway, for its quota (found as a program is, below).
 - Rust 1.99 to build it (the toolchain file pins it).
 
 ```sh
@@ -707,12 +709,12 @@ is the suggestion above.
 Every harness is scheduled alike. An adapter in [`src/harness/`](src/harness/)
 says, for its CLI:
 
-| | claude | omp |
-| --- | --- | --- |
-| an account | a `~/.claude*` dir with a refreshable sign-in | `~/.omp` (`default`) or `~/.omp/profiles/<name>` |
-| selected by | `CLAUDE_CONFIG_DIR` | `OMP_PROFILE` |
-| quota from | `claude -p /usage`, and each session's rate events | `omp usage`, per provider |
-| resume on another account | yes: the transcript is copied | yes: the session lives with the job, not the profile |
+| | claude | omp | puku |
+| --- | --- | --- | --- |
+| an account | a `~/.claude*` dir with a refreshable sign-in | `~/.omp` (`default`) or `~/.omp/profiles/<name>` | a `~/.puku-cli*` dir whose sign-in (below) is refreshable |
+| selected by | `CLAUDE_CONFIG_DIR` | `OMP_PROFILE` | `PUKU_CONFIG_DIR`, and `APP_NAME` for its sign-in |
+| quota from | `claude -p /usage`, and each session's rate events | `omp usage`, per provider | puku's chat quota (`api-cli.puku.sh`), read by a node script |
+| resume on another account | yes: the transcript is copied | yes: the session lives with the job, not the profile | yes: the transcript is copied |
 
 An account is named `harness:label` (`claude:work`, `omp:default`).
 `[harness.<id>]` in the config sets a harness's `model`, `effort`,
@@ -721,7 +723,7 @@ single accounts.
 
 A harness's program is `program` when set (a path, relative to the config file's directory
 when it is not absolute, or a name), else its own name
-(`claude`, `omp`). A name is the absolute path relay recorded the first time it found
+(`claude`, `omp`, `puku-cli`). A name is the absolute path relay recorded the first time it found
 it on a `PATH` (`$XDG_STATE_HOME/relay/programs.json`, kept while that file can be run;
 changed only under `programs.lock`, so relays recording at once keep each other's entries),
 so a shell whose `PATH` lacks it (a dispatcher woken from cron, a bare `env -i` shell)
@@ -733,6 +735,20 @@ a `[harness.<id>]` table for whose program is not found is shown on the board an
 directory), set `program`, or delete its line from `programs.json` and run any relay
 command from a shell that has it.
 
+A harness whose program is a script also has helper programs, the interpreters its
+`#!/usr/bin/env` line names: `bun` for omp, `node` for puku. They are found and recorded the
+same way, by the first command that finds the harness, and come first on the `PATH` of every
+run of that harness (its sessions, quota readings and `relay probe`'s check), so a session never
+runs whatever interpreter an earlier `PATH` directory holds. A helper is never a mise shim
+(`~/.local/share/mise/shims/bun`, a link to `mise`): a shim chooses its version from the mise
+config of the directory it runs in, and fails (`No version is set for shim: bun`) where none
+pins it, which is where sessions run. Run the first relay command from a shell where mise has put
+the real binary on `PATH` (an activated mise does), or delete the helper's line from
+`programs.json` to find it again. A harness whose helper is not found is not used: one the
+config names (`[harness.omp]`) is shown as `helper not found: bun`, and a job asked of it is
+refused saying how to provide one (never by setting `program`, which names omp itself), one it does not name is left
+out, as one whose program is not found is.
+
 Who a claude directory is signed in as comes from its `.claude.json`
 (`oauthAccount`), read locally, never by a call. relay shows only the plan and
 the first 6 hex characters of a hash of the account id (`Ultra #76de9d`), and
@@ -741,6 +757,35 @@ signed in` and is never chosen. Two directories signed in as one account are
 shown as `same sign-in as claude:first`; they share one quota (one reading,
 the newest) and one seat budget, so a session on either counts against both.
 omp keeps no identity relay can read, so it shows none.
+
+puku-cli is a Claude Code derivative and runs through the same adapter: the same
+flags (except `--god-mode` for `--dangerously-skip-permissions`), stream-json
+events, session ids and transcripts. Its home is `~/.puku-cli` (`puku:default`) or
+`~/.puku-cli.<label>`, but its sign-in is not in the home: `puku-cli auth login` writes
+`~/.config/$APP_NAME/session.json`, with `APP_NAME` defaulting to `pukucode`. So relay
+pairs `~/.puku-cli` with `~/.config/pukucode` and `~/.puku-cli.<label>` with
+`~/.config/pukucode.<label>`, and sets `APP_NAME` to match; sign each labelled home in
+with both variables set (Requirements). Who it is signed in as is a hash of that
+file's user id (`#3f2a1c`: puku keeps no plan there). Its quota is the chat quota
+puku's own Usage tab shows (`fiveHour`, `weekly` and `monthly` windows become the
+meters `five_hour`, `seven_day` and `monthly`); puku has no command that prints it, so
+relay runs a short `node` script that sends the home's access token to
+`https://api-cli.puku.sh/puku/v1/subscription` and prints only the quota. When the
+token has expired, the script first runs `puku-cli auth status`, since every puku-cli
+start renews an expired sign-in, so puku's file is written only by puku. A refused
+token (401 or 403) or no sign-in marks the account signed out; a token that could not
+be renewed leaves it unread. Both `puku-cli` and the script's `node` are found as a
+harness's program is (above): `[harness.puku] program`, else the path recorded when relay
+first found the name on a `PATH` (mise installs `puku-cli` under
+`~/.local/share/mise/installs/npm-puku-puku-cli/`, with a shim in mise's `shims`). `node` is
+a helper program of the puku harness: the first relay command that finds `puku-cli` finds and
+records `node` too, from that caller's `PATH`, so the dispatcher and its quota reader, which run
+on a narrower one, use the same file. That `node` also comes first on the `PATH` of every puku
+run, whatever `session.env` names, since `puku-cli` starts through `#!/usr/bin/env node`: the quota
+script, the `puku-cli` it renews through and every session all run the one interpreter. A `node`
+not found is shown as `helper not found: node`, and puku is not used. In the same way every puku
+run is told `HOME` (the user's home) and `APP_NAME`, which puku finds its sign-in by, so a job whose
+`session.env` names another `HOME` still uses the sign-in relay found the account by.
 
 Quota readings cost no model call. One is taken again after 10 minutes, or
 once a reset it names has passed; a reading that fails is not retried for the
@@ -871,12 +916,13 @@ Each session runs under `bwrap`. It sees the machine read-only, except for:
   other jobs' clones; the credential stores in `sandbox.hide_home`; and host
   sockets (`/run/user/<uid>`, sockets under `/run`), since a read-only mount
   does not stop a connection to a socket.
-- **Writable**: its own clone and job directory, and its own account, except
-  what in it the host later runs or obeys (claude's settings, hooks, plugins,
-  skills and scripts; omp's config, agents, extensions and natives, and the
+- **Writable**: its own clone and job directory, and its own account (for puku also
+  its sign-in directory under `~/.config`, which a session rewrites when it renews
+  the token), except what in it the host later runs or obeys (claude's and puku's
+  settings, hooks, plugins, skills and scripts; omp's config, agents, extensions and natives, and the
   default profile's `profiles`, where new accounts would appear), which is
   mounted back read-only. One the account does not have yet is protected too: relay
-  makes it empty first (an empty directory, an empty file, `{}` for a `.json`) and
+  makes it empty first (an empty directory or file, whichever the adapter says it is; `{}` for a `.json`) and
   mounts that read-only, so the session cannot be the one to create it. These
   empty stand-ins stay in the account afterwards, and mean what their absence did.
 - **Read-only: the job's inbox** (`<job>.in` in the jobs directory), where relay
@@ -907,8 +953,8 @@ What is left open, by design or by necessity:
 
 - **The network**, since the session needs its provider's API, and with it
   abstract Unix sockets.
-- **claude's `.claude.json`**, which can name MCP servers the host would start
-  later. claude rewrites it by renaming a new file over it, which a read-only
+- **claude's `.claude.json`** (and puku's `puku-cli.json`), which can name MCP
+  servers the host would start later. claude rewrites it by renaming a new file over it, which a read-only
   mount would break.
 
 The mounts are one declarative plan in layers ([`src/sandbox.rs`](src/sandbox.rs)),
@@ -917,7 +963,10 @@ where the job's own mounts come last, so nothing above can hide them.
 Environment variables are cleared and relay's own (built from the config, never the
 calling shell's) are passed in, except those matching
 `sandbox.env_deny` (tokens, secrets, keys, `AUTH`, cookies, sessions and
-`CLAUDE*`). The adapter then sets the one that selects the account. A
+`CLAUDE*` and `PUKU*`). The adapter then sets the one that selects the account. The
+same list applies to `[session.env]`: an entry it names (`PUKU_WORKER_URL`, `NPM_TOKEN`) is
+refused when the config is loaded, naming the variable and the pattern, rather than dropped,
+so narrow `sandbox.env_deny` if a job really needs one. A
 project whose toolchain comes from a development environment that cannot
 start inside the sandbox (single-user Nix locks its store, which is
 read-only there) names it in `session.env_shell`, such as

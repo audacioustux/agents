@@ -887,7 +887,7 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "0fe977c5d41038667c56cf9d300c21174974c162c78e2cfc76243f91e6d50b5b",
+          "sha256": "5275dbc5693acf1d9004fc949c2a89479ec1fcf65fd543690931f416a8430aac",
           "upstream": {
             "status": "rewritten"
           }
@@ -911,7 +911,9 @@
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-11-10: the non-breaking-space clause became the rule that a value stays on one line, citing UAX #14 (LineBreak.txt 18.0.0: en dash is BA; currency, percent, plus and minus signs are PR or PO): a sign binds to the digits it touches, an ordinary space or the point after an en dash is a break; plus the check at the narrowest width or container, and a detection row. Prompted by critiquing-visual-design's tests."
+      ],
       "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
       "owned": true
     },

@@ -64,7 +64,9 @@ Forcing grayscale smoothing thins strokes. On macOS it is a common house style a
 
 ## Copy, punctuation, direction
 
-Store copy in natural case, style with `text-transform`, so a redesign never means rewriting strings. Use curly quotes in prose (straight quotes in code), an en dash for ranges, a single ellipsis character instead of three periods, a non-breaking space to hold a value and its unit together, and a soft hyphen where a long word may break.
+Store copy in natural case, style with `text-transform`, so a redesign never means rewriting strings. Use curly quotes in prose (straight quotes in code), an en dash for ranges, a single ellipsis character instead of three periods, and a soft hyphen where a long word may break.
+
+Keep a value on one line. Unicode line breaking (UAX #14) holds a currency, percent, plus or minus sign to the digits it touches, but every ordinary space inside a value is a break opportunity (`BDT 1,200`, `90 min`, `6:30 PM`), and so is the point after an en dash, so `600–1,200` can end one line and start the next. Join the space with a non-breaking space, or make a range or compound value unbreakable as a whole. Only the rendered value at the narrowest width or container, with the longest real content, shows the break; a review of one wide layout misses it.
 
 Pull underline position and thickness from the font's own metrics; the browser default sits inconsistently and can cut through descenders.
 
@@ -84,4 +86,5 @@ Set `lang` so pronunciation, quotes, and hyphenation resolve correctly, and `dir
 | Thin or light weight used on sub-18px UI text | Raise to weight 400+, reserve thin weights for display sizes |
 | Card or list description at heading line-height wraps to 3+ lines | Raise line-height to at least 1.4 |
 | Hyphen used for a date or number range | Replace with an en dash |
+| A price, time or range splits across lines at a narrow width (`BDT` / `1,200`, `600–` / `1,200`) | Join with a non-breaking space, or make the whole value unbreakable |
 | Mixed-direction value reorders inside RTL text | Wrap the value in `<bdi>` |

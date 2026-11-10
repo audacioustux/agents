@@ -1061,7 +1061,10 @@ fn a_session_that_lapsed_is_signed_out_until_a_reading_succeeds() {
     std::fs::write(&usage, good).unwrap();
     ok(&relay(&env, &["quota", "refresh"]), "refresh again");
     let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
-    assert!(!table.contains("signed out") && table.contains("ready"), "{table}");
+    // Usable again: ready, or already busy with the job that waited for it (the dispatcher
+    // may start it between the refresh and the show).
+    let usable = table.contains("ready") || table.contains("busy (1 of 1 seat)");
+    assert!(!table.contains("signed out") && usable, "{table}");
     assert_eq!(wait_for(&env, "look")["status"], "done");
 }
 

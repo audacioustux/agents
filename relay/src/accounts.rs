@@ -181,12 +181,17 @@ pub fn floor_note(limits: &Limits, m: &Meter, now_s: i64) -> Option<String> {
     near.then(|| format!("floor {:.0}%, resets in {}", floor * 100.0, fmt_left(left)))
 }
 
-/// Time left, to the hour (`1d17h`, `2d`, `10h`), or to the minute under an hour (`57m`).
+/// Time left, to the hour (`1d17h`, `2d`, `10h`), to the minute under an hour (`57m`), or to the
+/// day from ten days out (`30d`): never wider than five columns.
 pub fn fmt_left(secs: i64) -> String {
     if secs < 3600 {
         return format!("{}m", (secs + 59) / 60);
     }
     let hours = (secs + 1800) / 3600;
+    if hours >= 10 * 24 {
+        // Weeks out the hours tell nothing, and dropping them keeps every time left within five columns.
+        return format!("{}d", (hours + 12) / 24);
+    }
     match (hours / 24, hours % 24) {
         (0, h) => format!("{h}h"),
         (d, 0) => format!("{d}d"),
@@ -451,6 +456,12 @@ mod tests {
         for (secs, left) in [(86_400, "1d"), (2 * 86_400 + 600, "2d"), (41 * 3600, "1d17h"), (149 * 3600, "6d5h")] {
             assert_eq!(fmt_left(secs), left, "{secs}");
         }
+        // From ten days out the hours are dropped, so a time left is never wider than five columns.
+        for (secs, left) in [(9 * 86_400 + 23 * 3600, "9d23h"), (10 * 86_400, "10d"), (29 * 86_400 + 23 * 3600, "30d")]
+        {
+            assert_eq!(fmt_left(secs), left, "{secs}");
+        }
+        assert!((0..400).map(|d| fmt_left(d * 86_400 + 13 * 3600).len()).all(|n| n <= 5));
     }
 
     #[test]

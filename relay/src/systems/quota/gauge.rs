@@ -10,8 +10,8 @@ use crate::harness::Meter;
 /// The cells a bar takes when there is room, and the fewest it shrinks to.
 pub const BAR: usize = 12;
 pub const MIN_BAR: usize = 5;
-/// What follows the bar: ` 100%* 1d17h`, the time left padded to five columns. A longer time
-/// left (a monthly meter's `29d23h`) makes it wider.
+/// What follows the bar: ` 100%* 1d17h`, the time left padded to five columns, which
+/// [`crate::accounts::fmt_left`] never exceeds, so the tail always fits whole.
 pub const TAIL: usize = 12;
 
 /// A cell partly filled, by eighths.
@@ -178,14 +178,15 @@ mod tests {
         assert!(bold.spans.iter().all(|s| s.style.add_modifier.contains(ratatui::style::Modifier::BOLD)));
     }
 
-    /// A monthly meter can be `29d23h` from its reset: its tail is wider, and the bar gives way.
+    /// A monthly meter is weeks from its reset: its time left is in days alone, so the tail keeps
+    /// its width and its unit, down to the narrowest gauge a board lays out (review of #42).
     #[test]
     fn a_monthly_reset_keeps_its_unit() {
         let g = Gauge { left: Some(29 * 86_400 + 23 * 3600), ..gauge(0.31, Some(0.9)) };
-        assert_eq!(g.text(12), "███▊░░░░░░│░  31%  29d23h");
+        assert_eq!(g.text(12), "███▊░░░░░░│░  31%  30d  ");
         let text = |l: Line<'_>| l.spans.iter().map(|s| s.content.to_string()).collect::<String>();
-        assert_eq!(text(g.line(24)), "███▍░░░░░│░  31%  29d23h", "a bar a cell shorter, the whole time left");
-        assert_eq!(text(g.line(18)), "█▌░░│  31%  29d23h", "at five cells, still whole");
+        assert_eq!(text(g.line(BAR + TAIL)), "███▊░░░░░░│░  31%  30d  ");
+        assert_eq!(text(g.line(MIN_BAR + TAIL)), "█▌░░│  31%  30d  ", "at the narrowest, still whole");
     }
 
     #[test]

@@ -32,8 +32,10 @@ impl Drop for Dir {
     }
 }
 
-/// Whether `pid` has gone (or is a zombie no one has reaped yet).
+/// Whether `pid` has gone (or is a zombie no one has reaped yet). It must be a pid: an empty one
+/// would read `/proc//stat`, which is `/proc/stat`, and never be gone.
 fn gone(pid: &str) -> bool {
+    let pid: u32 = pid.parse().unwrap_or_else(|_| panic!("not a pid: {pid:?}"));
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
     stat.is_empty() || stat.contains(") Z ")
 }
@@ -112,33 +114,42 @@ fn it_exits_as_its_handler_did_and_ends_what_the_handler_left() {
 /// PR #39 fifth review, gaps 1 and 3: nothing is recorded, and a runner killed at once after it
 /// started a handler (before the supervisor has even looked) or while the handler works takes the
 /// handler's whole group with it. The "runner" here is a shell that starts the supervisor and is
-/// killed with SIGKILL.
+/// killed with SIGKILL. A handler killed as it writes a pid file leaves it empty, which names no
+/// process (it once named `/proc/stat`, and failed "at-once" now and then under load).
 #[test]
 fn a_handler_goes_with_its_runner_however_soon_the_runner_is_killed() {
     let dir = Dir::new("runner");
-    for wait_for_handler in [false, true] {
-        let tag = if wait_for_handler { "working" } else { "at-once" };
+    // How long the runner waits before it is killed, and whether the handler holds its grandchild's
+    // pid file open, created and still empty, as it is killed: the moment "at-once" can only hit by chance.
+    for (tag, wait_for, hold) in
+        [("at-once", None, ""), ("mid-write", Some("-e"), "sleep 300; "), ("working", Some("-s"), "")]
+    {
         let (sup, handler, grandchild) =
             (dir.join(&format!("{tag}.sup")), dir.join(&format!("{tag}.handler")), dir.join(&format!("{tag}.gc")));
-        let inner = format!("echo $$ >{}; sleep 300 & echo $! >{}; sleep 300", handler.display(), grandchild.display());
-        let wait = if wait_for_handler {
-            format!("while [ ! -s {} ]; do sleep 0.05; done; ", grandchild.display())
-        } else {
-            String::new()
-        };
+        let inner = format!(
+            "echo $$ >{}; sleep 300 & {{ {hold}echo $!; }} >{}; sleep 300",
+            handler.display(),
+            grandchild.display()
+        );
+        let wait = wait_for
+            .map_or(String::new(), |t| format!("while [ ! {t} {} ]; do sleep 0.05; done; ", grandchild.display()));
         let runner =
             format!("\"$0\" supervise --parent $$ -- sh -c '{inner}' & echo $! >{}; {wait}kill -9 $$", sup.display());
         let status = Command::new("sh").arg("-c").arg(&runner).arg(RELAY).status().unwrap();
         assert!(!status.success());
         let sup = read_pid(&sup);
         assert!(eventually(|| gone(&sup)), "{tag}: the supervisor ended");
+        // A pid file names a pid once its line is whole. One created but not yet written (the handler
+        // killed between `>file` and `echo`) names none; the group check below covers what it started.
         for f in [&handler, &grandchild] {
-            if let Ok(pid) = std::fs::read_to_string(f) {
+            if let Some(pid) = std::fs::read_to_string(f).ok().filter(|s| s.ends_with('\n')) {
                 assert!(eventually(|| gone(pid.trim())), "{tag}: {} went with the runner", f.display());
             }
         }
-        if wait_for_handler {
-            assert!(grandchild.exists(), "the handler was at work when its runner was killed");
+        match tag {
+            "mid-write" => assert_eq!(std::fs::read_to_string(&grandchild).unwrap(), "", "killed as it wrote the pid"),
+            "working" => assert!(grandchild.exists(), "the handler was at work when its runner was killed"),
+            _ => {}
         }
         let pgid = sup.parse().unwrap();
         assert!(eventually(|| group_members(pgid).is_empty()), "{tag}: nothing is left in its group");

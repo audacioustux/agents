@@ -282,12 +282,15 @@ fn read(ctx: &Ctx, home: &Home) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// One account, as `show --json` reports it.
+/// One account, as `show --json` reports it. What relay keeps of who it is signed in as is
+/// `identity`; its email address is only shown, read from its home as the view is drawn
+/// ([`AccountsView::show_emails`]).
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Row<'a> {
     account: String,
-    /// Who the home is signed in as: a plan and a short hash, never an email address or uuid.
+    /// Who the home is signed in as, as relay keeps it: a plan and a short hash, never an email
+    /// address or uuid.
     #[serde(skip_serializing_if = "Option::is_none")]
     identity: Option<Identity>,
     /// The first home signed in as the same account, when this one is not the first.
@@ -466,7 +469,9 @@ pub fn show(ctx: &Ctx, world: &World, refresh: bool) -> Result<()> {
     if refresh {
         v.refreshing(start_refresh(ctx, &room, world, false)?);
     }
-    ctx.reply(&v.json, &v.text())
+    v.show_emails(&room);
+    // On a terminal, as wide as it is: the emails give way, then the bars shrink. Piped, every line whole.
+    ctx.reply(&v.json, &v.text_in(crate::os::terminal_size().map(|(cols, _)| cols)))
 }
 
 /// Every account's room: as every project on this machine knows it, with
@@ -492,34 +497,85 @@ impl AccountsView {
     /// The columns' headings: the account, its state, a meter and its gauge, room/day, run.
     pub const HEADINGS: [&str; 6] = ["", "state", "meter", "gauge", "room/day", "run"];
 
+    /// Puts each account's email address beside it, read now from its home in `room`
+    /// ([`crate::harness::Harness::email`]), when stdout is a terminal: the address is for the
+    /// owner's eyes, so never in output a pipe could write to a file, a log or a session's context.
+    /// It stays in this view, never written anywhere relay keeps.
+    pub fn show_emails(&mut self, room: &Room) {
+        use std::io::IsTerminal;
+        if std::io::stdout().is_terminal() {
+            self.add_emails(room.found());
+        }
+    }
+
+    /// Each account of `found` with an email address gets it, as `email` in `--json`.
+    fn add_emails(&mut self, found: &[Home]) {
+        let Some(rows) = self.json.get_mut("accounts").and_then(serde_json::Value::as_array_mut) else { return };
+        for row in rows {
+            let key = row.get("account").and_then(serde_json::Value::as_str);
+            let home = found.iter().find(|h| key == Some(h.key().as_str()));
+            if let Some(email) = home.and_then(|h| harness_of(h).email(h)) {
+                row["email"] = email.into();
+            }
+        }
+    }
+
+    /// Each row's email address ([`AccountsView::show_emails`]), on its account's own row, the
+    /// first of the account's rows, which come in the order of `--json`'s accounts; empty elsewhere.
+    pub fn emails(&self) -> Vec<String> {
+        let accounts = self.json.get("accounts").and_then(serde_json::Value::as_array);
+        let mut n = 0;
+        let mut email = || {
+            let e = accounts.and_then(|a| a.get(n)).and_then(|a| a.get("email")).and_then(serde_json::Value::as_str);
+            n += 1;
+            e.unwrap_or_default().to_owned()
+        };
+        self.rows.iter().map(|r| if r.sub { String::new() } else { email() }).collect()
+    }
+
     /// Each row's cells under [`AccountsView::HEADINGS`], each gauge written by `gauge`.
     pub fn cells(&self, gauge: impl Fn(&Gauge) -> String) -> Vec<Vec<String>> {
         self.rows.iter().map(|r| r.cells(&gauge)).collect()
     }
 
-    /// The rows as aligned text under their headings, bars `bar` cells wide. A column empty in
-    /// every row is left out, its heading too.
+    /// The rows as aligned text under their headings, bars `bar` cells wide, each account's email
+    /// beside it. A column empty in every row is left out, its heading too.
     pub fn table(&self, bar: usize) -> Vec<String> {
-        let body = self.cells(|g| g.text(bar));
+        self.table_with(bar, true)
+    }
+
+    /// As [`AccountsView::table`], the emails left out unless `emails`.
+    fn table_with(&self, bar: usize, emails: bool) -> Vec<String> {
+        let mut body = self.cells(|g| g.text(bar));
+        let mut headings = Self::HEADINGS.to_vec();
+        if emails {
+            headings.insert(1, "email");
+            for (cells, email) in body.iter_mut().zip(self.emails()) {
+                cells.insert(1, email);
+            }
+        }
         let used = |c: usize| body.iter().any(|r| r.get(c).is_some_and(|s| !s.is_empty()));
-        let heads =
-            Self::HEADINGS.iter().enumerate().map(|(c, h)| if used(c) { (*h).to_owned() } else { String::new() });
+        let heads = headings.iter().enumerate().map(|(c, h)| if used(c) { (*h).to_owned() } else { String::new() });
         crate::systems::view::table(&std::iter::once(heads.collect()).chain(body).collect::<Vec<_>>())
     }
 
+    /// Every line whole, as piped output shows it.
+    #[cfg(test)]
     pub fn text(&self) -> String {
         self.text_in(None)
     }
 
     /// The head and the table, indented, its bars as wide as `width` columns allow, down to
-    /// [`gauge::MIN_BAR`] cells: a narrow window shrinks the bars before it cuts the lines.
+    /// [`gauge::MIN_BAR`] cells: a narrow window leaves the emails out, then shrinks the bars,
+    /// before it cuts the lines.
     pub fn text_in(&self, width: Option<usize>) -> String {
         let fits = |lines: &[String]| width.is_none_or(|w| lines.iter().all(|l| l.chars().count() + 2 <= w));
         let table = if self.rows.is_empty() {
             Vec::new()
         } else {
-            let mut tables = (gauge::MIN_BAR..=gauge::BAR).rev().map(|bar| self.table(bar));
-            let narrowest = self.table(gauge::MIN_BAR);
+            let shrunk = (gauge::MIN_BAR..=gauge::BAR).rev().map(|bar| self.table_with(bar, false));
+            let mut tables = std::iter::once(self.table(gauge::BAR)).chain(shrunk);
+            let narrowest = self.table_with(gauge::MIN_BAR, false);
             tables.find(|t| fits(t)).unwrap_or(narrowest)
         };
         let lines = table.into_iter().map(|l| format!("  {l}"));
@@ -946,6 +1002,55 @@ mod tests {
         for secret in ["me@secret.invalid", "u-1", "u-2"] {
             assert!(!table.contains(secret) && !v.json.to_string().contains(secret), "{secret}");
         }
+    }
+
+    /// The owner's ask of 2026-11-11: each Claude account's email beside its name, read from its
+    /// home when shown, and only then; a home with none shows nothing.
+    #[test]
+    fn an_account_shows_its_email_beside_its_name_only_when_shown() {
+        let (dir, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
+        let home = |label: &str, json: &str| {
+            let dir = dir.path().join(label);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(".claude.json"), json).unwrap();
+            Home { harness: "claude", label: label.into(), dir }
+        };
+        let signed =
+            |email: &str| format!(r#"{{"oauthAccount":{{"accountUuid":"u-{email}","emailAddress":"{email}"}}}}"#);
+        let found = [
+            home("study", &signed("ada@fixture.invalid")),
+            home("work", &signed("grace.long.name@fixture.invalid")),
+            home("out", r#"{"oauthAccount":{"emailAddress":"gone@fixture.invalid"}}"#),
+            omp(),
+        ];
+        let mut w = world(&[]);
+        for h in &found[..3] {
+            w.accounts.insert(h.key(), AccountState { read_at: Some(NOW - 1), ..Default::default() });
+        }
+        let mut v = view_of(&cfg, &found, &w, &[]);
+        assert!(!v.json.to_string().contains("@fixture.invalid") && !v.text().contains('@'), "not until shown");
+        v.add_emails(&found);
+        let email = |key: &str| {
+            let rows = v.json["accounts"].as_array().unwrap();
+            rows.iter().find(|r| r["account"] == key).and_then(|r| r.get("email")).cloned()
+        };
+        assert_eq!(email("claude:study"), Some("ada@fixture.invalid".into()), "{}", v.json);
+        assert_eq!(email("claude:work"), Some("grace.long.name@fixture.invalid".into()));
+        assert_eq!((email("claude:out"), email("omp:default")), (None, None), "signed out, and omp: nothing");
+        let table = v.table(gauge::BAR);
+        let line = |key: &str| table.iter().find(|l| l.contains(&format!("{key} "))).unwrap().clone();
+        assert!(table[0].trim_start().starts_with("email  "), "{}", table[0]);
+        assert!(line("claude:study").contains("claude:study  ada@fixture.invalid  "), "{table:#?}");
+        assert!(line("claude:work").contains("claude:work   grace.long.name@fixture.invalid  "), "{table:#?}");
+        assert!(!line("claude:out").contains('@') && !line("omp:default").contains('@'), "{table:#?}");
+        let lines = |t: Vec<String>| std::iter::once(v.head.clone()).chain(t.into_iter().map(|l| format!("  {l}")));
+        let wide = v.text_in(Some(200));
+        assert_eq!(wide, lines(table.clone()).collect::<Vec<_>>().join("\n"), "room for all");
+        // One column short: the email gives way before the bars shrink.
+        let need = table.iter().map(|l| l.chars().count() + 2).max().unwrap();
+        let without = lines(v.table_with(gauge::BAR, false)).collect::<Vec<_>>().join("\n");
+        assert_eq!(v.text_in(Some(need)), wide);
+        assert_eq!(v.text_in(Some(need - 1)), without, "the email first, the bars whole");
     }
 
     /// Audit finding 14: the pane judges an account as the dispatcher does, its seats too, so an

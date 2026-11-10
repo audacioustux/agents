@@ -315,6 +315,16 @@ mod tests {
     }
 
     #[test]
+    fn the_email_of_a_puku_session_is_never_read() {
+        let d = tmp("email");
+        std::fs::create_dir_all(d.0.join(".puku-cli")).unwrap();
+        let h = Home { harness: "puku", label: "default".into(), dir: d.0.join(".puku-cli") };
+        session(&d.0, "pukucode", "fake-refresh", "user-76de9d00", 1);
+        assert!(matches!(Puku.sign_in(&h), SignIn::As(_)), "signed in");
+        assert_eq!(Puku.email(&h), None, "its user.email stays unread");
+    }
+
+    #[test]
     fn usage_is_the_chat_quota() {
         let reply = r#"{"chat":{"used_req":10,"req_limit":1000,"windows":{"fiveHour":{"limit":200,"used":50,"resetsAt":"2026-11-09T05:00:00Z"},"weekly":{"limit":1000,"used":900,"resetsAt":"2026-11-12T00:00:00.000Z"},"monthly":{"limit":0,"used":0,"resetsAt":"2026-12-01T00:00:00Z"}}}}"#;
         let m = Puku.parse_quota(&format!("noise\n{reply}\n"), 0);

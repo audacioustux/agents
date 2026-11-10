@@ -630,3 +630,30 @@ fn the_bars_give_way_before_a_name_is_cut() {
     let row = &fr[usize::from(row_of(&fr, "claude:tangim"))];
     assert_eq!(bar_after(row, "…"), 5, "a name cut, its bar at five cells: {row}");
 }
+
+/// The owner's ask of 2026-11-11: each account's email beside its name; when room runs short the
+/// email gives way, down to `…`, before the gauge or a name does.
+#[test]
+fn an_accounts_email_shows_beside_it_and_gives_way_first() {
+    let mut v = gauged();
+    v.json = serde_json::json!({ "accounts": [
+        { "account": "claude:ifty", "email": "ifty@fixture.invalid" },
+        { "account": "claude:tj" },
+    ] });
+    let row = |w: u16| {
+        let (fr, _) = accounts_pane(&v, w);
+        let head = fr[usize::from(row_of(&fr, "│account"))].clone();
+        (head, fr[usize::from(row_of(&fr, "claude:ifty  "))].clone(), fr[usize::from(row_of(&fr, "claude:tj"))].clone())
+    };
+    let (head, ifty, tj) = row(120);
+    assert!(head.starts_with("│account        email                 state"), "{head}");
+    assert!(ifty.starts_with("│▸ claude:ifty  ifty@fixture.invalid  ready  "), "{ifty}");
+    assert!(tj.starts_with("│  claude:tj                          stale (read 3h ago)  "), "nothing shown: {tj}");
+    assert_eq!(bar_after(&ifty, "7 days"), 12, "{ifty}");
+    let (_, ifty, _) = row(100);
+    assert!(ifty.contains("ifty@fixture.i…  ready"), "the email gives way first: {ifty}");
+    assert_eq!(bar_after(&ifty, "7 days"), 12, "the gauge whole: {ifty}");
+    let (_, ifty, _) = row(80);
+    assert!(ifty.starts_with("│▸ claude:ifty  …  ready  "), "{ifty}");
+    assert!(bar_after(&ifty, "7 days") < 12, "then the gauge: {ifty}");
+}

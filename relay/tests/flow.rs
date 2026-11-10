@@ -1086,6 +1086,54 @@ fn a_home_with_no_sign_in_is_never_chosen() {
     assert!(table.contains("claude:a") && table.contains("not signed in"), "{table}");
 }
 
+/// Every file under `dir` whose bytes hold `needle`, and how many files were searched.
+fn files_holding(dir: &Path, needle: &str) -> (Vec<PathBuf>, usize) {
+    let (mut found, mut searched) = (Vec::new(), 0);
+    let Ok(entries) = std::fs::read_dir(dir) else { return (found, searched) };
+    for entry in entries.flatten() {
+        let (path, kind) = (entry.path(), entry.file_type().unwrap());
+        if kind.is_dir() {
+            let (f, n) = files_holding(&path, needle);
+            found.extend(f);
+            searched += n;
+        } else if kind.is_file() {
+            searched += 1;
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            if bytes.windows(needle.len()).any(|w| w == needle.as_bytes()) {
+                found.push(path);
+            }
+        }
+    }
+    (found, searched)
+}
+
+/// The owner's ask of 2026-11-11: an account's email is shown, read from its home as a view is
+/// drawn, and never kept: after a reading, a queued job's run and the views, no file relay keeps
+/// (state, events, job logs, checkpoints, clones) holds the address.
+#[test]
+fn an_accounts_email_never_reaches_relays_state_or_events() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("email", false);
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["quota", "refresh"]), "refresh");
+    ok(&relay(&env, &["queue", "add", "look", "--text", "Look.", "--readonly"]), "queue");
+    assert_eq!(wait_for(&env, "look")["status"], "done");
+    ok(&relay(&env, &["quota", "show"]), "show");
+    ok(&relay(&env, &["quota", "show", "--json"]), "show --json");
+    ok(&relay(&env, &["view", "status"]), "board");
+    let (state, data) = (env.root.join("state"), env.root.join("data"));
+    assert!(state.join("relay/flow/bus/quota.ndjson").exists(), "the reading is in the events");
+    for dir in [&state, &data] {
+        let (kept, searched) = files_holding(dir, SECRET_EMAIL);
+        assert!(kept.is_empty(), "{SECRET_EMAIL} kept in {kept:?}");
+        if dir == &state {
+            assert!(searched > 3, "the state was searched: {searched} files");
+        }
+    }
+}
+
 /// A puku-cli home, `~/.puku-cli.<label>`, signed in under `APP_NAME=pukucode.<label>`, whose weekly
 /// chat quota is `used_pct` used and resets in 2100.
 fn puku_account(home: &Path, label: &str, used_pct: u32) {

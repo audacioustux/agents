@@ -51,6 +51,10 @@ pub trait Account: Sync + fmt::Debug {
     /// within hours, so it is not offered.
     fn can_refresh(&self, home: &Home) -> bool;
     fn sign_in(&self, home: &Home) -> SignIn;
+    /// The address the home is signed in as, read for a view alone ([`Harness::email`]).
+    fn email(&self, _home: &Home) -> Option<String> {
+        None
+    }
     fn lapsed(&self, text: &str) -> bool;
     /// Variables a run on `home` needs besides the one naming the home: where its sign-in is, when
     /// that is not in the home. Every run takes them through [`ClaudeCode::run_env`].
@@ -133,6 +137,15 @@ impl Account for ClaudeAccount {
                 .join("\n"),
         );
         SignIn::As(Identity { plan, id: digest(uuid)[..6].to_owned(), stamp: stamp[..12].to_owned() })
+    }
+
+    /// `oauthAccount.emailAddress`, when the home is signed in ([`Account::sign_in`] reads an account).
+    fn email(&self, home: &Home) -> Option<String> {
+        let file = read_json(&home.dir.join(".claude.json"))?;
+        let account = file.get("oauthAccount")?;
+        let field = |k: &str| account.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+        field("accountUuid")?;
+        field("emailAddress").map(crate::harness::printable)
     }
 
     fn lapsed(&self, text: &str) -> bool {
@@ -289,6 +302,10 @@ impl Harness for ClaudeCode {
 
     fn sign_in(&self, home: &Home) -> SignIn {
         self.account.sign_in(home)
+    }
+
+    fn email(&self, home: &Home) -> Option<String> {
+        self.account.email(home)
     }
 
     fn lapsed(&self, text: &str) -> bool {
@@ -544,6 +561,24 @@ mod tests {
         let SignIn::As(later) = Claude.sign_in(&h) else { panic!("signed in") };
         assert_eq!(later.id, id.id);
         assert_ne!(later.stamp, id.stamp, "a changed plan is a changed sign-in");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_email_is_read_for_a_view_only_when_the_home_is_signed_in() {
+        let d = std::env::temp_dir().join(format!("hb-email-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let h = Home { dir: d.clone(), ..home("claude", "w") };
+        assert_eq!(Claude.email(&h), None, "no .claude.json");
+        std::fs::write(d.join(".claude.json"), "not json").unwrap();
+        assert_eq!(Claude.email(&h), None, "an unreadable file is no error");
+        std::fs::write(d.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"x@y.invalid"}}"#).unwrap();
+        assert_eq!(Claude.email(&h), None, "signed out: no accountUuid");
+        std::fs::write(d.join(".claude.json"), r#"{"oauthAccount":{"accountUuid":"u-1","emailAddress":""}}"#).unwrap();
+        assert_eq!(Claude.email(&h), None, "no address");
+        let file = r#"{"oauthAccount":{"accountUuid":"u-1","emailAddress":"x@y.invalid\u001b[2J"}}"#;
+        std::fs::write(d.join(".claude.json"), file).unwrap();
+        assert_eq!(Claude.email(&h).as_deref(), Some("x@y.invalid [2J"), "no terminal escape gets through");
         std::fs::remove_dir_all(&d).unwrap();
     }
 

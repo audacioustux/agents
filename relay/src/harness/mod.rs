@@ -283,6 +283,13 @@ pub trait Harness: Sync + fmt::Debug {
     fn sign_in(&self, _home: &Home) -> SignIn {
         SignIn::Unknown
     }
+    /// The address the home is signed in as, for a view to show its owner beside the account's name.
+    /// Read from the home's files when the view is drawn and never kept: not in [`SignIn`], the
+    /// state, the events or anything a run is given. None when the harness keeps none this crate
+    /// reads, or the home is signed out.
+    fn email(&self, _home: &Home) -> Option<String> {
+        None
+    }
     /// Whether the quota command's output says the session is expired,
     /// unauthorised or not signed in.
     fn lapsed(&self, _text: &str) -> bool {

@@ -346,6 +346,23 @@ mod tests {
         assert_eq!(widths(&cols, &rows, 60, 2), [17, 17, 17, 3], "then, at their shortest, as the others do");
     }
 
+    /// Review of #42: a meter's name is shown whole when the pane has room for it (omp's longest is
+    /// 49 columns), and cut only once the gauge is at its shortest.
+    #[test]
+    fn the_accounts_meter_name_is_whole_while_there_is_room() {
+        let long = "google-antigravity/Claude & GPT (shared) (Weekly)";
+        let row = |meter: &str| {
+            ["omp:default", "ready", meter, &"g".repeat(super::super::board::ACCOUNTS[3].cap), "16%/d", "0"]
+                .map(String::from)
+                .to_vec()
+        };
+        let rows = vec![row(long), row("7 days")];
+        let w = widths(&super::super::board::ACCOUNTS, &rows, 120, 2);
+        assert_eq!(w[2], long.len(), "{w:?}");
+        let narrow = widths(&super::super::board::ACCOUNTS, &rows, 90, 2);
+        assert_eq!(narrow[3], super::super::board::ACCOUNTS[3].yields, "the gauge gives way first: {narrow:?}");
+    }
+
     #[test]
     fn markdown_markers_are_dropped_and_headings_marked() {
         let text = "## What survives\nsome **bold** and `code`\n```rust\nlet x = **y;\n```\n#hashtag";

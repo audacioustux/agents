@@ -92,7 +92,8 @@ static DECISIONS: [Column; 5] =
 pub static ACCOUNTS: [Column; 6] = [
     col("account", 32),
     col("state", 24),
-    col("meter", 40),
+    // As wide as the longest name: when room runs short the gauge gives way first, then the widest.
+    col("meter", usize::MAX),
     Column {
         head: std::borrow::Cow::Borrowed("gauge"),
         cap: gauge::BAR + gauge::TAIL,

@@ -306,7 +306,7 @@ mod tests {
         session(&d.0, "pukucode", "fake-refresh", "user-76de9d00", 1);
         let SignIn::As(id) = Puku.sign_in(&h) else { panic!("signed in") };
         assert_eq!((id.plan.as_str(), id.id.len()), ("", 6));
-        let shown = format!("{id:?} {}", id.label());
+        let shown = format!("{id:?} {}", serde_json::to_string(&id).unwrap());
         assert!(!shown.contains("x@y.invalid") && !shown.contains("user-76de9d00") && !shown.contains("fake"));
         session(&d.0, "pukucode", "fake-refresh", "user-76de9d00", 2);
         let SignIn::As(later) = Puku.sign_in(&h) else { panic!("signed in") };

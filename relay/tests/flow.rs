@@ -1026,7 +1026,8 @@ fn two_homes_signed_in_as_one_account_share_a_seat_and_the_board_says_so() {
 
     let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
     let json = String::from_utf8_lossy(&relay(&env, &["quota", "show", "--json"]).stdout).into_owned();
-    assert!(table.contains("same sign-in as claude:a") && table.contains("Ultra #"), "{table}");
+    // Who each is signed in as is in --json; the table says which are one account.
+    assert!(table.contains("same sign-in as claude:a"), "{table}");
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["accounts"][1]["sameAs"], "claude:a", "{json}");
     assert_eq!(v["accounts"][0]["identity"]["plan"], "Ultra");

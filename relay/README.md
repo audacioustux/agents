@@ -217,15 +217,17 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   (`no account has room (claude:a busy (1 of 1 seat); claude:b reading is stale)`).
   A retried or requeued job has no account until its next start, so its account
   column says `-` and its model column lists every harness it may run on.
-- **Accounts.** A column per meter window the harnesses report (`5 hours`, `7 days`,
-  `openai-codex/5 hours`; `·` where an account has none), each a gauge: a bar in
-  eighths with `│` at that meter's floor, how full, and the time to its reset
-  (`6d5h`). The meter that decides is bold (`*` in `view status`, which is never
-  coloured); on the board a gauge is green, yellow within 10 points of its floor and
-  red at it. `room/day` is how dispatch ranks the account and `▸` the one the next
-  start would take, also named in the title with the floors. A stale reading says
-  how old it is (`stale (read 3h ago)`). A narrow window shrinks the bars (to five
-  cells) before it cuts anything.
+- **Accounts.** A row per account with its state, the meter that decides, `room/day`
+  and the sessions it runs; then a row for each of its other meters, the closest to its
+  floor first (`openai-codex/5 hours`, `seven day overage included`), so the table is as
+  wide as the longest meter name however many there are. Each meter is a gauge: a bar in
+  eighths with `│` at that meter's floor, how full, and the time to its reset (`6d5h`).
+  The meter that decides is bold (`*` in `view status`, which is never coloured); on the
+  board a gauge is green, yellow within 10 points of its floor and red at it. `room/day`
+  is how dispatch ranks the account and `▸` the one the next start would take, also named
+  in the title with the floors. A stale reading says how old it is (`stale (read 3h ago)`).
+  Who a home is signed in as is in `--json` (`identity`); twins say `same sign-in as`.
+  A narrow window shrinks the bars (to five cells) before it cuts a name.
 - **Readings.** Showing the accounts in a project (`view status`, `view watch`, `quota
   show`) starts a reading of each stale one in the background, and the accounts title
   says `refreshing claude:a, …` until it lands. `view status --json` does too, with the

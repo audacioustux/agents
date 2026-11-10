@@ -538,7 +538,7 @@ mod tests {
         let SignIn::As(id) = Claude.sign_in(&h) else { panic!("signed in") };
         assert_eq!((id.plan.as_str(), id.id.len()), ("Ultra", 6));
         assert!(id.id.chars().all(|c| c.is_ascii_hexdigit()));
-        let shown = format!("{id:?} {}", id.label());
+        let shown = format!("{id:?} {}", serde_json::to_string(&id).unwrap());
         assert!(!shown.contains("x@y.invalid") && !shown.contains("76de9d00-aaaa"), "{shown}");
         std::fs::write(d.join(".claude.json"), file("76de9d00-aaaa-4bbb-8ccc-000000000001", "Max")).unwrap();
         let SignIn::As(later) = Claude.sign_in(&h) else { panic!("signed in") };

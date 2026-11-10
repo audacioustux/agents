@@ -14,9 +14,6 @@ pub const MIN_BAR: usize = 5;
 /// left (a monthly meter's `29d23h`) makes it wider.
 pub const TAIL: usize = 12;
 
-/// What a board shows where an account has no such meter.
-pub const MISSING: &str = "·";
-
 /// A cell partly filled, by eighths.
 const EIGHTHS: [char; 8] = ['░', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
 
@@ -63,6 +60,12 @@ impl Gauge {
         } else {
             Tone::Room
         }
+    }
+
+    /// How far past its floor it is (or its whole window, where no floor is known): the
+    /// closest to its floor is the greatest, negative while there is room.
+    pub fn past_floor(&self) -> f64 {
+        self.used - self.floor.unwrap_or(1.0)
     }
 
     /// The bar alone, `cells` wide: `███▍░░░░░░│░`.
@@ -122,24 +125,13 @@ fn share(fraction: f64, n: usize) -> usize {
     k.min(n)
 }
 
-/// A meter window's column heading: claude's and puku's names in words, any other as named.
+/// A meter's name as a board shows it: claude's and puku's in words, any other as named.
 pub fn heading(window: &str) -> String {
     match window {
         "five_hour" => "5 hours".into(),
         "seven_day" => "7 days".into(),
         other => other.replace('_', " "),
     }
-}
-
-/// Where a window's column goes: the short windows first, the others by name.
-pub fn order(window: &str) -> (u8, &str) {
-    let rank = match window {
-        "five_hour" => 0,
-        "seven_day" => 1,
-        "monthly" => 2,
-        _ => 3,
-    };
-    (rank, window)
 }
 
 #[cfg(test)]
@@ -197,12 +189,17 @@ mod tests {
     }
 
     #[test]
-    fn windows_read_as_words_shortest_first() {
-        let mut w = ["seven_day", "monthly", "five_hour", "openai-codex/5 hours"];
-        w.sort_by_key(|w| order(w));
-        assert_eq!(
-            w.iter().map(|w| heading(w)).collect::<Vec<_>>(),
-            ["5 hours", "7 days", "monthly", "openai-codex/5 hours"]
-        );
+    fn a_meter_reads_as_words() {
+        let names = ["five_hour", "seven_day", "seven_day_overage_included", "openai-codex/5 hours"];
+        let words = ["5 hours", "7 days", "seven day overage included", "openai-codex/5 hours"];
+        assert_eq!(names.map(heading), words);
+    }
+
+    #[test]
+    fn the_closest_to_its_floor_is_the_most_past_it() {
+        let (near_reset, far) = (gauge(0.95, Some(0.98)), gauge(0.9, Some(0.9)));
+        assert!(far.past_floor() > near_reset.past_floor(), "at its floor, past one three points off");
+        assert!(near_reset.past_floor() > gauge(0.85, Some(0.9)).past_floor(), "three points off, past five");
+        assert!((gauge(0.5, None).past_floor() + 0.5).abs() < 1e-9, "machine-wide, against the whole window");
     }
 }

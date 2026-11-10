@@ -60,12 +60,13 @@ Current UI ownership boundaries:
 | `building-responsive-layouts` | Responsive adaptation, overlay stability, stacking order, safe areas, direction and locale resilience |
 | `building-color-systems` | Ramp construction, color token tiers, notation and gamut, measuring rendered pairs, dark-mode palettes |
 | `refining-typography` | Text rendering: scale, line-height, measure, wrapping, truncation, numerals, font faces |
-| `writing-interface-copy` | User-facing wording: labels, errors, empty states, terminology, translation-safe strings |
+| `writing-interface-copy` | User-facing wording: headlines, labels, errors, empty states, terminology, translation-safe strings |
 | `designing-component-systems` | Component APIs, composition, state ownership, token consumption |
 | `animating-interface-motion` | Whether to animate, continuity, entrance and exit shaping, technique choice |
 | `following-repo-ui-conventions` | Repository convention precedence, theme safety, styling discipline |
 | `improving-web-performance` | Loading, runtime responsiveness, visual stability, resilience |
 | `reviewing-ux-in-browser` | Browser verification procedure |
+| `critiquing-visual-design` | Visual judgement: defect or taste, the evidence a finding carries, decoration doing no work, the main thing shown largest, emphasis, icon families |
 
 How the UI skills compose. A solid arrow means "defers this concern to", declared in
 the source skill's `uses:` block and stated in its hand-off line. The one dashed arrow
@@ -84,8 +85,10 @@ flowchart TD
   perf["improving-web-performance<br/>loading, runtime"]
   motion["animating-interface-motion<br/>motion craft"]
   browser["reviewing-ux-in-browser<br/>verification"]
+  critique["critiquing-visual-design<br/>visual judgement"]
 
-  conv --> a11y & layout & type & color & copy
+  conv --> a11y & layout & type & color & copy & critique
+  critique --> comp & color & a11y & type & copy & layout & motion & perf & browser
   a11y --> color & type & copy & layout & motion
   layout --> type & a11y & perf
   type --> a11y & color & copy & perf & layout
@@ -102,7 +105,11 @@ flowchart TD
 purpose: repository conventions outrank every sibling rule, so no skill hands its
 rules upward. `reviewing-ux-in-browser` is a procedure rather than a domain, so it
 verifies the others rather than owning rules they defer to it, which is why its one
-arrow is dashed.
+outbound arrow is dashed; the solid arrow into it hands over the capture of rendered
+states, not a rule. `critiquing-visual-design` is a judgement rather than a layer: it
+decides whether what a reviewer sees is a defect or taste and what evidence a finding
+carries, then hands each defect's rule to the layer that owns it. That is why it points
+at nearly every UI skill and owns only the composition questions none of them covers.
 
 Rust ownership boundaries:
 

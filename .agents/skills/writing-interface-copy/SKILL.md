@@ -1,6 +1,6 @@
 ---
 name: writing-interface-copy
-description: Use when writing or reviewing user-facing copy - labels, errors, empty states, settings, toggles, confirmations, and button text - for voice consistency, plain wording, and translation safety.
+description: Use when writing or reviewing user-facing copy - headlines, labels, errors, empty states, settings, toggles, confirmations, and button text - for voice consistency, plain wording, and translation safety.
 uses:
   - name: refining-typography
     source: audacioustux/agents
@@ -40,6 +40,10 @@ Write "you", not "the user". In errors, "we" reads as deflection: prefer "Unable
 Choose words a tired reader gets on the first pass, and delete every word that does no work. No idioms, no colloquialisms, no humor that won't translate.
 
 The one rule worth memorizing exactly: never assemble a sentence from fragments around a variable, such as `"You have " + n + " new messages"`. Word order and pluralization rules change per language, so a fragment-built sentence breaks in translation even when it reads fine in the source. Use one complete templated string with proper pluralization handling, not a concatenation.
+
+## Headlines make a claim the page keeps
+
+A headline says what this product does for this reader, plainly enough that a first-time reader knows what the page offers before reading further. Swapping a competitor's name in is a quick prompt, not the test: a line that stays true of every product in the category ("The future of invoicing") usually names no job at all, while a line a rival could also truthfully use is still clear when it names the job ("Invoices that chase late payers for you"). Shared capability is not vagueness. Recommend a rewrite only when the headline and the copy under it together leave the reader unsure what this product does, which is the ambiguity that justifies raising a brand line at all. The page under it then has to keep the claim, since a headline promising speed above a six-step form reads as a broken promise. A deliberate brand line can stay when a specific line beside it does this work.
 
 ## Verb-first buttons
 
@@ -96,3 +100,4 @@ A placeholder shows the expected format: `name@example.com`, `DD/MM/YYYY`. It va
 | Mixed title case and sentence case on the same element type | Pick sentence case and apply it everywhere for that type |
 | An error that repeats "we" | Rewrite from the reader's perspective, drop the pronoun |
 | An empty state holding a stat or notice found nowhere else | Move that content out of the empty state before it ships |
+| A headline and the copy under it that together leave a first-time reader unsure what this product does (a line true of every product in the category is the usual sign) | Rewrite it to name the job, or add a line beside it that does |

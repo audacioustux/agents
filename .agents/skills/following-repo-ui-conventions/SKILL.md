@@ -12,6 +12,8 @@ uses:
     source: audacioustux/agents
   - name: building-accessible-interfaces
     source: audacioustux/agents
+  - name: critiquing-visual-design
+    source: audacioustux/agents
 ---
 
 # Repo UI Conventions
@@ -29,7 +31,7 @@ Prioritize:
 
 Do not invent a new design system, visual style, framework pattern, or styling stack unless the user explicitly asks for one.
 
-Repository conventions outrank every rule in a sibling skill. Within them, `refining-typography` owns text rendering, `building-color-systems` owns palette construction and contrast measurement, `writing-interface-copy` owns user-facing wording, `building-responsive-layouts` owns adaptation and direction, and `building-accessible-interfaces` owns semantics, keyboard, and focus. Where those skills are not installed, apply the rule here and note the gap.
+Repository conventions outrank every rule in a sibling skill. Within them, `refining-typography` owns text rendering, `building-color-systems` owns palette construction and contrast measurement, `writing-interface-copy` owns user-facing wording, `building-responsive-layouts` owns adaptation and direction, `building-accessible-interfaces` owns semantics, keyboard, and focus, and `critiquing-visual-design` owns the judgement of whether a visual choice is a defect or taste. Where those skills are not installed, apply the rule here and note the gap.
 
 ## When to use
 

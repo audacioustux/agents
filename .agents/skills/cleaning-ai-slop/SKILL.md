@@ -1,8 +1,10 @@
 ---
 name: cleaning-ai-slop
-description: Use when the user says "deslop", "slop", "clean AI code", or "remove AI patterns", or when LLM-generated code smells appear after a generation session - strips AI-specific patterns while preserving behavior. For review that reports findings instead of fixing, use `reviewing-for-bloat`.
+description: Use when the user says "deslop", "slop", "clean AI code", or "remove AI patterns", or when LLM-generated code smells appear after a generation session - strips AI-specific patterns while preserving behavior. For review that reports findings instead of fixing, use `reviewing-for-bloat`. For how a screen or page looks, use `critiquing-visual-design`.
 uses:
   - name: reviewing-for-bloat
+    source: audacioustux/agents
+  - name: critiquing-visual-design
     source: audacioustux/agents
 ---
 
@@ -33,6 +35,7 @@ These rules have no exceptions.
 ## When NOT to use
 
 - Code that was written by humans (different smells, different treatment)
+- A design that looks AI-generated: use `critiquing-visual-design` if installed; either way, nothing here applies to how a screen looks
 - When tests don't exist and can't be added quickly (lock behavior first)
 - Mid-implementation — finish the feature, then clean
 

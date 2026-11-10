@@ -1137,7 +1137,7 @@ fn a_puku_session_runs_on_its_own_home_and_sign_in_and_sees_no_other() {
 
     let table = String::from_utf8_lossy(&relay(&env, &["quota", "show"]).stdout).into_owned();
     let json = String::from_utf8_lossy(&relay(&env, &["quota", "show", "--json"]).stdout).into_owned();
-    assert!(table.contains("puku:p") && table.contains("puku:q") && table.contains("seven_day"), "{table}");
+    assert!(table.contains("puku:p") && table.contains("puku:q") && table.contains("7 days"), "{table}");
     for secret in [SECRET_EMAIL, "puku-user-p", "\"fake\""] {
         assert!(!table.contains(secret) && !json.contains(secret), "{secret} leaked:\n{table}\n{json}");
     }
@@ -3011,8 +3011,9 @@ fn a_meter_about_to_reset_has_the_looser_floor_and_quota_says_so() {
     configure(&env, near, "");
     omp_meter(&env.home, 91, "10h");
     let table = stated(&env);
-    assert!(table.contains("floor 90%, 98% within 12h of a reset"), "{table}");
-    assert!(table.contains("ready") && table.contains("(floor 98%, resets in 10h)"), "{table}");
+    assert!(table.contains("floor 90% (98% in the last 12h before a reset)"), "{table}");
+    // The floor mark in the last cell: 98%, not the 90% it would be a day off.
+    assert!(table.contains("ready") && table.contains("█▉│  91%* 10h"), "{table}");
     let json: serde_json::Value = serde_json::from_slice(&relay(&env, &["quota", "show", "--json"]).stdout).unwrap();
     assert_eq!(json["accounts"][0]["floor"], 0.98, "{json}");
     assert_eq!(json["accounts"][0]["floorWhy"], "floor 98%, resets in 10h", "{json}");

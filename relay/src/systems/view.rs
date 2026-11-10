@@ -144,9 +144,9 @@ fn status(scope: Scope<'_>, json: bool, all: bool, everywhere: bool) -> Result<(
     let m = scope.read()?;
     let room = m.room(scope.home);
     let accounts = shown_accounts(scope, &m, &room)?;
-    let text = board(scope.cfg, &m, &room, &accounts, all, everywhere);
-    // On a terminal, one screen line per line; piped, every line whole.
+    // On a terminal, one screen line per line, the meters' bars shrunk first; piped, every line whole.
     let width = crate::os::terminal_size().map(|(cols, _)| cols);
+    let text = board(scope.cfg, &m, &room, &accounts, Shown { all, everywhere, width });
     out!("{}", fit(&text, width));
     Ok(())
 }
@@ -416,8 +416,17 @@ pub fn decision_cells<'a>(
         .collect()
 }
 
+/// What a text board shows: older jobs too, every project, and in how many columns.
+#[derive(Debug, Clone, Copy)]
+struct Shown {
+    all: bool,
+    everywhere: bool,
+    width: Option<usize>,
+}
+
 /// The jobs and accounts, as text.
-fn board(cfg: &Config, m: &Machine, room: &Room, accounts: &AccountsView, all: bool, everywhere: bool) -> String {
+fn board(cfg: &Config, m: &Machine, room: &Room, accounts: &AccountsView, shown: Shown) -> String {
+    let Shown { all, everywhere, width } = shown;
     let now = now_micros();
     let everywhere = everywhere || !m.projects.iter().any(|p| p.own);
     let jobs = listed(m.shown(everywhere), all, now);
@@ -450,7 +459,7 @@ fn board(cfg: &Config, m: &Machine, room: &Room, accounts: &AccountsView, all: b
         lines.extend(m.unreadable.iter().map(|u| format!("  unreadable: {u}")));
     }
     lines.push(String::new());
-    lines.push(accounts.text());
+    lines.push(accounts.text_in(width));
     lines.join("\n")
 }
 

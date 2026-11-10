@@ -11,7 +11,8 @@ use super::pane::Step;
 use super::ui::{Action, Id, Ui};
 use crate::config::{Config, tempdir};
 use crate::systems::dispatch::Room;
-use crate::systems::quota::AccountsView;
+use crate::systems::quota::gauge::Gauge;
+use crate::systems::quota::{AccountsView, Shown};
 use crate::systems::view::machine::{Machine, Project};
 use crate::world::{Decision, Job, Status, World};
 
@@ -74,14 +75,19 @@ fn fixture(ours: &[Job], theirs: &[Job]) -> Fixture {
 }
 
 fn accounts(n: usize) -> AccountsView {
-    let row = |i: usize| {
-        vec![format!("claude:a{i}"), "Ultra #f4bd75".into(), "ready".into(), String::new(), "29% seven_day".into()]
+    let row = |i: usize| Shown {
+        account: format!("  claude:a{i}"),
+        who: "Ultra #f4bd75".into(),
+        state: "ready".into(),
+        gauges: vec![Some(Gauge { used: 0.29, floor: Some(0.9), left: Some(86_400), governing: true })],
+        ready: true,
+        ..Shown::default()
     };
     AccountsView {
         json: serde_json::Value::Null,
-        head: "accounts on claude (floor 90%, 1 session(s) each)".into(),
-        cells: (0..n).map(row).collect(),
-        ready: vec![true; n],
+        head: "accounts on claude · floor 90% · 1 session(s) each · next pick: none".into(),
+        windows: vec!["seven_day".into()],
+        rows: (0..n).map(row).collect(),
     }
 }
 
@@ -91,7 +97,7 @@ impl Fixture {
             &self.cfg,
             &self.machine,
             &Room::default(),
-            accounts(accounts_n),
+            &accounts(accounts_n),
             ui.shown.all,
             ui.shown.everywhere,
             NOW,
@@ -158,7 +164,7 @@ fn the_board_fits_80x24_and_120x40_with_headings_keys_and_a_zoned_clock() {
             assert!(keys.contains(hint), "{w}x{h}: {hint} missing from {keys}");
         }
         assert!(fr.iter().any(|l| l.contains("claude:a1")), "the accounts");
-        assert_eq!(b.accounts[0][3], "-", "an empty cell says so");
+        assert_eq!(b.accounts[0][4], "-", "an empty cell says so");
         // The model column follows `as`; the short form shows in the row, and the harness that ran
         // (claude) narrows a job with an account, while one without shows both.
         let heading = fr[1].find("as ").expect("as");
@@ -513,4 +519,76 @@ fn the_pagers_stderr_is_the_boards() {
     let ours = std::fs::read_link("/proc/self/fd/2").unwrap();
     let check = format!("test \"$(readlink /proc/$$/fd/2)\" = '{}' || exit 9", ours.display());
     super::run_pager(&check, "text").unwrap();
+}
+
+/// Two accounts on two windows: one picked next with a 7-day meter that decides and no 5-hour
+/// one; one stale, near its floor on one window and over it on the other.
+fn gauged() -> AccountsView {
+    let g = |used, left, governing| Some(Gauge { used, floor: Some(0.9), left: Some(left), governing });
+    let rows = vec![
+        Shown {
+            account: "▸ claude:ifty".into(),
+            who: "Ultra #ce60cb".into(),
+            state: "ready".into(),
+            gauges: vec![None, g(0.28, 149 * 3600, true)],
+            room: "12%/d".into(),
+            running: "1".into(),
+            ready: true,
+            sub: false,
+        },
+        Shown {
+            account: "  claude:tj".into(),
+            who: "Pro #f83f6d".into(),
+            state: "stale (read 3h ago)".into(),
+            gauges: vec![g(0.85, 57 * 60, false), g(0.95, 41 * 3600, true)],
+            room: "—".into(),
+            running: "0".into(),
+            ready: false,
+            sub: false,
+        },
+    ];
+    AccountsView {
+        json: serde_json::Value::Null,
+        head: "accounts on claude · floor 90% · 1 session(s) each · next pick ▸ claude:ifty".into(),
+        windows: vec!["five_hour".into(), "seven_day".into()],
+        rows,
+    }
+}
+
+/// The accounts pane draws each meter as a gauge: a bar with `│` at its floor, green with room,
+/// yellow within ten points of the floor, red at it, the meter that decides in bold.
+#[test]
+fn the_accounts_pane_draws_gauges() {
+    use ratatui::style::{Color, Modifier};
+    let fixture = two_jobs();
+    let mut ui = Ui::new(false, false, true);
+    let board = Board::new(&fixture.cfg, &fixture.machine, &Room::default(), &gauged(), false, false, NOW);
+    ui.sync(&board);
+    let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    term.draw(|fr| draw(fr, &board, &mut ui)).unwrap();
+    let buf = term.backend().buffer().clone();
+    let fr: Vec<String> = (0..40).map(|y| (0..120).map(|x| buf[(x, y)].symbol()).collect()).collect();
+    let top = usize::from(row_of(&fr, "next pick"));
+    let pane: Vec<&str> = fr[top..top + 5].iter().map(String::as_str).collect();
+    assert_eq!(
+        pane,
+        [
+            "┌ accounts on claude · floor 90% · 1 session(s) each · next pick ▸ claude:ifty ────────────────────────────────────────┐",
+            "│account        signed in as   state                5 hours                   7 days                    room/day  run  │",
+            "│▸ claude:ifty  Ultra #ce60cb  ready                ·                         ███▍░░░░░░│░  28%  6d5h   12%/d     1    │",
+            "│  claude:tj    Pro #f83f6d    stale (read 3h ago)  ██████████│░  85%  57m    ██████████│▍  95%  1d17h  —         0    │",
+            "└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
+        ]
+    );
+    let at = |needle: &str, nth: usize| {
+        let y = top + 2 + usize::from(needle.contains("tj"));
+        let line = &fr[y];
+        // The first `│` is the pane's border.
+        let x = line.char_indices().filter(|(_, c)| *c == '│').nth(nth + 1).map(|(i, _)| line[..i].chars().count());
+        &buf[(u16::try_from(x.unwrap()).unwrap(), u16::try_from(y).unwrap())]
+    };
+    assert_eq!(at("ifty", 0).fg, Color::Green, "28%: room");
+    assert_eq!(at("tj", 0).fg, Color::Yellow, "85%: within ten points of the floor");
+    assert_eq!(at("tj", 1).fg, Color::Red, "95%: over it");
+    assert!(at("tj", 1).modifier.contains(Modifier::BOLD) && !at("tj", 0).modifier.contains(Modifier::BOLD));
 }

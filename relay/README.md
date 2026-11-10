@@ -217,6 +217,15 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   (`no account has room (claude:a busy (1 of 1 seat); claude:b reading is stale)`).
   A retried or requeued job has no account until its next start, so its account
   column says `-` and its model column lists every harness it may run on.
+- **Accounts.** A column per meter window the harnesses report (`5 hours`, `7 days`,
+  `openai-codex/5 hours`; `·` where an account has none), each a gauge: a bar in
+  eighths with `│` at that meter's floor, how full, and the time to its reset
+  (`6d5h`). The meter that decides is bold (`*` in `view status`, which is never
+  coloured); on the board a gauge is green, yellow within 10 points of its floor and
+  red at it. `room/day` is how dispatch ranks the account and `▸` the one the next
+  start would take, also named in the title with the floors. A stale reading says
+  how old it is (`stale (read 3h ago)`). A narrow window shrinks the bars (to five
+  cells) before it cuts anything.
 - **Readings.** Showing the accounts in a project (`view status`, `view watch`, `quota
   show`) starts a reading of each stale one in the background, and the accounts title
   says `refreshing claude:a, …` until it lands. `view status --json` does too, with the
@@ -823,14 +832,16 @@ For each meter whose `resetsAt` is within `within_hours` of now, the floor is
 `floor_near_reset.floor` instead of `limits.floor`; every other meter keeps
 `limits.floor` (it is per meter, not per account, and an unknown reset is never near).
 The new floor must be above `limits.floor` and at most 1. Absent, nothing changes.
-`relay quota show` states it where it applies (`91% seven_day, resets Nov 4 13:15 +06
-(floor 98%, resets in 10h)`, and `floorWhy` in `--json`), and a held reason names it
-too: `at floor: 99% seven_day, resets Nov 4 13:15 +06 (floor 98%, resets in 10h)`.
+The accounts' gauges move that meter's `│` to it (`floorWhy` in `--json` says
+`floor 98%, resets in 10h`), and a held reason names it too:
+`at floor: 99% seven_day, resets Nov 4 13:15 +06 (floor 98%, resets in 10h)`.
 
 Of those, relay picks the one with the most room left per day until reset,
 because quota still unused at a reset is lost. A session that already ran
 stays on its account while that account is usable, since moving it loses the
 provider's prompt cache and its whole transcript is read again at full price.
+The accounts' `room/day` column is that ranking, and `▸` marks the account the
+next start would take (`next` in `--json`, `score` per account).
 
 Accounts belong to the machine, not the project, so every project on it
 shares what it knows of them: each listens to the others' state (never

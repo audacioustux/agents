@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 use crate::systems::dispatch::Room;
-use crate::systems::quota::AccountsView;
+use crate::systems::quota::gauge::{self, Gauge};
+use crate::systems::quota::{AccountsView, Shown};
 use crate::systems::view::machine::{Machine, Project};
 use crate::systems::view::{self, decision_cells, listed, row_cells};
 use crate::world::{Decision, Job, Status};
@@ -54,7 +55,12 @@ pub struct Board {
     pub jobs: Vec<Entry>,
     pub decisions: Vec<Vec<String>>,
     pub accounts_head: String,
+    /// The accounts' columns: [`ACCOUNTS`] with a meter window's between state and room/day.
+    pub account_columns: Vec<Column>,
+    /// A row per account (then a sub-row per other model), each meter as text for its width.
     pub accounts: Vec<Vec<String>>,
+    /// The same rows' meters, drawn as gauges where the text says them.
+    pub gauges: Vec<Vec<Option<Gauge>>>,
     pub ready: Vec<bool>,
     /// What an empty jobs list or accounts pane says instead.
     pub no_jobs: String,
@@ -64,11 +70,11 @@ pub struct Board {
 }
 
 const fn col(head: &'static str, cap: usize) -> Column {
-    Column { head, cap }
+    Column { head: std::borrow::Cow::Borrowed(head), cap }
 }
 
 /// The jobs' columns, the project's first when the board shows every project.
-const JOBS: [Column; 10] = [
+static JOBS: [Column; 10] = [
     col("project", 16),
     col("job", 28),
     col("state", 8),
@@ -80,10 +86,13 @@ const JOBS: [Column; 10] = [
     col("disk", 7),
     col("task", 0),
 ];
-const DECISIONS: [Column; 5] =
+static DECISIONS: [Column; 5] =
     [col("project", 16), col("decision", 30), col("job", 28), col("point", 16), col("until", 0)];
-pub const ACCOUNTS: [Column; 5] =
-    [col("account", 22), col("signed in as", 18), col("state", 24), col("sessions", 10), col("deciding meter", 0)];
+/// The accounts' columns around their meters': the account, who, the state; then room/day and run.
+const ACCOUNTS: [Column; 5] =
+    [col("account", 24), col("signed in as", 18), col("state", 24), col("room/day", 8), col("run", 3)];
+/// The most a meter's column is widened to: its whole bar and tail.
+const GAUGE: usize = gauge::BAR + 12;
 
 impl Board {
     /// The board of the projects `m` shows (`everywhere`, or ours alone), recent jobs or `all`; ours
@@ -92,7 +101,7 @@ impl Board {
         cfg: &Config,
         m: &Machine,
         room: &Room,
-        accounts: AccountsView,
+        accounts: &AccountsView,
         all: bool,
         everywhere: bool,
         now: u64,
@@ -136,13 +145,16 @@ impl Board {
             ),
             jobs,
             accounts_head: format!(" {} ", accounts.head),
+            account_columns: account_columns(accounts),
             // An account's empty cell says `-`; a sub-row for another model leaves blank what it shares.
             accounts: accounts
-                .cells
+                .cells(|g| g.text(gauge::BAR))
                 .into_iter()
-                .map(|r| if r.first().is_some_and(|c| c.starts_with("  ")) { r } else { dashed(r) })
+                .zip(&accounts.rows)
+                .map(|(cells, r)| if r.sub { cells } else { dashed(cells) })
                 .collect(),
-            ready: accounts.ready,
+            gauges: accounts.rows.iter().map(|r| gauge_cells(accounts, r)).collect(),
+            ready: accounts.rows.iter().map(|r| r.ready).collect(),
             unreadable: if everywhere { m.unreadable.clone() } else { Vec::new() },
         }
     }
@@ -158,6 +170,23 @@ impl Board {
     pub fn find(&self, key: &Key) -> Option<usize> {
         self.jobs.iter().position(|e| e.key == *key)
     }
+
+    /// The gauge in the accounts' row `row`, column `col`, if a meter is drawn there.
+    pub fn gauge(&self, row: usize, col: usize) -> Option<&Gauge> {
+        self.gauges.get(row)?.get(col)?.as_ref()
+    }
+}
+
+/// The accounts' columns: a meter window's (headed in words) between the state and room/day.
+fn account_columns(v: &AccountsView) -> Vec<Column> {
+    let windows = v.windows.iter().map(|w| Column { head: gauge::heading(w).into(), cap: GAUGE });
+    ACCOUNTS[..3].iter().cloned().chain(windows).chain(ACCOUNTS[3..].iter().cloned()).collect()
+}
+
+/// A row's gauges, each in its column of [`account_columns`].
+fn gauge_cells(v: &AccountsView, r: &Shown) -> Vec<Option<Gauge>> {
+    let windows = (0..v.windows.len()).map(|i| r.gauges.get(i).cloned().flatten());
+    [None, None, None].into_iter().chain(windows).chain([None, None]).collect()
 }
 
 fn entry(cfg: &Config, room: &Room, p: &Project, j: &Job, waiting: &[&Decision], everywhere: bool, now: u64) -> Entry {

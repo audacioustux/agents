@@ -105,26 +105,18 @@ struct Held {
 }
 
 impl Held {
-    /// How long to wait for another relay's write, before leaving the record as it is.
-    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
-
-    /// The record at `path`, locked; `None` when its state root is not there (a view outside every
-    /// project creates none) or another relay holds it past [`Held::PATIENCE`].
+    /// The record at `path`, locked once every other holder is done; `None` when its state root is not
+    /// there (a view outside every project creates none) or its lock cannot be opened or taken.
+    ///
+    /// It waits as long as it must: a holder only reads and rewrites this small file, never waiting on
+    /// anything while it holds it, so the wait ends; a waiter that gave up instead lost its discovery
+    /// whenever writers queued behind a loaded machine longer than it waited.
     fn take(path: &Path) -> Option<Self> {
-        let lock = path.with_extension("lock");
         if !path.parent().is_some_and(Path::is_dir) {
             return None;
         }
-        let started = std::time::Instant::now();
-        loop {
-            match crate::os::Role::try_take(&lock) {
-                Ok(Some(role)) => return Some(Self { _lock: role, path: path.to_path_buf(), known: read(path) }),
-                Ok(None) if started.elapsed() < Self::PATIENCE => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                _ => return None,
-            }
-        }
+        let role = crate::os::Role::take(&path.with_extension("lock")).ok()?;
+        Some(Self { _lock: role, path: path.to_path_buf(), known: read(path) })
     }
 
     /// Records `found` for `key`, unless another relay recorded a program that can run since this
@@ -471,6 +463,24 @@ mod tests {
             let lost: Vec<&&str> = names.iter().filter(|n| !known.contains_key(**n)).collect();
             assert!(lost.is_empty(), "round {round}: a concurrent writer dropped {lost:?}");
         }
+    }
+
+    /// A discovery made while another relay holds the record (here past the 2 s a waiter used to give up
+    /// after, as 13 writers each slowed by a loaded machine did) is recorded once it is free, never dropped.
+    #[test]
+    fn a_discovery_waits_for_the_record_however_long_it_is_held() {
+        let d = crate::config::tempdir::Dir::new();
+        let record = d.path().join("programs.json");
+        let other = crate::os::Role::try_take(&record.with_extension("lock")).unwrap().unwrap();
+        let resolving = std::thread::spawn({
+            let record = record.clone();
+            move || resolve(Some(&record), OsStr::new("sh"))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        assert!(!resolving.is_finished(), "a discovery gave up on a held record");
+        drop(other);
+        let Program::Found(sh) = resolving.join().unwrap() else { panic!("no sh") };
+        assert_eq!(read(&record).get("sh"), Some(&sh));
     }
 
     /// Review of #40: a helper a harness runs (puku's `node`) in a directory of its own is recorded with

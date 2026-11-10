@@ -17,23 +17,14 @@ fn bridge(args: &[&str]) -> (i32, serde_json::Value, String) {
 mod isolated;
 use isolated::Isolated;
 
+#[path = "support/executable.rs"]
+mod executable;
+use executable::write_executable;
+
 /// `bin --help`, asked where it can reach no real sign-in ([`Isolated::ask`]); otherwise why there
 /// is none to ask, and the check skips saying so. Every check of an installed CLI here goes through it.
 fn installed_help(bin: &str) -> Result<String, String> {
     Isolated::new(bin.rsplit('/').next().unwrap_or(bin)).ask(bin, &["--help"]).map(|(_, help)| help)
-}
-
-/// Writes `script` to `path` as an executable, from a child process. Written here, the file would be
-/// open for writing in this process, and any other test thread that forks meanwhile holds that open
-/// until its child execs: a start then fails "Text file busy" (ETXTBSY). The child's is closed
-/// before this returns, and nothing else ever had it.
-fn write_executable(path: &std::path::Path, script: &str) {
-    let status = std::process::Command::new("sh")
-        .args(["-c", "printf %s \"$1\" >\"$2\" && chmod 755 \"$2\"", "sh", script])
-        .arg(path)
-        .status()
-        .unwrap();
-    assert!(status.success(), "{} written", path.display());
 }
 
 /// A script written here starts at once, while other threads fork (it failed "Text file busy" in one run

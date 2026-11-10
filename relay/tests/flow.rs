@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
 
+#[path = "support/executable.rs"]
+mod executable;
+use executable::write_executable;
+
 struct Env {
     root: PathBuf,
     home: PathBuf,
@@ -129,10 +133,8 @@ fn setup(tag: &str, omp: bool) -> Env {
     if omp {
         // omp runs on `bun`, its helper; the stub needs none, but omp is usable only with one recorded,
         // whatever this machine's PATH has (a mise shim alone is not one).
-        use std::os::unix::fs::PermissionsExt;
         let bun = repo.join(".stub/bun");
-        std::fs::write(&bun, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
-        std::fs::set_permissions(&bun, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(&bun, "#!/bin/sh\nexec /bin/sh \"$@\"\n");
         std::fs::write(root.join("state/relay/programs.json"), serde_json::json!({ "bun": bun }).to_string()).unwrap();
     }
     let omp_conf = if omp {
@@ -1228,9 +1230,7 @@ fn omp_runs_on_the_recorded_bun_never_on_a_mise_shim() {
     std::fs::create_dir_all(bin.join("shims")).unwrap();
     std::fs::create_dir_all(bin.join("bun-bin")).unwrap();
     let script = |path: &Path, text: &str| {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, text).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable(path, text);
     };
     // mise, and its shim for bun, failing as they do where nothing pins bun.
     script(
@@ -3487,10 +3487,9 @@ fn a_harness_found_once_is_found_from_a_shell_whose_path_lacks_it() {
     // omp lives where a version manager puts it, on the operator's PATH and nowhere else.
     let bin = env.root.join("mise/installs/omp/bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::fs::copy(env.repo.join(".stub/omp"), bin.join("omp")).unwrap();
+    write_executable(&bin.join("omp"), &std::fs::read_to_string(env.repo.join(".stub/omp")).unwrap());
     // With the `bun` it runs on, a helper found and recorded with it.
-    std::fs::write(bin.join("bun"), "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
-    std::fs::set_permissions(bin.join("bun"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    write_executable(&bin.join("bun"), "#!/bin/sh\nexec /bin/sh \"$@\"\n");
     let (full, bare) = (caller_path(&[&bin]), caller_path(&[]));
     let both = vec!["claude".to_owned(), "omp".to_owned()];
     assert_eq!(harnesses_seen(&relay_from(&env, &full, &[], &["--json", "quota", "show"])).0, both);

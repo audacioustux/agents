@@ -248,7 +248,7 @@
       "state": "native",
       "files": {
         "SKILL.md": {
-          "sha256": "24b1b75cd688aa512d9445bf72925155791dc13ea1d919d6d56ba2262bd8999e",
+          "sha256": "ee347d922bb551638b541d220cb500f49624b055fb5a2dc868c63bde6f64462d",
           "upstream": {
             "status": "native"
           }
@@ -260,7 +260,9 @@
           }
         }
       },
-      "decisions": []
+      "decisions": [
+        "2026-11-10: the description and When NOT to use hand how a screen looks to critiquing-visual-design (if installed), plus its uses: entry. A routing test showed 'unslop this design' matching this skill on the word slop."
+      ]
     },
     "context7-cli": {
       "disposition": "external",
@@ -579,14 +581,16 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "4effb638ca3146c376bc501791057bb11195fe762999ccd923c1a29dc35d4202",
+          "sha256": "19e35965df942d6029446ca25d7abc12c832d94f8bf4726cf7d09b5097b43071",
           "upstream": {
             "status": "diverged",
             "sha256": "a750f8e941ba6184ab22ef84427f119e2d56b3a36b6896a472dfd66c5398e7d8"
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-11-10: the Role's owner list names critiquing-visual-design as owner of whether a visual choice is a defect or taste, plus its uses: entry."
+      ],
       "rationale": "audacioustux-owned, pristine",
       "owned": true
     },
@@ -1911,6 +1915,17 @@
       "files": {
         "SKILL.md": {
           "sha256": "a240e45f2687066c4bed545cb1e94d4554fe206dd85507427a1366e87867be0b"
+        }
+      }
+    },
+    "critiquing-visual-design": {
+      "owned": true,
+      "presentInTree": true,
+      "origin": "native",
+      "note": "2026-11-10: written test-first at the owner's request. Inspiration: three short lists by the designer Charles Liu (ways to unslop AI designs, AI design slop indicators, backgrounds that make a design less flat), shared by the owner; restated as prompts for looking, not reproduced. The owner's framing is the skill's premise: something is slop only if it looks weird, inconsistent, aesthetically not pleasing, or practically ruins something; the lists say what to measure and rethink, not what to follow or avoid. Most rules already had owners and stay there; this skill owns the judgement, the evidence a finding carries, and the composition questions no sibling covered. Tests (Sonnet unless noted) used rendered fixtures: an orders dashboard whose list-like items each do a job, a clean copy of it, and a landing page with ten planted defects. RED, 7 runs: list matches reported as 'confirmed slop' (a brand gradient, per-row status pills, table row rules), seven of them on the clean copy; offered the corpus, no reviewer opened a skill; a three-bullet request answered with vibes and false facts about the render. With the skill, 11 runs over the initial text, two refactor rounds and two review rounds: the dashboard's planted defects reported first and measured, list items kept with their jobs named, no list-match findings on the clean copy; loopholes closed for an installed owner left unread, header rules counted as the same role as row rules, a count of findings never written down, the answer to a list growing past the items present plus one line for those absent, and an unpleasant look reported with nothing to point at (under 'it is ugly, don't tell me it is fine', the last run named elements for every finding and labelled the rest preference). Known limit: Sonnet missed the 16/16/6 card radii and the non-concentric inset band in every run, and the icon styles in the post-review run; one Opus run, on the first refactor's text, found all ten.",
+      "files": {
+        "SKILL.md": {
+          "sha256": "6627a3c1412728bdd7a13be35f5ebb8d4f76b27126553be2d45fe5b28b0f09c6"
         }
       }
     }

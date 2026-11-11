@@ -294,6 +294,12 @@ impl Ctx {
         log_in(&self.jobs, job, ext)
     }
 
+    /// Every file of a job's stream log, oldest first: the gzip of earlier runs (gc's, or a resumed
+    /// job's), then the plain file of the current run; each only if it exists.
+    pub fn job_logs(&self, job: &str, ext: &str) -> Vec<PathBuf> {
+        [format!("{ext}.gz"), ext.to_owned()].iter().map(|e| self.job_file(job, e)).filter(|p| p.exists()).collect()
+    }
+
     /// A job's log as text, whether gc gzipped (all or part of) it or not: the
     /// compressed part first, then what was written since.
     pub fn read_job_log(&self, job: &str, ext: &str) -> String {
@@ -561,6 +567,27 @@ impl Ctx {
             json: false,
             _claim: Claim(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn job_logs_names_the_gzip_then_the_plain_file() {
+        let d = crate::config::tempdir::Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let cfg = Config::parse("name = \"t\"\n", &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        std::fs::create_dir_all(&ctx.jobs).unwrap();
+        assert_eq!(ctx.job_logs("x", "log.ndjson"), Vec::<PathBuf>::new());
+        let (gz, plain) = (ctx.job_file("x", "log.ndjson.gz"), ctx.job_file("x", "log.ndjson"));
+        std::fs::write(&gz, "").unwrap();
+        assert_eq!(ctx.job_logs("x", "log.ndjson"), std::slice::from_ref(&gz));
+        std::fs::write(&plain, "").unwrap();
+        assert_eq!(ctx.job_logs("x", "log.ndjson"), [gz, plain]);
     }
 }
 

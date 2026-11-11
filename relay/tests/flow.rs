@@ -2046,6 +2046,20 @@ fn an_old_log_is_gzipped_and_still_read_by_view_result() {
     let json: serde_json::Value =
         serde_json::from_slice(&relay(&env, &["view", "result", "talk", "--json"]).stdout).unwrap();
     assert!(json["log"].as_str().unwrap().ends_with("talk.log.ndjson.gz"), "{json}");
+
+    // A resume writes a new plain log beside the gzip: the result names both, the earlier runs first.
+    std::fs::write(records(&env, "talk", "log.ndjson"), "").unwrap();
+    let r = result(&env, "talk");
+    let logs: Vec<_> = r.lines().filter(|l| l.starts_with("log ")).collect();
+    assert!(logs.len() == 2 && logs[0].ends_with("talk.log.ndjson.gz") && logs[1].ends_with("talk.log.ndjson"), "{r}");
+    let json: serde_json::Value =
+        serde_json::from_slice(&relay(&env, &["view", "result", "talk", "--json"]).stdout).unwrap();
+    assert!(json["log"].as_str().unwrap().ends_with("talk.log.ndjson"), "the newest: {json}");
+    let paths: Vec<_> = json["logs"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
+    assert!(
+        paths.len() == 2 && paths[0].ends_with("talk.log.ndjson.gz") && paths[1].ends_with("talk.log.ndjson"),
+        "{json}"
+    );
 }
 
 #[test]

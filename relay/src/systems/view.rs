@@ -516,11 +516,13 @@ fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
         .ok()
         .or_else(|| answer_in(&ctx.read_job_log(name, "log.ndjson")));
     let log = ctx.job_log(name, "log.ndjson");
+    let logs = ctx.job_logs(name, "log.ndjson");
     if ctx.json {
         let mut v = serde_json::to_value(j)?;
         v["readonly"] = j.readonly().into();
         v["answer"] = answer.as_deref().map(str::trim_end).into();
         v["log"] = log.display().to_string().into();
+        v["logs"] = logs.iter().map(|l| l.display().to_string()).collect::<Vec<_>>().into();
         return ctx.reply(&v, "");
     }
     out!(
@@ -557,7 +559,10 @@ fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
     if let (Some(b), Some(w)) = (&j.branch, &j.workdir) {
         out!("branch {b} in {}   bring it here: relay land fetch {name}", w.path().display());
     }
-    out!("log {}\n", log.display());
+    for l in if logs.is_empty() { std::slice::from_ref(&log) } else { &logs[..] } {
+        out!("log {}", l.display());
+    }
+    out!("");
     out!("{}", answer.as_deref().map_or("(no result yet)", str::trim_end));
     Ok(())
 }

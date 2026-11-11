@@ -486,8 +486,9 @@ handlers as untrusted.
   the job: relay records `base-red` with the failing tests' names, does not resume the
   session (a brief's "stop if a test you did not touch fails" is not overridden), does
   not accept, and stops the job with its commits as they are, for you to look at. The
-  tests are compared by what the output names: `cargo test`'s `test NAME ... FAILED`,
-  `---- NAME stdout ----` and `failures:` lines. When neither output names a test (a
+  tests are compared by what the whole output names (read before it is cut to its end):
+  `cargo test`'s `test NAME ... FAILED` lines and the names under `failures:`, whole,
+  so a doctest's `src/lib.rs - f (line 3)` counts. When neither output names a test (a
   formatter or a build that fails), failing at the base is enough; when only one does,
   they failed differently and the failure is the job's. A new failing test is the job's:
   it is resumed as above. A timeout or failed checkout at the base is

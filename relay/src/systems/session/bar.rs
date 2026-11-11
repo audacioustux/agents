@@ -56,6 +56,8 @@ struct Ran {
     code: i32,
     /// The end of its output, or why it could not run.
     text: String,
+    /// The failing tests its whole output names, read before the output is cut to its end.
+    failing: Vec<String>,
 }
 
 /// Runs the job's check on its branch tip (and, for a revert control, at its base), and records
@@ -79,7 +81,7 @@ pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, inbox: &
             base_exit = Some(base.code);
             match base.said {
                 Said::Passed => BarResult::Fail,
-                Said::Failed => match base_red(&head.text, &base.text) {
+                Said::Failed => match base_red(&head.failing, &base.failing) {
                     Some(tests) => {
                         text = format!("{text}\n(the same check also failed at the base commit)");
                         failing = tests;
@@ -124,31 +126,31 @@ pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, inbox: &
     Ok(CheckRun { command, commit: tip, result, exit: head.code, base_exit, failing, tail })
 }
 
-/// Whether a check that failed at the tip (`tip`, its output) and at the base (`base`) failed for the
-/// base's reason, and if so the tip's failing tests. Both outputs naming tests: every test failing at
-/// the tip fails at the base too. Neither naming any: the failure cannot be compared, so failing at
-/// the base is enough. Only one naming tests: they failed differently, so it is the job's.
-fn base_red(tip: &str, base: &str) -> Option<Vec<String>> {
-    let (at_tip, at_base) = (failing_tests(tip), failing_tests(base));
-    match (at_tip.is_empty(), at_base.is_empty()) {
+/// Whether a check that failed at the tip and at the base, naming the failing tests `tip` and `base`,
+/// failed for the base's reason, and if so the tip's failing tests. Both naming tests: every test
+/// failing at the tip fails at the base too. Neither naming any: the failure cannot be compared, so
+/// failing at the base is enough. Only one naming tests: they failed differently, so it is the job's.
+fn base_red(tip: &[String], base: &[String]) -> Option<Vec<String>> {
+    match (tip.is_empty(), base.is_empty()) {
         (true, true) => Some(Vec::new()),
-        (false, false) => at_tip.iter().all(|t| at_base.contains(t)).then_some(at_tip),
+        (false, false) => tip.iter().all(|t| base.contains(t)).then(|| tip.to_vec()),
         _ => None,
     }
 }
 
-/// The failing tests a `cargo test` output names: its `test NAME ... FAILED` lines, its
-/// `---- NAME stdout ----` headers and the `failures:` list, in the order first named.
-fn failing_tests(output: &str) -> Vec<String> {
+/// The failing tests a whole `cargo test` output names, in the order first named: its
+/// `test NAME ... FAILED` lines and the names indented under a `failures:` line. Names are kept whole,
+/// spaces and all (a doctest's is `src/lib.rs - f (line 3)`). The `---- NAME stdout ----` headers are
+/// not read: `--show-output` prints them for passing tests too, under `successes:`.
+fn failing_tests(output: impl std::io::BufRead) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let mut listing = false;
-    for line in output.lines() {
+    for line in output.split(b'\n').map_while(Result::ok) {
+        let line = String::from_utf8_lossy(&line);
+        let line = line.trim_end_matches('\r');
         let name = if line == "failures:" {
             listing = true;
             None
-        } else if let Some(n) = line.strip_prefix("---- ").and_then(|l| l.strip_suffix(" stdout ----")) {
-            listing = false;
-            Some(n)
         } else if let Some(n) = line.strip_prefix("test ").and_then(|l| l.strip_suffix(" ... FAILED")) {
             Some(n)
         } else if listing && line.starts_with("    ") {
@@ -157,7 +159,7 @@ fn failing_tests(output: &str) -> Vec<String> {
             listing &= line.trim().is_empty();
             None
         };
-        if let Some(n) = name.filter(|n| !n.is_empty() && !n.contains(char::is_whitespace))
+        if let Some(n) = name.filter(|n| !n.is_empty())
             && !names.iter().any(|m| m == n)
         {
             names.push(n.to_owned());
@@ -175,7 +177,7 @@ fn at_base(ctx: &Ctx, job: &Job, home: &Home, command: &str, dir: &SessionRepo, 
 }
 
 fn broke(why: &str) -> Ran {
-    Ran { said: Said::Broke, code: -1, text: why.to_owned() }
+    Ran { said: Said::Broke, code: -1, text: why.to_owned(), failing: Vec::new() }
 }
 
 /// Where a check runs: its working directory, made fresh for each run in a place only relay writes,
@@ -232,9 +234,14 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, place: &Place<'_>) -
         c.stdin(Stdio::null()).stdout(file.try_clone()?).stderr(file);
         let status = c.status().context("running the acceptance check")?;
         let text = place.inbox.read("check.out").map(|f| tail_text(f, 2 * TAIL as u64)).unwrap_or_default();
-        let _ = place.inbox.remove("check.out");
         let code = status.code();
-        Ok(Ran { said: said(code), code: code.unwrap_or(-1), text })
+        let failing = match said(code) {
+            Said::Failed => place.inbox.read("check.out").map(|f| failing_tests(std::io::BufReader::new(f))),
+            _ => Ok(Vec::new()),
+        }
+        .unwrap_or_default();
+        let _ = place.inbox.remove("check.out");
+        Ok(Ran { said: said(code), code: code.unwrap_or(-1), text, failing })
     };
     go().unwrap_or_else(|e| broke(&format!("the acceptance check could not run: {e:#}")))
 }
@@ -276,21 +283,39 @@ mod tests {
         ---- a::two stdout ----\nthread 'a::two' panicked at src/a.rs:9:5:\n  left: 17\n\n\
         failures:\n    a::two\n\ntest result: FAILED. 1 passed; 1 failed\n";
 
+    fn names(output: &str) -> Vec<String> {
+        failing_tests(output.as_bytes())
+    }
+
     #[test]
     fn a_cargo_test_output_names_its_failing_tests() {
-        assert_eq!(failing_tests(RED), ["a::two"]);
-        let tail = "    a::three\n\nfailures:\n    a::two\n    a::three\n\ntest result: FAILED.\n";
-        assert_eq!(failing_tests(tail), ["a::two", "a::three"], "a tail cut before the first lines");
-        assert_eq!(failing_tests("Diff in src/a.rs at line 3:\nerror: could not compile"), Vec::<String>::new());
+        assert_eq!(names(RED), ["a::two"]);
+        assert_eq!(names(&RED.replace('\n', "\r\n")), ["a::two"], "CRLF line ends");
+        assert_eq!(names("Diff in src/a.rs at line 3:\nerror: could not compile"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_passing_test_s_output_is_not_a_failure() {
+        let shown =
+            format!("successes:\n\n---- a::one stdout ----\nhi\n    indented\n\nsuccesses:\n    a::one\n\n{RED}");
+        assert_eq!(names(&shown), ["a::two"], "--show-output prints passing tests' headers and list");
+    }
+
+    #[test]
+    fn a_doctest_keeps_its_whole_name() {
+        let doc = "test src/lib.rs - f (line 3) ... FAILED\n\nfailures:\n    src/lib.rs - f (line 3)\n";
+        assert_eq!(names(doc), ["src/lib.rs - f (line 3)"]);
+        let other = doc.replace("line 3", "line 9");
+        assert_eq!(base_red(&names(&other), &names(doc)), None, "a different doctest failing is the job's");
     }
 
     #[test]
     fn a_failure_is_the_base_s_when_every_failing_test_fails_there_too() {
-        let both = RED.replace("    a::two\n", "    a::two\n    a::new\n");
-        assert_eq!(base_red(RED, &both), Some(vec!["a::two".to_owned()]), "fewer fail at the tip");
-        assert_eq!(base_red(&both, RED), None, "a new failing test is the job's");
-        assert_eq!(base_red("error: fmt", "error: fmt"), Some(vec![]), "nothing to compare: the base fails too");
-        assert_eq!(base_red("error: fmt", RED), None, "the tip fails before the tests the base fails");
+        let (red, both) = (names(RED), names(&RED.replace("    a::two\n", "    a::two\n    a::new\n")));
+        assert_eq!(base_red(&red, &both), Some(vec!["a::two".to_owned()]), "fewer fail at the tip");
+        assert_eq!(base_red(&both, &red), None, "a new failing test is the job's");
+        assert_eq!(base_red(&[], &[]), Some(vec![]), "nothing to compare: the base fails too");
+        assert_eq!(base_red(&[], &red), None, "the tip fails before the tests the base fails");
     }
 
     #[test]

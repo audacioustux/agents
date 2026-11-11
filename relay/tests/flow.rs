@@ -2561,6 +2561,31 @@ fn a_job_that_can_be_resumed_without_end_needs_a_ceiling_and_waits_on_a_gate() {
     assert_eq!(out.status.code(), Some(2), "the name is relay's: {}", stderr(&out));
 }
 
+/// A session that dies printing only to stderr ends "no output" with the cause shown.
+#[test]
+fn a_session_that_prints_nothing_shows_the_end_of_its_stderr() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("stderr", false);
+    let real = env.repo.join(".stub/claude");
+    let boom = env.repo.join(".stub/claude-boom");
+    // Readings still work; a session prints `boom` to stderr and exits 1.
+    let script = format!(
+        "#!/bin/sh\ncase \" $* \" in *\" /usage \"*|*\" --version \"*) exec {} \"$@\" ;; esac\necho boom >&2\nexit 1\n",
+        real.display()
+    );
+    write_executable(&boom, &script);
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    let conf = conf.replace(&format!("program = \"{}\"", real.display()), &format!("program = \"{}\"", boom.display()));
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "dies", "--text", "Make a change."]), "queue");
+    let j = wait_for(&env, "dies");
+    assert_eq!(j["status"], "failed", "{j}");
+    assert!(j["reason"].as_str().unwrap_or_default().contains("boom"), "the cause is shown: {j}");
+}
+
 /// A build job and a review of it that rejects, on one account.
 fn rejected(env: &Env) -> (String, String) {
     claude_account(&env.home, "a", 10, false);

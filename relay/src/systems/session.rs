@@ -745,12 +745,27 @@ fn conclude(ctx: &Ctx, job: &Job, key: &str, v: Verdict, now_s: i64) -> Result<E
             (Outcome::Retry, Some(format!("{key} is signed out; moving on")))
         }
         Verdict::NoOutput if job.reruns < ctx.cfg.limits.max_retries => {
-            (Outcome::Rerun, Some("no output; trying again".into()))
+            (Outcome::Rerun, Some(format!("no output; trying again{}", stderr_tail(ctx, job))))
         }
-        Verdict::NoOutput => (Outcome::Failed, Some("no output, again".into())),
+        Verdict::NoOutput => (Outcome::Failed, Some(format!("no output, again{}", stderr_tail(ctx, job)))),
         Verdict::Budget => (Outcome::Failed, Some("reached its spend cap; resume with --budget to go on".into())),
         Verdict::Failed(why) => (Outcome::Failed, Some(why)),
     })
+}
+
+/// The end of the job's `stderr.log` (about 400 bytes, on one line), for a run that printed nothing
+/// else: a sandbox that could not start, a missing interpreter, a crash. Empty when there is none.
+fn stderr_tail(ctx: &Ctx, job: &Job) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut tail = Vec::new();
+    let read = std::fs::File::open(ctx.job_file(&job.name, "stderr.log")).and_then(|mut f| {
+        let len = f.metadata()?.len();
+        f.seek(SeekFrom::Start(len.saturating_sub(400)))?;
+        f.read_to_end(&mut tail)
+    });
+    let text = String::from_utf8_lossy(&tail);
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if read.is_err() || lines.is_empty() { String::new() } else { format!("; its stderr ends: {}", lines.join(" / ")) }
 }
 
 /// The invocation, niced, inside the sandbox when it is on.

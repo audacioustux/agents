@@ -172,33 +172,36 @@ fn failing_tests(mut output: impl BufRead) -> Option<Vec<String>> {
         }
         let line = String::from_utf8_lossy(&buf);
         let line = line.trim_end_matches(['\n', '\r']);
-        let name = if let Some(t) = test_target(line) {
+        let qualified = |name: &str| if target.is_empty() { name.to_owned() } else { format!("{target}: {name}") };
+        // (whether it failed, the test): a cargo test name is qualified with its target; nextest's already is.
+        let outcome = if let Some(t) = test_target(line) {
             (target, listing) = (t, false);
             None
         } else if line == "failures:" {
             listing = true;
             None
-        } else if let Some(n) = line.strip_prefix("test ").and_then(|l| l.strip_suffix(" ... FAILED")) {
-            Some(n)
+        } else if let Some(n) = line.strip_prefix("test ").and_then(|l| l.strip_suffix(" ... FAILED")).map(str::trim)
+            && !n.is_empty()
+        {
+            Some((true, qualified(n)))
         } else if let Some((failed, n)) = nextest_outcome(line) {
-            // A retry that passes (`TRY 2 PASS`, `FLAKY 2/3`) takes back the attempts that failed.
-            if !failed {
-                names.retain(|m| m != n);
-            }
-            failed.then_some(n)
-        } else if listing && line.starts_with("    ") {
-            Some(line.trim())
+            Some((failed, n.to_owned()))
+        } else if listing && line.starts_with("    ") && !line.trim().is_empty() {
+            Some((true, qualified(line.trim())))
         } else {
             listing &= line.trim().is_empty();
             None
         };
-        let Some(name) = name.filter(|n| !n.is_empty()) else { continue };
-        let id = if target.is_empty() { name.to_owned() } else { format!("{target}: {name}") };
-        if !names.contains(&id) {
-            if names.len() == MAX_FAILING {
-                return None;
+        match outcome {
+            // A retry that passes (`TRY 2 PASS`, `FLAKY 2/3`) takes back the attempts that failed.
+            Some((false, id)) => names.retain(|m| *m != id),
+            Some((true, id)) if !names.contains(&id) => {
+                if names.len() == MAX_FAILING {
+                    return None;
+                }
+                names.push(id);
             }
-            names.push(id);
+            _ => {}
         }
     }
 }
@@ -214,7 +217,7 @@ fn nextest_outcome(line: &str) -> Option<(bool, &str)> {
     let id = rest.split_once("] ")?.1.trim();
     // Newer versions put the test's place in the run first: `(3/10) relay::flow a_test`.
     let id = id.strip_prefix('(').and_then(|i| i.split_once(") ")).map_or(id, |(_, i)| i.trim_start());
-    (failed || passed).then_some((failed, id))
+    (!id.is_empty() && (failed || passed)).then_some((failed, id))
 }
 
 /// The test target a `cargo test` status line starts, without its binary's hash:
@@ -404,6 +407,9 @@ mod tests {
         assert_eq!(names(&recovered.replace("FLAKY 2/2", "TRY 2 PASS")), ["relay a::old"]);
         let (at_base, at_tip) = (names(&recovered), names(&both));
         assert_eq!(base_red(Some(&at_tip), Some(&at_base)), None, "it recovered at the base and fails at the tip");
+        let after_cargo = format!("     Running tests/flow.rs (target/debug/deps/flow-0a1b)\n{recovered}");
+        assert_eq!(names(&after_cargo), ["relay a::old"], "a cargo target before it does not rename nextest's tests");
+        assert_eq!(names("test  ... FAILED\n"), Vec::<String>::new(), "no name");
     }
 
     #[test]

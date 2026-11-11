@@ -69,10 +69,30 @@ pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, inbox: &
         None => broke("the clone has no commit to check"),
     };
     let red_first = matches!(job.acceptance, crate::bus::Acceptance::CheckRedFirst(_));
-    let (mut base_exit, mut text) = (None, head.text.clone());
+    let (mut base_exit, mut text, mut failing) = (None, head.text.clone(), Vec::new());
     let result = match head.said {
         Said::Broke => BarResult::CheckCouldNotRun,
-        Said::Failed => BarResult::Fail,
+        // A revert control expects the base to fail: its failure there is the point, not an excuse.
+        Said::Failed if red_first => BarResult::Fail,
+        Said::Failed => {
+            let base = at_base(ctx, job, home, &command, dir, &place);
+            base_exit = Some(base.code);
+            match base.said {
+                Said::Passed => BarResult::Fail,
+                Said::Failed => match base_red(&head.text, &base.text) {
+                    Some(tests) => {
+                        text = format!("{text}\n(the same check also failed at the base commit)");
+                        failing = tests;
+                        BarResult::BaseRed
+                    }
+                    None => BarResult::Fail,
+                },
+                Said::Broke => {
+                    text = format!("the check could not run at the base commit: {}", base.text);
+                    BarResult::CheckCouldNotRun
+                }
+            }
+        }
         Said::Passed if !red_first => BarResult::Pass,
         Said::Passed => {
             let base = at_base(ctx, job, home, &command, dir, &place);
@@ -98,9 +118,52 @@ pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, inbox: &
         tail: tail.clone(),
         base_exit,
         result,
+        failing: failing.clone(),
     };
     port(ctx, job).emit(event)?;
-    Ok(CheckRun { command, commit: tip, result, exit: head.code, base_exit, tail })
+    Ok(CheckRun { command, commit: tip, result, exit: head.code, base_exit, failing, tail })
+}
+
+/// Whether a check that failed at the tip (`tip`, its output) and at the base (`base`) failed for the
+/// base's reason, and if so the tip's failing tests. Both outputs naming tests: every test failing at
+/// the tip fails at the base too. Neither naming any: the failure cannot be compared, so failing at
+/// the base is enough. Only one naming tests: they failed differently, so it is the job's.
+fn base_red(tip: &str, base: &str) -> Option<Vec<String>> {
+    let (at_tip, at_base) = (failing_tests(tip), failing_tests(base));
+    match (at_tip.is_empty(), at_base.is_empty()) {
+        (true, true) => Some(Vec::new()),
+        (false, false) => at_tip.iter().all(|t| at_base.contains(t)).then_some(at_tip),
+        _ => None,
+    }
+}
+
+/// The failing tests a `cargo test` output names: its `test NAME ... FAILED` lines, its
+/// `---- NAME stdout ----` headers and the `failures:` list, in the order first named.
+fn failing_tests(output: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut listing = false;
+    for line in output.lines() {
+        let name = if line == "failures:" {
+            listing = true;
+            None
+        } else if let Some(n) = line.strip_prefix("---- ").and_then(|l| l.strip_suffix(" stdout ----")) {
+            listing = false;
+            Some(n)
+        } else if let Some(n) = line.strip_prefix("test ").and_then(|l| l.strip_suffix(" ... FAILED")) {
+            Some(n)
+        } else if listing && line.starts_with("    ") {
+            Some(line.trim())
+        } else {
+            listing &= line.trim().is_empty();
+            None
+        };
+        if let Some(n) = name.filter(|n| !n.is_empty() && !n.contains(char::is_whitespace))
+            && !names.iter().any(|m| m == n)
+        {
+            names.push(n.to_owned());
+        }
+    }
+    names
 }
 
 /// The check at the commit the branch started from.
@@ -207,6 +270,27 @@ mod tests {
         for broken in [Some(124), Some(125), Some(126), Some(127), Some(137), Some(143), None] {
             assert_eq!(said(broken), Said::Broke, "{broken:?}");
         }
+    }
+
+    const RED: &str = "running 3 tests\ntest a::one ... ok\ntest a::two ... FAILED\n\nfailures:\n\n\
+        ---- a::two stdout ----\nthread 'a::two' panicked at src/a.rs:9:5:\n  left: 17\n\n\
+        failures:\n    a::two\n\ntest result: FAILED. 1 passed; 1 failed\n";
+
+    #[test]
+    fn a_cargo_test_output_names_its_failing_tests() {
+        assert_eq!(failing_tests(RED), ["a::two"]);
+        let tail = "    a::three\n\nfailures:\n    a::two\n    a::three\n\ntest result: FAILED.\n";
+        assert_eq!(failing_tests(tail), ["a::two", "a::three"], "a tail cut before the first lines");
+        assert_eq!(failing_tests("Diff in src/a.rs at line 3:\nerror: could not compile"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_failure_is_the_base_s_when_every_failing_test_fails_there_too() {
+        let both = RED.replace("    a::two\n", "    a::two\n    a::new\n");
+        assert_eq!(base_red(RED, &both), Some(vec!["a::two".to_owned()]), "fewer fail at the tip");
+        assert_eq!(base_red(&both, RED), None, "a new failing test is the job's");
+        assert_eq!(base_red("error: fmt", "error: fmt"), Some(vec![]), "nothing to compare: the base fails too");
+        assert_eq!(base_red("error: fmt", RED), None, "the tip fails before the tests the base fails");
     }
 
     #[test]

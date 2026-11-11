@@ -227,6 +227,9 @@ pub struct CheckRun {
     pub result: BarResult,
     pub exit: i32,
     pub base_exit: Option<i32>,
+    /// For `base-red`: the failing tests, all failing at the base commit too.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failing: Vec<String>,
     /// The end of its output, bounded: worker-written, so untrusted.
     pub tail: String,
 }
@@ -1015,6 +1018,9 @@ fn check_of(v: &Value) -> Option<CheckRun> {
         result: serde_json::from_value(v["result"].clone()).ok()?,
         exit: i32::try_from(v["exit"].as_i64()?).ok()?,
         base_exit: v["base_exit"].as_i64().and_then(|x| i32::try_from(x).ok()),
+        failing: v["failing"]
+            .as_array()
+            .map_or_else(Vec::new, |a| a.iter().filter_map(|t| t.as_str().map(str::to_owned)).collect()),
         tail: v["tail"].as_str().unwrap_or_default().to_owned(),
     })
 }

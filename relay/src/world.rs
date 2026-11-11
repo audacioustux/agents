@@ -178,8 +178,22 @@ pub struct Bar {
     pub result: bus::BarResult,
     pub exit: i32,
     pub base_exit: Option<i32>,
+    /// For `base-red`: the failing tests, all failing at the base commit too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing: Vec<String>,
     /// The output tail; kept for the latest run only.
     pub tail: String,
+}
+
+impl Bar {
+    /// Its result, with the failing tests a `base-red` names: `base-red: a::one, a::two`.
+    pub fn summary(&self) -> String {
+        if self.failing.is_empty() {
+            self.result.as_str().to_owned()
+        } else {
+            format!("{}: {}", self.result.as_str(), self.failing.join(", "))
+        }
+    }
 }
 
 /// One review of a job's branch.
@@ -1093,7 +1107,7 @@ impl World {
     /// The acceptance checks and reviews a job went through.
     fn apply_judgement(&mut self, e: &SessionEvent) {
         match e {
-            SessionEvent::BarChecked { job, commit, exit, tail, base_exit, result } => {
+            SessionEvent::BarChecked { job, commit, exit, tail, base_exit, result, failing } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.bars.iter_mut().for_each(|b| b.tail.clear());
                     j.bars.push(Bar {
@@ -1101,6 +1115,7 @@ impl World {
                         result: *result,
                         exit: *exit,
                         base_exit: *base_exit,
+                        failing: failing.clone(),
                         tail: tail.clone(),
                     });
                 }

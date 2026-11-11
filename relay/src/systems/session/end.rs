@@ -170,7 +170,7 @@ pub(super) struct EndRule<'a> {
 }
 
 /// The `rule` handler when a run ends: a failed acceptance check resumes the session with its output
-/// (and a check that could not run, or proves nothing, stops the job); a review's verdict is taken
+/// (and a check that could not run, proves nothing or fails at the base too, stops the job); a review's verdict is taken
 /// from its report; a clean done is accepted; a first silence resumes the same session; enough failed
 /// ends requeue the job under the profile it escalates to. Anything else is deferred.
 pub(super) fn ended_rule(r: &EndRule<'_>) -> Option<(Action, String)> {
@@ -203,6 +203,14 @@ fn done_rule(r: &EndRule<'_>) -> Option<(Action, String)> {
                 let why = format!(
                     "check-proves-nothing: `{}` also passes at the base commit, so it shows nothing about this change",
                     c.command
+                );
+                return Some((Action::Stop { why: why.clone() }, why));
+            }
+            BarResult::BaseRed => {
+                let why = format!(
+                    "base-red: `{}` also fails at the base commit{}, so the failure is not this job's to fix",
+                    c.command,
+                    if c.failing.is_empty() { String::new() } else { format!(" ({})", c.failing.join(", ")) }
                 );
                 return Some((Action::Stop { why: why.clone() }, why));
             }
@@ -290,6 +298,7 @@ mod tests {
             result,
             exit: 1,
             base_exit: None,
+            failing: vec!["x".into()],
             tail: "test x ... FAILED".into(),
         }
     }
@@ -312,10 +321,11 @@ mod tests {
     }
 
     #[test]
-    fn a_bar_that_proves_nothing_or_could_not_run_stops_the_job() {
+    fn a_bar_that_proves_nothing_could_not_run_or_is_base_red_stops_the_job() {
         for (result, name) in [
             (BarResult::CheckProvesNothing, "check-proves-nothing"),
             (BarResult::CheckCouldNotRun, "check-could-not-run"),
+            (BarResult::BaseRed, "base-red"),
         ] {
             let Some(Action::Stop { why }) = with_check(&ran(result)) else { panic!("{result:?}") };
             assert!(why.starts_with(name), "{why}");
@@ -327,7 +337,8 @@ mod tests {
         let done: Ended = (Outcome::Done, None);
         assert_eq!(never_done_red(done.clone(), None), done);
         assert_eq!(never_done_red(done.clone(), Some(&ran(BarResult::Pass))), done);
-        for result in [BarResult::Fail, BarResult::CheckCouldNotRun, BarResult::CheckProvesNothing] {
+        for result in [BarResult::Fail, BarResult::CheckCouldNotRun, BarResult::CheckProvesNothing, BarResult::BaseRed]
+        {
             let (outcome, why) = never_done_red(done.clone(), Some(&ran(result)));
             assert_eq!(outcome, Outcome::Failed);
             assert!(why.unwrap().contains(result.as_str()));

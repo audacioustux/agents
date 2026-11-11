@@ -474,12 +474,32 @@ handlers as untrusted.
   `accept` of a run whose check is red is refused where it is given (`decide answer`
   exits 5 with the reason and the decision keeps waiting; a handler in a chain is recorded
   as refused and the chain goes on to the next one).
-- **Fail** (the command ran and failed): `rule` answers `resume` with the failing
-  tail as the message, so the same session fixes what the check found and ends again,
+- **Fail** (the command ran and failed, and not only as it does at the base): `rule`
+  answers `resume` with the failing tail as the message, so the same session fixes what the check found and ends again,
   and the check runs again. This is bounded by `hooks.max_decisions` and
   `limits.job_ceiling_usd`; when a resume is refused the job ends `failed`, its reason
   naming the check. A fail is not a failed *end*, so it counts toward
   [escalation](#escalation) only once the job itself ends failed.
+- **Base-red:** a check that fails at the tip is run again at the job's base (the
+  commit its branch started from, as the revert control does). If it fails there too,
+  and every test failing at the tip fails at the base, the failure was there before
+  the job: relay records `base-red` with the failing tests' names, does not resume the
+  session (a brief's "stop if a test you did not touch fails" is not overridden), does
+  not accept, and stops the job with its commits as they are, for you to look at. The
+  tests are compared by what the whole output names (read before it is cut to its end):
+  `cargo test`'s `test NAME ... FAILED` lines and the names under `failures:`, and
+  `cargo nextest`'s `FAIL`, `TIMEOUT`, `SIG…` and `ABORT` lines, whole
+  (a doctest's `src/lib.rs - f (line 3)` counts), each after the test target it ran in
+  (`tests/flow.rs (flow): NAME`), since a name is only unique within one. An output with
+  a line over 64 KiB or more than 1000 failing tests is not compared: its fails are the
+  job's. When neither output names a test (a
+  formatter, a build that fails or a runner relay does not read), failing at the base
+  is enough: a wrong `base-red` stops the job for you, where a wrong resume sets the
+  worker fixing what it did not break; when only one does,
+  they failed differently and the failure is the job's. A new failing test is the job's:
+  it is resumed as above. A timeout or failed checkout at the base is
+  `check-could-not-run`, never base-red. A job with a revert control expects its base to
+  fail, so its fails are always the job's.
 - **Could not run:** a command that timed out (124), was not found or not runnable
   (126, 127), was killed, or whose checkout failed said nothing about the code. relay
   records `check-could-not-run`, does not accept, and stops the job for you to look
@@ -497,8 +517,8 @@ handlers as untrusted.
   is set: what such a job may spend is then bounded for sure, not only by
   `max_decisions`.
 
-`view status` shows the latest result (`check pass`), `view result` the exit statuses
-and commit, and `--json` every run under `bars` (only the latest keeps its tail).
+`view status` shows the latest result (`check pass`, `check base-red: report::tests::reset`),
+`view result` the exit statuses and commit, and `--json` every run under `bars` (only the latest keeps its tail).
 
 **Older relays.** A job that declares an acceptance carries a dependency on a job
 named `needs-relay-acceptance` that does not exist: a relay that does not know what a

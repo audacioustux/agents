@@ -11,6 +11,7 @@
 //! A session that planted a symlink in its own directories has nothing relay follows.
 
 use std::ffi::OsString;
+use std::io::{BufRead, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -56,11 +57,21 @@ struct Ran {
     code: i32,
     /// The end of its output, or why it could not run.
     text: String,
+    /// The failing tests its whole output names, read before the output is cut to its end; `None` when
+    /// they could not all be read.
+    failing: Option<Vec<String>>,
 }
 
 /// Runs the job's check on its branch tip (and, for a revert control, at its base), and records
 /// `bar-checked` for the commit it read, which is read once and checked as it was.
-pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, inbox: &HostDir) -> Result<CheckRun> {
+pub(super) fn run(
+    ctx: &Ctx,
+    job: &Job,
+    home: &Home,
+    dir: &SessionRepo,
+    base: Option<&str>,
+    inbox: &HostDir,
+) -> Result<CheckRun> {
     let command = job.check().context("a check was asked of a job that declares none")?.to_owned();
     let tip = dir.rev("HEAD");
     let place = Place { inbox, work: &ctx.job_scratch(&format!("{}.bar", job.name)) };
@@ -69,22 +80,42 @@ pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, inbox: &
         None => broke("the clone has no commit to check"),
     };
     let red_first = matches!(job.acceptance, crate::bus::Acceptance::CheckRedFirst(_));
-    let (mut base_exit, mut text) = (None, head.text.clone());
+    let (mut base_exit, mut text, mut failing) = (None, head.text.clone(), Vec::new());
     let result = match head.said {
         Said::Broke => BarResult::CheckCouldNotRun,
-        Said::Failed => BarResult::Fail,
+        // A revert control expects the base to fail: its failure there is the point, not an excuse.
+        Said::Failed if red_first => BarResult::Fail,
+        Said::Failed => {
+            let at = at_base(ctx, base, home, &command, dir, &place);
+            base_exit = Some(at.code);
+            match at.said {
+                Said::Passed => BarResult::Fail,
+                Said::Failed => match base_red(head.failing.as_deref(), at.failing.as_deref()) {
+                    Some(tests) => {
+                        text = format!("{text}\n(the same check also failed at the base commit)");
+                        failing = tests;
+                        BarResult::BaseRed
+                    }
+                    None => BarResult::Fail,
+                },
+                Said::Broke => {
+                    text = format!("the check could not run at the base commit: {}", at.text);
+                    BarResult::CheckCouldNotRun
+                }
+            }
+        }
         Said::Passed if !red_first => BarResult::Pass,
         Said::Passed => {
-            let base = at_base(ctx, job, home, &command, dir, &place);
-            base_exit = Some(base.code);
-            match base.said {
+            let at = at_base(ctx, base, home, &command, dir, &place);
+            base_exit = Some(at.code);
+            match at.said {
                 Said::Failed => BarResult::Pass,
                 Said::Passed => {
                     text = format!("{text}\n(the same check also passed at the base commit)");
                     BarResult::CheckProvesNothing
                 }
                 Said::Broke => {
-                    text = format!("the check could not run at the base commit: {}", base.text);
+                    text = format!("the check could not run at the base commit: {}", at.text);
                     BarResult::CheckCouldNotRun
                 }
             }
@@ -98,21 +129,123 @@ pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, inbox: &
         tail: tail.clone(),
         base_exit,
         result,
+        failing: failing.clone(),
     };
     port(ctx, job).emit(event)?;
-    Ok(CheckRun { command, commit: tip, result, exit: head.code, base_exit, tail })
+    Ok(CheckRun { command, commit: tip, result, exit: head.code, base_exit, failing, tail })
+}
+
+/// Whether a check that failed at the tip and at the base, naming the failing tests `tip` and `base`,
+/// failed for the base's reason, and if so the tip's failing tests. Either list unknown: it cannot be
+/// compared, so it is the job's. Both naming tests: every test failing at the tip fails at the base
+/// too. Neither naming any: failing at the base is enough. Only one naming tests: they failed
+/// differently, so it is the job's.
+fn base_red(tip: Option<&[String]>, base: Option<&[String]>) -> Option<Vec<String>> {
+    let (tip, base) = (tip?, base?);
+    match (tip.is_empty(), base.is_empty()) {
+        (true, true) => Some(Vec::new()),
+        (false, false) => tip.iter().all(|t| base.contains(t)).then(|| tip.to_vec()),
+        _ => None,
+    }
+}
+
+/// The most failing tests compared, and the longest output line read: the output is the worker's,
+/// so past either it is not compared at all.
+const MAX_FAILING: usize = 1000;
+const MAX_LINE: usize = 64 * 1024;
+
+/// The failing tests a whole `cargo test` output names, in the order first named: its
+/// `test NAME ... FAILED` lines and the names indented under a `failures:` line. A name is kept whole,
+/// spaces and all (a doctest's is `src/lib.rs - f (line 3)`), after the test target it ran in, since a
+/// name is only unique within one. The `---- NAME stdout ----` headers are not read: `--show-output`
+/// prints them for passing tests too, under `successes:`. `None` when the output cannot be read
+/// whole: a read error, a line longer than [`MAX_LINE`] or more than [`MAX_FAILING`] failing tests.
+fn failing_tests(mut output: impl BufRead) -> Option<Vec<String>> {
+    let (mut names, mut target, mut listing, mut buf) = (Vec::<String>::new(), String::new(), false, Vec::new());
+    loop {
+        buf.clear();
+        if output.by_ref().take(MAX_LINE as u64 + 1).read_until(b'\n', &mut buf).ok()? == 0 {
+            return Some(names);
+        }
+        if buf.len() > MAX_LINE {
+            return None;
+        }
+        let line = String::from_utf8_lossy(&buf);
+        let line = line.trim_end_matches(['\n', '\r']);
+        let qualified = |name: &str| if target.is_empty() { name.to_owned() } else { format!("{target}: {name}") };
+        // (whether it failed, the test): a cargo test name is qualified with its target; nextest's already is.
+        let outcome = if let Some(t) = test_target(line) {
+            (target, listing) = (t, false);
+            None
+        } else if line == "failures:" {
+            listing = true;
+            None
+        } else if let Some(n) = line.strip_prefix("test ").and_then(|l| l.strip_suffix(" ... FAILED")).map(str::trim)
+            && !n.is_empty()
+        {
+            Some((true, qualified(n)))
+        } else if let Some((failed, n)) = nextest_outcome(line) {
+            Some((failed, n.to_owned()))
+        } else if listing && line.starts_with("    ") && !line.trim().is_empty() {
+            Some((true, qualified(line.trim())))
+        } else {
+            listing &= line.trim().is_empty();
+            None
+        };
+        match outcome {
+            // A retry that passes (`TRY 2 PASS`, `FLAKY 2/3`) takes back the attempts that failed.
+            Some((false, id)) => names.retain(|m| *m != id),
+            Some((true, id)) if !names.contains(&id) => {
+                if names.len() == MAX_FAILING {
+                    return None;
+                }
+                names.push(id);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether a `cargo nextest` status line says a test failed or passed, and the test, already named
+/// with its target: `        FAIL [   0.004s] relay::flow a_test` failed `relay::flow a_test`. A
+/// timeout, a signal, an abort and a failed attempt (`TRY 2 FAIL`) fail; a pass, a passing retry
+/// (`TRY 2 PASS`) and a flaky test (`FLAKY 2/3`) pass. A skip and the summary line are neither.
+fn nextest_outcome(line: &str) -> Option<(bool, &str)> {
+    let (status, rest) = line.trim_start().split_once(" [")?;
+    let failed = status.ends_with("FAIL") || status.starts_with("SIG") || matches!(status, "TIMEOUT" | "ABORT");
+    let passed = status.ends_with("PASS") || status.starts_with("FLAKY");
+    let id = rest.split_once("] ")?.1.trim();
+    // Newer versions put the test's place in the run first: `(3/10) relay::flow a_test`.
+    let id = id.strip_prefix('(').and_then(|i| i.split_once(") ")).map_or(id, |(_, i)| i.trim_start());
+    (!id.is_empty() && (failed || passed)).then_some((failed, id))
+}
+
+/// The test target a `cargo test` status line starts, without its binary's hash:
+/// `     Running tests/flow.rs (target/debug/deps/flow-0a1b2c3d)` is `tests/flow.rs (flow)`, and
+/// `   Doc-tests relay` is `doctests relay`.
+fn test_target(line: &str) -> Option<String> {
+    if let Some(krate) = line.strip_prefix("   Doc-tests ") {
+        return Some(format!("doctests {krate}"));
+    }
+    let what = line.strip_prefix("     Running ")?;
+    let Some((src, bin)) = what.strip_suffix(')').and_then(|w| w.split_once(" (")) else {
+        return Some(what.to_owned());
+    };
+    let file = bin.rsplit(['/', '\\']).next().unwrap_or(bin);
+    let stem = file.rsplit_once('-').filter(|(_, h)| h.bytes().all(|b| b.is_ascii_hexdigit())).map_or(file, |(s, _)| s);
+    Some(format!("{src} ({stem})"))
 }
 
 /// The check at the commit the branch started from.
-fn at_base(ctx: &Ctx, job: &Job, home: &Home, command: &str, dir: &SessionRepo, place: &Place<'_>) -> Ran {
-    match job.base.clone().or_else(|| checkpoint::base(dir, &[]).head) {
+fn at_base(ctx: &Ctx, base: Option<&str>, home: &Home, command: &str, dir: &SessionRepo, place: &Place<'_>) -> Ran {
+    match base.map(str::to_owned).or_else(|| checkpoint::base(dir, &[]).head) {
         Some(base) => at(ctx, home, command, dir, &base, place),
         None => broke("no base commit is known for the revert control"),
     }
 }
 
 fn broke(why: &str) -> Ran {
-    Ran { said: Said::Broke, code: -1, text: why.to_owned() }
+    Ran { said: Said::Broke, code: -1, text: why.to_owned(), failing: Some(Vec::new()) }
 }
 
 /// Where a check runs: its working directory, made fresh for each run in a place only relay writes,
@@ -169,9 +302,13 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, place: &Place<'_>) -
         c.stdin(Stdio::null()).stdout(file.try_clone()?).stderr(file);
         let status = c.status().context("running the acceptance check")?;
         let text = place.inbox.read("check.out").map(|f| tail_text(f, 2 * TAIL as u64)).unwrap_or_default();
-        let _ = place.inbox.remove("check.out");
         let code = status.code();
-        Ok(Ran { said: said(code), code: code.unwrap_or(-1), text })
+        let failing = match said(code) {
+            Said::Failed => place.inbox.read("check.out").ok().and_then(|f| failing_tests(std::io::BufReader::new(f))),
+            _ => Some(Vec::new()),
+        };
+        let _ = place.inbox.remove("check.out");
+        Ok(Ran { said: said(code), code: code.unwrap_or(-1), text, failing })
     };
     go().unwrap_or_else(|e| broke(&format!("the acceptance check could not run: {e:#}")))
 }
@@ -207,6 +344,93 @@ mod tests {
         for broken in [Some(124), Some(125), Some(126), Some(127), Some(137), Some(143), None] {
             assert_eq!(said(broken), Said::Broke, "{broken:?}");
         }
+    }
+
+    const RED: &str = "running 3 tests\ntest a::one ... ok\ntest a::two ... FAILED\n\nfailures:\n\n\
+        ---- a::two stdout ----\nthread 'a::two' panicked at src/a.rs:9:5:\n  left: 17\n\n\
+        failures:\n    a::two\n\ntest result: FAILED. 1 passed; 1 failed\n";
+
+    fn names(output: &str) -> Vec<String> {
+        failing_tests(output.as_bytes()).expect("read whole")
+    }
+
+    #[test]
+    fn a_cargo_test_output_names_its_failing_tests() {
+        assert_eq!(names(RED), ["a::two"]);
+        assert_eq!(names(&RED.replace('\n', "\r\n")), ["a::two"], "CRLF line ends");
+        assert_eq!(names("Diff in src/a.rs at line 3:\nerror: could not compile"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_passing_test_s_output_is_not_a_failure() {
+        let shown =
+            format!("successes:\n\n---- a::one stdout ----\nhi\n    indented\n\nsuccesses:\n    a::one\n\n{RED}");
+        assert_eq!(names(&shown), ["a::two"], "--show-output prints passing tests' headers and list");
+    }
+
+    #[test]
+    fn a_doctest_keeps_its_whole_name() {
+        let doc =
+            "   Doc-tests relay\ntest src/lib.rs - f (line 3) ... FAILED\n\nfailures:\n    src/lib.rs - f (line 3)\n";
+        assert_eq!(names(doc), ["doctests relay: src/lib.rs - f (line 3)"]);
+        let other = doc.replace("line 3", "line 9");
+        assert_eq!(base_red(Some(&names(&other)), Some(&names(doc))), None, "another doctest");
+    }
+
+    #[test]
+    fn a_test_is_named_with_the_target_it_ran_in() {
+        let in_target =
+            |bin: &str| format!("     Running tests/{bin}.rs (target/debug/deps/{bin}-0a1b2c3d4e5f6a7b)\n{RED}");
+        assert_eq!(names(&in_target("flow")), ["tests/flow.rs (flow): a::two"]);
+        let (at_base, at_tip) = (names(&in_target("one")), names(&in_target("two")));
+        assert_eq!(base_red(Some(&at_tip), Some(&at_base)), None, "the same name in another target");
+        let rebuilt = names(&in_target("flow").replace("0a1b2c3d4e5f6a7b", "ffffffffffffffff"));
+        assert_eq!(rebuilt, names(&in_target("flow")), "a binary's hash is not part of its name");
+    }
+
+    #[test]
+    fn a_nextest_output_names_its_failing_tests() {
+        let run = "    Starting 3 tests across 2 binaries\n        PASS [   0.004s] relay a::one\n        \
+            FAIL [   0.010s] relay::flow a_test\n     TIMEOUT [  60.001s] (3/3) relay b::slow\n------------\n     \
+            Summary [  60.1s] 3 tests run: 1 passed, 2 failed\n        FAIL [   0.010s] relay::flow a_test\n";
+        assert_eq!(names(run), ["relay::flow a_test", "relay b::slow"]);
+        assert_eq!(nextest_outcome("   TRY 2 FAIL [   0.010s] relay a::flaky"), Some((true, "relay a::flaky")));
+        assert_eq!(nextest_outcome("        SKIP [         ] relay a::skipped"), None);
+    }
+
+    #[test]
+    fn a_nextest_retry_that_passes_is_not_a_failure() {
+        let old = "        FAIL [   0.010s] relay a::old\n";
+        let recovered = format!("{old}   TRY 1 FAIL [   0.010s] relay a::new\n   FLAKY 2/2 [   0.010s] relay a::new\n");
+        let both = format!("{old}   TRY 1 FAIL [   0.010s] relay a::new\n   TRY 2 FAIL [   0.010s] relay a::new\n");
+        assert_eq!(names(&recovered), ["relay a::old"]);
+        assert_eq!(names(&recovered.replace("FLAKY 2/2", "TRY 2 PASS")), ["relay a::old"]);
+        let (at_base, at_tip) = (names(&recovered), names(&both));
+        assert_eq!(base_red(Some(&at_tip), Some(&at_base)), None, "it recovered at the base and fails at the tip");
+        let after_cargo = format!("     Running tests/flow.rs (target/debug/deps/flow-0a1b)\n{recovered}");
+        assert_eq!(names(&after_cargo), ["relay a::old"], "a cargo target before it does not rename nextest's tests");
+        assert_eq!(names("test  ... FAILED\n"), Vec::<String>::new(), "no name");
+    }
+
+    #[test]
+    fn an_output_too_big_to_compare_is_not_compared() {
+        let long = format!("{}\n{RED}", "x".repeat(MAX_LINE + 1));
+        assert_eq!(failing_tests(long.as_bytes()), None, "a line too long to read");
+        let mut many = String::new();
+        for i in 0..=MAX_FAILING {
+            std::fmt::Write::write_fmt(&mut many, format_args!("test t{i} ... FAILED\n")).expect("to a String");
+        }
+        assert_eq!(failing_tests(many.as_bytes()), None, "more failing tests than are kept");
+        assert_eq!(base_red(None, Some(&names(RED))), None, "unknown at the tip is the job's");
+    }
+
+    #[test]
+    fn a_failure_is_the_base_s_when_every_failing_test_fails_there_too() {
+        let (red1, both) = (names(RED), names(&RED.replace("    a::two\n", "    a::two\n    a::new\n")));
+        assert_eq!(base_red(Some(&red1), Some(&both)), Some(vec!["a::two".to_owned()]), "fewer fail at the tip");
+        assert_eq!(base_red(Some(&both), Some(&red1)), None, "a new failing test is the job's");
+        assert_eq!(base_red(Some(&[]), Some(&[])), Some(vec![]), "nothing to compare: the base fails too");
+        assert_eq!(base_red(Some(&[]), Some(&red1)), None, "the tip fails before the tests the base fails");
     }
 
     #[test]

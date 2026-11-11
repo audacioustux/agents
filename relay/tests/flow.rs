@@ -2339,6 +2339,9 @@ fn steps(env: &Env, name: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A check that passes at the base commit and fails on every commit the stub makes: a red that is the job's.
+const RED_AT_TIP: &str = "test ! -f relay-output.txt";
+
 /// Queues a build job whose brief says it is done, with `extra` flags, and waits for it to end.
 fn build(env: &Env, name: &str, extra: &[&str]) -> serde_json::Value {
     let mut args = vec!["queue", "add", name, "--text", "[status-done] Make a change."];
@@ -2360,13 +2363,14 @@ fn a_failed_check_resumes_the_session_with_its_output_until_it_passes() {
     configure(
         &env,
         "job_ceiling_usd = 100.0\n",
-        "[hooks]\nmax_decisions = 2\n[profiles.bar]\nharness = \"claude\"\ncheck = \"false\"\n",
+        "[hooks]\nmax_decisions = 2\n[profiles.bar]\nharness = \"claude\"\ncheck = \"test ! -f relay-output.txt\"\n",
     );
     claude_account(&env.home, "a", 10, false);
 
     // The stub writes the number of the turn into its output: the first run fails the check, and the
-    // resume it is sent (with the failing output) writes turn 2, which passes.
-    let check = "grep -Eq ' 2$' relay-output.txt || { echo 'expected the second turn' >&2; exit 3; }";
+    // resume it is sent (with the failing output) writes turn 2, which passes. The base passes too, so
+    // the failure is the job's.
+    let check = "test ! -f relay-output.txt || grep -Eq ' 2$' relay-output.txt || { echo 'expected the second turn' >&2; exit 3; }";
     let j = build(&env, "fix", &["--check", check]);
     assert_eq!(j["status"], "done", "{j}");
     let bars = j["bars"].as_array().unwrap();
@@ -2395,7 +2399,7 @@ fn a_failed_check_resumes_the_session_with_its_output_until_it_passes() {
     // The profile's check is the default for a build job, and a check that never passes ends the job
     // when `max_decisions` is spent: two resumes, then it is failed and says why.
     let j = build(&env, "stuck", &["--profile", "bar"]);
-    assert_eq!((j["status"].as_str(), j["acceptance"]["check"].as_str()), (Some("failed"), Some("false")), "{j}");
+    assert_eq!((j["status"].as_str(), j["acceptance"]["check"].as_str()), (Some("failed"), Some(RED_AT_TIP)), "{j}");
     let reason = j["reason"].as_str().unwrap_or_default();
     assert!(reason.contains("acceptance check fail") || reason.contains("decisions have acted"), "{reason}");
     assert_eq!(decisions(&env, "stuck").len(), 3, "two resumes and the one that was refused");
@@ -2492,6 +2496,74 @@ fn a_revert_control_needs_the_check_to_fail_for_real_at_the_base_commit() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
 
+/// A check that prints `cargo test`'s failure summary for `tests` and exits as it does, 101.
+fn failing_suite(tests: &[&str]) -> String {
+    let names = tests.iter().map(|t| format!("---- {t} stdout ----")).collect::<Vec<_>>().join("\\n");
+    let list = tests.iter().map(|t| format!("    {t}")).collect::<Vec<_>>().join("\\n");
+    format!("printf 'failures:\\n\\n{names}\\n\\nfailures:\\n{list}\\n\\ntest result: FAILED.\\n'; exit 101")
+}
+
+#[test]
+fn a_check_that_also_fails_at_the_base_does_not_resume_the_session() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("bar-base-red", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "[hooks]\nmax_decisions = 2\n");
+    claude_account(&env.home, "a", 10, false);
+
+    // The base already fails `report::tests::reset_time`, which the job does not touch: it commits an
+    // unrelated change, and the check fails at its tip in the same way.
+    let base = rev_parse(&env.repo, "HEAD");
+    let j = build(&env, "unowned", &["--check", &failing_suite(&["report::tests::reset_time"])]);
+    assert_eq!(j["status"], "failed", "not accepted: {j}");
+    let bars = j["bars"].as_array().unwrap();
+    assert_eq!(bars.len(), 1, "checked once: {j}");
+    assert_eq!((bars[0]["result"].as_str(), bars[0]["base_exit"].as_i64()), (Some("base-red"), Some(101)), "{j}");
+    assert_eq!(bars[0]["failing"], serde_json::json!(["report::tests::reset_time"]), "{j}");
+    let reason = j["reason"].as_str().unwrap_or_default();
+    assert!(reason.starts_with("base-red") && reason.contains("report::tests::reset_time"), "{reason}");
+    assert_eq!(acts(&steps(&env, "unowned")), ["stop"], "not resumed");
+    assert!(!prompts(&env, "a").contains("acceptance check"), "the session was not told to fix it");
+    // Its commit is kept as it was.
+    let tip = rev_parse(&workdir(&env, "unowned"), "HEAD");
+    assert_ne!(tip, base);
+    assert_eq!(bars[0]["commit"], tip.as_str());
+    let shown = board(&env);
+    assert!(shown.contains("check base-red: report::tests::reset_time"), "{shown}");
+    let result = String::from_utf8_lossy(&relay(&env, &["view", "result", "unowned"]).stdout).into_owned();
+    assert!(result.contains("check base-red: report::tests::reset_time"), "{result}");
+}
+
+#[test]
+fn a_check_that_fails_only_at_the_tip_resumes_the_session() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("bar-tip-red", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "[hooks]\nmax_decisions = 2\n");
+    claude_account(&env.home, "a", 10, false);
+
+    // Green at the base (no output file there), red after the first turn, green after the second.
+    let fail = failing_suite(&["flow::new_test"]);
+    let check = format!("test ! -f relay-output.txt || grep -Eq ' 2$' relay-output.txt || {{ {fail}; }}");
+    let j = build(&env, "owned", &["--check", &check]);
+    assert_eq!(j["status"], "done", "{j}");
+    let results: Vec<&str> = j["bars"].as_array().unwrap().iter().filter_map(|b| b["result"].as_str()).collect();
+    assert_eq!(results, ["fail", "pass"], "{j}");
+    assert_eq!(acts(&steps(&env, "owned")), ["resume", "defer"]);
+    assert!(prompts(&env, "a").contains("flow::new_test"), "resumed with the tail");
+
+    // Red at the base, and red at the tip on a test the base passes as well: that one is the job's.
+    let old = failing_suite(&["report::tests::reset_time"]);
+    let both = failing_suite(&["report::tests::reset_time", "flow::new_test"]);
+    let check = format!("if test -f relay-output.txt && grep -Eq ' 1$' relay-output.txt; then {both}; else {old}; fi");
+    let j = build(&env, "added", &["--check", &check]);
+    let results: Vec<&str> = j["bars"].as_array().unwrap().iter().filter_map(|b| b["result"].as_str()).collect();
+    assert_eq!(results, ["fail", "base-red"], "resumed, then only the base's failure is left: {j}");
+    assert_eq!(acts(&steps(&env, "added"))[0], "resume");
+}
+
 #[test]
 fn whoever_accepts_a_red_run_it_does_not_end_done() {
     if !have_bwrap() {
@@ -2504,7 +2576,10 @@ fn whoever_accepts_a_red_run_it_does_not_end_done() {
         "[hooks]\nended = [\"orchestrator\"]\norchestrator_timeout_minutes = 3\n",
     );
     claude_account(&env.home, "a", 10, false);
-    ok(&relay(&env, &["queue", "add", "pushy", "--text", "[status-done] Make a change.", "--check", "false"]), "queue");
+    ok(
+        &relay(&env, &["queue", "add", "pushy", "--text", "[status-done] Make a change.", "--check", RED_AT_TIP]),
+        "queue",
+    );
     let mut waiting = None;
     for _ in 0..100 {
         let v: serde_json::Value = serde_json::from_slice(&relay(&env, &["decide", "list", "--json"]).stdout).unwrap();
@@ -2541,7 +2616,7 @@ fn a_handler_that_accepts_a_red_run_is_refused_and_the_chain_goes_on() {
         &format!("[hooks]\nended = [\"command:{}\", \"rule\"]\nmax_decisions = 2\n", script.display()),
     );
     claude_account(&env.home, "a", 10, false);
-    let j = build(&env, "red", &["--check", "false"]);
+    let j = build(&env, "red", &["--check", RED_AT_TIP]);
     assert_eq!(j["status"], "failed", "{j}");
     let first = &decisions(&env, "red")[0];
     let (a, b) = (&first["steps"][0], &first["steps"][1]);
@@ -3007,7 +3082,7 @@ fn stats_fold_the_events_per_profile_and_model_and_show_labels_only() {
     );
     claude_account(&env.home, "a", 10, false);
     build(&env, "one", &["--profile", "worker", "--check", "test -f relay-output.txt"]);
-    build(&env, "two", &["--profile", "worker", "--check", "false"]);
+    build(&env, "two", &["--profile", "worker", "--check", RED_AT_TIP]);
     ok(
         &relay(
             &env,

@@ -368,7 +368,7 @@ fn overran(j: &Job) -> Option<String> {
 fn declared(j: &Job) -> Vec<String> {
     let left = j.unchained.as_ref().map_or(String::new(), |u| format!(" ({})", u.summary()));
     let mut out: Vec<String> = j.review_of().map(|b| format!("reviews {b}{left}")).into_iter().collect();
-    out.extend(j.bars.last().map(|b| format!("check {}", b.result.as_str())));
+    out.extend(j.bars.last().map(|b| format!("check {}", b.summary())));
     // Only the latest reviewed commit's verdicts: an earlier commit's reject is history, not the state.
     let latest = j.verdicts.last().map(|l| &l.commit);
     for (i, v) in j.verdicts.iter().enumerate() {
@@ -546,8 +546,9 @@ fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
     }
     if let Some(b) = j.bars.last() {
         out!(
-            "check {}: exit {}{}{}",
-            b.result.as_str(),
+            "check {}{}exit {}{}{}",
+            b.summary(),
+            if b.failing.is_empty() { ": " } else { "; " },
             b.exit,
             b.base_exit.map_or(String::new(), |e| format!(", exit {e} at the base commit")),
             b.commit.as_deref().map_or(String::new(), |c| format!(", at {}", c.get(..12).unwrap_or(c)))

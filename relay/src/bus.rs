@@ -242,6 +242,10 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_exit: Option<i32>,
         result: BarResult,
+        /// For `base-red`: the failing tests, all failing at the base commit too (empty when the
+        /// output names none to compare).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        failing: Vec<String>,
     },
     /// A review was carried out: `job` judged `of`'s branch at `commit`.
     Reviewed {
@@ -349,6 +353,8 @@ pub enum BarResult {
     CheckCouldNotRun,
     /// It passed, but it also passes at the base commit, so it does not show the change did anything.
     CheckProvesNothing,
+    /// It failed, and it fails at the base commit the same way: the failure is not the job's.
+    BaseRed,
 }
 
 impl BarResult {
@@ -358,6 +364,7 @@ impl BarResult {
             Self::Fail => "fail",
             Self::CheckCouldNotRun => "check-could-not-run",
             Self::CheckProvesNothing => "check-proves-nothing",
+            Self::BaseRed => "base-red",
         }
     }
 }

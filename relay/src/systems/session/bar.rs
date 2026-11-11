@@ -180,8 +180,12 @@ fn failing_tests(mut output: impl BufRead) -> Option<Vec<String>> {
             None
         } else if let Some(n) = line.strip_prefix("test ").and_then(|l| l.strip_suffix(" ... FAILED")) {
             Some(n)
-        } else if let Some(n) = nextest_failure(line) {
-            Some(n)
+        } else if let Some((failed, n)) = nextest_outcome(line) {
+            // A retry that passes (`TRY 2 PASS`, `FLAKY 2/3`) takes back the attempts that failed.
+            if !failed {
+                names.retain(|m| m != n);
+            }
+            failed.then_some(n)
         } else if listing && line.starts_with("    ") {
             Some(line.trim())
         } else {
@@ -199,16 +203,18 @@ fn failing_tests(mut output: impl BufRead) -> Option<Vec<String>> {
     }
 }
 
-/// The test a `cargo nextest` status line says failed: `        FAIL [   0.004s] relay::flow a_test` is
-/// `relay::flow a_test`, already named with its target. A timeout, a signal, an abort and a retry's
-/// failure (`TRY 2 FAIL`) count; a pass, a skip and the summary line do not.
-fn nextest_failure(line: &str) -> Option<&str> {
+/// Whether a `cargo nextest` status line says a test failed or passed, and the test, already named
+/// with its target: `        FAIL [   0.004s] relay::flow a_test` failed `relay::flow a_test`. A
+/// timeout, a signal, an abort and a failed attempt (`TRY 2 FAIL`) fail; a pass, a passing retry
+/// (`TRY 2 PASS`) and a flaky test (`FLAKY 2/3`) pass. A skip and the summary line are neither.
+fn nextest_outcome(line: &str) -> Option<(bool, &str)> {
     let (status, rest) = line.trim_start().split_once(" [")?;
     let failed = status.ends_with("FAIL") || status.starts_with("SIG") || matches!(status, "TIMEOUT" | "ABORT");
+    let passed = status.ends_with("PASS") || status.starts_with("FLAKY");
     let id = rest.split_once("] ")?.1.trim();
     // Newer versions put the test's place in the run first: `(3/10) relay::flow a_test`.
     let id = id.strip_prefix('(').and_then(|i| i.split_once(") ")).map_or(id, |(_, i)| i.trim_start());
-    failed.then_some(id)
+    (failed || passed).then_some((failed, id))
 }
 
 /// The test target a `cargo test` status line starts, without its binary's hash:
@@ -385,8 +391,19 @@ mod tests {
             FAIL [   0.010s] relay::flow a_test\n     TIMEOUT [  60.001s] (3/3) relay b::slow\n------------\n     \
             Summary [  60.1s] 3 tests run: 1 passed, 2 failed\n        FAIL [   0.010s] relay::flow a_test\n";
         assert_eq!(names(run), ["relay::flow a_test", "relay b::slow"]);
-        assert_eq!(nextest_failure("   TRY 2 FAIL [   0.010s] relay a::flaky"), Some("relay a::flaky"));
-        assert_eq!(nextest_failure("        SKIP [         ] relay a::skipped"), None);
+        assert_eq!(nextest_outcome("   TRY 2 FAIL [   0.010s] relay a::flaky"), Some((true, "relay a::flaky")));
+        assert_eq!(nextest_outcome("        SKIP [         ] relay a::skipped"), None);
+    }
+
+    #[test]
+    fn a_nextest_retry_that_passes_is_not_a_failure() {
+        let old = "        FAIL [   0.010s] relay a::old\n";
+        let recovered = format!("{old}   TRY 1 FAIL [   0.010s] relay a::new\n   FLAKY 2/2 [   0.010s] relay a::new\n");
+        let both = format!("{old}   TRY 1 FAIL [   0.010s] relay a::new\n   TRY 2 FAIL [   0.010s] relay a::new\n");
+        assert_eq!(names(&recovered), ["relay a::old"]);
+        assert_eq!(names(&recovered.replace("FLAKY 2/2", "TRY 2 PASS")), ["relay a::old"]);
+        let (at_base, at_tip) = (names(&recovered), names(&both));
+        assert_eq!(base_red(Some(&at_tip), Some(&at_base)), None, "it recovered at the base and fails at the tip");
     }
 
     #[test]

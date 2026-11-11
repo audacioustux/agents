@@ -26,6 +26,9 @@ pub struct Report {
     /// ([`Report::choose`]), as a report can be written in a wake-up. Empty for a harness that
     /// gives one result.
     pub results: Vec<Said>,
+    /// The zone the run's process kept its clock in (its environment's `TZ`): a reset time in an
+    /// error that names no zone is in it. None: this machine's zone.
+    pub zone: Option<TimeZone>,
     pub is_error: bool,
     /// The error's own message fields only (never whole events: an id can contain "429").
     pub error_text: String,
@@ -55,8 +58,11 @@ impl Report {
     /// results, the report stays as its reader filled it.
     pub fn choose(&mut self, marker: &str) {
         let marked = self.results.iter().rev().find(|s| !marker.is_empty() && s.text.contains(marker));
+        // With no finished report, an error that ended the run (a limit, a lapsed sign-in) is what
+        // it is judged by, never an earlier "waiting" that it cut short.
+        let failed_last = || self.results.last().filter(|s| !marker.is_empty() && s.is_error);
         let ordinary = || self.results.iter().rev().find(|s| !s.wakeup);
-        let Some(s) = marked.or_else(ordinary).or(self.results.last()).cloned() else { return };
+        let Some(s) = marked.or_else(failed_last).or_else(ordinary).or(self.results.last()).cloned() else { return };
         (self.answer, self.is_error, self.error_text, self.api_status) =
             (s.text, s.is_error, s.error_text, s.api_status);
     }
@@ -127,7 +133,7 @@ pub fn verdict(r: &Report, end: Ending, final_marker: &str, readonly: bool, now_
                 .meters
                 .as_ref()
                 .and_then(|m| m.values().filter(|w| w.utilization >= 1.0).filter_map(|w| w.resets_at).max())
-                .or_else(|| parse_reset(&head, now_s));
+                .or_else(|| parse_reset_in(&head, now_s, r.zone.as_ref().unwrap_or(&TimeZone::system())));
             return Verdict::Limited { until };
         }
         if AUTH.is_match(&head) || r.api_status == Some(401) {
@@ -163,6 +169,7 @@ static RESETS_IN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"resets in\s+((
 
 /// The next moment after `now_s` matching "resets [Mon D,] H[:MM]am|pm [(Zone)]"
 /// or "resets in 6d23h". A time with no zone is in this machine's, as the CLI printed it.
+#[cfg(test)]
 pub fn parse_reset(text: &str, now_s: i64) -> Option<i64> {
     parse_reset_in(text, now_s, &TimeZone::system())
 }
@@ -304,5 +311,16 @@ mod tests {
             assert_eq!(parse_reset_in("resets 3pm", NOW, &zone_of(Some(tz))), Some(NOW + 18 * 3600), "{tz}");
         }
         assert_eq!(zone_of(Some("")), TimeZone::UTC);
+    }
+
+    /// Review of #51: a run's own limit message with a bare reset time is read in the zone the run
+    /// kept its clock in, not in relay's.
+    #[test]
+    fn a_runs_bare_reset_time_is_in_the_runs_zone() {
+        let dhaka = Report { zone: Some(zone_of(Some("Asia/Dhaka"))), ..error("You've hit your limit · resets 3pm") };
+        // 21:00 in Dhaka (UTC+6): 3pm there is 09:00 UTC tomorrow.
+        assert_eq!(verdict(&dhaka, OK, "FINAL", false, NOW), Verdict::Limited { until: Some(NOW + 18 * 3600) });
+        let utc = Report { zone: Some(TimeZone::UTC), ..error("You've hit your limit · resets 4pm") };
+        assert_eq!(verdict(&utc, OK, "FINAL", false, NOW), Verdict::Limited { until: Some(NOW + 3600) });
     }
 }

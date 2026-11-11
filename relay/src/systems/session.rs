@@ -193,6 +193,8 @@ struct Workspace {
 /// A session ready to run.
 struct Launch {
     cmd: Command,
+    /// The zone the session keeps its clock in: its environment's `TZ`, which the config sets, never relay's.
+    zone: jiff::tz::TimeZone,
     stdin: Option<String>,
     session_id: String,
     brief: String,
@@ -233,6 +235,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     let (mut report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
     let marker = &ctx.cfg.session.final_marker;
+    report.zone = Some(launch.zone.clone());
     report.choose(marker);
     if !report.answer.is_empty() {
         std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
@@ -381,7 +384,9 @@ fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home
         account: true,
     };
     let cmd = supervised_command(ctx, &inv, &mounts)?;
-    Ok(ControlFlow::Continue(Launch { cmd, stdin: inv.stdin, session_id, brief, reviewing }))
+    let tz = sandbox::session_env(ctx, &inv).into_iter().find(|(k, _)| k == "TZ").map(|(_, v)| v);
+    let zone = crate::harness::report::zone_of(tz.as_ref().map(|v| v.to_string_lossy()).as_deref());
+    Ok(ControlFlow::Continue(Launch { cmd, zone, stdin: inv.stdin, session_id, brief, reviewing }))
 }
 
 /// The harness's command line for the session, or why it refuses.

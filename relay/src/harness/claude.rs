@@ -675,6 +675,19 @@ mod tests {
         assert_ne!(verdict(&r, ok, "FINAL", false, 0), Verdict::Done, "{r:?}");
     }
 
+    /// Review of #51: with no finished report, a limit that ended the run in a wake-up is what the
+    /// run is judged by, so the account is marked limited, never followed up.
+    #[test]
+    fn a_trailing_limit_is_not_masked_by_an_earlier_waiting_result() {
+        let mut r = read(&[
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"waiting for the tests"}"#,
+            r#"{"type":"result","subtype":"error","is_error":true,"result":"You've hit your weekly limit","origin":{"kind":"task-notification"}}"#,
+        ]);
+        r.choose("FINAL");
+        let ok = Ending { exit_ok: true, ..Ending::default() };
+        assert!(matches!(verdict(&r, ok, "FINAL", false, 0), Verdict::Limited { .. }), "{r:?}");
+    }
+
     #[test]
     fn usage() {
         let text = "\x1b[1mCurrent week (all models): 24% used · resets Nov 8, 3pm (UTC)\x1b[0m\nCurrent week (Fable): 0% used\nCurrent session: 61% used · resets 7pm (UTC)\n";

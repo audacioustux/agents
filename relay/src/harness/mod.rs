@@ -302,7 +302,8 @@ pub trait Harness: Sync + fmt::Debug {
     fn quota(&self, _home: &Home) -> Option<Invocation> {
         None
     }
-    fn parse_quota(&self, _text: &str, _now_s: i64) -> Meters {
+    /// `local` is the zone the quota command ran in, for a time that names none.
+    fn parse_quota(&self, _text: &str, _now_s: i64, _local: &jiff::tz::TimeZone) -> Meters {
         Meters::new()
     }
     /// The meters that govern `model`. An error means they cannot be told,

@@ -7,11 +7,13 @@ use std::process::{Command, Stdio};
 
 use anyhow::Result;
 use clap::Subcommand;
+use jiff::tz::TimeZone;
 
 use crate::accounts::{self, harness_of};
 use crate::bus::{QuotaEvent, now_micros, secs};
 use crate::config::{Config, Limits};
 use crate::ctx::Ctx;
+use crate::harness::report::zone_of;
 use crate::harness::{Home, Identity, Meters, SignIn};
 use crate::os::Role;
 use crate::sandbox;
@@ -245,7 +247,7 @@ fn read_accounts(ctx: &Ctx, select: &Select<'_>) -> Result<Taken> {
     let (mut unreadable, mut signed_out) = (Vec::new(), Vec::new());
     for (home, text) in readings {
         let h = harness_of(home);
-        let meters = text.as_deref().map(|t| h.parse_quota(t, now_s)).unwrap_or_default();
+        let meters = text.as_ref().map(|(t, zone)| h.parse_quota(t, now_s, zone)).unwrap_or_default();
         let account = home.key();
         let sign_in = match accounts::sign_in(home) {
             SignIn::As(id) => Some(id.stamp),
@@ -254,7 +256,7 @@ fn read_accounts(ctx: &Ctx, select: &Select<'_>) -> Result<Taken> {
         if !meters.is_empty() {
             read.push(account.clone());
             port.emit(QuotaEvent::Reading { account, meters, sign_in })?;
-        } else if text.as_deref().is_some_and(|t| h.lapsed(t)) {
+        } else if text.as_ref().is_some_and(|(t, _)| h.lapsed(t)) {
             signed_out.push(account.clone());
             port.emit(QuotaEvent::SignedOut { account, sign_in })?;
         } else {
@@ -266,20 +268,25 @@ fn read_accounts(ctx: &Ctx, select: &Select<'_>) -> Result<Taken> {
     Ok(Taken { read, unreadable, signed_out })
 }
 
-fn read(ctx: &Ctx, home: &Home) -> Option<String> {
+/// What the home's quota command printed, and the zone it ran in: its environment is the config's,
+/// never relay's own, so a time it printed with no zone is in that environment's `TZ`.
+fn read(ctx: &Ctx, home: &Home) -> Option<(String, TimeZone)> {
     let inv = ctx.cfg.locate(home.harness, harness_of(home).quota(home)?).ok()?;
+    let env = sandbox::session_env(ctx, &inv);
+    let tz = env.iter().find(|(k, _)| k == "TZ").map(|(_, v)| v.to_string_lossy());
+    let zone = zone_of(tz.as_deref());
     let out = Command::new("timeout")
         .arg("90")
         .arg(&inv.program)
         .args(&inv.args)
         .env_clear()
-        .envs(sandbox::session_env(ctx, &inv))
+        .envs(env)
         .current_dir(&ctx.state)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
         .ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    Some((String::from_utf8_lossy(&out.stdout).into_owned(), zone))
 }
 
 /// One account, as `show --json` reports it. What relay keeps of who it is signed in as is

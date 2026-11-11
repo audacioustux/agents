@@ -430,6 +430,27 @@ fn projects_on_one_machine_share_what_they_read_of_an_account() {
     assert!(!env.root.join("state/relay/other/bus/quota.ndjson").exists());
 }
 
+/// Copilot review of PR #51: a reset time that names no zone is read in the zone the quota command
+/// ran with (its `[session.env]` `TZ`), not in relay's own.
+#[test]
+fn a_reset_with_no_zone_is_read_in_the_quota_commands_zone() {
+    let env = setup("reset-zone", false);
+    // UTC+6, whatever the caller's zone is.
+    configure(&env, "", "[session.env]\nTZ = \"Etc/GMT-6\"\n");
+    claude_account(&env.home, "solo", 40, false);
+    let usage =
+        "Current week (all models): 40% used · resets Jan 1, 12am (UTC)\nCurrent session: 61% used · resets 3pm\n";
+    std::fs::write(env.home.join(".claude.solo/usage"), usage).unwrap();
+    let in_utc = |args: &[&str]| relay_cmd(&env, Command::new(env!("CARGO_BIN_EXE_relay")).args(args).env("TZ", "UTC"));
+    ok(&in_utc(&["quota", "refresh"]), "refresh");
+    let shown: serde_json::Value = serde_json::from_slice(&in_utc(&["--json", "quota", "show"]).stdout).unwrap();
+    let account = &shown["accounts"][0];
+    let read_s = account["readAt"].as_i64().expect("read") / 1_000_000;
+    let reset = account["meters"]["five_hour"]["resetsAt"].as_i64().expect("a reset time");
+    assert!(reset > read_s && reset <= read_s + 86_400, "the next 3pm: {account}");
+    assert_eq!((reset + 6 * 3600) % 86_400, 15 * 3600, "3pm at UTC+6: {account}");
+}
+
 /// Audit finding 16: a reading is taken when the accounts are shown, with no job waiting and no
 /// dispatcher, and the view says it is being taken.
 #[test]
@@ -2561,6 +2582,31 @@ fn a_job_that_can_be_resumed_without_end_needs_a_ceiling_and_waits_on_a_gate() {
     assert_eq!(out.status.code(), Some(2), "the name is relay's: {}", stderr(&out));
 }
 
+/// A session that dies printing only to stderr ends "no output" with the cause shown.
+#[test]
+fn a_session_that_prints_nothing_shows_the_end_of_its_stderr() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("stderr", false);
+    let real = env.repo.join(".stub/claude");
+    let boom = env.repo.join(".stub/claude-boom");
+    // Readings still work; a session prints `boom` to stderr and exits 1.
+    let script = format!(
+        "#!/bin/sh\ncase \" $* \" in *\" /usage \"*|*\" --version \"*) exec {} \"$@\" ;; esac\necho boom >&2\nexit 1\n",
+        real.display()
+    );
+    write_executable(&boom, &script);
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    let conf = conf.replace(&format!("program = \"{}\"", real.display()), &format!("program = \"{}\"", boom.display()));
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "dies", "--text", "Make a change."]), "queue");
+    let j = wait_for(&env, "dies");
+    assert_eq!(j["status"], "failed", "{j}");
+    assert!(j["reason"].as_str().unwrap_or_default().contains("boom"), "the cause is shown: {j}");
+}
+
 /// A build job and a review of it that rejects, on one account.
 fn rejected(env: &Env) -> (String, String) {
     claude_account(&env.home, "a", 10, false);
@@ -2584,6 +2630,24 @@ fn rejected(env: &Env) -> (String, String) {
     ok(&out, "queue the review");
     assert_eq!(wait_for(env, "rev")["status"], "done");
     (tip, rev_parse(&env.repo, "HEAD"))
+}
+
+#[test]
+fn a_review_whose_verdict_comes_in_a_wake_up_turn_still_rejects() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-wake", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &["--model", "claude=claude-opus-5-5"]);
+    let text = "[wake] [verdict-reject] Review the change.";
+    let out = relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", text]);
+    ok(&out, "queue the review");
+    let r = wait_for(&env, "rev");
+    assert_eq!(r["status"], "done", "{r}");
+    let b = wait_for(&env, "build");
+    assert_eq!(b["verdicts"][0]["reason"], "test-failure", "the builder has the reject: {b}");
 }
 
 #[test]
@@ -2886,7 +2950,7 @@ fn a_profile_that_asks_for_an_independent_family_refuses_a_same_family_reviewer(
                 "--review-of",
                 "easy",
                 "--text",
-                "x",
+                "[verdict-accept] x",
                 "--harness",
                 "claude",
                 "--model",
@@ -3262,6 +3326,29 @@ fn a_run_that_ended_done_over_its_budget_ends_done_with_no_checker_seat_and_its_
     let r = wait_for(&env, "rev");
     assert_eq!(r["status"], "done", "{r}");
     assert!(job(&env, "build")["verdicts"][0]["verdict"] == "accept", "{}", job(&env, "build"));
+}
+
+/// Copilot review of PR #51: a review over its cap that says `status: done` with no verdict does
+/// not end done; it takes the budget path like any run at its cap.
+#[test]
+fn a_review_over_its_budget_with_no_verdict_does_not_end_done() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("overran-review", false);
+    configure(&env, "job_ceiling_usd = 1.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "build", "--text", "[status-done] Make a change."]), "queue");
+    let out = relay(
+        &env,
+        &["queue", "add", "rev", "--review-of", "build", "--text", "[status-done] Review it.", "--budget", "0.015"],
+    );
+    ok(&out, "queue the review");
+    assert_eq!(wait_for(&env, "build")["status"], "done");
+    let r = wait_for(&env, "rev");
+    assert_eq!(r["status"], "failed", "{r}");
+    assert!(r["reason"].as_str().is_some_and(|w| w.contains("spend cap")), "{r}");
+    assert!(job(&env, "build")["verdicts"].as_array().is_none_or(Vec::is_empty), "{}", job(&env, "build"));
 }
 
 #[test]

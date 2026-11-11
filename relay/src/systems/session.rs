@@ -193,6 +193,8 @@ struct Workspace {
 /// A session ready to run.
 struct Launch {
     cmd: Command,
+    /// The zone the session keeps its clock in: its environment's `TZ`, which the config sets, never relay's.
+    zone: jiff::tz::TimeZone,
     stdin: Option<String>,
     session_id: String,
     brief: String,
@@ -230,8 +232,11 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         stderr: "stderr.log",
         measure: work.clone.iter().map(SessionRepo::path).chain([work.tmp.as_path()]).collect(),
     };
-    let (report, ending, disk) =
+    let (mut report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
+    let marker = &ctx.cfg.session.final_marker;
+    report.zone = Some(launch.zone.clone());
+    report.choose(marker);
     if !report.answer.is_empty() {
         std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
     }
@@ -248,11 +253,25 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         reviewing: launch.reviewing.as_ref(),
         model: seat.model.as_deref(),
     };
-    let marker = &ctx.cfg.session.final_marker;
-    match verdict(&report, ending, marker, job.readonly(), now_s()) {
+    // A review's answer is not enough: it needs its report and the verdict in it.
+    let v = match verdict(&report, ending, marker, job.readonly() && ran.reviewing.is_none(), now_s()) {
+        Verdict::Done if ran.reviewing.is_some() && review::verdict(&report.answer, marker).is_none() => {
+            Verdict::FollowUp(format!(
+                "Your {marker} section has no `verdict: accept` or `verdict: reject` line, so the review is not \
+                 finished. End with the {marker} section again, with its verdict."
+            ))
+        }
+        v => v,
+    };
+    match v {
         // A cap authorizes more spend; a run that has said `status: done` needs none. It ends as its
         // report says, the overrun recorded, and the acceptance check and the `ended` chain judge it as usual.
-        Verdict::Budget if report.ended && final_status_done(&report.answer, marker) => {
+        // A review is done only with its verdict too: without one, it is at its cap like any run.
+        Verdict::Budget
+            if report.ended
+                && final_status_done(&report.answer, marker)
+                && (ran.reviewing.is_none() || review::verdict(&report.answer, marker).is_some()) =>
+        {
             let (spent_usd, cap_usd) = (job.cost_usd + report.cost_usd, job.budget_usd);
             port(ctx, job).emit(SessionEvent::Overran { job: job.name.clone(), spent_usd, cap_usd })?;
             let (outcome, _) = conclude(ctx, job, &seat.key, Verdict::Done, now_s())?;
@@ -365,7 +384,9 @@ fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home
         account: true,
     };
     let cmd = supervised_command(ctx, &inv, &mounts)?;
-    Ok(ControlFlow::Continue(Launch { cmd, stdin: inv.stdin, session_id, brief, reviewing }))
+    let tz = sandbox::session_env(ctx, &inv).into_iter().find(|(k, _)| k == "TZ").map(|(_, v)| v);
+    let zone = crate::harness::report::zone_of(tz.as_ref().map(|v| v.to_string_lossy()).as_deref());
+    Ok(ControlFlow::Continue(Launch { cmd, zone, stdin: inv.stdin, session_id, brief, reviewing }))
 }
 
 /// The harness's command line for the session, or why it refuses.
@@ -719,6 +740,9 @@ fn conclude(ctx: &Ctx, job: &Job, key: &str, v: Verdict, now_s: i64) -> Result<E
             port.emit(SessionEvent::FollowUp { job: job.name.clone(), message, budget_usd: None })?;
             (Outcome::Retry, Some("ended without its final report; asked once more".into()))
         }
+        Verdict::FollowUp(_) if job.review_of().is_some() => {
+            (Outcome::Failed, Some("no verdict in the review's report after a follow-up".into()))
+        }
         Verdict::FollowUp(_) => (Outcome::Done, Some(format!("no {} section after a follow-up", s.final_marker))),
         Verdict::Limited { until } => {
             // Two minutes after a stated reset; fifteen when none is stated (an overload or bare 429).
@@ -731,12 +755,27 @@ fn conclude(ctx: &Ctx, job: &Job, key: &str, v: Verdict, now_s: i64) -> Result<E
             (Outcome::Retry, Some(format!("{key} is signed out; moving on")))
         }
         Verdict::NoOutput if job.reruns < ctx.cfg.limits.max_retries => {
-            (Outcome::Rerun, Some("no output; trying again".into()))
+            (Outcome::Rerun, Some(format!("no output; trying again{}", stderr_tail(ctx, job))))
         }
-        Verdict::NoOutput => (Outcome::Failed, Some("no output, again".into())),
+        Verdict::NoOutput => (Outcome::Failed, Some(format!("no output, again{}", stderr_tail(ctx, job)))),
         Verdict::Budget => (Outcome::Failed, Some("reached its spend cap; resume with --budget to go on".into())),
         Verdict::Failed(why) => (Outcome::Failed, Some(why)),
     })
+}
+
+/// The end of the job's `stderr.log` (about 400 bytes, on one line), for a run that printed nothing
+/// else: a sandbox that could not start, a missing interpreter, a crash. Empty when there is none.
+fn stderr_tail(ctx: &Ctx, job: &Job) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut tail = Vec::new();
+    let read = std::fs::File::open(ctx.job_file(&job.name, "stderr.log")).and_then(|mut f| {
+        let len = f.metadata()?.len();
+        f.seek(SeekFrom::Start(len.saturating_sub(400)))?;
+        f.read_to_end(&mut tail)
+    });
+    let text = String::from_utf8_lossy(&tail);
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if read.is_err() || lines.is_empty() { String::new() } else { format!("; its stderr ends: {}", lines.join(" / ")) }
 }
 
 /// The invocation, niced, inside the sandbox when it is on.

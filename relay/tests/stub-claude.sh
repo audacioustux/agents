@@ -19,7 +19,7 @@
 #   cargo    appended to with every session's CARGO_INCREMENTAL (`unset` when it has none)
 #   env      the session's whole environment, sorted, written by a brief containing [env]
 # A brief containing [idle] makes no commit; one containing [status-done] reports status: done;
-# [verdict-accept] and [verdict-reject] also give a review's verdict; [uncommitted] leaves a changed tracked
+# [verdict-accept] and [verdict-reject] also give a review's verdict; [wake] writes the report in a wake-up turn; [uncommitted] leaves a changed tracked
 # file and an untracked one behind after its commit; [filter] leaves a clean filter in the clone's own configuration
 # plus diff.external and a textconv driver (and a .gitattributes using them) that touch $acct/filter-ran if anything on the host ever runs it.
 # [plant-check] plants, like a hostile session, symlinks in every relay job directory it can write: where the
@@ -144,6 +144,12 @@ case "$prompt" in *"[plant-config]"*)
 esac
 case "$prompt" in *"[fsmonitor]"*)
   if [ -w . ] && [ -e .git ]; then git config core.fsmonitor "touch $acct/fsmonitor-ran; false"; fi ;;
+esac
+# [wake] ends its turn "waiting for the tests" and writes its report in a wake-up turn after them.
+case "$prompt" in *"[wake]"*)
+  printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"waiting for the tests","num_turns":1,"total_cost_usd":%s}\n' "$sid" "$cost"
+  printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"%s","origin":{"kind":"task-notification"},"num_turns":2,"total_cost_usd":%s}\n' "$sid" "$final" "$cost"
+  exit 0 ;;
 esac
 # printf, not echo: dash's echo turns \n into a real newline and splits the JSON line.
 printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"ran on %s with %s transcript turns\\n%s","num_turns":1,"total_cost_usd":%s}\n' "$sid" "$(basename "$acct")" "$turns" "$final" "$cost"

@@ -135,13 +135,18 @@ static RESET: LazyLock<Regex> = LazyLock::new(|| {
 static RESETS_IN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"resets in\s+((?:\d+[dhms])+)").expect("regex"));
 
 /// The next moment after `now_s` matching "resets [Mon D,] H[:MM]am|pm [(Zone)]"
-/// or "resets in 6d23h".
+/// or "resets in 6d23h". A time with no zone is in this machine's, as the CLI printed it.
 pub fn parse_reset(text: &str, now_s: i64) -> Option<i64> {
+    parse_reset_in(text, now_s, &TimeZone::system())
+}
+
+/// [`parse_reset`], with `local` as the zone of a time that names none.
+pub fn parse_reset_in(text: &str, now_s: i64, local: &TimeZone) -> Option<i64> {
     if let Some(c) = RESETS_IN.captures(text) {
         return Some(now_s + duration_seconds(&c[1]));
     }
     let c = RESET.captures(text)?;
-    let tz = c.name("tz").map_or(Some(TimeZone::UTC), |z| match z.as_str() {
+    let tz = c.name("tz").map_or(Some(local.clone()), |z| match z.as_str() {
         "UTC" | "GMT" => Some(TimeZone::UTC),
         name => TimeZone::get(name).ok(),
     })?;
@@ -259,5 +264,13 @@ mod tests {
         assert_eq!(parse_reset("resets Jan 2, 3pm (UTC)", NOW), Some(1_798_902_000), "rolls into next year");
         assert_eq!(parse_reset("21.0% used · resets in 5d20h", NOW), Some(NOW + 5 * 86_400 + 20 * 3600));
         assert_eq!(parse_reset("no reset here", NOW), None);
+    }
+
+    #[test]
+    fn a_reset_with_no_zone_is_in_the_local_zone() {
+        let dhaka = TimeZone::get("Asia/Dhaka").unwrap();
+        // 21:00 in Dhaka (UTC+6): 3pm there is 09:00 UTC tomorrow.
+        assert_eq!(parse_reset_in("resets 3pm", NOW, &dhaka), Some(NOW + 18 * 3600));
+        assert_eq!(parse_reset_in("resets 4pm (UTC)", NOW, &dhaka), Some(NOW + 3600), "a stated zone wins");
     }
 }

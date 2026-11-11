@@ -263,7 +263,12 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     match v {
         // A cap authorizes more spend; a run that has said `status: done` needs none. It ends as its
         // report says, the overrun recorded, and the acceptance check and the `ended` chain judge it as usual.
-        Verdict::Budget if report.ended && final_status_done(&report.answer, marker) => {
+        // A review is done only with its verdict too: without one, it is at its cap like any run.
+        Verdict::Budget
+            if report.ended
+                && final_status_done(&report.answer, marker)
+                && (ran.reviewing.is_none() || review::verdict(&report.answer, marker).is_some()) =>
+        {
             let (spent_usd, cap_usd) = (job.cost_usd + report.cost_usd, job.budget_usd);
             port(ctx, job).emit(SessionEvent::Overran { job: job.name.clone(), spent_usd, cap_usd })?;
             let (outcome, _) = conclude(ctx, job, &seat.key, Verdict::Done, now_s())?;

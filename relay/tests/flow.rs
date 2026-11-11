@@ -3307,6 +3307,29 @@ fn a_run_that_ended_done_over_its_budget_ends_done_with_no_checker_seat_and_its_
     assert!(job(&env, "build")["verdicts"][0]["verdict"] == "accept", "{}", job(&env, "build"));
 }
 
+/// Copilot review of PR #51: a review over its cap that says `status: done` with no verdict does
+/// not end done; it takes the budget path like any run at its cap.
+#[test]
+fn a_review_over_its_budget_with_no_verdict_does_not_end_done() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("overran-review", false);
+    configure(&env, "job_ceiling_usd = 1.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "build", "--text", "[status-done] Make a change."]), "queue");
+    let out = relay(
+        &env,
+        &["queue", "add", "rev", "--review-of", "build", "--text", "[status-done] Review it.", "--budget", "0.015"],
+    );
+    ok(&out, "queue the review");
+    assert_eq!(wait_for(&env, "build")["status"], "done");
+    let r = wait_for(&env, "rev");
+    assert_eq!(r["status"], "failed", "{r}");
+    assert!(r["reason"].as_str().is_some_and(|w| w.contains("spend cap")), "{r}");
+    assert!(job(&env, "build")["verdicts"].as_array().is_none_or(Vec::is_empty), "{}", job(&env, "build"));
+}
+
 #[test]
 fn a_checkpoint_that_needs_a_checker_waits_for_a_seat_and_goes_on_when_one_frees() {
     if !have_bwrap() {

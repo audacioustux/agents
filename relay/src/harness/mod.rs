@@ -328,9 +328,10 @@ pub fn by_id(id: &str) -> Result<&'static dyn Harness, Refusal> {
     })
 }
 
-/// Control characters replaced, so a value cannot forge log lines or terminal escapes.
+/// Control characters (C0, DEL and C1, such as U+009B, a one-character CSI) replaced, so a value cannot forge
+/// log lines or terminal escapes.
 pub fn printable(s: &str) -> String {
-    s.chars().map(|c| if c.is_ascii_control() { ' ' } else { c }).collect()
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
 fn read_json(path: &Path) -> Option<serde_json::Value> {

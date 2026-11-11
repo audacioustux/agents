@@ -579,6 +579,9 @@ mod tests {
         let file = r#"{"oauthAccount":{"accountUuid":"u-1","emailAddress":"x@y.invalid\u001b[2J"}}"#;
         std::fs::write(d.join(".claude.json"), file).unwrap();
         assert_eq!(Claude.email(&h).as_deref(), Some("x@y.invalid [2J"), "no terminal escape gets through");
+        let file = r#"{"oauthAccount":{"accountUuid":"u-1","emailAddress":"x@y.invalid\u009b2J"}}"#;
+        std::fs::write(d.join(".claude.json"), file).unwrap();
+        assert_eq!(Claude.email(&h).as_deref(), Some("x@y.invalid 2J"), "nor a one-character CSI (C1)");
         std::fs::remove_dir_all(&d).unwrap();
     }
 

@@ -283,6 +283,13 @@ pub trait Harness: Sync + fmt::Debug {
     fn sign_in(&self, _home: &Home) -> SignIn {
         SignIn::Unknown
     }
+    /// The address the home is signed in as, for a view to show its owner beside the account's name.
+    /// Read from the home's files when the view is drawn and never kept: not in [`SignIn`], the
+    /// state, the events or anything a run is given. None when the harness keeps none this crate
+    /// reads, or the home is signed out.
+    fn email(&self, _home: &Home) -> Option<String> {
+        None
+    }
     /// Whether the quota command's output says the session is expired,
     /// unauthorised or not signed in.
     fn lapsed(&self, _text: &str) -> bool {
@@ -321,9 +328,10 @@ pub fn by_id(id: &str) -> Result<&'static dyn Harness, Refusal> {
     })
 }
 
-/// Control characters replaced, so a value cannot forge log lines or terminal escapes.
+/// Control characters (C0, DEL and C1, such as U+009B, a one-character CSI) replaced, so a value cannot forge
+/// log lines or terminal escapes.
 pub fn printable(s: &str) -> String {
-    s.chars().map(|c| if c.is_ascii_control() { ' ' } else { c }).collect()
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
 fn read_json(path: &Path) -> Option<serde_json::Value> {

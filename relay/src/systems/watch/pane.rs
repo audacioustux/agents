@@ -155,7 +155,8 @@ pub struct Column {
     pub head: std::borrow::Cow<'static, str>,
     pub cap: usize,
     /// The width it gives way to before any other column is cut (a gauge's, its bar at its
-    /// shortest); 0 when it gives way only as the others do.
+    /// shortest); 0 when it gives way only as the others do. Of the columns that yield, the one
+    /// that yields the furthest gives way first.
     pub yields: usize,
 }
 
@@ -166,7 +167,8 @@ const LAST_MIN: usize = 12;
 /// Each column's width in `avail` columns with `gap` between them: as wide as its widest cell or
 /// heading up to its cap, the last taking the rest. When they do not fit, the widest give way
 /// first, down to a floor, so the last keeps some room: its cap, when it has one. A column that
-/// [`Column::yields`] gives way before those, down to that width.
+/// [`Column::yields`] gives way before those, down to that width; the one that yields the furthest
+/// first, then the one with the most room above its width.
 pub fn widths<R: AsRef<[String]>>(cols: &[Column], rows: &[R], avail: usize, gap: usize) -> Vec<usize> {
     let Some(last) = cols.len().checked_sub(1) else { return Vec::new() };
     let widest = |c: usize| rows.iter().filter_map(|r| r.as_ref().get(c)).map(|s| width(s)).max().unwrap_or(0);
@@ -181,7 +183,9 @@ pub fn widths<R: AsRef<[String]>>(cols: &[Column], rows: &[R], avail: usize, gap
             (0..last).filter(|&i| w[i] > content[i].max(2)).max_by_key(|&i| (w[i] - content[i], std::cmp::Reverse(i)));
         let yields = || {
             let room = |i: usize| w[i].saturating_sub(cols[i].yields);
-            (0..last).filter(|&i| cols[i].yields > 0 && room(i) > 0).max_by_key(|&i| (room(i), std::cmp::Reverse(i)))
+            (0..last)
+                .filter(|&i| cols[i].yields > 0 && room(i) > 0)
+                .max_by_key(|&i| (std::cmp::Reverse(cols[i].yields), room(i), std::cmp::Reverse(i)))
         };
         let widest = || (0..last).filter(|&i| w[i] > FLOOR).max_by_key(|&i| (w[i], std::cmp::Reverse(i)));
         let Some(i) = slack.or_else(yields).or_else(widest) else { break };
@@ -344,6 +348,23 @@ mod tests {
         let rows = vec![vec!["a".repeat(24), "g".repeat(24), "g".repeat(24), "1".into()]];
         assert_eq!(widths(&cols, &rows, 75, 2), [24, 21, 21, 3], "the gauges give way first");
         assert_eq!(widths(&cols, &rows, 60, 2), [17, 17, 17, 3], "then, at their shortest, as the others do");
+    }
+
+    /// Of the columns that yield, the one that yields the furthest (an email, to `…`) gives way first.
+    #[test]
+    fn the_column_that_yields_furthest_gives_way_first() {
+        let gauge = Column { head: "gauge".into(), cap: 24, yields: 17 };
+        let email = Column { head: "email".into(), cap: 40, yields: 1 };
+        let cols = [
+            Column { head: "account".into(), cap: 24, yields: 0 },
+            email,
+            gauge,
+            Column { head: "run".into(), cap: 3, yields: 0 },
+        ];
+        let rows = vec![vec!["a".repeat(10), "e".repeat(20), "g".repeat(24), "1".into()]];
+        assert_eq!(widths(&cols, &rows, 66, 2), [10, 20, 24, 6], "room for all");
+        assert_eq!(widths(&cols, &rows, 50, 2), [10, 7, 24, 3], "the email gives way, the gauge whole");
+        assert_eq!(widths(&cols, &rows, 38, 2), [10, 1, 18, 3], "then the gauge");
     }
 
     /// Review of #42: a meter's name is shown whole when the pane has room for it (omp's longest is

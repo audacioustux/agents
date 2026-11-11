@@ -56,8 +56,10 @@ pub struct Board {
     pub decisions: Vec<Vec<String>>,
     pub accounts_head: String,
     /// A row per account, then a sub-row per other meter and per other model, under
-    /// [`ACCOUNTS`], each gauge as text for its width.
+    /// [`Board::account_columns`], each gauge as text for its width.
     pub accounts: Vec<Vec<String>>,
+    /// Whether an account shows its email, in a column after its name.
+    pub emails: bool,
     /// The same rows' meters, drawn as gauges where the text says them.
     pub gauges: Vec<Option<Gauge>>,
     pub ready: Vec<bool>,
@@ -89,19 +91,22 @@ static DECISIONS: [Column; 5] =
     [col("project", 16), col("decision", 30), col("job", 28), col("point", 16), col("until", 0)];
 /// The accounts' columns. The gauge's is widened to its whole bar and tail, and gives way, down to
 /// its bar at its shortest, before the account or meter name is cut.
-pub static ACCOUNTS: [Column; 6] = [
-    col("account", 32),
-    col("state", 24),
-    // As wide as the longest name: when room runs short the gauge gives way first, then the widest.
-    col("meter", usize::MAX),
-    Column {
-        head: std::borrow::Cow::Borrowed("gauge"),
-        cap: gauge::BAR + gauge::TAIL,
-        yields: gauge::MIN_BAR + gauge::TAIL,
-    },
-    col("room/day", 8),
-    col("run", 3),
-];
+pub static ACCOUNTS: [Column; 6] = [ACCOUNT, STATE, METER, GAUGE, ROOM, RUN];
+/// [`ACCOUNTS`] with each account's email beside it, when some account shows one. The email gives
+/// way first, down to `…`, before the gauge does.
+pub static ACCOUNTS_WITH_EMAIL: [Column; 7] = [ACCOUNT, EMAIL, STATE, METER, GAUGE, ROOM, RUN];
+const ACCOUNT: Column = col("account", 32);
+const EMAIL: Column = Column { head: std::borrow::Cow::Borrowed("email"), cap: 40, yields: 1 };
+const STATE: Column = col("state", 24);
+// As wide as the longest name: when room runs short the email and the gauge give way first, then the widest.
+const METER: Column = col("meter", usize::MAX);
+const GAUGE: Column = Column {
+    head: std::borrow::Cow::Borrowed("gauge"),
+    cap: gauge::BAR + gauge::TAIL,
+    yields: gauge::MIN_BAR + gauge::TAIL,
+};
+const ROOM: Column = col("room/day", 8);
+const RUN: Column = col("run", 3);
 /// Where the gauge is among [`ACCOUNTS`].
 const GAUGE_COLUMN: usize = 3;
 
@@ -141,6 +146,8 @@ impl Board {
         } else {
             harnesses.join(", ")
         };
+        let emails = accounts.emails();
+        let with_emails = emails.iter().any(|e| !e.is_empty());
         Self {
             title: if everywhere {
                 "every project".to_owned()
@@ -157,12 +164,21 @@ impl Board {
             jobs,
             accounts_head: format!(" {} ", accounts.head),
             // An account's empty cell says `-`; a sub-row leaves blank what its account's row says.
+            // An account with no email shows nothing there.
             accounts: accounts
                 .cells(|g| g.text(gauge::BAR))
                 .into_iter()
                 .zip(&accounts.rows)
                 .map(|(cells, r)| if r.sub { cells } else { dashed(cells) })
+                .zip(emails)
+                .map(|(mut cells, email)| {
+                    if with_emails {
+                        cells.insert(1, email);
+                    }
+                    cells
+                })
                 .collect(),
+            emails: with_emails,
             gauges: accounts.rows.iter().map(|r| r.gauge.clone()).collect(),
             ready: accounts.rows.iter().map(|r| r.ready).collect(),
             unreadable: if everywhere { m.unreadable.clone() } else { Vec::new() },
@@ -177,13 +193,17 @@ impl Board {
         if self.everywhere { &DECISIONS } else { &DECISIONS[1..] }
     }
 
+    pub fn account_columns(&self) -> &'static [Column] {
+        if self.emails { &ACCOUNTS_WITH_EMAIL } else { &ACCOUNTS }
+    }
+
     pub fn find(&self, key: &Key) -> Option<usize> {
         self.jobs.iter().position(|e| e.key == *key)
     }
 
     /// The gauge in the accounts' row `row`, column `col`, if a meter is drawn there.
     pub fn gauge(&self, row: usize, col: usize) -> Option<&Gauge> {
-        self.gauges.get(row).filter(|_| col == GAUGE_COLUMN)?.as_ref()
+        self.gauges.get(row).filter(|_| col == GAUGE_COLUMN + usize::from(self.emails))?.as_ref()
     }
 }
 

@@ -160,13 +160,15 @@ fn refresh_shown(ctx: &Ctx, world: &World, others: &[&World]) -> Result<Vec<Stri
     crate::systems::quota::start_refresh(ctx, &room, world, false)
 }
 
-/// The accounts as a board shows them; in a project, a reading of each stale one is started
-/// first (`quota::start_refresh`), and the view says so: a reading is taken when it is shown.
+/// The accounts as a board shows them, each with its email on a terminal (`AccountsView::show_emails`);
+/// in a project, a reading of each stale one is started first (`quota::start_refresh`), and the view
+/// says so: a reading is taken when it is shown.
 pub fn shown_accounts(scope: Scope<'_>, m: &Machine, room: &Room) -> Result<AccountsView> {
     let mut v = m.accounts(scope.home, room);
     if let Some(ctx) = scope.home {
         v.refreshing(crate::systems::quota::start_refresh(ctx, room, m.own(), false)?);
     }
+    v.show_emails(room);
     Ok(v)
 }
 
@@ -186,7 +188,7 @@ pub fn table(rows: &[Vec<String>]) -> Vec<String> {
 }
 
 /// Cuts each line to `width` columns, marking the cut.
-fn fit(text: &str, width: Option<usize>) -> String {
+pub(crate) fn fit(text: &str, width: Option<usize>) -> String {
     let cut = |line: &str| match width {
         Some(w) if line.chars().count() > w => {
             line.chars().take(w.saturating_sub(1)).chain(std::iter::once('…')).collect::<String>()

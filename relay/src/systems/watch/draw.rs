@@ -10,7 +10,7 @@ use ratatui::widgets::{
     Table, TableState, Wrap,
 };
 
-use super::board::{ACCOUNTS, Board};
+use super::board::Board;
 use super::pane::{Column, Pane, Step, Tone, cut, heights, width, widths, wrap};
 use super::ui::{Action, Id, Ui};
 use crate::world::Status;
@@ -68,7 +68,7 @@ pub fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
     // A meter is a gauge, coloured by how near its floor it is, whatever the row's colour.
     let gauge = |row: usize, col: usize, w: usize| b.gauge(row, col).map(|g| g.line(w));
     let t = Tabled {
-        cols: &ACCOUNTS,
+        cols: b.account_columns(),
         rows: &b.accounts,
         style: ready,
         selected: None,

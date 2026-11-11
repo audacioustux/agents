@@ -76,6 +76,13 @@ pub fn verdict(r: &Report, end: Ending, final_marker: &str, readonly: bool, now_
     if end.over_budget || r.budget_hit {
         return Verdict::Budget;
     }
+    // A finished report stands however the process ended after it: a background child kept
+    // alive past the silence or time limit, or an exit error after the result, loses nothing.
+    let answered = readonly && !r.answer.trim().is_empty();
+    let reported = final_marker.is_empty() || r.answer.contains(final_marker) || answered;
+    if r.ended && !r.is_error && reported {
+        return Verdict::Done;
+    }
     if end.silent {
         return Verdict::Failed("printed nothing for too long; ended".into());
     }
@@ -103,14 +110,10 @@ pub fn verdict(r: &Report, end: Ending, final_marker: &str, readonly: bool, now_
     if !end.exit_ok {
         return Verdict::Failed("the agent exited with an error after its result".into());
     }
-    let answered = readonly && !r.answer.trim().is_empty();
-    if !final_marker.is_empty() && !r.answer.contains(final_marker) && !answered {
-        return Verdict::FollowUp(format!(
-            "Your last message has no {final_marker} section, so the job is not finished. Ending your turn ends \
-             the job: nothing waits for you. Finish any remaining work now, then end with the {final_marker} section."
-        ));
-    }
-    Verdict::Done
+    Verdict::FollowUp(format!(
+        "Your last message has no {final_marker} section, so the job is not finished. Ending your turn ends \
+         the job: nothing waits for you. Finish any remaining work now, then end with the {final_marker} section."
+    ))
 }
 
 static RESET: LazyLock<Regex> = LazyLock::new(|| {
@@ -200,6 +203,15 @@ mod tests {
     fn readonly_answer_needs_no_marker() {
         assert_eq!(verdict(&done("the review, no marker"), OK, "FINAL", true, NOW), Verdict::Done);
         assert!(matches!(verdict(&done("  \n"), OK, "FINAL", true, NOW), Verdict::FollowUp(_)));
+    }
+
+    #[test]
+    fn a_finished_report_survives_how_the_process_ended() {
+        let silent = Ending { silent: true, exit_ok: false, ..OK };
+        assert_eq!(verdict(&done("FINAL ok"), silent, "FINAL", false, NOW), Verdict::Done);
+        let late = Ending { timed_out: true, ..OK };
+        assert_eq!(verdict(&done("the review"), late, "FINAL", true, NOW), Verdict::Done);
+        assert!(matches!(verdict(&done("I'll continue"), silent, "FINAL", false, NOW), Verdict::Failed(_)));
     }
 
     #[test]

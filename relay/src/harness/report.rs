@@ -19,11 +19,12 @@ pub struct Report {
     pub lines: usize,
     /// A final result arrived.
     pub ended: bool,
-    /// The final answer: the last report that was not a wake-up after it,
-    /// or the main agent's last words when that report is empty.
+    /// The final answer: the chosen result's text ([`Report::choose`]), or the main agent's last
+    /// words when that result is empty.
     pub answer: String,
-    /// The results `answer` is chosen from, in order, each with its own status ([`Report::choose`]):
-    /// a report can be written in a wake-up. Empty for a harness that gives one result.
+    /// Every result of the run, in order, each with its own status: `answer` is chosen from them
+    /// ([`Report::choose`]), as a report can be written in a wake-up. Empty for a harness that
+    /// gives one result.
     pub results: Vec<Said>,
     pub is_error: bool,
     /// The error's own message fields only (never whole events: an id can contain "429").

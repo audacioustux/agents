@@ -535,7 +535,8 @@ impl StreamReader {
         r.budget_hit = subtype == "error_max_budget_usd";
         let api_error = v.get("api_error").and_then(Value::as_str).unwrap_or("");
         // A wake-up (a background task finishing after the report) adds a later result, and can
-        // carry the report: each is kept with its own status, and the report chosen from them.
+        // carry the report: every result of the stream is kept with its own status, and the report
+        // chosen from them, so a later ordinary "ok" cannot erase a report written in a wake-up.
         let said = Said {
             text: if text.trim().is_empty() { self.last_text.clone().unwrap_or_default() } else { text.to_owned() },
             wakeup: v.pointer("/origin/kind").and_then(Value::as_str) == Some("task-notification"),
@@ -543,9 +544,6 @@ impl StreamReader {
             error_text: if is_error { format!("{text} {api_error}").trim().to_owned() } else { String::new() },
             api_status: v.get("api_error_status").and_then(Value::as_u64),
         };
-        if !said.wakeup {
-            r.results.clear();
-        }
         r.results.push(said);
         r.choose("");
     }
@@ -648,6 +646,19 @@ mod tests {
         ]);
         r.choose("FINAL");
         assert!(r.answer.contains("verdict: reject"), "{r:?}");
+    }
+
+    #[test]
+    fn a_later_ordinary_result_keeps_a_marked_wake_up() {
+        let mut r = read(&[
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"waiting for the tests"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"FINAL\nstatus: done\nverdict: reject","origin":{"kind":"task-notification"}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#,
+        ]);
+        r.choose("FINAL");
+        assert!(r.answer.contains("verdict: reject"), "{r:?}");
+        r.choose("");
+        assert_eq!(r.answer, "ok", "with no marker, the latest ordinary result");
     }
 
     #[test]

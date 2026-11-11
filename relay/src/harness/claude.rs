@@ -355,58 +355,161 @@ pub(crate) fn strip_ansi(text: &str) -> std::borrow::Cow<'_, str> {
 /// `<session>/` sidecar dir when present. A sandbox keeps the cwd at the same
 /// path, so the key is the same, and copying the files moves the session.
 fn carry_transcript(session: &str, from: Option<&Path>, to: &Path) -> std::io::Result<bool> {
-    let find = |dir: &Path| -> Option<(PathBuf, PathBuf)> {
-        std::fs::read_dir(dir.join("projects")).ok()?.flatten().find_map(|e| {
-            let file = e.path().join(format!("{session}.jsonl"));
-            file.is_file().then(|| (e.path(), file))
-        })
-    };
     // The home that wrote last holds the newest copy.
-    let Some((key_dir, file)) = from.filter(|f| *f != to).and_then(find) else { return Ok(find(to).is_some()) };
-    let dest = to.join("projects").join(key_dir.file_name().unwrap_or_default());
-    std::fs::create_dir_all(&dest)?;
-    std::fs::copy(&file, dest.join(format!("{session}.jsonl")))?;
-    let sidecar = key_dir.join(session);
-    if sidecar.is_dir() {
-        copy_dir(&sidecar, &dest.join(session))?;
-    }
+    let Some((key, src)) = from.filter(|f| *f != to).and_then(|f| nofollow::find(f, session)) else {
+        return Ok(nofollow::find(to, session).is_some());
+    };
+    let dest = nofollow::make_dir(&nofollow::projects(to)?, key.as_c_str())?;
+    nofollow::copy_transcript(&src, &dest, session)?;
     Ok(true)
 }
 
 /// The transcript, copied to where a session working in `cwd` finds it on
 /// `to` (claude keys a project by its path, every other character a dash).
 fn fork_transcript(session: &str, from: &Path, to: &Path, cwd: &Path) -> std::io::Result<bool> {
-    let Some(src) = std::fs::read_dir(from.join("projects"))?
-        .flatten()
-        .map(|e| e.path())
-        .find(|d| d.join(format!("{session}.jsonl")).is_file())
-    else {
+    let Some((src_key, src)) = nofollow::find(from, session) else {
         return Ok(false);
     };
     let key: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    let dest = to.join("projects").join(key);
-    if dest == src {
+    if from == to && src_key.as_bytes() == key.as_bytes() {
         return Ok(true);
     }
-    std::fs::create_dir_all(&dest)?;
-    std::fs::copy(src.join(format!("{session}.jsonl")), dest.join(format!("{session}.jsonl")))?;
-    if src.join(session).is_dir() {
-        copy_dir(&src.join(session), &dest.join(session))?;
-    }
+    let dest = nofollow::make_dir(&nofollow::projects(to)?, key.as_str())?;
+    nofollow::copy_transcript(&src, &dest, session)?;
     Ok(true)
 }
 
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for e in std::fs::read_dir(from)?.flatten() {
-        let target = to.join(e.file_name());
-        if e.file_type()?.is_dir() {
-            copy_dir(&e.path(), &target)?;
-        } else {
-            std::fs::copy(e.path(), target)?;
+/// Copying a transcript between homes without following a symlink (audit finding 3). A session
+/// writes its own home, so any entry under `projects/` may be a link it planted: in the source, to
+/// another account's credentials, which the host would copy where the session reads them; in the
+/// destination, to a file the host would write through. So every directory is a handle opened with
+/// `O_NOFOLLOW | O_DIRECTORY`, only regular files and directories are copied (anything else is
+/// skipped), and each file at the destination is unlinked and made afresh with
+/// `O_CREAT | O_EXCL | O_NOFOLLOW`.
+mod nofollow {
+    use std::ffi::CString;
+    use std::fs::File;
+    use std::io;
+    use std::os::fd::{AsFd, OwnedFd};
+    use std::path::Path;
+
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+    use rustix::io::Errno;
+    use rustix::path::Arg;
+
+    fn dir_flags() -> OFlags {
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+    }
+
+    /// What `name` in `dir` is, without following a link.
+    fn kind<P: Arg>(dir: impl AsFd, name: P) -> Option<FileType> {
+        rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok().map(|st| FileType::from_raw_mode(st.st_mode))
+    }
+
+    /// The directory `name` in `dir`, refusing a symlink.
+    fn open_dir<P: Arg>(dir: impl AsFd, name: P) -> io::Result<OwnedFd> {
+        Ok(rustix::fs::openat(dir, name, dir_flags(), Mode::empty())?)
+    }
+
+    /// The directory `name` in `dir`: a directory already there is kept; anything else there (a
+    /// file, a link) is removed and a directory made in its place.
+    pub(super) fn make_dir<P: Arg + Copy>(dir: impl AsFd, name: P) -> io::Result<OwnedFd> {
+        let dir = dir.as_fd();
+        match kind(dir, name) {
+            Some(FileType::Directory) | None => {}
+            Some(_) => rustix::fs::unlinkat(dir, name, AtFlags::empty())?,
+        }
+        match rustix::fs::mkdirat(dir, name, Mode::from_raw_mode(0o700)) {
+            Ok(()) | Err(Errno::EXIST) => open_dir(dir, name),
+            Err(e) => Err(e.into()),
         }
     }
-    Ok(())
+
+    /// `<home>/projects`, made when missing. The home is relay's own; `projects` may not be a link.
+    pub(super) fn projects(home: &Path) -> io::Result<OwnedFd> {
+        std::fs::create_dir_all(home)?;
+        let home = rustix::fs::open(home, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())?;
+        make_dir(&home, "projects")
+    }
+
+    /// `session` names one entry in a directory: not empty, no `/`, not `.` or `..`.
+    fn bare(session: &str) -> bool {
+        !(session.is_empty() || session == "." || session == ".." || session.contains(['/', '\0']))
+    }
+
+    /// The `projects/<key>` directory in `home` holding `<session>.jsonl` as a regular file: its
+    /// key and a handle on it.
+    pub(super) fn find(home: &Path, session: &str) -> Option<(CString, OwnedFd)> {
+        if !bare(session) {
+            return None;
+        }
+        let projects = rustix::fs::open(home.join("projects"), dir_flags(), Mode::empty()).ok()?;
+        let file = format!("{session}.jsonl");
+        Dir::read_from(&projects).ok()?.flatten().find_map(|e| {
+            let key = e.file_name();
+            if [&b"."[..], b".."].contains(&key.to_bytes()) {
+                return None;
+            }
+            let dir = open_dir(&projects, key).ok()?;
+            (kind(&dir, file.as_str()) == Some(FileType::RegularFile)).then(|| (key.to_owned(), dir))
+        })
+    }
+
+    /// `<session>.jsonl` and its `<session>/` sidecar, from one key directory to another.
+    /// The transcript itself must be copied: one swapped for a link or anything but a regular file
+    /// since it was found is an error, never a transfer reported done. Sidecar entries may be skipped.
+    pub(super) fn copy_transcript(from: &OwnedFd, to: &OwnedFd, session: &str) -> io::Result<()> {
+        if !copy_file(from, to, format!("{session}.jsonl").as_str())? {
+            return Err(io::Error::other(format!("{session}.jsonl is no longer a regular file")));
+        }
+        if kind(from, session) == Some(FileType::Directory) {
+            copy_tree(&open_dir(from, session)?, &make_dir(to, session)?)?;
+        }
+        Ok(())
+    }
+
+    /// Copies the regular file `name`, with its permission bits; anything else there is skipped.
+    /// Whether it was copied.
+    fn copy_file<P: Arg + Copy>(from: &OwnedFd, to: &OwnedFd, name: P) -> io::Result<bool> {
+        // `NONBLOCK` so a fifo swapped in is not waited on; it is skipped below.
+        let read = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        let src = match rustix::fs::openat(from, name, read, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(Errno::LOOP) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        let st = rustix::fs::fstat(&src)?;
+        if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+            return Ok(false);
+        }
+        match rustix::fs::unlinkat(to, name, AtFlags::empty()) {
+            Ok(()) | Err(Errno::NOENT) => {}
+            Err(e) => return Err(e.into()),
+        }
+        let write = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mode = Mode::from_raw_mode(st.st_mode & 0o777);
+        let dest = rustix::fs::openat(to, name, write, mode)?;
+        // The umask filtered the mode `openat` was given; set it on the descriptor, never by name.
+        rustix::fs::fchmod(&dest, mode)?;
+        io::copy(&mut File::from(src), &mut File::from(dest))?;
+        Ok(true)
+    }
+
+    fn copy_tree(from: &OwnedFd, to: &OwnedFd) -> io::Result<()> {
+        for e in Dir::read_from(from)? {
+            let e = e?;
+            let name = e.file_name();
+            if [&b"."[..], b".."].contains(&name.to_bytes()) {
+                continue;
+            }
+            match kind(from, name) {
+                Some(FileType::Directory) => copy_tree(&open_dir(from, name)?, &make_dir(to, name)?)?,
+                Some(FileType::RegularFile) => _ = copy_file(from, to, name)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 /// `--output-format stream-json --verbose`, and the single result object
@@ -622,5 +725,87 @@ mod tests {
         assert!(Claude.carry("s1", Some(&ha), &hb, &d));
         assert_eq!(std::fs::read_to_string(b.join("projects/-repo/s1/sub/f")).unwrap(), "y");
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Two homes `a` and `b`, with `s1` in `a/projects/-repo`, and a secret outside both.
+    fn homes_with_a_transcript(d: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let (a, b, secret) = (d.join("a"), d.join("b"), d.join("secret"));
+        std::fs::create_dir_all(a.join("projects/-repo/s1")).unwrap();
+        std::fs::write(a.join("projects/-repo/s1.jsonl"), "x").unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(&secret, "secret").unwrap();
+        (a, b, secret)
+    }
+
+    /// Audit finding 3: a symlink in the sidecar is not copied as what it points at.
+    fn a_sidecar_link_is_not_followed(copy: impl Fn(&Path, &Path) -> std::io::Result<bool>) {
+        let d = crate::config::tempdir::Dir::new();
+        let (a, b, secret) = homes_with_a_transcript(d.path());
+        std::os::unix::fs::symlink(&secret, a.join("projects/-repo/s1/leak")).unwrap();
+        assert!(copy(&a, &b).unwrap(), "the transcript is copied");
+        assert_eq!(std::fs::read_to_string(b.join("projects/-repo/s1.jsonl")).unwrap(), "x", "with its data");
+        let leak = b.join("projects/-repo/s1/leak");
+        assert!(std::fs::read_to_string(&leak).map_or(true, |s| s != "secret"), "the secret was copied");
+        assert!(std::fs::symlink_metadata(&leak).is_err(), "a link was copied");
+    }
+
+    /// Audit finding 3: a symlink planted at the destination is replaced, never written through.
+    fn a_planted_destination_link_is_not_written_through(copy: impl Fn(&Path, &Path) -> std::io::Result<bool>) {
+        let d = crate::config::tempdir::Dir::new();
+        let (a, b, victim) = homes_with_a_transcript(d.path());
+        std::fs::create_dir_all(b.join("projects/-repo")).unwrap();
+        std::os::unix::fs::symlink(&victim, b.join("projects/-repo/s1.jsonl")).unwrap();
+        assert!(copy(&a, &b).unwrap());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "secret");
+        assert_eq!(std::fs::read_to_string(b.join("projects/-repo/s1.jsonl")).unwrap(), "x");
+    }
+
+    /// Review of #50: a transcript that is no longer a regular file when it is copied (a link
+    /// swapped in after `find`) fails the copy rather than reporting a transfer done.
+    #[test]
+    fn a_transcript_that_is_not_a_regular_file_fails_the_copy() {
+        use std::os::fd::OwnedFd;
+        let d = crate::config::tempdir::Dir::new();
+        let (a, b, secret) = homes_with_a_transcript(d.path());
+        let key = a.join("projects/-repo");
+        std::fs::remove_file(key.join("s1.jsonl")).unwrap();
+        std::os::unix::fs::symlink(&secret, key.join("s1.jsonl")).unwrap();
+        std::fs::create_dir_all(b.join("projects/-repo")).unwrap();
+        let open = |p: &Path| -> OwnedFd { std::fs::File::open(p).unwrap().into() };
+        assert!(nofollow::copy_transcript(&open(&key), &open(&b.join("projects/-repo")), "s1").is_err());
+        assert!(std::fs::symlink_metadata(b.join("projects/-repo/s1.jsonl")).is_err(), "nothing copied");
+    }
+
+    /// Review of #50: a copied file keeps its source's permission bits whatever the umask.
+    #[test]
+    fn a_copied_transcript_keeps_its_mode_past_the_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = crate::config::tempdir::Dir::new();
+        let (a, b, _) = homes_with_a_transcript(d.path());
+        let src = a.join("projects/-repo/s1.jsonl");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(carry_transcript("s1", Some(&a), &b).unwrap());
+        let mode = std::fs::metadata(b.join("projects/-repo/s1.jsonl")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o666, "{mode:o}");
+    }
+
+    #[test]
+    fn a_carry_does_not_copy_a_sidecar_link() {
+        a_sidecar_link_is_not_followed(|a, b| carry_transcript("s1", Some(a), b));
+    }
+
+    #[test]
+    fn a_carry_does_not_write_through_a_planted_link() {
+        a_planted_destination_link_is_not_written_through(|a, b| carry_transcript("s1", Some(a), b));
+    }
+
+    #[test]
+    fn a_fork_does_not_copy_a_sidecar_link() {
+        a_sidecar_link_is_not_followed(|a, b| fork_transcript("s1", a, b, Path::new("/repo")));
+    }
+
+    #[test]
+    fn a_fork_does_not_write_through_a_planted_link() {
+        a_planted_destination_link_is_not_written_through(|a, b| fork_transcript("s1", a, b, Path::new("/repo")));
     }
 }

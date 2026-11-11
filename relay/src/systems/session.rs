@@ -233,7 +233,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     let (mut report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
     let marker = &ctx.cfg.session.final_marker;
-    report.answer = report.chosen(marker).to_owned();
+    report.choose(marker);
     if !report.answer.is_empty() {
         std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
     }

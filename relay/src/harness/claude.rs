@@ -17,7 +17,7 @@ use regex::Regex;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::harness::report::{Report, parse_reset};
+use crate::harness::report::{Report, Said, parse_reset};
 use crate::harness::{
     Caps, Harness, Home, Identity, Invocation, Kind, Meter, Meters, Permissions, Reader, Refusal, Session, SignIn,
     Task, read_json,
@@ -530,21 +530,24 @@ impl StreamReader {
         r.cost_usd = v.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(r.cost_usd);
         r.turns = v.get("num_turns").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()).unwrap_or(r.turns);
         // `is_error` can be true with subtype "success" (an auth failure is reported that way).
-        r.is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false) || !matches!(subtype, "" | "success");
+        let is_error =
+            v.get("is_error").and_then(Value::as_bool).unwrap_or(false) || !matches!(subtype, "" | "success");
         r.budget_hit = subtype == "error_max_budget_usd";
-        r.api_status = v.get("api_error_status").and_then(Value::as_u64);
         let api_error = v.get("api_error").and_then(Value::as_str).unwrap_or("");
-        r.error_text = if r.is_error { format!("{text} {api_error}").trim().to_owned() } else { String::new() };
-        // A wake-up (a background task finishing after the report) adds a later result. The answer
-        // is the last one that is not a wake-up; the wake-ups after it are kept, as one can carry
-        // the report ([`Report::chosen`]).
-        let said = if text.trim().is_empty() { self.last_text.clone().unwrap_or_default() } else { text.to_owned() };
-        if v.pointer("/origin/kind").and_then(Value::as_str) == Some("task-notification") {
-            r.wakeups.push(said);
-        } else {
-            r.answer = said;
-            r.wakeups.clear();
+        // A wake-up (a background task finishing after the report) adds a later result, and can
+        // carry the report: each is kept with its own status, and the report chosen from them.
+        let said = Said {
+            text: if text.trim().is_empty() { self.last_text.clone().unwrap_or_default() } else { text.to_owned() },
+            wakeup: v.pointer("/origin/kind").and_then(Value::as_str) == Some("task-notification"),
+            is_error,
+            error_text: if is_error { format!("{text} {api_error}").trim().to_owned() } else { String::new() },
+            api_status: v.get("api_error_status").and_then(Value::as_u64),
+        };
+        if !said.wakeup {
+            r.results.clear();
         }
+        r.results.push(said);
+        r.choose("");
     }
 }
 
@@ -589,6 +592,7 @@ impl Reader for StreamReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::report::{Ending, Verdict, verdict};
     use crate::harness::testing::{argv, home, task};
 
     fn read(lines: &[&str]) -> Report {
@@ -638,11 +642,24 @@ mod tests {
 
     #[test]
     fn a_report_written_in_a_wake_up_turn_is_kept() {
-        let r = read(&[
+        let mut r = read(&[
             r#"{"type":"result","subtype":"success","is_error":false,"result":"waiting for the tests"}"#,
             r#"{"type":"result","subtype":"success","is_error":false,"result":"FINAL\nstatus: done\nverdict: reject","origin":{"kind":"task-notification"}}"#,
         ]);
-        assert!(r.chosen("FINAL").contains("verdict: reject"), "{r:?}");
+        r.choose("FINAL");
+        assert!(r.answer.contains("verdict: reject"), "{r:?}");
+    }
+
+    #[test]
+    fn the_chosen_report_is_judged_by_its_own_status() {
+        let mut r = read(&[
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"waiting for the tests"}"#,
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"FINAL\nstatus: done","origin":{"kind":"task-notification"}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","origin":{"kind":"task-notification"}}"#,
+        ]);
+        r.choose("FINAL");
+        let ok = Ending { exit_ok: true, ..Ending::default() };
+        assert_ne!(verdict(&r, ok, "FINAL", false, 0), Verdict::Done, "{r:?}");
     }
 
     #[test]

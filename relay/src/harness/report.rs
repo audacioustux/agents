@@ -22,8 +22,9 @@ pub struct Report {
     /// The final answer: the last report that was not a wake-up after it,
     /// or the main agent's last words when that report is empty.
     pub answer: String,
-    /// The texts of the wake-up results after `answer`'s, in order: a report can be written in one.
-    pub wakeups: Vec<String>,
+    /// The results `answer` is chosen from, in order, each with its own status ([`Report::choose`]):
+    /// a report can be written in a wake-up. Empty for a harness that gives one result.
+    pub results: Vec<Said>,
     pub is_error: bool,
     /// The error's own message fields only (never whole events: an id can contain "429").
     pub error_text: String,
@@ -36,14 +37,27 @@ pub struct Report {
     pub meters: Option<Meters>,
 }
 
+/// One result of a run: its text, and how that result itself ended.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Said {
+    pub text: String,
+    /// It came in a wake-up turn (a background task finishing after the report).
+    pub wakeup: bool,
+    pub is_error: bool,
+    pub error_text: String,
+    pub api_status: Option<u64>,
+}
+
 impl Report {
-    /// The report to keep: the latest result carrying `marker`, else [`Report::answer`]. With no
-    /// marker, the answer: a wake-up's "ok" must not replace it.
-    pub fn chosen(&self, marker: &str) -> &str {
-        if marker.is_empty() {
-            return &self.answer;
-        }
-        self.wakeups.iter().rev().find(|w| w.contains(marker)).unwrap_or(&self.answer)
+    /// Keeps the report, with its own status: the latest result carrying `marker`, else the latest
+    /// one that is not a wake-up (a wake-up's "ok" must not replace it), else the latest. With no
+    /// results, the report stays as its reader filled it.
+    pub fn choose(&mut self, marker: &str) {
+        let marked = self.results.iter().rev().find(|s| !marker.is_empty() && s.text.contains(marker));
+        let ordinary = || self.results.iter().rev().find(|s| !s.wakeup);
+        let Some(s) = marked.or_else(ordinary).or(self.results.last()).cloned() else { return };
+        (self.answer, self.is_error, self.error_text, self.api_status) =
+            (s.text, s.is_error, s.error_text, s.api_status);
     }
 }
 

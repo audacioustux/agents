@@ -1140,9 +1140,10 @@ fn an_accounts_email_never_reaches_relays_state_or_events() {
     ok(&relay(&env, &["quota", "show", "--json"]), "show --json");
     ok(&relay(&env, &["view", "status"]), "board");
     for args in [&["quota", "show"][..], &["quota", "show", "--json"], &["view", "status"]] {
+        // Without a pseudo-terminal only the shown-email checks are skipped; the scans below still run.
         let Some(shown) = relay_on_a_terminal(&env, args) else {
             eprintln!("SKIPPED (no pseudo-terminal from /usr/bin/script): the views never showed the email");
-            return;
+            break;
         };
         assert!(shown.contains(SECRET_EMAIL), "{args:?} shows the email on a terminal:\n{shown}");
     }

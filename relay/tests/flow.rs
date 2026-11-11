@@ -1107,9 +1107,25 @@ fn files_holding(dir: &Path, needle: &str) -> (Vec<PathBuf>, usize) {
     (found, searched)
 }
 
+/// relay with `args` on a pseudo-terminal 200 columns wide (`script`, from util-linux), as every
+/// test runs it otherwise: what it printed there, or None when no pseudo-terminal can be had.
+fn relay_on_a_terminal(env: &Env, args: &[&str]) -> Option<String> {
+    let mut probe = Command::new("/usr/bin/script");
+    if !probe.args(["-qec", "true", "/dev/null"]).output().is_ok_and(|o| o.status.success()) {
+        return None;
+    }
+    let line = std::iter::once(env!("CARGO_BIN_EXE_relay")).chain(args.iter().copied());
+    let line = line.map(|a| format!("'{}'", a.replace('\'', "'\\''"))).collect::<Vec<_>>().join(" ");
+    let mut cmd = Command::new("/usr/bin/script");
+    cmd.args(["-qec", &format!("stty cols 200 rows 50; exec {line}"), "/dev/null"]);
+    let out = relay_cmd(env, cmd.env("SHELL", "/bin/sh").env("COLUMNS", "200").env("TERM", "dumb"));
+    ok(&out, &format!("{args:?} on a terminal"));
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// The owner's ask of 2026-11-11: an account's email is shown, read from its home as a view is
-/// drawn, and never kept: after a reading, a queued job's run and the views, no file relay keeps
-/// (state, events, job logs, checkpoints, clones) holds the address.
+/// drawn, and never kept: after a reading, a queued job's run and the views, on a terminal where
+/// they show it, no file relay keeps (state, events, job logs, checkpoints, clones) holds the address.
 #[test]
 fn an_accounts_email_never_reaches_relays_state_or_events() {
     if !have_bwrap() {
@@ -1123,6 +1139,13 @@ fn an_accounts_email_never_reaches_relays_state_or_events() {
     ok(&relay(&env, &["quota", "show"]), "show");
     ok(&relay(&env, &["quota", "show", "--json"]), "show --json");
     ok(&relay(&env, &["view", "status"]), "board");
+    for args in [&["quota", "show"][..], &["quota", "show", "--json"], &["view", "status"]] {
+        let Some(shown) = relay_on_a_terminal(&env, args) else {
+            eprintln!("SKIPPED (no pseudo-terminal from /usr/bin/script): the views never showed the email");
+            return;
+        };
+        assert!(shown.contains(SECRET_EMAIL), "{args:?} shows the email on a terminal:\n{shown}");
+    }
     let (state, data) = (env.root.join("state"), env.root.join("data"));
     assert!(state.join("relay/flow/bus/quota.ndjson").exists(), "the reading is in the events");
     for dir in [&state, &data] {

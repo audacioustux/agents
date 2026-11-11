@@ -470,8 +470,7 @@ pub fn show(ctx: &Ctx, world: &World, refresh: bool) -> Result<()> {
         v.refreshing(start_refresh(ctx, &room, world, false)?);
     }
     v.show_emails(&room);
-    // On a terminal, as wide as it is: the emails give way, then the bars shrink. Piped, every line whole.
-    ctx.reply(&v.json, &v.text_in(crate::os::terminal_size().map(|(cols, _)| cols)))
+    ctx.reply(&v.json, &v.text_on(crate::os::terminal_size().map(|(cols, _)| cols)))
 }
 
 /// Every account's room: as every project on this machine knows it, with
@@ -563,6 +562,12 @@ impl AccountsView {
     #[cfg(test)]
     pub fn text(&self) -> String {
         self.text_in(None)
+    }
+
+    /// The text for a terminal `width` columns wide (piped, `None`: every line whole): the emails
+    /// give way, then the bars shrink, and what still does not fit, the head included, is cut.
+    pub fn text_on(&self, width: Option<usize>) -> String {
+        crate::systems::view::fit(&self.text_in(width), width)
     }
 
     /// The head and the table, indented, its bars as wide as `width` columns allow, down to
@@ -1051,6 +1056,22 @@ mod tests {
         let without = lines(v.table_with(gauge::BAR, false)).collect::<Vec<_>>().join("\n");
         assert_eq!(v.text_in(Some(need)), wide);
         assert_eq!(v.text_in(Some(need - 1)), without, "the email first, the bars whole");
+    }
+
+    /// Review of #47: on a terminal narrower than the narrowest table, `quota show` cuts every line,
+    /// its head too, as `view status` does, rather than let the terminal wrap them; piped, none is cut.
+    #[test]
+    fn a_terminal_narrower_than_the_narrowest_table_cuts_every_line() {
+        let (_d, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
+        let v = view_of(&cfg, &[omp()], &world(&[queued("a", None)]), &[]);
+        let narrowest = v.table_with(gauge::MIN_BAR, false).iter().map(|l| l.chars().count() + 2).max().unwrap();
+        let w = 40;
+        assert!(w < narrowest && w < v.head.chars().count(), "{narrowest}");
+        let cut = v.text_on(Some(w));
+        assert!(cut.lines().all(|l| l.chars().count() <= w), "{cut}");
+        assert_eq!(cut.lines().count(), v.text_in(Some(w)).lines().count(), "cut, not wrapped: {cut}");
+        assert!(cut.lines().all(|l| l.ends_with('…')), "the head and every row: {cut}");
+        assert_eq!(v.text_on(None), v.text_in(None), "piped, every line whole");
     }
 
     /// Audit finding 14: the pane judges an account as the dispatcher does, its seats too, so an

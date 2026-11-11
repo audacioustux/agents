@@ -188,7 +188,7 @@ pub fn table(rows: &[Vec<String>]) -> Vec<String> {
 }
 
 /// Cuts each line to `width` columns, marking the cut.
-fn fit(text: &str, width: Option<usize>) -> String {
+pub(crate) fn fit(text: &str, width: Option<usize>) -> String {
     let cut = |line: &str| match width {
         Some(w) if line.chars().count() > w => {
             line.chars().take(w.saturating_sub(1)).chain(std::iter::once('…')).collect::<String>()

@@ -184,6 +184,8 @@ struct Seat<'a> {
 /// inbox (what relay writes for it), and its `/tmp` (on disk).
 struct Workspace {
     clone: Option<SessionRepo>,
+    /// The commit the clone's branch started from: the job's record of it, or the clone just made.
+    base: Option<String>,
     cwd: PathBuf,
     scratch: PathBuf,
     inbox: HostDir,
@@ -248,6 +250,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     let ran = Ran {
         report: &report,
         dir: work.clone.as_ref(),
+        base: work.base.as_deref(),
         inbox: &work.inbox,
         brief: &launch.brief,
         reviewing: launch.reviewing.as_ref(),
@@ -307,14 +310,20 @@ fn seat<'a>(ctx: &Ctx, job: &Job, found: &'a [Home]) -> Step<Seat<'a>> {
 
 /// A build job's clone, made on its first run; a read-only job stands in the repository.
 fn workspace(ctx: &Ctx, job: &Job) -> Result<Step<Workspace>> {
-    let mut clone_dir = job.workdir.clone();
+    let (mut clone_dir, mut base) = (job.workdir.clone(), job.base.clone());
     if !job.readonly() && clone_dir.is_none() {
         let bases = bases(&ctx.world()?, job);
-        let (dir, branch, base) = match clone(ctx, &job.name, &bases, job.session_id.is_some()) {
+        let (dir, branch, made) = match clone(ctx, &job.name, &bases, job.session_id.is_some()) {
             Ok(made) => made,
             Err(e) => return Ok(ControlFlow::Break((Outcome::Failed, Some(format!("{e:#}"))))),
         };
-        port(ctx, job).emit(SessionEvent::Cloned { job: job.name.clone(), workdir: dir.clone(), branch, base })?;
+        base.clone_from(&made);
+        port(ctx, job).emit(SessionEvent::Cloned {
+            job: job.name.clone(),
+            workdir: dir.clone(),
+            branch,
+            base: made,
+        })?;
         clone_dir = Some(dir);
     }
     let cwd = if job.readonly() {
@@ -327,7 +336,7 @@ fn workspace(ctx: &Ctx, job: &Job) -> Result<Step<Workspace>> {
     let inbox = HostDir::open(&ctx.job_inbox(&job.name))?;
     let tmp = ctx.job_tmp(&job.name);
     std::fs::create_dir_all(&tmp)?;
-    Ok(ControlFlow::Continue(Workspace { clone: clone_dir, cwd, scratch, inbox, tmp }))
+    Ok(ControlFlow::Continue(Workspace { clone: clone_dir, base, cwd, scratch, inbox, tmp }))
 }
 
 /// Chooses the session (new, resumed or forked), records that it started, and builds its command.
@@ -439,6 +448,8 @@ fn forkable(job: &Job, found: &[Home], home: &Home, cwd: &Path) -> Option<Ended>
 struct Ran<'a> {
     report: &'a Report,
     dir: Option<&'a SessionRepo>,
+    /// The commit `dir`'s branch started from, when known: `job` may predate its recording.
+    base: Option<&'a str>,
     /// The job's inbox, for what relay writes beside the run (a scratch git index, the check's output).
     inbox: &'a HostDir,
     brief: &'a str,

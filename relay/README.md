@@ -487,8 +487,11 @@ handlers as untrusted.
   session (a brief's "stop if a test you did not touch fails" is not overridden), does
   not accept, and stops the job with its commits as they are, for you to look at. The
   tests are compared by what the whole output names (read before it is cut to its end):
-  `cargo test`'s `test NAME ... FAILED` lines and the names under `failures:`, whole,
-  so a doctest's `src/lib.rs - f (line 3)` counts. When neither output names a test (a
+  `cargo test`'s `test NAME ... FAILED` lines and the names under `failures:`, whole
+  (a doctest's `src/lib.rs - f (line 3)` counts), each after the test target it ran in
+  (`tests/flow.rs (flow): NAME`), since a name is only unique within one. An output with
+  a line over 64 KiB or more than 1000 failing tests is not compared: its fails are the
+  job's. When neither output names a test (a
   formatter or a build that fails), failing at the base is enough; when only one does,
   they failed differently and the failure is the job's. A new failing test is the job's:
   it is resumed as above. A timeout or failed checkout at the base is

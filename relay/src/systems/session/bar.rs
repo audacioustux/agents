@@ -11,6 +11,7 @@
 //! A session that planted a symlink in its own directories has nothing relay follows.
 
 use std::ffi::OsString;
+use std::io::{BufRead, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -56,13 +57,21 @@ struct Ran {
     code: i32,
     /// The end of its output, or why it could not run.
     text: String,
-    /// The failing tests its whole output names, read before the output is cut to its end.
-    failing: Vec<String>,
+    /// The failing tests its whole output names, read before the output is cut to its end; `None` when
+    /// they could not all be read.
+    failing: Option<Vec<String>>,
 }
 
 /// Runs the job's check on its branch tip (and, for a revert control, at its base), and records
 /// `bar-checked` for the commit it read, which is read once and checked as it was.
-pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, inbox: &HostDir) -> Result<CheckRun> {
+pub(super) fn run(
+    ctx: &Ctx,
+    job: &Job,
+    home: &Home,
+    dir: &SessionRepo,
+    base: Option<&str>,
+    inbox: &HostDir,
+) -> Result<CheckRun> {
     let command = job.check().context("a check was asked of a job that declares none")?.to_owned();
     let tip = dir.rev("HEAD");
     let place = Place { inbox, work: &ctx.job_scratch(&format!("{}.bar", job.name)) };
@@ -77,11 +86,11 @@ pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, inbox: &
         // A revert control expects the base to fail: its failure there is the point, not an excuse.
         Said::Failed if red_first => BarResult::Fail,
         Said::Failed => {
-            let base = at_base(ctx, job, home, &command, dir, &place);
-            base_exit = Some(base.code);
-            match base.said {
+            let at = at_base(ctx, base, home, &command, dir, &place);
+            base_exit = Some(at.code);
+            match at.said {
                 Said::Passed => BarResult::Fail,
-                Said::Failed => match base_red(&head.failing, &base.failing) {
+                Said::Failed => match base_red(head.failing.as_deref(), at.failing.as_deref()) {
                     Some(tests) => {
                         text = format!("{text}\n(the same check also failed at the base commit)");
                         failing = tests;
@@ -90,23 +99,23 @@ pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, inbox: &
                     None => BarResult::Fail,
                 },
                 Said::Broke => {
-                    text = format!("the check could not run at the base commit: {}", base.text);
+                    text = format!("the check could not run at the base commit: {}", at.text);
                     BarResult::CheckCouldNotRun
                 }
             }
         }
         Said::Passed if !red_first => BarResult::Pass,
         Said::Passed => {
-            let base = at_base(ctx, job, home, &command, dir, &place);
-            base_exit = Some(base.code);
-            match base.said {
+            let at = at_base(ctx, base, home, &command, dir, &place);
+            base_exit = Some(at.code);
+            match at.said {
                 Said::Failed => BarResult::Pass,
                 Said::Passed => {
                     text = format!("{text}\n(the same check also passed at the base commit)");
                     BarResult::CheckProvesNothing
                 }
                 Said::Broke => {
-                    text = format!("the check could not run at the base commit: {}", base.text);
+                    text = format!("the check could not run at the base commit: {}", at.text);
                     BarResult::CheckCouldNotRun
                 }
             }
@@ -127,10 +136,12 @@ pub(super) fn run(ctx: &Ctx, job: &Job, home: &Home, dir: &SessionRepo, inbox: &
 }
 
 /// Whether a check that failed at the tip and at the base, naming the failing tests `tip` and `base`,
-/// failed for the base's reason, and if so the tip's failing tests. Both naming tests: every test
-/// failing at the tip fails at the base too. Neither naming any: the failure cannot be compared, so
-/// failing at the base is enough. Only one naming tests: they failed differently, so it is the job's.
-fn base_red(tip: &[String], base: &[String]) -> Option<Vec<String>> {
+/// failed for the base's reason, and if so the tip's failing tests. Either list unknown: it cannot be
+/// compared, so it is the job's. Both naming tests: every test failing at the tip fails at the base
+/// too. Neither naming any: failing at the base is enough. Only one naming tests: they failed
+/// differently, so it is the job's.
+fn base_red(tip: Option<&[String]>, base: Option<&[String]>) -> Option<Vec<String>> {
+    let (tip, base) = (tip?, base?);
     match (tip.is_empty(), base.is_empty()) {
         (true, true) => Some(Vec::new()),
         (false, false) => tip.iter().all(|t| base.contains(t)).then(|| tip.to_vec()),
@@ -138,17 +149,33 @@ fn base_red(tip: &[String], base: &[String]) -> Option<Vec<String>> {
     }
 }
 
+/// The most failing tests compared, and the longest output line read: the output is the worker's,
+/// so past either it is not compared at all.
+const MAX_FAILING: usize = 1000;
+const MAX_LINE: usize = 64 * 1024;
+
 /// The failing tests a whole `cargo test` output names, in the order first named: its
-/// `test NAME ... FAILED` lines and the names indented under a `failures:` line. Names are kept whole,
-/// spaces and all (a doctest's is `src/lib.rs - f (line 3)`). The `---- NAME stdout ----` headers are
-/// not read: `--show-output` prints them for passing tests too, under `successes:`.
-fn failing_tests(output: impl std::io::BufRead) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    let mut listing = false;
-    for line in output.split(b'\n').map_while(Result::ok) {
-        let line = String::from_utf8_lossy(&line);
-        let line = line.trim_end_matches('\r');
-        let name = if line == "failures:" {
+/// `test NAME ... FAILED` lines and the names indented under a `failures:` line. A name is kept whole,
+/// spaces and all (a doctest's is `src/lib.rs - f (line 3)`), after the test target it ran in, since a
+/// name is only unique within one. The `---- NAME stdout ----` headers are not read: `--show-output`
+/// prints them for passing tests too, under `successes:`. `None` when the output cannot be read
+/// whole: a read error, a line longer than [`MAX_LINE`] or more than [`MAX_FAILING`] failing tests.
+fn failing_tests(mut output: impl BufRead) -> Option<Vec<String>> {
+    let (mut names, mut target, mut listing, mut buf) = (Vec::<String>::new(), String::new(), false, Vec::new());
+    loop {
+        buf.clear();
+        if output.by_ref().take(MAX_LINE as u64 + 1).read_until(b'\n', &mut buf).ok()? == 0 {
+            return Some(names);
+        }
+        if buf.len() > MAX_LINE {
+            return None;
+        }
+        let line = String::from_utf8_lossy(&buf);
+        let line = line.trim_end_matches(['\n', '\r']);
+        let name = if let Some(t) = test_target(line) {
+            (target, listing) = (t, false);
+            None
+        } else if line == "failures:" {
             listing = true;
             None
         } else if let Some(n) = line.strip_prefix("test ").and_then(|l| l.strip_suffix(" ... FAILED")) {
@@ -159,25 +186,43 @@ fn failing_tests(output: impl std::io::BufRead) -> Vec<String> {
             listing &= line.trim().is_empty();
             None
         };
-        if let Some(n) = name.filter(|n| !n.is_empty())
-            && !names.iter().any(|m| m == n)
-        {
-            names.push(n.to_owned());
+        let Some(name) = name.filter(|n| !n.is_empty()) else { continue };
+        let id = if target.is_empty() { name.to_owned() } else { format!("{target}: {name}") };
+        if !names.contains(&id) {
+            if names.len() == MAX_FAILING {
+                return None;
+            }
+            names.push(id);
         }
     }
-    names
+}
+
+/// The test target a `cargo test` status line starts, without its binary's hash:
+/// `     Running tests/flow.rs (target/debug/deps/flow-0a1b2c3d)` is `tests/flow.rs (flow)`, and
+/// `   Doc-tests relay` is `doctests relay`.
+fn test_target(line: &str) -> Option<String> {
+    if let Some(krate) = line.strip_prefix("   Doc-tests ") {
+        return Some(format!("doctests {krate}"));
+    }
+    let what = line.strip_prefix("     Running ")?;
+    let Some((src, bin)) = what.strip_suffix(')').and_then(|w| w.split_once(" (")) else {
+        return Some(what.to_owned());
+    };
+    let file = bin.rsplit(['/', '\\']).next().unwrap_or(bin);
+    let stem = file.rsplit_once('-').filter(|(_, h)| h.bytes().all(|b| b.is_ascii_hexdigit())).map_or(file, |(s, _)| s);
+    Some(format!("{src} ({stem})"))
 }
 
 /// The check at the commit the branch started from.
-fn at_base(ctx: &Ctx, job: &Job, home: &Home, command: &str, dir: &SessionRepo, place: &Place<'_>) -> Ran {
-    match job.base.clone().or_else(|| checkpoint::base(dir, &[]).head) {
+fn at_base(ctx: &Ctx, base: Option<&str>, home: &Home, command: &str, dir: &SessionRepo, place: &Place<'_>) -> Ran {
+    match base.map(str::to_owned).or_else(|| checkpoint::base(dir, &[]).head) {
         Some(base) => at(ctx, home, command, dir, &base, place),
         None => broke("no base commit is known for the revert control"),
     }
 }
 
 fn broke(why: &str) -> Ran {
-    Ran { said: Said::Broke, code: -1, text: why.to_owned(), failing: Vec::new() }
+    Ran { said: Said::Broke, code: -1, text: why.to_owned(), failing: Some(Vec::new()) }
 }
 
 /// Where a check runs: its working directory, made fresh for each run in a place only relay writes,
@@ -236,10 +281,9 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, place: &Place<'_>) -
         let text = place.inbox.read("check.out").map(|f| tail_text(f, 2 * TAIL as u64)).unwrap_or_default();
         let code = status.code();
         let failing = match said(code) {
-            Said::Failed => place.inbox.read("check.out").map(|f| failing_tests(std::io::BufReader::new(f))),
-            _ => Ok(Vec::new()),
-        }
-        .unwrap_or_default();
+            Said::Failed => place.inbox.read("check.out").ok().and_then(|f| failing_tests(std::io::BufReader::new(f))),
+            _ => Some(Vec::new()),
+        };
         let _ = place.inbox.remove("check.out");
         Ok(Ran { said: said(code), code: code.unwrap_or(-1), text, failing })
     };
@@ -284,7 +328,7 @@ mod tests {
         failures:\n    a::two\n\ntest result: FAILED. 1 passed; 1 failed\n";
 
     fn names(output: &str) -> Vec<String> {
-        failing_tests(output.as_bytes())
+        failing_tests(output.as_bytes()).expect("read whole")
     }
 
     #[test]
@@ -303,19 +347,43 @@ mod tests {
 
     #[test]
     fn a_doctest_keeps_its_whole_name() {
-        let doc = "test src/lib.rs - f (line 3) ... FAILED\n\nfailures:\n    src/lib.rs - f (line 3)\n";
-        assert_eq!(names(doc), ["src/lib.rs - f (line 3)"]);
+        let doc =
+            "   Doc-tests relay\ntest src/lib.rs - f (line 3) ... FAILED\n\nfailures:\n    src/lib.rs - f (line 3)\n";
+        assert_eq!(names(doc), ["doctests relay: src/lib.rs - f (line 3)"]);
         let other = doc.replace("line 3", "line 9");
-        assert_eq!(base_red(&names(&other), &names(doc)), None, "a different doctest failing is the job's");
+        assert_eq!(base_red(Some(&names(&other)), Some(&names(doc))), None, "another doctest");
+    }
+
+    #[test]
+    fn a_test_is_named_with_the_target_it_ran_in() {
+        let in_target =
+            |bin: &str| format!("     Running tests/{bin}.rs (target/debug/deps/{bin}-0a1b2c3d4e5f6a7b)\n{RED}");
+        assert_eq!(names(&in_target("flow")), ["tests/flow.rs (flow): a::two"]);
+        let (at_base, at_tip) = (names(&in_target("one")), names(&in_target("two")));
+        assert_eq!(base_red(Some(&at_tip), Some(&at_base)), None, "the same name in another target");
+        let rebuilt = names(&in_target("flow").replace("0a1b2c3d4e5f6a7b", "ffffffffffffffff"));
+        assert_eq!(rebuilt, names(&in_target("flow")), "a binary's hash is not part of its name");
+    }
+
+    #[test]
+    fn an_output_too_big_to_compare_is_not_compared() {
+        let long = format!("{}\n{RED}", "x".repeat(MAX_LINE + 1));
+        assert_eq!(failing_tests(long.as_bytes()), None, "a line too long to read");
+        let mut many = String::new();
+        for i in 0..=MAX_FAILING {
+            std::fmt::Write::write_fmt(&mut many, format_args!("test t{i} ... FAILED\n")).expect("to a String");
+        }
+        assert_eq!(failing_tests(many.as_bytes()), None, "more failing tests than are kept");
+        assert_eq!(base_red(None, Some(&names(RED))), None, "unknown at the tip is the job's");
     }
 
     #[test]
     fn a_failure_is_the_base_s_when_every_failing_test_fails_there_too() {
-        let (red, both) = (names(RED), names(&RED.replace("    a::two\n", "    a::two\n    a::new\n")));
-        assert_eq!(base_red(&red, &both), Some(vec!["a::two".to_owned()]), "fewer fail at the tip");
-        assert_eq!(base_red(&both, &red), None, "a new failing test is the job's");
-        assert_eq!(base_red(&[], &[]), Some(vec![]), "nothing to compare: the base fails too");
-        assert_eq!(base_red(&[], &red), None, "the tip fails before the tests the base fails");
+        let (red1, both) = (names(RED), names(&RED.replace("    a::two\n", "    a::two\n    a::new\n")));
+        assert_eq!(base_red(Some(&red1), Some(&both)), Some(vec!["a::two".to_owned()]), "fewer fail at the tip");
+        assert_eq!(base_red(Some(&both), Some(&red1)), None, "a new failing test is the job's");
+        assert_eq!(base_red(Some(&[]), Some(&[])), Some(vec![]), "nothing to compare: the base fails too");
+        assert_eq!(base_red(Some(&[]), Some(&red1)), None, "the tip fails before the tests the base fails");
     }
 
     #[test]

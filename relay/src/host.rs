@@ -47,8 +47,16 @@ pub fn executable(path: &Path) -> bool {
 /// absolute path recorded at `record` while that can still run, else what relay's own `PATH`
 /// finds, which is then recorded: a later caller whose `PATH` lacks it finds the same program,
 /// and one whose `PATH` has another does not replace it. With no record (`None`), `PATH` alone.
+///
+/// A program found by name is never a mise shim, recorded or on `PATH`: a shim picks its version
+/// from the mise config of whatever directory it runs in, and fails (`No version is set for
+/// shim`) where none pins it, such as a session's clone or relay's state directory. The real
+/// binary an activated mise put on the caller's `PATH` is found and recorded instead; with only a
+/// shim, the program is missing, and shown so. A path the config names is the owner's own
+/// choice, and is taken as it is.
 pub fn resolve(record: Option<&Path>, name: &OsStr) -> Program {
-    resolve_as(record, name, &executable)
+    let dirs = search_path().unwrap_or_default();
+    resolve_as(record, name, &executable, &|p: &Path| executable(p) && !mise_shim(p), &dirs)
 }
 
 /// A harness's helper ([`crate::harness::Harness::helpers`]: the interpreter its launcher's
@@ -59,9 +67,15 @@ pub fn resolve(record: Option<&Path>, name: &OsStr) -> Program {
 /// caller's `PATH` (`~/.local/share/mise/installs/bun/<v>/bin/bun`) is found and recorded instead;
 /// with only a shim, the helper is missing, and shown so.
 pub fn resolve_helper(record: Option<&Path>, name: &OsStr) -> Program {
-    // A launcher finds its helper by name (`#!/usr/bin/env node`) in the recorded file's directory, so
-    // a recorded file under another name (`/opt/node/node-v22`) could not serve it: it is passed over.
-    resolve_as(record, name, &|p: &Path| executable(p) && !mise_shim(p) && p.file_name() == Some(name))
+    let dirs = search_path().unwrap_or_default();
+    resolve_as(record, name, &helper_runs(name), &helper_runs(name), &dirs)
+}
+
+/// Whether `p` can serve as the helper `name`: a runnable file of that name, never a mise shim.
+/// A launcher finds its helper by name (`#!/usr/bin/env node`) in the recorded file's directory, so
+/// a recorded file under another name (`/opt/node/node-v22`) could not serve it: it is passed over.
+fn helper_runs(name: &OsStr) -> impl Fn(&Path) -> bool {
+    move |p: &Path| executable(p) && !mise_shim(p) && p.file_name() == Some(name)
 }
 
 /// Whether `path` is a mise shim: a link to the `mise` executable under another name.
@@ -72,20 +86,28 @@ pub fn mise_shim(path: &Path) -> bool {
         && std::fs::canonicalize(path).is_ok_and(|t| named(&t))
 }
 
-fn resolve_as(record: Option<&Path>, name: &OsStr, runs: &dyn Fn(&Path) -> bool) -> Program {
+/// The program `name` names: `explicit` judges a path the owner named (their own choice), and
+/// `discovered` judges what is found by name (the record, then `dirs`), so the two can differ.
+fn resolve_as(
+    record: Option<&Path>,
+    name: &OsStr,
+    explicit: &dyn Fn(&Path) -> bool,
+    discovered: &dyn Fn(&Path) -> bool,
+    dirs: &[PathBuf],
+) -> Program {
     let as_path = Path::new(name);
     if name.is_empty() || as_path.components().count() != 1 {
-        let found = !name.is_empty() && as_path.is_absolute() && runs(as_path);
+        let found = !name.is_empty() && as_path.is_absolute() && explicit(as_path);
         return if found { Program::Found(as_path.to_path_buf()) } else { Program::Missing(name.to_owned()) };
     }
     let key = name.to_string_lossy().into_owned();
-    if let Some(p) = recorded(&record.map(read).unwrap_or_default(), &key, runs) {
+    if let Some(p) = recorded(&record.map(read).unwrap_or_default(), &key, discovered) {
         return Program::Found(p);
     }
-    let Some(found) = on_path(name, runs) else { return Program::Missing(name.to_owned()) };
+    let Some(found) = on_path_in(dirs, name, discovered) else { return Program::Missing(name.to_owned()) };
     // A record that cannot be had or written is found again next time.
     match record.and_then(Held::take) {
-        Some(held) => held.record(key, found, runs),
+        Some(held) => held.record(key, found, discovered),
         None => Program::Found(found),
     }
 }
@@ -139,14 +161,16 @@ impl Held {
     }
 }
 
-/// Where `name` is on relay's own `PATH`, skipping relative entries (they would name a
-/// different file from every other directory).
+/// Where `name` is in `dirs`, in order, the first that `runs` accepts.
+fn on_path_in(dirs: &[PathBuf], name: &OsStr, runs: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
+    dirs.iter().map(|d| d.join(name)).find(|p| runs(p))
+}
+
+/// The directories relay's own `PATH` names, the one read of the caller's `PATH`. Relative
+/// entries are left out (they would name a different file from every other directory).
 #[allow(clippy::disallowed_methods, reason = "the one read of a caller's PATH: what it finds is recorded")]
-fn on_path(name: &OsStr, runs: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .filter(|d| d.is_absolute())
-        .map(|d| d.join(name))
-        .find(|p| runs(p))
+fn search_path() -> Option<Vec<PathBuf>> {
+    std::env::var_os("PATH").map(|p| std::env::split_paths(&p).filter(|d| d.is_absolute()).collect())
 }
 
 fn read(record: &Path) -> BTreeMap<String, PathBuf> {
@@ -401,8 +425,8 @@ mod tests {
         assert_eq!(resolve(None, OsStr::new("no-such-program-xyz")), Program::Missing("no-such-program-xyz".into()));
     }
 
-    /// A mise shim (a link to `mise` under the tool's name) is a program, but never a helper: it fails
-    /// wherever no mise config pins the tool, which is where sessions run.
+    /// A mise shim (a link to `mise` under the tool's name) is never a program and never a helper: it
+    /// fails wherever no mise config pins the tool, which is where sessions run.
     #[test]
     fn a_helper_is_never_a_mise_shim() {
         let d = crate::config::tempdir::Dir::new();
@@ -417,10 +441,52 @@ mod tests {
         assert!(mise_shim(&shim) && !mise_shim(&mise) && !mise_shim(&real) && !mise_shim(&linked));
         let record = d.path().join("programs.json");
         std::fs::write(&record, serde_json::json!({ "bun": shim }).to_string()).unwrap();
-        assert_eq!(resolve(Some(&record), OsStr::new("bun")), Program::Found(shim.clone()), "a program may be one");
+        assert_ne!(resolve(Some(&record), OsStr::new("bun")), Program::Found(shim.clone()), "a program not");
         assert_ne!(resolve_helper(Some(&record), OsStr::new("bun")), Program::Found(shim.clone()), "a helper not");
         std::fs::write(&record, serde_json::json!({ "bun": linked }).to_string()).unwrap();
         assert_eq!(resolve_helper(Some(&record), OsStr::new("bun")), Program::Found(linked), "a link to a real one is");
+    }
+
+    /// A mise shim is never a harness's program, recorded or on `PATH`: a shim fails wherever no
+    /// mise config pins the tool, which is where sessions run. The real binary an activated mise
+    /// put on `PATH` is found and recorded instead; with only a shim there, the program is missing.
+    #[test]
+    fn a_program_is_never_a_mise_shim() {
+        let d = crate::config::tempdir::Dir::new();
+        let mise = program(d.path(), "mise", 0o755);
+        let (shims, real_dir) = (d.path().join("shims"), d.path().join("installs/bin"));
+        std::fs::create_dir(&shims).unwrap();
+        std::fs::create_dir_all(&real_dir).unwrap();
+        // A name no `PATH` holds, so only what this test puts there is found.
+        let name = OsStr::new("relay-shim-program-xyz");
+        let key = name.to_str().unwrap();
+        let shim = shims.join(name);
+        std::os::unix::fs::symlink(&mise, &shim).unwrap();
+        let real = program(&real_dir, key, 0o755);
+        assert!(mise_shim(&shim) && !mise_shim(&real));
+        let runs = |p: &Path| executable(p) && !mise_shim(p);
+        let record = d.path().join("programs.json");
+        // A shim in the record is passed over, and the record replaced by the real binary found.
+        std::fs::write(&record, serde_json::json!({ key: shim }).to_string()).unwrap();
+        let dirs = [shims.clone(), real_dir.clone()];
+        let found = resolve_as(Some(&record), name, &executable, &runs, &dirs);
+        assert_ne!(found, Program::Found(shim.clone()), "a shim in the record not");
+        assert_eq!(found, Program::Found(real.clone()), "the real one instead");
+        assert_eq!(read(&record).get(key), Some(&real), "and the record holds it");
+        // A shim on `PATH` is passed over too: the real binary behind it is found.
+        assert_eq!(on_path_in(&dirs, name, &runs), Some(real.clone()), "the real one, past the shim");
+        // With only a shim there, the program is missing, and nothing is recorded.
+        let only = [shims.clone()];
+        assert_eq!(on_path_in(&only, name, &runs), None, "a shim is not a program");
+        let bare = d.path().join("bare.json");
+        assert_eq!(
+            resolve_as(Some(&bare), name, &executable, &runs, &only),
+            Program::Missing(name.into()),
+            "with only a shim, the program is missing"
+        );
+        assert!(!bare.exists(), "and nothing is recorded");
+        // A path the owner names is their own choice: a shim there is taken as it is.
+        assert_eq!(resolve_as(None, shim.as_os_str(), &executable, &runs, &only), Program::Found(shim.clone()));
     }
 
     /// Review of #40: a launcher finds its helper by name in the directory relay puts on its PATH, so
@@ -448,7 +514,9 @@ mod tests {
     fn concurrent_discoveries_all_stay_in_the_record() {
         let common =
             ["sh", "cat", "ls", "env", "true", "false", "echo", "mkdir", "rm", "cp", "mv", "ln", "sort", "head"];
-        let names: Vec<&str> = common.into_iter().filter(|n| on_path(OsStr::new(n), &executable).is_some()).collect();
+        let dirs = search_path().unwrap_or_default();
+        let names: Vec<&str> =
+            common.into_iter().filter(|n| on_path_in(&dirs, OsStr::new(n), &executable).is_some()).collect();
         assert!(names.len() >= 6, "too few programs on PATH to race: {names:?}");
         let d = crate::config::tempdir::Dir::new();
         for round in 0..20 {

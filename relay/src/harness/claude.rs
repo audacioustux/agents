@@ -548,6 +548,8 @@ impl StreamReader {
         };
         r.results.push(said);
         r.choose("");
+        // The main agent's words belong to the turn that just ended, never to a later result.
+        self.last_text = None;
     }
 }
 
@@ -673,6 +675,20 @@ mod tests {
         r.choose("FINAL");
         let ok = Ending { exit_ok: true, ..Ending::default() };
         assert_ne!(verdict(&r, ok, "FINAL", false, 0), Verdict::Done, "{r:?}");
+    }
+
+    /// Review of #51: an empty wake-up result does not take the words of the turn before it, so an
+    /// error in it cannot pass for the report that turn wrote.
+    #[test]
+    fn an_empty_wake_up_does_not_reuse_the_last_turns_words() {
+        let mut r = read(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"FINAL\nstatus: done"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"FINAL\nstatus: done"}"#,
+            r#"{"type":"result","subtype":"error","is_error":true,"result":"","origin":{"kind":"task-notification"}}"#,
+        ]);
+        r.choose("FINAL");
+        let ok = Ending { exit_ok: true, ..Ending::default() };
+        assert_eq!(verdict(&r, ok, "FINAL", false, 0), Verdict::Done, "{r:?}");
     }
 
     /// Review of #51: with no finished report, a limit that ended the run in a wake-up is what the

@@ -739,12 +739,18 @@ it on a `PATH` (`$XDG_STATE_HOME/relay/programs.json`, kept while that file can 
 changed only under `programs.lock`, so relays recording at once keep each other's entries),
 so a shell whose `PATH` lacks it (a dispatcher woken from cron, a bare `env -i` shell)
 still finds it, and a shell whose `PATH` names another does not replace it. Only an
-executable file counts. A harness is used when its program is found; one the config has
-a `[harness.<id>]` table for whose program is not found is shown on the board and in
-`quota show` as `program not found: omp` (`missing` in `--json`), and `queue add
---harness omp` exits 5 saying so. To move relay to another copy (an upgrade into a new
-directory), set `program`, or delete its line from `programs.json` and run any relay
-command from a shell that has it.
+executable file counts. A name found on a `PATH` is never a mise shim
+(`~/.local/share/mise/shims/puku-cli`, a link to `mise`): a shim chooses its version from
+the mise config of the directory it runs in, and fails (`No version is set for shim:
+puku-cli`) where none pins it, which is where sessions run. The real binary an activated
+mise put on `PATH` is found and recorded instead; a shim already in `programs.json` is
+passed over and the record replaced by that real binary. A path the config names is the
+owner's own choice, and is taken as it is. A harness is used when its program is found; one
+the config has a `[harness.<id>]` table for whose program is not found is shown on the
+board and in `quota show` as `program not found: omp` (`missing` in `--json`), and `queue
+add --harness omp` exits 5 saying so, and how to provide one. To move relay to another
+copy (an upgrade into a new directory), set `program`, or delete its line from
+`programs.json` and run any relay command from a shell that has it.
 
 A harness whose program is a script also has helper programs, the interpreters its
 `#!/usr/bin/env` line names: `bun` for omp, `node` for puku. They are found and recorded the

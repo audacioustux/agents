@@ -896,10 +896,9 @@ impl Config {
     ) -> Result<crate::harness::Invocation, crate::harness::Refusal> {
         let found = |program: crate::host::Program| match program {
             crate::host::Program::Found(p) => Ok(p.into_os_string()),
-            crate::host::Program::Missing(what) => Err(crate::harness::Refusal(format!(
-                "harness {harness}: program not found: {}",
-                what.to_string_lossy()
-            ))),
+            crate::host::Program::Missing(what) => {
+                Err(crate::harness::Refusal(Missing::Program(what).refusal(harness, self.programs.as_deref())))
+            }
         };
         let resolve = |name: &std::ffi::OsStr| found(crate::host::resolve(self.programs.as_deref(), name));
         // A helper is never a mise shim ([`crate::host::resolve_helper`]), and one not found says so.
@@ -1002,13 +1001,24 @@ impl Missing {
     /// Why harness `id` cannot run, and how to make what it lacks available. `record` is this
     /// machine's record of programs (`programs.json`), where a helper's path is kept.
     pub fn refusal(&self, id: &str, record: Option<&Path>) -> String {
+        let record = record.map_or_else(|| "relay's programs.json".to_owned(), |r| r.display().to_string());
         match self {
+            // A name is found on a `PATH` or in the record, where a mise shim may have been passed
+            // over; a path is the owner's own, and says what to set.
+            Self::Program(what) if Path::new(what).components().count() == 1 => {
+                let what = what.to_string_lossy();
+                format!(
+                    "harness {id}: program not found: {what}, which no mise shim may be: a shim \
+                     (~/.local/share/mise/shims/{what}) fails where no mise config pins it. Put a real {what} on \
+                     PATH (an installed binary, not a mise shim) and run any relay command from that shell, or set \
+                     \"{what}\" in {record} to its absolute path."
+                )
+            }
             Self::Program(what) => format!(
                 "harness {id}: program not found: {} (set [harness.{id}] program to its path)",
                 what.to_string_lossy()
             ),
             Self::Helper { name } => {
-                let record = record.map_or_else(|| "relay's programs.json".to_owned(), |r| r.display().to_string());
                 format!(
                     "harness {id}: helper not found: {name}, which {id}'s command runs on. Put a real {name} on \
                      PATH (an installed binary, not a mise shim, which fails where no mise config pins it) and run \
@@ -1091,7 +1101,8 @@ mod tests {
         assert_eq!(cfg.locate("claude", crate::harness::Invocation::new("claude")).unwrap().program, pinned);
         // A program that is not there is refused by name, never left for the shell to fail on.
         let missing = cfg.locate("omp", crate::harness::Invocation::new("no-such-harness-xyz")).unwrap_err();
-        assert_eq!(missing.0, "harness omp: program not found: no-such-harness-xyz");
+        assert!(missing.0.starts_with("harness omp: program not found: no-such-harness-xyz"), "{}", missing.0);
+        assert!(missing.0.contains("not a mise shim"), "how to provide one: {}", missing.0);
         let gone = Config::parse("name = \"x\"\n[harness.omp]\nprogram = \"/opt/x/omp\"\n", d.path()).unwrap();
         assert!(gone.locate("omp", crate::harness::Invocation::new("omp")).unwrap_err().0.contains("/opt/x/omp"));
         assert!(!gone.harnesses().iter().any(|h| h.id() == "omp"), "not usable");
@@ -1160,6 +1171,13 @@ mod tests {
         let program = Missing::Program("/opt/x/omp".into()).refusal("omp", Some(record));
         assert_eq!(program, "harness omp: program not found: /opt/x/omp (set [harness.omp] program to its path)");
         assert_eq!(Missing::Helper { name: "bun" }.cell(), "helper not found: bun");
+        // A program found by name is refused with its own remedy: a mise shim may have been passed
+        // over, and the way to give relay the real one is said.
+        let named = Missing::Program("omp".into()).refusal("omp", Some(record));
+        assert!(named.starts_with("harness omp: program not found: omp,"), "{named}");
+        assert!(named.contains("not a mise shim") && named.contains("on PATH"), "{named}");
+        assert!(named.contains("\"omp\" in /s/relay/programs.json"), "how to repair its record: {named}");
+        assert_eq!(Missing::Program("omp".into()).cell(), "program not found: omp");
     }
 
     fn repo() -> tempdir::Dir {

@@ -22,6 +22,8 @@ pub struct Report {
     /// The final answer: the last report that was not a wake-up after it,
     /// or the main agent's last words when that report is empty.
     pub answer: String,
+    /// The texts of the wake-up results after `answer`'s, in order: a report can be written in one.
+    pub wakeups: Vec<String>,
     pub is_error: bool,
     /// The error's own message fields only (never whole events: an id can contain "429").
     pub error_text: String,
@@ -32,6 +34,17 @@ pub struct Report {
     pub turns: u32,
     /// The latest quota reading the stream carried.
     pub meters: Option<Meters>,
+}
+
+impl Report {
+    /// The report to keep: the latest result carrying `marker`, else [`Report::answer`]. With no
+    /// marker, the answer: a wake-up's "ok" must not replace it.
+    pub fn chosen(&self, marker: &str) -> &str {
+        if marker.is_empty() {
+            return &self.answer;
+        }
+        self.wakeups.iter().rev().find(|w| w.contains(marker)).unwrap_or(&self.answer)
+    }
 }
 
 /// How the run ended, from the runner's side.

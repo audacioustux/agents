@@ -535,11 +535,15 @@ impl StreamReader {
         r.api_status = v.get("api_error_status").and_then(Value::as_u64);
         let api_error = v.get("api_error").and_then(Value::as_str).unwrap_or("");
         r.error_text = if r.is_error { format!("{text} {api_error}").trim().to_owned() } else { String::new() };
-        // A wake-up (a background task finishing after the report) adds a later
-        // result; the report is the last one that is not a wake-up.
-        if v.pointer("/origin/kind").and_then(Value::as_str) != Some("task-notification") {
-            r.answer =
-                if text.trim().is_empty() { self.last_text.clone().unwrap_or_default() } else { text.to_owned() };
+        // A wake-up (a background task finishing after the report) adds a later result. The answer
+        // is the last one that is not a wake-up; the wake-ups after it are kept, as one can carry
+        // the report ([`Report::chosen`]).
+        let said = if text.trim().is_empty() { self.last_text.clone().unwrap_or_default() } else { text.to_owned() };
+        if v.pointer("/origin/kind").and_then(Value::as_str) == Some("task-notification") {
+            r.wakeups.push(said);
+        } else {
+            r.answer = said;
+            r.wakeups.clear();
         }
     }
 }
@@ -630,6 +634,15 @@ mod tests {
         assert!(auth.is_error && auth.error_text.contains("authenticate"));
         let budget = read(&[r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"result":""}"#]);
         assert!(budget.budget_hit);
+    }
+
+    #[test]
+    fn a_report_written_in_a_wake_up_turn_is_kept() {
+        let r = read(&[
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"waiting for the tests"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"FINAL\nstatus: done\nverdict: reject","origin":{"kind":"task-notification"}}"#,
+        ]);
+        assert!(r.chosen("FINAL").contains("verdict: reject"), "{r:?}");
     }
 
     #[test]

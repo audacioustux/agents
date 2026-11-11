@@ -2587,6 +2587,24 @@ fn rejected(env: &Env) -> (String, String) {
 }
 
 #[test]
+fn a_review_whose_verdict_comes_in_a_wake_up_turn_still_rejects() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-wake", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &["--model", "claude=claude-opus-5-5"]);
+    let text = "[wake] [verdict-reject] Review the change.";
+    let out = relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", text]);
+    ok(&out, "queue the review");
+    let r = wait_for(&env, "rev");
+    assert_eq!(r["status"], "done", "{r}");
+    let b = wait_for(&env, "build");
+    assert_eq!(b["verdicts"][0]["reason"], "test-failure", "the builder has the reject: {b}");
+}
+
+#[test]
 fn a_review_sees_the_builders_branch_and_a_reject_resumes_the_builder_with_the_findings() {
     if !have_bwrap() {
         return;
@@ -2886,7 +2904,7 @@ fn a_profile_that_asks_for_an_independent_family_refuses_a_same_family_reviewer(
                 "--review-of",
                 "easy",
                 "--text",
-                "x",
+                "[verdict-accept] x",
                 "--harness",
                 "claude",
                 "--model",

@@ -230,8 +230,10 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         stderr: "stderr.log",
         measure: work.clone.iter().map(SessionRepo::path).chain([work.tmp.as_path()]).collect(),
     };
-    let (report, ending, disk) =
+    let (mut report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
+    let marker = &ctx.cfg.session.final_marker;
+    report.answer = report.chosen(marker).to_owned();
     if !report.answer.is_empty() {
         std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
     }
@@ -248,8 +250,17 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         reviewing: launch.reviewing.as_ref(),
         model: seat.model.as_deref(),
     };
-    let marker = &ctx.cfg.session.final_marker;
-    match verdict(&report, ending, marker, job.readonly(), now_s()) {
+    // A review's answer is not enough: it needs its report and the verdict in it.
+    let v = match verdict(&report, ending, marker, job.readonly() && ran.reviewing.is_none(), now_s()) {
+        Verdict::Done if ran.reviewing.is_some() && review::verdict(&report.answer, marker).is_none() => {
+            Verdict::FollowUp(format!(
+                "Your {marker} section has no `verdict: accept` or `verdict: reject` line, so the review is not \
+                 finished. End with the {marker} section again, with its verdict."
+            ))
+        }
+        v => v,
+    };
+    match v {
         // A cap authorizes more spend; a run that has said `status: done` needs none. It ends as its
         // report says, the overrun recorded, and the acceptance check and the `ended` chain judge it as usual.
         Verdict::Budget if report.ended && final_status_done(&report.answer, marker) => {
@@ -718,6 +729,9 @@ fn conclude(ctx: &Ctx, job: &Job, key: &str, v: Verdict, now_s: i64) -> Result<E
         Verdict::FollowUp(message) if job.follow_ups == 0 => {
             port.emit(SessionEvent::FollowUp { job: job.name.clone(), message, budget_usd: None })?;
             (Outcome::Retry, Some("ended without its final report; asked once more".into()))
+        }
+        Verdict::FollowUp(_) if job.review_of().is_some() => {
+            (Outcome::Failed, Some("no verdict in the review's report after a follow-up".into()))
         }
         Verdict::FollowUp(_) => (Outcome::Done, Some(format!("no {} section after a follow-up", s.final_marker))),
         Verdict::Limited { until } => {

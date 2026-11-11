@@ -742,7 +742,8 @@ mod tests {
         let d = crate::config::tempdir::Dir::new();
         let (a, b, secret) = homes_with_a_transcript(d.path());
         std::os::unix::fs::symlink(&secret, a.join("projects/-repo/s1/leak")).unwrap();
-        let _ = copy(&a, &b);
+        assert!(copy(&a, &b).unwrap(), "the transcript is copied");
+        assert_eq!(std::fs::read_to_string(b.join("projects/-repo/s1.jsonl")).unwrap(), "x", "with its data");
         let leak = b.join("projects/-repo/s1/leak");
         assert!(std::fs::read_to_string(&leak).map_or(true, |s| s != "secret"), "the secret was copied");
         assert!(std::fs::symlink_metadata(&leak).is_err(), "a link was copied");

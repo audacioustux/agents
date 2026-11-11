@@ -456,35 +456,43 @@ mod nofollow {
     }
 
     /// `<session>.jsonl` and its `<session>/` sidecar, from one key directory to another.
+    /// The transcript itself must be copied: one swapped for a link or anything but a regular file
+    /// since it was found is an error, never a transfer reported done. Sidecar entries may be skipped.
     pub(super) fn copy_transcript(from: &OwnedFd, to: &OwnedFd, session: &str) -> io::Result<()> {
-        copy_file(from, to, format!("{session}.jsonl").as_str())?;
+        if !copy_file(from, to, format!("{session}.jsonl").as_str())? {
+            return Err(io::Error::other(format!("{session}.jsonl is no longer a regular file")));
+        }
         if kind(from, session) == Some(FileType::Directory) {
             copy_tree(&open_dir(from, session)?, &make_dir(to, session)?)?;
         }
         Ok(())
     }
 
-    /// Copies the regular file `name`; anything else there is skipped.
-    fn copy_file<P: Arg + Copy>(from: &OwnedFd, to: &OwnedFd, name: P) -> io::Result<()> {
+    /// Copies the regular file `name`, with its permission bits; anything else there is skipped.
+    /// Whether it was copied.
+    fn copy_file<P: Arg + Copy>(from: &OwnedFd, to: &OwnedFd, name: P) -> io::Result<bool> {
         // `NONBLOCK` so a fifo swapped in is not waited on; it is skipped below.
         let read = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
         let src = match rustix::fs::openat(from, name, read, Mode::empty()) {
             Ok(fd) => fd,
-            Err(Errno::LOOP) => return Ok(()),
+            Err(Errno::LOOP) => return Ok(false),
             Err(e) => return Err(e.into()),
         };
         let st = rustix::fs::fstat(&src)?;
         if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
-            return Ok(());
+            return Ok(false);
         }
         match rustix::fs::unlinkat(to, name, AtFlags::empty()) {
             Ok(()) | Err(Errno::NOENT) => {}
             Err(e) => return Err(e.into()),
         }
         let write = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let dest = rustix::fs::openat(to, name, write, Mode::from_raw_mode(st.st_mode & 0o777))?;
+        let mode = Mode::from_raw_mode(st.st_mode & 0o777);
+        let dest = rustix::fs::openat(to, name, write, mode)?;
+        // The umask filtered the mode `openat` was given; set it on the descriptor, never by name.
+        rustix::fs::fchmod(&dest, mode)?;
         io::copy(&mut File::from(src), &mut File::from(dest))?;
-        Ok(())
+        Ok(true)
     }
 
     fn copy_tree(from: &OwnedFd, to: &OwnedFd) -> io::Result<()> {
@@ -496,7 +504,7 @@ mod nofollow {
             }
             match kind(from, name) {
                 Some(FileType::Directory) => copy_tree(&open_dir(from, name)?, &make_dir(to, name)?)?,
-                Some(FileType::RegularFile) => copy_file(from, to, name)?,
+                Some(FileType::RegularFile) => _ = copy_file(from, to, name)?,
                 _ => {}
             }
         }
@@ -749,6 +757,35 @@ mod tests {
         assert!(copy(&a, &b).unwrap());
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "secret");
         assert_eq!(std::fs::read_to_string(b.join("projects/-repo/s1.jsonl")).unwrap(), "x");
+    }
+
+    /// Review of #50: a transcript that is no longer a regular file when it is copied (a link
+    /// swapped in after `find`) fails the copy rather than reporting a transfer done.
+    #[test]
+    fn a_transcript_that_is_not_a_regular_file_fails_the_copy() {
+        use std::os::fd::OwnedFd;
+        let d = crate::config::tempdir::Dir::new();
+        let (a, b, secret) = homes_with_a_transcript(d.path());
+        let key = a.join("projects/-repo");
+        std::fs::remove_file(key.join("s1.jsonl")).unwrap();
+        std::os::unix::fs::symlink(&secret, key.join("s1.jsonl")).unwrap();
+        std::fs::create_dir_all(b.join("projects/-repo")).unwrap();
+        let open = |p: &Path| -> OwnedFd { std::fs::File::open(p).unwrap().into() };
+        assert!(nofollow::copy_transcript(&open(&key), &open(&b.join("projects/-repo")), "s1").is_err());
+        assert!(std::fs::symlink_metadata(b.join("projects/-repo/s1.jsonl")).is_err(), "nothing copied");
+    }
+
+    /// Review of #50: a copied file keeps its source's permission bits whatever the umask.
+    #[test]
+    fn a_copied_transcript_keeps_its_mode_past_the_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = crate::config::tempdir::Dir::new();
+        let (a, b, _) = homes_with_a_transcript(d.path());
+        let src = a.join("projects/-repo/s1.jsonl");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(carry_transcript("s1", Some(&a), &b).unwrap());
+        let mode = std::fs::metadata(b.join("projects/-repo/s1.jsonl")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o666, "{mode:o}");
     }
 
     #[test]

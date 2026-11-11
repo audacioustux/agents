@@ -317,7 +317,8 @@ fn workspace(ctx: &Ctx, job: &Job) -> Result<Step<Workspace>> {
             Ok(made) => made,
             Err(e) => return Ok(ControlFlow::Break((Outcome::Failed, Some(format!("{e:#}"))))),
         };
-        base.clone_from(&made);
+        // A collected clone made again has no new base: the recorded one stands.
+        base = made.clone().or(base);
         port(ctx, job).emit(SessionEvent::Cloned {
             job: job.name.clone(),
             workdir: dir.clone(),

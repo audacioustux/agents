@@ -180,6 +180,8 @@ fn failing_tests(mut output: impl BufRead) -> Option<Vec<String>> {
             None
         } else if let Some(n) = line.strip_prefix("test ").and_then(|l| l.strip_suffix(" ... FAILED")) {
             Some(n)
+        } else if let Some(n) = nextest_failure(line) {
+            Some(n)
         } else if listing && line.starts_with("    ") {
             Some(line.trim())
         } else {
@@ -195,6 +197,18 @@ fn failing_tests(mut output: impl BufRead) -> Option<Vec<String>> {
             names.push(id);
         }
     }
+}
+
+/// The test a `cargo nextest` status line says failed: `        FAIL [   0.004s] relay::flow a_test` is
+/// `relay::flow a_test`, already named with its target. A timeout, a signal, an abort and a retry's
+/// failure (`TRY 2 FAIL`) count; a pass, a skip and the summary line do not.
+fn nextest_failure(line: &str) -> Option<&str> {
+    let (status, rest) = line.trim_start().split_once(" [")?;
+    let failed = status.ends_with("FAIL") || status.starts_with("SIG") || matches!(status, "TIMEOUT" | "ABORT");
+    let id = rest.split_once("] ")?.1.trim();
+    // Newer versions put the test's place in the run first: `(3/10) relay::flow a_test`.
+    let id = id.strip_prefix('(').and_then(|i| i.split_once(") ")).map_or(id, |(_, i)| i.trim_start());
+    failed.then_some(id)
 }
 
 /// The test target a `cargo test` status line starts, without its binary's hash:
@@ -363,6 +377,16 @@ mod tests {
         assert_eq!(base_red(Some(&at_tip), Some(&at_base)), None, "the same name in another target");
         let rebuilt = names(&in_target("flow").replace("0a1b2c3d4e5f6a7b", "ffffffffffffffff"));
         assert_eq!(rebuilt, names(&in_target("flow")), "a binary's hash is not part of its name");
+    }
+
+    #[test]
+    fn a_nextest_output_names_its_failing_tests() {
+        let run = "    Starting 3 tests across 2 binaries\n        PASS [   0.004s] relay a::one\n        \
+            FAIL [   0.010s] relay::flow a_test\n     TIMEOUT [  60.001s] (3/3) relay b::slow\n------------\n     \
+            Summary [  60.1s] 3 tests run: 1 passed, 2 failed\n        FAIL [   0.010s] relay::flow a_test\n";
+        assert_eq!(names(run), ["relay::flow a_test", "relay b::slow"]);
+        assert_eq!(nextest_failure("   TRY 2 FAIL [   0.010s] relay a::flaky"), Some("relay a::flaky"));
+        assert_eq!(nextest_failure("        SKIP [         ] relay a::skipped"), None);
     }
 
     #[test]

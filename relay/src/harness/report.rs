@@ -144,6 +144,18 @@ pub fn verdict(r: &Report, end: Ending, final_marker: &str, readonly: bool, now_
     ))
 }
 
+/// The zone a process with `TZ` set to `tz` reads its clock in: a zone name (`Asia/Dhaka`,
+/// `:Etc/GMT-6`), else a POSIX rule (`UTC-6`); an empty one is UTC. With no `TZ`, or one that
+/// cannot be read, this machine's zone.
+pub fn zone_of(tz: Option<&str>) -> TimeZone {
+    let Some(tz) = tz else { return TimeZone::system() };
+    let name = tz.strip_prefix(':').unwrap_or(tz);
+    if name.is_empty() {
+        return TimeZone::UTC;
+    }
+    TimeZone::get(name).or_else(|_| TimeZone::posix(name)).unwrap_or_else(|_| TimeZone::system())
+}
+
 static RESET: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)resets\s+(?:(?P<mon>[A-Z][a-z]{2})\s+(?P<day>\d{1,2}),?\s+)?(?:at\s+)?(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>am|pm)\s*(?:\((?P<tz>[^)]+)\))?").expect("regex")
 });
@@ -155,7 +167,8 @@ pub fn parse_reset(text: &str, now_s: i64) -> Option<i64> {
     parse_reset_in(text, now_s, &TimeZone::system())
 }
 
-/// [`parse_reset`], with `local` as the zone of a time that names none.
+/// [`parse_reset`], with `local` as the zone of a time that names none: the zone of the process
+/// that printed it ([`zone_of`]).
 pub fn parse_reset_in(text: &str, now_s: i64, local: &TimeZone) -> Option<i64> {
     if let Some(c) = RESETS_IN.captures(text) {
         return Some(now_s + duration_seconds(&c[1]));
@@ -287,5 +300,9 @@ mod tests {
         // 21:00 in Dhaka (UTC+6): 3pm there is 09:00 UTC tomorrow.
         assert_eq!(parse_reset_in("resets 3pm", NOW, &dhaka), Some(NOW + 18 * 3600));
         assert_eq!(parse_reset_in("resets 4pm (UTC)", NOW, &dhaka), Some(NOW + 3600), "a stated zone wins");
+        for tz in ["Etc/GMT-6", ":Etc/GMT-6", "UTC-6"] {
+            assert_eq!(parse_reset_in("resets 3pm", NOW, &zone_of(Some(tz))), Some(NOW + 18 * 3600), "{tz}");
+        }
+        assert_eq!(zone_of(Some("")), TimeZone::UTC);
     }
 }

@@ -20,6 +20,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use jiff::tz::TimeZone;
 use serde_json::Value;
 
 use crate::harness::claude::{Account, ClaudeCode, digest};
@@ -183,7 +184,7 @@ impl Account for PukuSession {
 
     /// `quotas.chat` of the subscription: `windows` `fiveHour`, `weekly` and
     /// `monthly`, or, with none, the request count `used_req` of `req_limit`.
-    fn parse_quota(&self, text: &str, _now_s: i64) -> Meters {
+    fn parse_quota(&self, text: &str, _now_s: i64, _local: &TimeZone) -> Meters {
         let mut out = Meters::new();
         let Some(chat) = last_object(text).and_then(|v| v.get("chat").cloned()) else { return out };
         for (key, name) in [("fiveHour", "five_hour"), ("weekly", "seven_day"), ("monthly", "monthly")] {
@@ -327,15 +328,15 @@ mod tests {
     #[test]
     fn usage_is_the_chat_quota() {
         let reply = r#"{"chat":{"used_req":10,"req_limit":1000,"windows":{"fiveHour":{"limit":200,"used":50,"resetsAt":"2026-11-09T05:00:00Z"},"weekly":{"limit":1000,"used":900,"resetsAt":"2026-11-12T00:00:00.000Z"},"monthly":{"limit":0,"used":0,"resetsAt":"2026-12-01T00:00:00Z"}}}}"#;
-        let m = Puku.parse_quota(&format!("noise\n{reply}\n"), 0);
+        let m = Puku.parse_quota(&format!("noise\n{reply}\n"), 0, &TimeZone::UTC);
         assert_eq!(m.keys().collect::<Vec<_>>(), ["five_hour", "seven_day"], "a window with no limit is no meter");
         assert!((m["five_hour"].utilization - 0.25).abs() < 1e-9 && (m["seven_day"].utilization - 0.9).abs() < 1e-9);
         assert_eq!(m["five_hour"].resets_at, Some(1_794_200_400));
         assert_eq!(Puku.meters_for(Some("puku-ai-2.8"), &m).unwrap().len(), 2, "one allowance, whatever the model");
-        let counts = Puku.parse_quota(r#"{"chat":{"used_req":250,"req_limit":1000}}"#, 0);
+        let counts = Puku.parse_quota(r#"{"chat":{"used_req":250,"req_limit":1000}}"#, 0, &TimeZone::UTC);
         assert!((counts["requests"].utilization - 0.25).abs() < 1e-9 && counts["requests"].resets_at.is_none());
         for unread in [r#"{"chat":null}"#, r#"{"stale":"expired"}"#, r#"{"error":"HTTP 500"}"#, ""] {
-            assert!(Puku.parse_quota(unread, 0).is_empty() && !Puku.lapsed(unread), "{unread}");
+            assert!(Puku.parse_quota(unread, 0, &TimeZone::UTC).is_empty() && !Puku.lapsed(unread), "{unread}");
         }
         assert!(Puku.lapsed(r#"{"lapsed":"HTTP 401"}"#) && Puku.lapsed(r#"{"lapsed":"not signed in"}"#));
     }
@@ -441,7 +442,7 @@ mod tests {
             request.starts_with("get /puku/v1/subscription") && request.contains("authorization: bearer fake-access")
         );
         assert!(!out.contains("x@y.invalid") && !out.contains("fake"), "only the quota is printed: {out}");
-        assert!((Puku.parse_quota(&out, 0)["seven_day"].utilization - 0.4).abs() < 1e-9, "{out}");
+        assert!((Puku.parse_quota(&out, 0, &TimeZone::UTC)["seven_day"].utilization - 0.4).abs() < 1e-9, "{out}");
         // A refused sign-in is a lapsed one.
         let (url, asked) = serve("401 Unauthorized", "{}");
         let out = run(&url, &cli, Some("pukucode.w"));

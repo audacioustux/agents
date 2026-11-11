@@ -430,6 +430,27 @@ fn projects_on_one_machine_share_what_they_read_of_an_account() {
     assert!(!env.root.join("state/relay/other/bus/quota.ndjson").exists());
 }
 
+/// Copilot review of PR #51: a reset time that names no zone is read in the zone the quota command
+/// ran with (its `[session.env]` `TZ`), not in relay's own.
+#[test]
+fn a_reset_with_no_zone_is_read_in_the_quota_commands_zone() {
+    let env = setup("reset-zone", false);
+    // UTC+6, whatever the caller's zone is.
+    configure(&env, "", "[session.env]\nTZ = \"Etc/GMT-6\"\n");
+    claude_account(&env.home, "solo", 40, false);
+    let usage =
+        "Current week (all models): 40% used · resets Jan 1, 12am (UTC)\nCurrent session: 61% used · resets 3pm\n";
+    std::fs::write(env.home.join(".claude.solo/usage"), usage).unwrap();
+    let in_utc = |args: &[&str]| relay_cmd(&env, Command::new(env!("CARGO_BIN_EXE_relay")).args(args).env("TZ", "UTC"));
+    ok(&in_utc(&["quota", "refresh"]), "refresh");
+    let shown: serde_json::Value = serde_json::from_slice(&in_utc(&["--json", "quota", "show"]).stdout).unwrap();
+    let account = &shown["accounts"][0];
+    let read_s = account["readAt"].as_i64().expect("read") / 1_000_000;
+    let reset = account["meters"]["five_hour"]["resetsAt"].as_i64().expect("a reset time");
+    assert!(reset > read_s && reset <= read_s + 86_400, "the next 3pm: {account}");
+    assert_eq!((reset + 6 * 3600) % 86_400, 15 * 3600, "3pm at UTC+6: {account}");
+}
+
 /// Audit finding 16: a reading is taken when the accounts are shown, with no job waiting and no
 /// dispatcher, and the view says it is being taken.
 #[test]

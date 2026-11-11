@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use jiff::tz::TimeZone;
 use regex::Regex;
 use serde_json::Value;
 
@@ -166,7 +167,7 @@ impl Harness for Omp {
     /// windows like `● 7 days ███░░ 21.0% used · resets in 5d20h`. A section
     /// whose accounts are all disabled has no windows, so it reads as unmetered
     /// and [`Self::meters_for`] refuses it.
-    fn parse_quota(&self, text: &str, now_s: i64) -> Meters {
+    fn parse_quota(&self, text: &str, now_s: i64, _local: &TimeZone) -> Meters {
         static HEADER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\S.*?) — ").expect("regex"));
         static WINDOW: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"●\s+(.+?)\s+[█░]+\s+([\d.]+)% used(?: · resets in (\S+))?").expect("regex"));
@@ -305,7 +306,7 @@ mod tests {
     fn usage_meters_by_provider() {
         let text = "Usage · fetched 1.9s ago\n\nAnthropic — 0 accounts\n  ✗ someone · x — disabled 74d19h ago: Refresh token expired\n\n\
 Openai Codex — 1 account\n  ● someone · plan: plus\n      ● 5 hours  ░░░░  0.0% used · resets in 4h59m\n      ● 7 days   ██░░  21.0% used · resets in 5d20h\n";
-        let m = Omp.parse_quota(text, 1_000);
+        let m = Omp.parse_quota(text, 1_000, &TimeZone::UTC);
         assert_eq!(m.len(), 2);
         assert!((m["openai-codex/7 days"].utilization - 0.21).abs() < 1e-9);
         assert_eq!(m["openai-codex/5 hours"].resets_at, Some(1_000 + 4 * 3600 + 59 * 60));

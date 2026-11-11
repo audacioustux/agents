@@ -13,11 +13,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use jiff::tz::TimeZone;
 use regex::Regex;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::harness::report::{Report, Said, parse_reset};
+use crate::harness::report::{Report, Said, parse_reset_in};
 use crate::harness::{
     Caps, Harness, Home, Identity, Invocation, Kind, Meter, Meters, Permissions, Reader, Refusal, Session, SignIn,
     Task, read_json,
@@ -71,7 +72,8 @@ pub trait Account: Sync + fmt::Debug {
         None
     }
     fn quota(&self, cli: &ClaudeCode, home: &Home) -> Invocation;
-    fn parse_quota(&self, text: &str, now_s: i64) -> Meters;
+    /// `local` is the zone the quota command ran in, for a time that names none.
+    fn parse_quota(&self, text: &str, now_s: i64, local: &TimeZone) -> Meters;
     /// Programs its quota reading runs besides the CLI ([`Harness::helpers`]).
     fn helpers(&self) -> &'static [&'static str] {
         &[]
@@ -165,7 +167,7 @@ impl Account for ClaudeAccount {
         i
     }
 
-    fn parse_quota(&self, text: &str, now_s: i64) -> Meters {
+    fn parse_quota(&self, text: &str, now_s: i64, local: &TimeZone) -> Meters {
         static LINE: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"^Current (week \(all models\)|session):\s+(\d+)% used(?:\s+·\s+resets\s+(.+?))?\s*$")
                 .expect("regex")
@@ -176,7 +178,7 @@ impl Account for ClaudeAccount {
             let Some(c) = LINE.captures(line.trim()) else { continue };
             let key = if c[1].starts_with("week") { "seven_day" } else { "five_hour" };
             let used: f64 = c[2].parse().unwrap_or(0.0);
-            let resets_at = c.get(3).and_then(|r| parse_reset(&format!("resets {}", r.as_str()), now_s));
+            let resets_at = c.get(3).and_then(|r| parse_reset_in(&format!("resets {}", r.as_str()), now_s, local));
             out.insert(key.into(), Meter { utilization: used / 100.0, resets_at });
         }
         out
@@ -328,8 +330,8 @@ impl Harness for ClaudeCode {
         Some(self.account.quota(self, home))
     }
 
-    fn parse_quota(&self, text: &str, now_s: i64) -> Meters {
-        self.account.parse_quota(text, now_s)
+    fn parse_quota(&self, text: &str, now_s: i64, local: &TimeZone) -> Meters {
+        self.account.parse_quota(text, now_s, local)
     }
 
     fn meters_for<'m>(&self, _model: Option<&str>, meters: &'m Meters) -> Result<Vec<&'m Meter>, Refusal> {
@@ -676,7 +678,7 @@ mod tests {
     #[test]
     fn usage() {
         let text = "\x1b[1mCurrent week (all models): 24% used · resets Nov 8, 3pm (UTC)\x1b[0m\nCurrent week (Fable): 0% used\nCurrent session: 61% used · resets 7pm (UTC)\n";
-        let m = Claude.parse_quota(text, 1_793_631_600);
+        let m = Claude.parse_quota(text, 1_793_631_600, &TimeZone::UTC);
         assert_eq!(m.len(), 2);
         assert!((m["seven_day"].utilization - 0.24).abs() < 1e-9);
         assert_eq!(m["five_hour"].resets_at, Some(1_793_631_600 + 4 * 3600));

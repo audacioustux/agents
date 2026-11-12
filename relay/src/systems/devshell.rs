@@ -299,7 +299,9 @@ struct Failure {
 /// The development environment entered on the host in `dir` through `shell`, from `env` and
 /// nothing of the caller's, under `timeout` for at most `limit` seconds, minus names `deny`
 /// matches. Its stderr goes to `stderr`, and `stdin` (the warm-up's lock, shared) is its stdin.
-/// It runs supervised: in a process group of its own, killed whole when this process ends.
+/// It runs supervised: in a process group of its own, killed whole when `timeout` exits or this
+/// process ends, so nothing the shell leaves behind (a hook's background child holding its stdout
+/// or the lock) outlives the attempt.
 fn enter(
     env: &RelayEnv,
     stdin: Stdio,
@@ -324,7 +326,9 @@ fn enter(
     let mut cmd = env
         .supervised("timeout")
         .map_err(|e| fail(format!("could not run relay supervise: {e}"), String::new(), false))?;
-    cmd.args(["-k", "5", &limit.to_string()])
+    // `--foreground` keeps `timeout`, and so the shell and all it starts, in the supervisor's group:
+    // without it `timeout` makes a group of its own, which nothing would end with the attempt.
+    cmd.args(["--foreground", "-k", "5", &limit.to_string()])
         .arg(program)
         .args(prefix)
         .args(["sh", "-c", &format!("printf '{}'; env -0", MARK.replace('\0', "\\0"))])
@@ -334,16 +338,22 @@ fn enter(
         .stderr(err);
     let mut child =
         Supervised::spawn(&mut cmd).map_err(|e| fail(format!("could not run {program}: {e}"), String::new(), false))?;
-    let mut stdout = Vec::new();
-    if let Some(mut out) = child.child().stdout.take() {
-        // To its end: the supervisor kills whatever is left of the group once `timeout` exits.
-        let _ = out.read_to_end(&mut stdout);
-    }
-    let status = match child.finish(|| true, || None::<std::convert::Infallible>) {
+    // Read beside the wait, never before it: a background child can hold the output open past
+    // `timeout`'s exit, and only the group's end, once `timeout` has exited, closes it.
+    let out = child.child().stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut stdout = Vec::new();
+        if let Some(mut out) = out {
+            let _ = out.read_to_end(&mut stdout);
+        }
+        stdout
+    });
+    let status = match child.finish(|| reader.is_finished(), || None::<std::convert::Infallible>) {
         Ok(Ok(status)) => status,
         Ok(Err(never)) => match never {},
         Err(e) => return Err(fail(format!("waiting for {program}: {e}"), String::new(), false)),
     };
+    let stdout = reader.join().unwrap_or_default();
     let tail = std::fs::File::open(stderr).map(|f| tail_of(f, TAIL_BYTES)).unwrap_or_default();
     if timed_out(status, started.elapsed(), limit) {
         return Err(fail(format!("timed out after {limit} s"), tail, true));
@@ -489,6 +499,34 @@ pub(crate) mod tests {
         assert_eq!(entries(&d), 1, "no second entry beside the first");
         assert!(attempt.join().unwrap().is_ok());
         assert_eq!(settled(&ctx), "entered", "a replacement may run once the attempt has ended");
+    }
+
+    /// Review of #54 (second round): GNU `timeout` used to put the shell in a group of its own, so a hook's
+    /// background child holding stdout outlived it, the read waited for that child, and the lock and every
+    /// queued job with it. The attempt ends at its limit whatever the shell leaves behind, and nothing of it
+    /// keeps the lock.
+    #[test]
+    fn a_background_child_holding_stdout_does_not_hold_the_warm_up() {
+        let d = Dir::new();
+        let ctx = project(&d, &["sh", "-c", "exec \"$@\"", "s"]);
+        let deny = regex::Regex::new("TOKEN").unwrap();
+        let err = d.path().join("stderr");
+        let relay = RelayEnv::of([("PATH", "/usr/bin:/bin")]);
+        let started = std::time::Instant::now();
+        // A hook that leaves a child behind, then enters as asked: done at once.
+        let hook = strings(&["sh", "-c", "sleep 60 & export DEV_TOOL=x; exec \"$@\"", "s"]);
+        let role = Role::try_take(&lock_file(&ctx)).unwrap().unwrap();
+        let env = enter(&relay, role.share().unwrap(), &hook, &deny, Path::new("/"), &err, 30).unwrap();
+        assert!(env.iter().any(|(k, _)| k == "DEV_TOOL"));
+        assert!(started.elapsed().as_secs() < 10, "done when the shell is: {:?}", started.elapsed());
+        drop(role);
+        assert_eq!(settled(&ctx), "entered", "the child it left keeps no lock: a warm-up can run");
+        // One that hangs past its limit, with a child holding the output: stopped at the limit.
+        let started = std::time::Instant::now();
+        let hung = strings(&["sh", "-c", "sleep 60 & sleep 60", "s"]);
+        let f = enter(&relay, Stdio::null(), &hung, &deny, Path::new("/"), &err, 1).unwrap_err();
+        assert!(f.timed_out, "{f:?}");
+        assert!(started.elapsed().as_secs() < 10, "stopped at its limit: {:?}", started.elapsed());
     }
 
     /// Review of #54: a shell that ignores the TERM gets `timeout` killed by SIGKILL, with no exit

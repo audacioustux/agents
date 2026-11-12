@@ -4023,3 +4023,20 @@ fn a_failing_dev_shell_holds_jobs_with_its_reason_and_fails_none() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "devshell: entered");
     assert_eq!(wait_for(&env, "look")["status"], "done");
 }
+
+/// Review of #54 (second round), through the real supervisor: a shell hook that leaves a background
+/// child holding its output does not hold the warm-up (and every job) until that child ends.
+#[test]
+fn a_dev_shell_hook_left_running_does_not_hold_the_jobs() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("devshell-hook", false);
+    claude_account(&env.home, "a", 10, false);
+    let shell = env.root.join("dev-shell");
+    write_executable(&shell, "#!/bin/sh\nsleep 600 &\nexport DEV_TOOL=from-the-shell\nexec \"$@\"\n");
+    dev_shell(&env, &shell);
+    ok(&relay(&env, &["queue", "add", "look", "--text", "Look around.", "--readonly"]), "queue");
+    // `wait_for` gives up after 90 s, far inside the 600 s the child would hold the output.
+    assert_eq!(wait_for(&env, "look")["status"], "done");
+}

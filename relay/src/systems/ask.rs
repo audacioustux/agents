@@ -207,7 +207,7 @@ pub fn run(a: &Args, json: bool) -> Result<u8> {
             .map_err(|e| anyhow::anyhow!("writing the prompt file: {e}"))?;
     }
     let result = spawn_and_wait(&built, &cwd, a.agent.id());
-    let _ = std::fs::remove_dir_all(&scratch);
+    let _ = crate::hostdir::remove_tree(&scratch);
     result.map_err(anyhow::Error::msg)
 }
 

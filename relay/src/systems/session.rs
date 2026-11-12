@@ -1256,7 +1256,7 @@ fn clone(
         Ok(())
     };
     // The job has no clone on record, so anything here is relay's own leftover from a failed attempt.
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = crate::hostdir::remove_tree(&dir);
     let made = (|| -> Result<Option<String>> {
         ok(Command::new("git").args(["clone", "--quiet", "--shared"]).arg(&ctx.cfg.repo).arg(&dir), "git clone")?;
         let mut tips = Vec::new();
@@ -1291,7 +1291,7 @@ fn clone(
         Ok(if ran { None } else { checkpoint_rev(&dir, "HEAD") })
     })();
     if made.is_err() {
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = crate::hostdir::remove_tree(&dir);
     }
     made.map(|base| (SessionRepo::new(dir), branch, base))
 }

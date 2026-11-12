@@ -5,7 +5,7 @@
 
 #![allow(clippy::disallowed_methods, reason = "a test reads its own switches and passes its PATH on by config")]
 
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
@@ -2024,6 +2024,39 @@ fn a_done_clone_is_removed_with_its_unfetched_commits_rescued_and_the_job_can_re
     assert_eq!(wait_for(&env, "lost")["status"], "done");
     let log = commits(&job(&env, "lost")["workdir"]);
     assert_eq!(log.matches("stub work").count(), 2, "the resumed clone started from the rescued work: {log}");
+}
+
+#[test]
+fn gc_removes_a_clone_whose_tests_left_a_mode_zero_directory() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("gc-mode0", false);
+    configure(&env, "", "[gc]\noutputs_after_hours = 0\nclones_after_days = 0\n");
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "stuck", "--text", "Make a change."]), "queue");
+    assert_eq!(wait_for(&env, "stuck")["status"], "done");
+    ok(&relay(&env, &["land", "fetch", "stuck"]), "land fetch");
+
+    // What a session's tests leave: a directory set to 0o000 with a file in it, in the clone (its build
+    // outputs included) and in the job's /tmp.
+    let clone = workdir(&env, "stuck");
+    let scratch = env.root.join("data/relay/flow/scratch/stuck");
+    std::fs::create_dir_all(&scratch).unwrap();
+    for base in [clone.join("target/debug"), clone.join("sub"), scratch.join(".tmpAbC1")] {
+        let inner = base.join("locked/inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("f"), "x").unwrap();
+        for d in [&inner, &base.join("locked")] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o0)).unwrap();
+        }
+    }
+    let out = relay(&env, &["land", "gc"]);
+    // Whatever happens, leave nothing the harness cannot delete.
+    let left = clone.exists() || scratch.exists();
+    ok(&out, "gc");
+    assert!(!left, "the clone and the job's /tmp are gone: {}", out_of(&out));
+    assert_eq!(job(&env, "stuck")["collected"], "clone");
 }
 
 /// Audit finding 2: gc reads a clone the session wrote, configuration and all, so it must not run

@@ -397,7 +397,7 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
         return Ok(());
     }
     if item.kind == Kind::Scratch {
-        std::fs::remove_dir_all(&item.path).with_context(|| format!("removing {}", item.path.display()))?;
+        crate::hostdir::remove_tree(&item.path).with_context(|| format!("removing {}", item.path.display()))?;
         return collected(ctx, &item.job, "scratch", a.bytes);
     }
     let j = world.jobs().get(&item.job).context("the job is gone")?;
@@ -406,7 +406,7 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
         Kind::Log => gzip_log(&item.path),
         Kind::Outputs => {
             let meta = item.path.symlink_metadata()?;
-            if meta.is_dir() { std::fs::remove_dir_all(&item.path) } else { std::fs::remove_file(&item.path) }
+            if meta.is_dir() { crate::hostdir::remove_tree(&item.path) } else { std::fs::remove_file(&item.path) }
                 .with_context(|| format!("removing {}", item.path.display()))?;
             collected(ctx, &item.job, "outputs", a.bytes)
         }
@@ -416,7 +416,7 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
             if let Some(r) = a.rescued.as_ref().filter(|_| !ctx.json) {
                 println!("gc: rescued {}'s unfetched commits into {r}", item.job);
             }
-            std::fs::remove_dir_all(&item.path).with_context(|| format!("removing {}", item.path.display()))?;
+            crate::hostdir::remove_tree(&item.path).with_context(|| format!("removing {}", item.path.display()))?;
             collected(ctx, &item.job, "clone", a.bytes)
         }
     }

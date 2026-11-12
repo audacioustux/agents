@@ -257,6 +257,12 @@ pub fn dir_size(path: &Path, within: Duration) -> (u64, bool) {
         for entry in entries.flatten() {
             let Ok(meta) = entry.path().symlink_metadata() else { continue };
             if meta.is_dir() {
+                // A session's copy of the caches in its clone is hard links to relay's caches: not the job's.
+                let farm =
+                    entry.file_name() == crate::sandbox::farm::IN_CLONE && dir.file_name().is_some_and(|d| d == ".git");
+                if farm {
+                    continue;
+                }
                 total += meta.blocks() * 512;
                 todo.push(entry.path());
             } else if meta.nlink() < 2 || seen.insert((meta.dev(), meta.ino())) {

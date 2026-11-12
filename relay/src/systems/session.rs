@@ -231,6 +231,8 @@ struct Launch {
     session_id: String,
     brief: String,
     reviewing: Option<Reviewing>,
+    /// The session's own copy of the caches, in its clone: linked back when dropped.
+    caches: Option<sandbox::farm::Farm>,
 }
 
 /// Either the next step's input, or how the attempt ends here.
@@ -272,6 +274,8 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     };
     let (mut report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
+    // What the session added to its caches is the project's before its check makes its own copy.
+    drop(launch.caches.take());
     let marker = &ctx.cfg.session.final_marker;
     report.zone = Some(launch.zone.clone());
     report.choose(marker);
@@ -428,6 +432,12 @@ fn launch(
     };
     layer_env(ctx, job, Phase::Session, &mut inv, dev);
     inv.write_files(&work.inbox).context("writing the prompt file")?;
+    // A package manager hard-links from its caches into the clone, so they are in the clone's mount.
+    let caches = work
+        .clone
+        .as_ref()
+        .and_then(|c| sandbox::farm::clone_git(c.path()))
+        .and_then(|git| sandbox::own_caches(ctx, &git, sandbox::farm::IN_CLONE, &ctx.farms));
     let mounts = Mounts {
         home: seat.home,
         workdir: work.clone.as_ref().map(SessionRepo::path),
@@ -436,11 +446,12 @@ fn launch(
         tmp: &work.tmp,
         cwd: &work.cwd,
         account: true,
+        caches: caches.as_ref().map(sandbox::farm::Farm::path),
     };
     let cmd = supervised_command(ctx, &inv, &mounts)?;
     let tz = sandbox::session_env(ctx, &inv).into_iter().find(|(k, _)| k == "TZ").map(|(_, v)| v);
     let zone = crate::harness::report::zone_of(tz.as_ref().map(|v| v.to_string_lossy()).as_deref());
-    Ok(ControlFlow::Continue(Launch { cmd, zone, stdin: inv.stdin, session_id, brief, reviewing }))
+    Ok(ControlFlow::Continue(Launch { cmd, zone, stdin: inv.stdin, session_id, brief, reviewing, caches }))
 }
 
 /// The harness's command line for the session, or why it refuses.
@@ -674,6 +685,7 @@ pub fn consult(
             tmp: &tmp,
             cwd: &ctx.cfg.repo,
             account: true,
+            caches: None,
         };
         let mut cmd = build(ctx, &inv, &mounts, |p| crate::supervised::holding(p, hold.as_deref()))?;
         let run = Run {

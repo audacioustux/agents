@@ -6,7 +6,8 @@
 //! session's sandbox plan, with the clone and the session's account out of sight, and a development
 //! environment entered from the project's repository, not from files the session could have changed.
 //!
-//! Its working directory (`<job>.bar.d`: the checkout and its `/tmp`) is made fresh for each run, outside
+//! Its working directory (`<job>.bar.d`: the checkout, its `/tmp` and its copy of the caches, in one mount
+//! with the checkout so a package manager can hard-link from them) is made fresh for each run, outside
 //! anything the session could write, and its output goes to the job's inbox, which the check cannot write.
 //! A session that planted a symlink in its own directories has nothing relay follows.
 
@@ -401,11 +402,23 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, phase: Phase, place:
         let file = place.inbox.create("check.out")?;
         let tmp = place.work.join("tmp");
         std::fs::create_dir(&tmp)?;
-        let mounts =
-            Mounts { home, workdir: None, scratch: place.work, inbox: None, tmp: &tmp, cwd: tree, account: false };
+        // Its own copy of the caches, beside its tree in its directory's mount, linked back when it ends.
+        let caches = crate::sandbox::own_caches(ctx, place.work, "caches", &ctx.state.join("farms"));
+        let mounts = Mounts {
+            home,
+            workdir: None,
+            scratch: place.work,
+            inbox: None,
+            tmp: &tmp,
+            cwd: tree,
+            account: false,
+            caches: caches.as_ref().map(crate::sandbox::farm::Farm::path),
+        };
         let mut c = self::command(ctx, &inv, &mounts);
         c.stdin(Stdio::null()).stdout(file.try_clone()?).stderr(file);
-        let status = c.status().context("running the acceptance check")?;
+        let status = c.status().context("running the acceptance check");
+        drop(caches);
+        let status = status?;
         let text = place.inbox.read("check.out").map(|f| tail_text(f, 2 * TAIL as u64)).unwrap_or_default();
         let code = status.code();
         let declared = &ctx.cfg.hooks.check_could_not_run_exit_codes;

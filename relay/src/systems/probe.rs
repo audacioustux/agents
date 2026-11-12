@@ -233,6 +233,7 @@ impl<'a> Probe<'a> {
             tmp: &self.tmp,
             cwd: &self.clone,
             account: true,
+            caches: None,
         };
         let plan = sandbox::plan(self.ctx, &user, &mounts);
         let markers: Vec<PathBuf> = plan

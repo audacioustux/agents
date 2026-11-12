@@ -9,10 +9,21 @@
 //! | 1 | `sandbox.hide` (default: the repository's siblings); the user's runtime dir and host sockets | hidden |
 //! | 2 | the repository, and its git directories when it is a linked worktree | read-only |
 //! | 3 | every home of every harness but the session's own; its own home; what in it the host runs or obeys (settings, hooks, scripts) | hidden; writable; read-only |
-//! | 4 | `sandbox.caches`: relay's own directory for each, never the host's | writable |
+//! | 0 | the parent of each cache a job with a tree gets as a symlink (see layer 4): the host's entries, each bound back | read-only |
+//! | 4 | `sandbox.caches`: relay's own directory for each, never the host's; for a job with a tree, a symlink into its own copy of them, in its tree's mount | writable |
 //! | 5 | `sandbox.hide_home` (credential stores) | hidden |
 //! | 6 | relay's own state and clones | hidden |
 //! | 7 | the job's own clone and directory; its inbox (what relay writes for it) | writable; read-only |
+//!
+//! `link()` fails across two mounts (EXDEV), even on one filesystem, and a package manager links from
+//! its store into the tree it installs. So a job with a tree (a session's clone, a check's checkout)
+//! does not get its caches as binds of their own: relay makes it a copy of them in hard links inside
+//! its tree's mount ([`farm::Farm`]), and each cache path is a symlink into that copy. A symlink cannot
+//! stand in the read-only host directory that holds the cache path, so that directory is layer 0: an
+//! empty tmpfs with each of the host's entries bound back read-only (a symlink copied as itself), made
+//! read-only like a hidden one. Where the cache path's directory is hidden already, the symlink goes in
+//! that tmpfs. Where something else covers it, or something else is mounted at or under the cache
+//! path, the cache stays a bind, as for a job with no tree.
 //!
 //! Layer 3 is one layer, ordered by depth, so a protected directory that holds other homes (omp's
 //! `profiles`) is mounted before they are hidden inside it.
@@ -39,6 +50,8 @@ use regex::Regex;
 
 use crate::ctx::Ctx;
 
+pub mod farm;
+
 #[derive(Debug)]
 pub struct Mounts<'a> {
     pub home: &'a crate::harness::Home,
@@ -54,6 +67,9 @@ pub struct Mounts<'a> {
     /// Whether the session's own account is mounted. A check run on its work is not the session: it
     /// gets no sign-in to read and nothing of the account to write.
     pub account: bool,
+    /// The job's own copy of the caches ([`farm::Farm`]), inside a writable mount that holds its tree:
+    /// each cache is a symlink into it. None: each is a bind of the project's caches.
+    pub caches: Option<&'a Path>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +84,12 @@ pub enum Mount {
     Placeholder {
         dir: bool,
     },
+    /// The host's directory as it is, each entry bound back read-only (a symlink copied as itself) on an
+    /// empty tmpfs that is made read-only once everything inside it has been mounted: so that a cache
+    /// path in it can be a symlink. Entries the host makes later do not show.
+    Rebuilt,
+    /// A symlink to this path: a cache, into the job's own copy of it.
+    Symlink(PathBuf),
 }
 
 /// The mounts, in the order bubblewrap must apply them.
@@ -85,7 +107,11 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
     // there (a hidden store under the account) is a directory.
     let kinds: std::collections::BTreeMap<PathBuf, crate::harness::Kind> = own_protected.iter().cloned().collect();
     let all = |paths: Vec<PathBuf>, mount: Mount| paths.into_iter().map(|p| (p, mount.clone())).collect::<Vec<_>>();
-    let layers: [Vec<(PathBuf, Mount)>; 7] = [
+    let by_depth = |mut layer: Vec<(PathBuf, Mount)>| {
+        layer.sort_by_key(|(p, _)| p.components().count());
+        layer
+    };
+    let before: Vec<(PathBuf, Mount)> = [
         all(cfg.hidden_dirs().into_iter().chain([runtime_dir()]).chain(host_sockets()).collect(), Mount::Hidden),
         all([cfg.repo.clone()].into_iter().chain(ctx.git_dirs.iter().cloned()).collect(), Mount::ReadOnly),
         all(other_homes.collect(), Mount::Hidden)
@@ -93,19 +119,53 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
             .chain(all(own_writable, Mount::Writable))
             .chain(all(own_protected.into_iter().map(|(p, _)| p).collect(), Mount::ReadOnly))
             .collect(),
-        cfg.sandbox.caches.iter().map(|r| (user_home.join(r), Mount::From(ctx.caches.join(r)))).collect(),
+    ]
+    .into_iter()
+    .flat_map(by_depth)
+    .collect();
+    let after: Vec<(PathBuf, Mount)> = [
         all(cfg.sandbox.hide_home.iter().map(|r| user_home.join(r)).collect(), Mount::Hidden),
         all(vec![ctx.state_root.clone(), ctx.data_root.clone()], Mount::Hidden),
         all(m.workdir.into_iter().chain([m.scratch]).map(Path::to_path_buf).collect(), Mount::Writable)
             .into_iter()
             .chain(all(m.inbox.map(Path::to_path_buf).into_iter().collect(), Mount::ReadOnly))
             .collect(),
-    ];
+    ]
+    .into_iter()
+    .flat_map(by_depth)
+    .collect();
+    let paths: Vec<PathBuf> = cfg.sandbox.caches.iter().map(|r| user_home.join(r)).collect();
+    let mut rebuilt: Vec<PathBuf> = Vec::new();
+    let caches: Vec<(PathBuf, Mount)> = cfg
+        .sandbox
+        .caches
+        .iter()
+        .zip(&paths)
+        .map(|(r, p)| {
+            let bind = (p.clone(), Mount::From(ctx.caches.join(r)));
+            let (Some(farm), Some(parent)) = (m.caches, p.parent()) else { return bind };
+            // Anything mounted at or under the cache path would land in the job's copy.
+            let crowded = before.iter().chain(&after).any(|(q, _)| q.starts_with(p))
+                || paths.iter().any(|q| q != p && q.starts_with(p));
+            if crowded || !p.exists() {
+                return bind;
+            }
+            // What the cache path's directory is, once the layers before the caches are mounted.
+            match before.iter().rev().find(|(q, _)| parent.starts_with(q)).map(|(_, k)| k) {
+                None => {
+                    if !rebuilt.iter().any(|q| q == parent) {
+                        rebuilt.push(parent.to_path_buf());
+                    }
+                    (p.clone(), Mount::Symlink(farm.join(r)))
+                }
+                Some(Mount::Hidden) => (p.clone(), Mount::Symlink(farm.join(r))),
+                Some(_) => bind,
+            }
+        })
+        .collect();
+    let rebuilt = by_depth(rebuilt.into_iter().map(|p| (p, Mount::Rebuilt)).collect());
     let mut out: Vec<(PathBuf, Mount)> = Vec::new();
-    for (p, mount) in layers.into_iter().flat_map(|mut layer| {
-        layer.sort_by_key(|(p, _)| p.components().count());
-        layer
-    }) {
+    for (p, mount) in rebuilt.into_iter().chain(before).chain(by_depth(caches)).chain(after) {
         if p.exists() {
             out.push((p, mount));
             continue;
@@ -119,6 +179,23 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
         }
     }
     out
+}
+
+/// The job's own copy of the caches ([`farm::Farm`]), put at `name` in `parent`, a directory in the mount
+/// that holds its tree, from the idle copies in `pool` (beside it, on its filesystem), of each cache the
+/// sandbox mounts (one whose path is there in the home). None without the sandbox, or when it cannot be
+/// made (`parent` on another filesystem than relay's caches): then each cache is a bind of the project's
+/// caches, as for a job with no tree.
+pub fn own_caches(ctx: &Ctx, parent: &Path, name: &str, pool: &Path) -> Option<farm::Farm> {
+    if !ctx.cfg.sandbox.enabled {
+        return None;
+    }
+    let home = crate::accounts::home();
+    let rels: Vec<PathBuf> = ctx.cfg.sandbox.caches.iter().filter(|r| home.join(r).exists()).cloned().collect();
+    if rels.is_empty() {
+        return None;
+    }
+    farm::Farm::take(parent, name, pool, &ctx.caches, &rels).ok().map(|(f, _)| f)
 }
 
 /// Makes the placeholder `p` exist on the host, empty: a directory, or a file (`{}` for JSON, so the
@@ -141,6 +218,22 @@ fn seed(p: &Path, dir: bool) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Bubblewrap's arguments that put back, in the empty tmpfs at `dir`, each of the host's entries in it
+/// but the cache paths in `links`: read-only, and a symlink as itself. An entry that is gone by the time
+/// bubblewrap binds it is left out (`--ro-bind-try`).
+fn rebuilt(dir: &Path, links: &[&Path]) -> Vec<OsString> {
+    let mut names: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    names.sort();
+    let mut a = Vec::new();
+    for p in names.into_iter().filter(|p| !links.contains(&p.as_path())) {
+        match std::fs::read_link(&p) {
+            Ok(target) => a.extend(["--symlink".into(), target.into(), p.into()]),
+            Err(_) => a.extend(["--ro-bind-try".into(), p.clone().into(), p.into()]),
+        }
+    }
+    a
 }
 
 /// `$XDG_RUNTIME_DIR` (`/run/user/<uid>`): the user's D-Bus, systemd and agent sockets.
@@ -182,8 +275,23 @@ pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsS
         a.extend(["--size".into(), (shm_mb << 20).to_string().into()]);
     }
     a.extend(["--tmpfs", "/dev/shm"].map(OsString::from));
-    for (p, mount) in plan(ctx, user_home, m) {
-        let (flag, src) = match &mount {
+    let plan = plan(ctx, user_home, m);
+    let links: Vec<&Path> =
+        plan.iter().filter(|(_, k)| matches!(k, Mount::Symlink(_))).map(|(p, _)| p.as_path()).collect();
+    for (p, mount) in &plan {
+        let p = p.clone();
+        let (flag, src) = match mount {
+            Mount::Rebuilt => {
+                a.extend(["--tmpfs".into(), p.clone().into()]);
+                a.extend(rebuilt(&p, &links));
+                sealed.push(p);
+                continue;
+            }
+            Mount::Symlink(target) => {
+                a.extend(["--dir".into(), p.parent().unwrap_or(&p).into()]);
+                a.extend(["--symlink".into(), target.into(), p.into()]);
+                continue;
+            }
             Mount::Hidden if p.is_dir() => {
                 sealed.push(p.clone());
                 ("--tmpfs", None)
@@ -293,6 +401,7 @@ mod tests {
             tmp: &tmp,
             cwd: &ctx.cfg.repo,
             account: true,
+            caches: None,
         };
         plan(&ctx, &root.join("user"), &m)
     }
@@ -382,6 +491,72 @@ mod tests {
         assert_eq!(mount_of(&plan, &root.join("profiles")), Some(&Mount::ReadOnly));
         assert_eq!(mount_of(&plan, &root.join("profiles/work")), Some(&Mount::Hidden));
         assert!(at(&root.join("profiles")) < at(&root.join("profiles/work")), "hidden after, so it stays hidden");
+    }
+
+    /// The caches and a job's tree on one mount: with a copy of the caches in the tree's mount, each cache
+    /// path is a symlink into it, standing in its directory rebuilt from the host's entries (or in the
+    /// hidden tmpfs already there); without one, or where something else is mounted under the cache path,
+    /// it is a bind of relay's caches as before.
+    #[test]
+    fn a_cache_is_a_symlink_into_the_jobs_copy_when_it_has_one() {
+        let d = Dir::new();
+        let root = d.path();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let user = root.join("user");
+        for p in [".cache", ".cargo/registry", ".cargo/git", ".npm/_cacache", "keep"] {
+            std::fs::create_dir_all(user.join(p)).unwrap();
+        }
+        std::os::unix::fs::symlink("keep", user.join("link")).unwrap();
+        std::fs::write(user.join(".rc"), "x").unwrap();
+        let conf = format!(
+            "name = \"t\"\n[sandbox]\nhide = [{:?}]\nhide_home = [\".cargo/git/secret\"]\n\
+             caches = [\".cache\", \".cargo/registry\", \".cargo/git\", \".npm/_cacache\", \".absent\"]\n",
+            user.join(".npm")
+        );
+        let cfg = Config::parse(&conf, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        let (scratch, tmp, farm) = (root.join("state/t/jobs/j.d"), root.join("data/t/scratch/j"), root.join("tree/f"));
+        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
+        let m = |caches| Mounts {
+            home: &home,
+            workdir: Some(&farm),
+            scratch: &scratch,
+            inbox: None,
+            tmp: &tmp,
+            cwd: &farm,
+            account: false,
+            caches,
+        };
+        let plan = plan(&ctx, &user, &m(Some(&farm)));
+        let at = |p: &Path| plan.iter().position(|(q, _)| q == p).unwrap_or_else(|| panic!("{p:?} in {plan:#?}"));
+        let link = |r: &str| Some(Mount::Symlink(farm.join(r)));
+        assert_eq!(mount_of(&plan, &user.join(".cache")).cloned(), link(".cache"));
+        assert_eq!(mount_of(&plan, &user.join(".cargo/registry")).cloned(), link(".cargo/registry"));
+        assert_eq!(mount_of(&plan, &user).cloned(), Some(Mount::Rebuilt), "{plan:#?}");
+        assert_eq!(mount_of(&plan, &user.join(".cargo")).cloned(), Some(Mount::Rebuilt));
+        assert!(at(&user) == 0 && at(&user.join(".cargo")) == 1, "rebuilt before anything is mounted in it");
+        // In a directory hidden already, the symlink goes in its tmpfs; a cache with a hidden path under it, or
+        // one the host does not have, is a bind as before (the latter then left out, as before).
+        assert_eq!(mount_of(&plan, &user.join(".npm/_cacache")).cloned(), link(".npm/_cacache"));
+        assert_eq!(mount_of(&plan, &user.join(".npm")).cloned(), Some(Mount::Hidden));
+        assert!(matches!(mount_of(&plan, &user.join(".cargo/git")), Some(Mount::From(_))));
+        assert!(mount_of(&plan, &user.join(".absent")).is_none());
+
+        let args = args(&ctx, &user, &m(Some(&farm)), Vec::new());
+        let s = |p: &Path| OsString::from(p);
+        let has = |w: &[OsString]| args.windows(w.len()).any(|x| x == w);
+        assert!(has(&["--tmpfs".into(), s(&user)]) && has(&["--remount-ro".into(), s(&user)]), "{args:?}");
+        assert!(has(&["--ro-bind-try".into(), s(&user.join("keep")), s(&user.join("keep"))]));
+        assert!(has(&["--ro-bind-try".into(), s(&user.join(".rc")), s(&user.join(".rc"))]));
+        assert!(has(&["--symlink".into(), "keep".into(), s(&user.join("link"))]), "a symlink as itself");
+        assert!(has(&["--symlink".into(), s(&farm.join(".cache")), s(&user.join(".cache"))]));
+        assert!(!has(&["--ro-bind-try".into(), s(&user.join(".cache")), s(&user.join(".cache"))]), "not the host's");
+
+        // Without a copy (a job with no tree), nothing is rebuilt and every cache is relay's bind.
+        let plan = super::plan(&ctx, &user, &m(None));
+        assert!(plan.iter().all(|(_, k)| !matches!(k, Mount::Rebuilt | Mount::Symlink(_))), "{plan:#?}");
+        assert!(matches!(mount_of(&plan, &user.join(".cache")), Some(Mount::From(_))));
     }
 
     #[test]

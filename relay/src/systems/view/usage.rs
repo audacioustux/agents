@@ -122,8 +122,21 @@ impl History {
     }
 }
 
-/// The colours the series take in turn.
-const PALETTE: [Color; 6] = [Color::Cyan, Color::Magenta, Color::Yellow, Color::Green, Color::Blue, Color::LightRed];
+/// The colours the series take in turn: twelve, so a machine's accounts rarely share one.
+const PALETTE: [Color; 12] = [
+    Color::Cyan,
+    Color::Magenta,
+    Color::Yellow,
+    Color::Green,
+    Color::Blue,
+    Color::LightRed,
+    Color::LightCyan,
+    Color::LightMagenta,
+    Color::LightYellow,
+    Color::LightGreen,
+    Color::LightBlue,
+    Color::Red,
+];
 /// The chart's rows, its axes and labels included.
 const CHART_ROWS: u16 = 18;
 

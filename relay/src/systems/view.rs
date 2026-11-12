@@ -2,6 +2,7 @@
 
 pub mod machine;
 mod stats;
+mod usage;
 
 use std::time::Duration;
 
@@ -53,12 +54,28 @@ pub enum Cmd {
         #[arg(long)]
         since: Option<String>,
     },
+    /// Each account's quota over time, as a chart printed inline: by default its 7-day meter, with
+    /// the floors drawn across it. With `--json`, the readings. Outside a project, every project's.
+    Usage {
+        /// Another meter, by name (`five_hour`, `openai-codex/5 hours`) or as `view status` shows it (`5 hours`).
+        #[arg(long)]
+        meter: Option<String>,
+        /// Only this account (`harness:label`); repeatable.
+        #[arg(long = "account", value_name = "HARNESS:LABEL")]
+        accounts: Vec<String>,
+        /// Only this harness's accounts; repeatable.
+        #[arg(long = "harness", value_name = "HARNESS")]
+        harnesses: Vec<String>,
+        /// How far back (`12h`, `7d`, `2w`).
+        #[arg(long, default_value = "7d")]
+        since: String,
+    },
 }
 
 impl Cmd {
-    /// The boards run outside a project too, over every project on this machine.
+    /// The boards and the usage chart run outside a project too, over every project on this machine.
     pub fn runs_anywhere(&self) -> bool {
-        matches!(self, Self::Status { .. } | Self::Watch { .. })
+        matches!(self, Self::Status { .. } | Self::Watch { .. } | Self::Usage { .. })
     }
 }
 
@@ -69,6 +86,9 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Watch { all, everywhere } => crate::systems::watch::run(scope, all, everywhere),
         Cmd::Result { name, wait } => result(ctx, &name, wait),
         Cmd::Stats { since } => stats::run(ctx, since.as_deref()),
+        Cmd::Usage { meter, accounts, harnesses, since } => {
+            usage::run(scope, ctx.json, usage::Filter { meter, accounts, harnesses, since: 0 }, &since)
+        }
         Cmd::Events => {
             for e in ctx.events()? {
                 out!("{}", e.to_json());
@@ -96,7 +116,16 @@ pub fn outside(json: bool, cmd: &Cmd) -> Result<()> {
     match cmd {
         Cmd::Status { all, .. } => status(scope, json, *all, true),
         Cmd::Watch { all, .. } => crate::systems::watch::run(scope, *all, true),
-        _ => unreachable!("only the boards run outside a project"),
+        Cmd::Usage { meter, accounts, harnesses, since } => {
+            let filter = usage::Filter {
+                meter: meter.clone(),
+                accounts: accounts.clone(),
+                harnesses: harnesses.clone(),
+                since: 0,
+            };
+            usage::run(scope, json, filter, since)
+        }
+        _ => unreachable!("only the boards and the usage chart run outside a project"),
     }
 }
 

@@ -141,6 +141,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)) |
 | `relay view events` | The merged event log |
 | `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |
+| `relay view usage [--meter NAME] [--account H:L] [--harness H] [--since DURATION]` | Each account's quota over time as a chart in the terminal, the floors drawn across it ([usage](#usage)); outside a project, every project's |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it, judged as the dispatcher judges it (a full account is `busy`, not `ready`); `show` starts a reading of each stale account and says `refreshing`. A fresh reading (one under way anywhere on the machine is waited for); switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout), noting when no review has accepted its tip / delete its clone and records |
 | `relay land gc [--dry-run]` | Remove what finished jobs no longer need: build outputs, old clones, old logs ([disk](#disk)) |
@@ -617,6 +618,41 @@ already on the bus (it writes none). It counts the jobs queued within the window
 A review is counted for the job it judged, so a profile's reject rate is how often
 its work was sent back. Spend is the runs' and the decisions'; an account's spend is
 its runs' alone.
+
+## Usage
+
+`relay view usage` charts each account's quota over time, printed inline at the
+terminal's width so it stays in scrollback: one line per account, time across
+(in your local zone), utilization 0–100 % up. A reset is a drop. The policy's
+`floor` is drawn across it (`┄`), and the `floor_near_reset` one (`╌`) when the
+policy sets it, so the room left is the gap. Each line ends in its id (`1`, `2`,
+..., then `a`, `b`, ...), which needs no colour; under the chart, each id's
+account and meter with its last reading and when that meter resets, wrapped to
+the terminal's width, never cut. A narrow terminal gets shorter time labels, and
+a very narrow one none.
+
+- **What it reads.** The readings already on the bus, as the project's fold takes
+  them in: a quota command's (`quota` `reading` events) and a live session's
+  (`session` `rate` events). It writes nothing, and starts no reading. In a project, its bus; outside one,
+  every project's on this machine. An account read by several projects is one
+  line, its readings merged by time, one seen on two buses kept once.
+- **Which meter.** By default each account's weekly meters: those whose name, as
+  `view status` shows it, says a 7-day or weekly window (`7 days`,
+  `openai-codex/7 days`, `minimax-code/General 7 Day`, `google-antigravity/Gemini
+  (Weekly)`), one line each; `--meter NAME` picks another, by its name or as the
+  board shows it (`five_hour` or `5 hours`). A reading without that meter adds no
+  point.
+- **Which accounts and when.** `--account harness:label` (repeatable) and
+  `--harness` (repeatable) narrow it; `--since` (`12h`, `7d`, `2w`; default `7d`)
+  is the window.
+- **Piped**, it is plain text with no colour. `--json` gives the readings instead:
+  `accounts.<account>.<meter>` is a list of `{t, utilization, resets_at}` (`t` in
+  bus microseconds, `resets_at` in unix seconds, `utilization` a fraction), with
+  `floor` and `floor_near_reset` beside it.
+- **Bare labels.** Old buses name some accounts by label alone (`adventor`).
+  relay has no rule saying which harness such a label was on, so their readings
+  are left out, and the chart names them (`left out: ...`; `left_out` in `--json`).
+- Meters only: never who an account is signed in as.
 
 ## Escalation
 

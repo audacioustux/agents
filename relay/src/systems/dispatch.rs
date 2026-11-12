@@ -300,15 +300,15 @@ fn enough_disk(limits: &Limits, free_gb: Option<f64>) -> bool {
     limits.min_free_disk_gb <= 0.0 || free_gb.is_some_and(|gb| gb >= resume_gb(limits))
 }
 
-/// Resumes the job the floor has held longest, when free disk is back over the floor and its margin
-/// ([`resume_due`]).
+/// Resumes the job the floor has held longest, when free disk is back over the floor and its margin, or the
+/// floor has been turned off ([`resume_due`]). Called with the machine's seats lock held, so the other
+/// projects' jobs it waits on are the ones as they stand.
 fn unhold(ctx: &Ctx, port: &crate::bus::Port<DispatchEvent>) -> Result<()> {
     let limits = &ctx.cfg.limits;
-    if limits.min_free_disk_gb <= 0.0 {
-        return Ok(());
-    }
     let free = os::free_disk_gb(&ctx.clones);
-    if let Some((job, message)) = resume_due(limits, &ctx.world()?, free, now_micros()) {
+    let neighbours = ctx.neighbours();
+    let others: Vec<&World> = neighbours.iter().collect();
+    if let Some((job, message)) = resume_due(limits, &ctx.world()?, &others, free, now_micros()) {
         eprintln!("{} resumed {job}: disk is back ({} GB free)", crate::os::stamp(), free.unwrap_or_default().round());
         port.emit(DispatchEvent::Unheld { job, message })?;
     }
@@ -320,15 +320,26 @@ fn settle_micros(limits: &Limits) -> u64 {
     u64::try_from(Duration::from_secs_f64(limits.disk_sample_minutes * 60.0).as_micros()).unwrap_or(u64::MAX)
 }
 
-/// The job to resume now, with the message its session is told: the one held longest, when `free_gb`
-/// is over the floor and its margin, and no job resumed from a hold is still settling (queued, or
-/// started less than a disk sample ago), so the space is not eaten again by two at once.
-fn resume_due(limits: &Limits, world: &World, free_gb: Option<f64>, now_us: u64) -> Option<(String, String)> {
-    let free = free_gb.filter(|_| limits.min_free_disk_gb > 0.0 && enough_disk(limits, free_gb))?;
+/// The job to resume now, with the message its session is told: the one held longest whose dependencies are
+/// done (a child held before its parent waits for it), when `free_gb` is over the floor and its margin or the
+/// floor is off, and no job resumed from a hold, in this project or another on the machine (`others`), is
+/// still settling (queued, or started less than a disk sample ago), so the space is not eaten again by two
+/// at once.
+fn resume_due(
+    limits: &Limits,
+    world: &World,
+    others: &[&World],
+    free_gb: Option<f64>,
+    now_us: u64,
+) -> Option<(String, String)> {
+    if !enough_disk(limits, free_gb) {
+        return None;
+    }
     let settle = settle_micros(limits);
-    let settling = world.jobs().values().any(|j| {
+    let settling = std::iter::once(world).chain(others.iter().copied()).flat_map(|w| w.jobs().values()).any(|j| {
         j.unheld_at.is_some_and(|at| match j.status {
-            Status::Queued => j.queued_at == at,
+            // Still queued, again after an automatic requeue too: it has not spent its space yet.
+            Status::Queued => true,
             s if s.has_runner() => j.started_at.is_some_and(|t| t >= at && now_us.saturating_sub(t) < settle),
             _ => false,
         })
@@ -339,15 +350,18 @@ fn resume_due(limits: &Limits, world: &World, free_gb: Option<f64>, now_us: u64)
     let j = world
         .jobs()
         .values()
-        .filter(|j| j.held && j.status == Status::Stopped)
+        .filter(|j| j.held && j.status == Status::Stopped && world.waits(j).is_empty())
         .min_by_key(|j| (j.ended_at, &j.name))?;
     let seen = j.reason.as_deref().unwrap_or("free disk was under the floor");
+    let back = if limits.min_free_disk_gb > 0.0 {
+        format!("Free disk is back ({} GB free)", free_gb.unwrap_or_default().round())
+    } else {
+        "The disk floor has since been turned off".to_owned()
+    };
     let message = format!(
-        "Relay's disk floor paused this session ({seen}): the machine's free disk was under its {} GB floor, so \
+        "Relay's disk floor paused this session ({seen}): the machine's free disk was under its floor, so \
          relay stopped the job rather than let the disk fill. Nothing in your work caused it, and your clone and \
-         session are as you left them. Free disk is back ({} GB free), so carry on from where you left off.",
-        limits.min_free_disk_gb,
-        free.round()
+         session are as you left them. {back}, so carry on from where you left off."
     );
     Some((j.name.clone(), message))
 }
@@ -1035,14 +1049,14 @@ mod tests {
     fn a_held_job_resumes_only_over_the_floor_and_its_margin() {
         let l = floor(60.0, 3.0);
         let w = held_world(&[("a", Status::Stopped, true, 5)]);
-        let due = |free| resume_due(&l, &w, free, NOW_US).map(|(job, _)| job);
+        let due = |free| resume_due(&l, &w, &[], free, NOW_US).map(|(job, _)| job);
         assert_eq!(due(Some(57.0)), None, "under the floor");
         assert_eq!(due(Some(62.9)), None, "over the floor, not over its margin: no flapping");
         assert_eq!(due(None), None, "unmeasured is not room");
         assert_eq!(due(Some(63.0)).as_deref(), Some("a"));
         let off = floor(0.0, 3.0);
-        assert_eq!(resume_due(&off, &w, Some(500.0), NOW_US), None, "no floor, nothing is ever held by it");
-        let (_, message) = resume_due(&l, &w, Some(65.2), NOW_US).unwrap();
+        assert!(off.min_free_disk_gb <= 0.0);
+        let (_, message) = resume_due(&l, &w, &[], Some(65.2), NOW_US).unwrap();
         assert!(message.contains("disk floor") && message.contains("Nothing in your work"), "{message}");
         assert!(message.contains("65 GB free"), "{message}");
     }
@@ -1052,29 +1066,93 @@ mod tests {
         let l = floor(60.0, 3.0);
         // Stopped and not held: by a person (or any other end), whatever the disk says.
         let w = held_world(&[("p", Status::Stopped, false, 1), ("f", Status::Failed, false, 1)]);
-        assert_eq!(resume_due(&l, &w, Some(900.0), NOW_US), None);
+        assert_eq!(resume_due(&l, &w, &[], Some(900.0), NOW_US), None);
     }
 
     #[test]
     fn held_jobs_resume_one_at_a_time_oldest_first() {
         let l = floor(60.0, 3.0);
         let mut w = held_world(&[("late", Status::Stopped, true, 9), ("early", Status::Stopped, true, 4)]);
-        let (first, _) = resume_due(&l, &w, Some(70.0), NOW_US).unwrap();
+        let (first, _) = resume_due(&l, &w, &[], Some(70.0), NOW_US).unwrap();
         assert_eq!(first, "early", "the one held longest");
         // It is resumed: queued, and the next waits while it has not started.
         let at = NOW_US - 10;
         let j = w.jobs_mut().get_mut("early").unwrap();
         (j.status, j.held, j.unheld_at, j.queued_at) = (Status::Queued, false, Some(at), at);
-        assert_eq!(resume_due(&l, &w, Some(70.0), NOW_US), None, "still queued: the space is not spent yet");
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US), None, "still queued: the space is not spent yet");
         // It starts: still settling for a disk sample, then the next one goes.
         let j = w.jobs_mut().get_mut("early").unwrap();
         (j.status, j.started_at) = (Status::Running, Some(NOW_US - 5));
-        assert_eq!(resume_due(&l, &w, Some(70.0), NOW_US), None, "just started: not measured yet");
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US), None, "just started: not measured yet");
         let later = NOW_US + settle_micros(&l);
-        assert_eq!(resume_due(&l, &w, Some(70.0), later).map(|(j, _)| j).as_deref(), Some("late"));
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), later).map(|(j, _)| j).as_deref(), Some("late"));
         // The first ended; nothing settles.
         w.jobs_mut().get_mut("early").unwrap().status = Status::Done;
-        assert_eq!(resume_due(&l, &w, Some(70.0), NOW_US).map(|(j, _)| j).as_deref(), Some("late"));
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).map(|(j, _)| j).as_deref(), Some("late"));
+    }
+
+    /// A held project's neighbour has resumed a job from its own hold, as `unheld_at` says.
+    fn settling_neighbour(status: Status) -> World {
+        let mut w = held_world(&[("n", status, false, 1)]);
+        let j = w.jobs_mut().get_mut("n").unwrap();
+        (j.unheld_at, j.queued_at, j.started_at) = (Some(NOW_US - 10), NOW_US - 10, Some(NOW_US - 5));
+        w
+    }
+
+    #[test]
+    fn a_job_another_project_resumed_from_a_hold_settles_for_this_one_too() {
+        let l = floor(60.0, 3.0);
+        let w = held_world(&[("mine", Status::Stopped, true, 4)]);
+        for status in [Status::Queued, Status::Running] {
+            let theirs = settling_neighbour(status);
+            assert_eq!(
+                resume_due(&l, &w, &[&theirs], Some(70.0), NOW_US),
+                None,
+                "{status:?}: the space is not spent yet"
+            );
+        }
+        let theirs = settling_neighbour(Status::Running);
+        let later = NOW_US + settle_micros(&l);
+        assert!(resume_due(&l, &w, &[&theirs], Some(70.0), later).is_some(), "once it has run a sample");
+        assert!(resume_due(&l, &w, &[&settling_neighbour(Status::Done)], Some(70.0), NOW_US).is_some(), "it ended");
+    }
+
+    #[test]
+    fn a_held_job_whose_dependency_is_held_too_waits_for_it() {
+        let l = floor(60.0, 3.0);
+        // The child was held first (older), the done parent after it was resumed: the parent goes first.
+        let mut w = held_world(&[("child", Status::Stopped, true, 3), ("parent", Status::Stopped, true, 8)]);
+        w.jobs_mut().get_mut("child").unwrap().after = vec!["parent".into()];
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).map(|(j, _)| j).as_deref(), Some("parent"));
+        // With the parent done, the child is free to go.
+        w.jobs_mut().get_mut("parent").unwrap().status = Status::Done;
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).map(|(j, _)| j).as_deref(), Some("child"));
+    }
+
+    #[test]
+    fn holds_resume_when_the_floor_is_turned_off_one_at_a_time() {
+        let enabled = floor(60.0, 3.0);
+        let off = floor(0.0, 3.0);
+        let mut w = held_world(&[("a", Status::Stopped, true, 4), ("b", Status::Stopped, true, 9)]);
+        assert_eq!(resume_due(&enabled, &w, &[], Some(10.0), NOW_US), None, "under the floor while it is on");
+        for free in [Some(10.0), None] {
+            let (job, message) = resume_due(&off, &w, &[], free, NOW_US).unwrap();
+            assert_eq!(job, "a", "the oldest, whatever the disk says: there is no floor");
+            assert!(message.contains("turned off") && !message.contains("0 GB floor"), "{message}");
+        }
+        let j = w.jobs_mut().get_mut("a").unwrap();
+        (j.status, j.held, j.unheld_at, j.queued_at) = (Status::Queued, false, Some(NOW_US - 10), NOW_US - 10);
+        assert_eq!(resume_due(&off, &w, &[], Some(10.0), NOW_US), None, "still one at a time");
+    }
+
+    #[test]
+    fn an_automatic_requeue_keeps_the_resumed_job_settling() {
+        let l = floor(60.0, 3.0);
+        let mut w = held_world(&[("early", Status::Stopped, true, 4), ("late", Status::Stopped, true, 9)]);
+        let j = w.jobs_mut().get_mut("early").unwrap();
+        // Resumed at `at`, started, and sent back to the queue by a retry: `queued_at` moved on, the marker did not.
+        (j.status, j.held, j.unheld_at, j.queued_at) = (Status::Queued, false, Some(NOW_US - 10), NOW_US - 5);
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US), None, "queued again: still not started");
     }
 
     #[test]

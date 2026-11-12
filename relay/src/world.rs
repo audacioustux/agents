@@ -108,7 +108,8 @@ pub struct Job {
     /// (`reason` says what it saw). A person's stop or resume clears it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held: bool,
-    /// When the dispatcher last resumed it from that hold (bus time): the next held job waits for this run to settle.
+    /// When the dispatcher last resumed it from that hold (bus time): the next held job waits while it is queued (an
+    /// automatic requeue keeps this) or has run less than a disk sample. A hand resume clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unheld_at: Option<u64>,
     /// Every checkpoint at a spend cap, oldest first.
@@ -927,6 +928,8 @@ impl World {
                     j.reason = None;
                     j.stop_requested = false;
                     j.held = false;
+                    // A person took it over: it no longer settles as the dispatcher's resume.
+                    j.unheld_at = None;
                     j.follow_ups = 0;
                     j.reruns = 0;
                     j.budget_usd = budget_usd.unwrap_or(j.budget_usd);
@@ -1857,6 +1860,36 @@ mod tests {
         evs.extend([st(5, dispatched("a")), st(6, unheld("a"))]);
         let j = &World::fold(&evs).jobs["a"].clone();
         assert_eq!((j.status, j.unheld_at), (Status::Running, Some(4)));
+    }
+
+    #[test]
+    fn a_retry_keeps_the_hold_marker_and_a_hand_resume_clears_it() {
+        let retried = Event::Session(SessionEvent::Ended {
+            job: "a".into(),
+            outcome: Outcome::Retry,
+            cost_usd: 0.0,
+            turns: 0,
+            reason: Some("the development environment changed".into()),
+        });
+        let mut evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+            st(4, unheld("a")),
+            st(5, dispatched("a")),
+            st(6, retried),
+        ];
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.unheld_at), (Status::Queued, Some(4)), "an automatic requeue is still the resume");
+        let resumed = Event::Queue(QueueEvent::Resumed {
+            job: "a".into(),
+            message: "mine".into(),
+            budget_usd: None,
+            models: BTreeMap::new(),
+        });
+        evs.push(st(7, resumed));
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.unheld_at), (Status::Queued, None), "a person took it over");
     }
 
     #[test]

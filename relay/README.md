@@ -832,7 +832,11 @@ floor does not flap), it puts the held job that has waited longest back in the q
 and its session is told the disk floor paused it, that nothing in its work caused it,
 and that free space is back. Only one resumes at a time: the next waits until the first
 has started and has run for one `disk_sample_minutes` (its clone measured), so the space
-is not eaten again at once. A held job not yet resumed counts as moving: a job queued
+is not eaten again at once. That holds across the machine's projects (a job another
+project resumed from a hold settles for this one too), and through an automatic retry of
+the resumed job; a hand `queue resume` of it ends the wait. A held job whose `--after`
+jobs are not done (a parent held after it) waits for them. Turning the floor off
+(`min_free_disk_gb = 0`) lets what is held resume, still one at a time. A held job not yet resumed counts as moving: a job queued
 `--after` it waits for it, and `view result --wait` goes on waiting.
 
 - A queued job obeys the same rule: a build job does not start while free disk is under

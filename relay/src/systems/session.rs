@@ -719,7 +719,7 @@ fn await_seat(
     let mut asked: Option<Instant> = None;
     loop {
         let record = |s: &dispatch::Start| decide::record_seat(ctx, id, Some(s));
-        match dispatch::book_session(ctx, job, &agent.harness, agent.model.as_deref(), since, record) {
+        match dispatch::book_session(ctx, id, job, &agent.harness, agent.model.as_deref(), since, record) {
             Ok(Ok((_, home))) => return Ok(home),
             Ok(Err(_)) => {}
             Err(e) => return Err(format!("agent:{} found no seat: {e:#}", agent.label)),

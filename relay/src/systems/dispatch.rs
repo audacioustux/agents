@@ -376,8 +376,9 @@ fn session_job(worker: &Job, harness: &str, model: Option<&str>, since: u64) -> 
 }
 
 /// A seat in `room` for a decision's `agent:` session for `worker` ([`session_job`]), chosen as a
-/// queued job's is ([`place`]): the worker's own run's seat given back first, and another account
-/// than the worker's where one fits, so no worker grades itself; else the worker's own.
+/// queued job's is ([`place`]): another account than the worker's where one fits, so no worker grades
+/// itself; else the worker's own. The worker's seat is as the fold has it: a run that asked at `cap`
+/// or `ended` is `checking` and holds none, while one at `disk` still runs and keeps its seat.
 pub fn place_session(
     cfg: &Config,
     room: &mut Room,
@@ -387,18 +388,19 @@ pub fn place_session(
     since: u64,
     now_us: u64,
 ) -> Result<Start, Hold> {
-    room.free(worker);
     let j = session_job(worker, harness, model, since);
     place(cfg, room, &j, worker.account.as_deref(), now_us)?
         .ok_or_else(|| Hold { why: format!("no {harness} account has room"), until: None })
 }
 
-/// Books a seat for a decision's `agent:` session for `worker` ([`place_session`]) under the
+/// Books a seat for decision `id`'s `agent:` session for `worker` ([`place_session`]) under the
 /// machine's seat lock, as a dispatch books a job's: `record` writes the booking to the bus before the
-/// lock is let go, so every dispatcher (and every other decision) that plans next counts it. The
-/// worker's state is read from the fold under the lock; `worker` is the caller's copy of it.
+/// lock is let go, so every dispatcher (and every other decision) that plans next counts it. A
+/// booking the fold did not take, since the decision is no longer on record (its job was cleaned
+/// away meanwhile), is an error: the session must not start.
 pub fn book_session(
     ctx: &Ctx,
+    id: &str,
     worker: &Job,
     harness: &str,
     model: Option<&str>,
@@ -411,7 +413,6 @@ pub fn book_session(
     let others: Vec<&World> = neighbours.iter().collect();
     // A decision's session is read-only: free disk does not hold it, nor does the dev shell.
     let mut room = Room::new(&ctx.cfg, &world, &others, true);
-    let worker = world.jobs().get(&worker.name).filter(|j| j.created_at == worker.created_at).unwrap_or(worker);
     let start = match place_session(&ctx.cfg, &mut room, worker, harness, model, since, now_micros()) {
         Ok(start) => start,
         Err(hold) => return Ok(Err(hold)),
@@ -420,6 +421,9 @@ pub fn book_session(
         anyhow::bail!("{} was chosen but is not found", start.account);
     };
     record(&start)?;
+    if !ctx.world()?.seated(id) {
+        anyhow::bail!("decision {id} is no longer on record, so its seat was not booked");
+    }
     Ok(Ok((start, home)))
 }
 
@@ -976,8 +980,107 @@ mod tests {
         let (mut w, _) = burst(&[("a", 0.3, 72), ("b", 0.3, 72)], NOW_US - 1, 1);
         running(&mut w, "x", "claude:a");
         decide(&mut w, "x").unwrap();
-        w.decisions.get_mut("x-ended-1").unwrap().waiter = Some((me, 1));
+        w.seats.get_mut("x-ended-1").unwrap().waiter = Some((me, 1));
         assert_eq!(sessions(&w), [0, 0]);
+    }
+
+    /// `per_account = 1` on accounts a and b, both read and with room.
+    fn one_seat_each() -> (crate::config::tempdir::Dir, Config, World) {
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let text = "name = \"demo\"\n[limits]\nmin_free_disk_gb = 0\nper_account = 1\n";
+        let cfg = Config::parse(text, d.path()).unwrap();
+        let (w, _) = burst(&[("a", 0.3, 72), ("b", 0.3, 72)], NOW_US - 1, 0);
+        (d, cfg, w)
+    }
+
+    fn run_on(w: &mut World, name: &str, account: &str) {
+        let j = Job {
+            name: name.into(),
+            status: Status::Running,
+            kind: crate::bus::Kind::Read,
+            account: Some(account.into()),
+            created_at: 100,
+            attempts: 1,
+            ..Job::default()
+        };
+        w.jobs_mut().insert(j.name.clone(), j);
+    }
+
+    fn decide_event(w: &mut World, t: u64, e: crate::bus::DecideEvent) {
+        w.apply(&crate::bus::Stamped { t, event: crate::bus::Event::Decide(e), from: None });
+    }
+
+    /// Copilot on PR #63, finding 1: a `disk` decision runs while its worker still runs (its job
+    /// stays `running`), so the worker's seat is not the decision's to take. With b busy and a the
+    /// worker's, a disk decision finds no seat rather than a second session on a.
+    #[test]
+    fn a_disk_decision_never_takes_its_running_workers_seat() {
+        let (_d, cfg, mut w) = one_seat_each();
+        run_on(&mut w, "x", "claude:a");
+        run_on(&mut w, "y", "claude:b");
+        let me = std::process::id();
+        let asked = crate::bus::DecideEvent::DecisionRequested {
+            id: "x-disk-1".into(),
+            job: "x".into(),
+            point: crate::bus::Point::Disk,
+            created: 100,
+            attempt: 1,
+            waiter: Some((me, os::start_time(me).unwrap())),
+        };
+        decide_event(&mut w, NOW_US, asked);
+        assert_eq!(w.jobs()["x"].status, Status::Running, "a disk decision leaves its worker running");
+        let mut room = Room::of(found_ab(), w.accounts.clone(), &w, &[], true);
+        let worker = w.jobs()["x"].clone();
+        let placed = place_session(&cfg, &mut room, &worker, "claude", None, 0, NOW_US);
+        assert!(placed.as_ref().is_err_and(|h| h.why.contains("busy")), "{placed:?}");
+        // With b free, it goes there.
+        w.jobs_mut().remove("y");
+        let mut room = Room::of(found_ab(), w.accounts.clone(), &w, &[], true);
+        let placed = place_session(&cfg, &mut room, &worker, "claude", None, 0, NOW_US);
+        assert_eq!(placed.map(|s| s.account), Ok("claude:b".into()));
+    }
+
+    /// Copilot on PR #63, finding 2: a held job dequeued and cleaned while its decision's session runs
+    /// forgets the decision, but the session still runs until its handler hears and stops: its seat
+    /// counts until `unseated` or its waiter's death, not until the cleanup. A booking that arrives
+    /// once its decision is gone is not recorded, and the booker can tell ([`World::seated`]).
+    #[test]
+    fn a_seat_outlives_the_cleanup_of_its_decision() {
+        use crate::bus::{DecideEvent, Event, LandEvent, Point, Stamped};
+        let (_d, _cfg, mut w) = one_seat_each();
+        let me = std::process::id();
+        let waiter = Some((me, os::start_time(me).unwrap()));
+        let asked = |id: &str| DecideEvent::DecisionRequested {
+            id: id.into(),
+            job: "q".into(),
+            point: Point::Held,
+            created: 100,
+            attempt: 0,
+            waiter,
+        };
+        let seated = |id: &str| DecideEvent::Seated {
+            id: id.into(),
+            account: "claude:b".into(),
+            model: None,
+            provider: String::new(),
+        };
+        let forgotten = Stamped { t: NOW_US, event: Event::Land(LandEvent::Forgotten { job: "q".into() }), from: None };
+        let on_b = |w: &World| Room::of(found_ab(), w.accounts.clone(), w, &[], true).running_on("claude:b");
+        decide_event(&mut w, NOW_US, asked("q-held-1"));
+        decide_event(&mut w, NOW_US, seated("q-held-1"));
+        assert!(w.seated("q-held-1"));
+        w.apply(&forgotten);
+        assert!(!w.decisions.contains_key("q-held-1"), "the decision went with its job");
+        assert_eq!(on_b(&w), 1, "its session still runs on b");
+        decide_event(&mut w, NOW_US, DecideEvent::Unseated { id: "q-held-1".into() });
+        assert_eq!(on_b(&w), 0);
+        // Asked again, and cleaned before the booking lands: the booking is not recorded.
+        decide_event(&mut w, NOW_US, asked("q-held-2"));
+        w.apply(&forgotten);
+        decide_event(&mut w, NOW_US, seated("q-held-2"));
+        assert!(!w.seated("q-held-2"), "a booking for a decision no longer on record");
+        assert_eq!(on_b(&w), 0);
     }
 
     fn found_ab() -> Vec<Home> {

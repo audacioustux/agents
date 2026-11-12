@@ -337,6 +337,10 @@ pub struct World {
     /// Decisions by id, while their job is kept.
     #[serde(default)]
     pub decisions: BTreeMap<String, Decision>,
+    /// The seats decisions' `agent:` sessions hold, by decision id, from `seated` until `unseated`:
+    /// kept apart from the decisions, which a job's cleanup forgets while its session may still run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub seats: BTreeMap<String, SessionSeat>,
     /// The project's development environment (`session.env_shell`): its latest warm-up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devshell: Option<DevShell>,
@@ -436,13 +440,11 @@ pub struct Decision {
     pub steps: Vec<Step>,
     /// The action carried out, once a handler gave one that passed.
     pub action: Option<Action>,
-    /// The seat its `agent:` handler's session holds, from `seated` until `unseated`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seat: Option<SessionSeat>,
 }
 
 /// A seat a session that is no job's own run holds (a decision's `agent:` session), as its booking
-/// recorded it: the account, and the model and provider it was judged on there.
+/// recorded it: the account, the model and provider it was judged on there, and the process that
+/// runs the session (its decision's waiter).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSeat {
     pub account: String,
@@ -450,6 +452,20 @@ pub struct SessionSeat {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub provider: String,
+    pub waiter: Option<(u32, u64)>,
+}
+
+impl SessionSeat {
+    /// The seat it holds while its process lives: one that died without a word (killed, crashed)
+    /// holds nothing, since nobody is left to give it back.
+    pub fn held(&self) -> Option<(&str, crate::accounts::Draws)> {
+        let (pid, started) = self.waiter?;
+        if !crate::os::same_process(pid, started) {
+            return None;
+        }
+        let harness = self.account.split_once(':').map_or(self.account.as_str(), |(h, _)| h);
+        Some((&self.account, crate::accounts::draws(self.model.as_deref(), &self.provider, harness)))
+    }
 }
 
 /// One handler's answer to a decision.
@@ -463,18 +479,6 @@ pub struct Step {
 }
 
 impl Decision {
-    /// The seat its `agent:` session holds while the process that waits for the answer lives: that
-    /// process runs the session, so one that died without a word (killed, crashed) holds nothing.
-    pub fn seat(&self) -> Option<(&str, crate::accounts::Draws)> {
-        let seat = self.seat.as_ref()?;
-        let (pid, started) = self.waiter?;
-        if !crate::os::same_process(pid, started) {
-            return None;
-        }
-        let harness = seat.account.split_once(':').map_or(seat.account.as_str(), |(h, _)| h);
-        Some((&seat.account, crate::accounts::draws(seat.model.as_deref(), &seat.provider, harness)))
-    }
-
     /// Parked at `now` (bus time) with nothing answered or carried out yet. Not enough to answer it:
     /// the job may have moved on since (`World::awaiting`).
     fn open(&self, now: u64) -> bool {
@@ -492,7 +496,8 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// 13: `dispatched` records the model and provider; a job back in the queue has no account.
 /// 14: the development environment's warm-ups (`devshell`).
 /// 15: a decision's `agent:` session holds a seat (`seated`, `unseated`).
-const FOLD_VERSION: u32 = 15;
+/// 16: those seats are kept apart from the decisions (`seats`), so a job's cleanup keeps them.
+const FOLD_VERSION: u32 = 16;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -764,6 +769,11 @@ impl World {
             (j.created_at, j.attempts) == (d.created, d.attempt)
                 && if d.point == Point::Held { j.status == Status::Queued } else { j.status.has_runner() }
         })
+    }
+
+    /// Whether decision `id`'s `agent:` session holds a seat on record.
+    pub fn seated(&self, id: &str) -> bool {
+        self.seats.contains_key(id)
     }
 
     /// Whether decision `id` is still on record and asks about its job as it is ([`World::asks_now`]).
@@ -1296,23 +1306,20 @@ impl World {
                         answer_why: String::new(),
                         steps: Vec::new(),
                         action: None,
-                        seat: None,
                     },
                 );
             }
+            // A booking for a decision no longer on record (its job cleaned away) is not one: its
+            // booker sees that (`seated`) and stops. Once made, it stands until `unseated`, whatever
+            // becomes of the decision, since its session runs until its handler hears and stops.
             DecideEvent::Seated { id, account, model, provider } => {
-                if let Some(d) = self.decisions.get_mut(id) {
-                    d.seat = Some(SessionSeat {
-                        account: account.clone(),
-                        model: model.clone(),
-                        provider: provider.clone(),
-                    });
+                if let Some(d) = self.decisions.get(id) {
+                    let (account, model, provider) = (account.clone(), model.clone(), provider.clone());
+                    self.seats.insert(id.clone(), SessionSeat { account, model, provider, waiter: d.waiter });
                 }
             }
             DecideEvent::Unseated { id } => {
-                if let Some(d) = self.decisions.get_mut(id) {
-                    d.seat = None;
-                }
+                self.seats.remove(id);
             }
             DecideEvent::Parked { id, until } => {
                 if let Some(d) = self.decisions.get_mut(id).filter(|d| d.action.is_none()) {
@@ -1478,8 +1485,12 @@ mod tests {
     /// new pair; never change a pair already recorded.
     #[test]
     fn the_fold_version_moves_with_the_fold() {
-        const PINNED: &[(u32, u64)] =
-            &[(13, 0x1d75_bf1b_971c_dfd9), (14, 0x0599_7a27_1a95_7bbd), (15, 0x96da_3e17_b6db_c0d4)];
+        const PINNED: &[(u32, u64)] = &[
+            (13, 0x1d75_bf1b_971c_dfd9),
+            (14, 0x0599_7a27_1a95_7bbd),
+            (15, 0x96da_3e17_b6db_c0d4),
+            (16, 0x2914_3231_8fc6_efac),
+        ];
         let dispatched = |t, model: Option<&str>| {
             st(
                 t,

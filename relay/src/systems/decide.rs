@@ -1375,7 +1375,6 @@ mod tests {
                 answer_why: String::new(),
                 steps: Vec::new(),
                 action: Some(resume.clone()),
-                seat: None,
             };
             w.decisions.insert(d.id.clone(), d);
         }
@@ -1435,7 +1434,6 @@ mod tests {
             answer_why: String::new(),
             steps: Vec::new(),
             action: Some(Action::Wait),
-            seat: None,
         };
         w.decisions.insert(d.id.clone(), d);
         assert_eq!(next_held_ask(&w, &job, 0), u64::MAX, "asked in this queueing");

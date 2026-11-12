@@ -7,14 +7,14 @@
 //! pane, the board's reasons and a checker's seat all ask these, so none of them can call an
 //! account `ready` or a job startable where another would not. A seat is read from what its
 //! dispatch recorded (`Job::seat`), or a decision's session from what its booking recorded
-//! (`Decision::seat`), never resolved again through a config.
+//! (`SessionSeat::held`), never resolved again through a config.
 
 use std::collections::BTreeMap;
 
 use crate::accounts::{self, Draws, Refusal};
 use crate::config::{Config, Limits};
 use crate::harness::Home;
-use crate::world::{AccountState, Decision, Job, World};
+use crate::world::{AccountState, Job, SessionSeat, World};
 
 use super::{kept, may_use, model_for, profile_hold};
 use crate::systems::devshell::Gate;
@@ -112,8 +112,8 @@ impl Room {
             room.book(account, draws);
         }
         // A decision's `agent:` session is a session like any: every project's, while its process lives.
-        let sessions = std::iter::once(world).chain(others.iter().copied()).flat_map(|w| w.decisions.values());
-        for (account, draws) in sessions.filter_map(Decision::seat) {
+        let sessions = std::iter::once(world).chain(others.iter().copied()).flat_map(|w| w.seats.values());
+        for (account, draws) in sessions.filter_map(SessionSeat::held) {
             room.book(account, draws);
         }
         for p in world.jobs().values().filter(|j| j.status.has_runner()).filter_map(|j| j.profile.as_deref()) {
@@ -167,15 +167,6 @@ impl Room {
             Draws::Account => on(Draws::Account),
             Draws::Provider(_) => on(draws.clone()) + on(Draws::Unknown),
             Draws::Unknown => self.running_on(account),
-        }
-    }
-
-    /// Gives back the seat `job` holds, if any: a checker may take the seat its worker's ended run frees.
-    pub fn free(&mut self, job: &Job) {
-        if let Some((account, draws)) = job.seat()
-            && let Some(n) = self.load.get_mut(&self.seat(account, draws))
-        {
-            *n = n.saturating_sub(1);
         }
     }
 

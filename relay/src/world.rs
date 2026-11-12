@@ -1509,7 +1509,7 @@ mod tests {
             (14, 0x0599_7a27_1a95_7bbd),
             (15, 0x5351_e6de_0d8d_bfd8),
             (16, 0x5351_e6de_0d8d_bfd8),
-            (18, 0x0000_0000_0000_0000),
+            (18, 0xcaf0_805c_bb93_9777),
         ];
         let dispatched = |t, model: Option<&str>| {
             st(

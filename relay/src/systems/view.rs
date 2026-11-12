@@ -343,12 +343,13 @@ fn model_cell(cfg: Option<&Config>, j: &Job) -> String {
     shorts.join(",")
 }
 
-/// Why a job waits or ended: a queued job's dependencies or, with its project's config and the
+/// Why a job waits or ended: a queued (or held) job's dependencies or, with its project's config and the
 /// room it is judged in (`own`), what holds it there, as the dispatcher judges it
 /// ([`Room::hold`]: a profile limit, free disk, or every account's cause); else the reason recorded.
 pub fn reason(own: Option<(&Config, &Room)>, world: &World, j: &Job, now: u64) -> Option<String> {
     let queued = j.status == crate::world::Status::Queued;
-    let waits = if queued { Wait::summary(&world.waits(j)) } else { None };
+    // A job the disk floor holds waits for its prerequisites too, and what blocks it there comes before the disk.
+    let waits = if queued || j.held { Wait::summary(&world.waits(j)) } else { None };
     let held = if queued && waits.is_none() { own.and_then(|(c, room)| room.hold(c, j, now)) } else { None };
     waits.or(held.map(|h| h.why)).or_else(|| held_by_floor(own.map(|(c, _)| c), j)).or_else(|| j.reason.clone())
 }
@@ -851,6 +852,12 @@ mod tests {
             Some("held: disk: 56G free, under 60G; resumes when space is back"),
             "another project's job, without its config"
         );
+        // Its prerequisite failed: what needs an operator is said, not the disk it no longer waits for.
+        let failed = Job { name: "p".into(), status: Status::Failed, ..Job::default() };
+        let child = Job { name: "c".into(), after: vec!["p".into()], ..held.clone() };
+        let (w, room) = claude_room(&[failed, child.clone()]);
+        assert_eq!(super::reason(Some((&cfg, &room)), &w, &child, NOW).as_deref(), Some("waits for p (failed)"));
+        assert_eq!(super::reason(None, &w, &child, NOW).as_deref(), Some("waits for p (failed)"));
         let stopped = Job { held: false, reason: Some("stopped by request".into()), ..held };
         assert_eq!(super::reason(Some((&cfg, &room)), &w, &stopped, NOW).as_deref(), Some("stopped by request"));
     }

@@ -3939,3 +3939,87 @@ fn a_relative_program_is_the_config_directorys_from_any_working_directory() {
     ok(&from_sub(&["queue", "add", "rel", "--text", "Look.", "--readonly"]), "queue from a subdirectory");
     assert_eq!(wait_for(&env, "rel")["status"], "done", "the session ran the same program");
 }
+
+/// Sets the project's `session.env_shell` to the script `shell`.
+fn dev_shell(env: &Env, shell: &Path) {
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    let conf = conf.replace("[session]\n", &format!("[session]\nenv_shell = [{:?}]\n", shell.display().to_string()));
+    std::fs::write(env.repo.join("relay.toml"), conf).unwrap();
+}
+
+/// Polls the board until `pred` holds of it (at most `secs`), and returns it.
+fn board_until(env: &Env, secs: u64, pred: impl Fn(&str) -> bool) -> String {
+    let until = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let text = board(env);
+        if pred(&text) || std::time::Instant::now() > until {
+            return text;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The incident of 2026-11-12: a development environment that takes long to enter. Jobs queued
+/// together wait, held with the reason on the board, while one warm-up enters it once; then every
+/// one of them runs on what it recorded, with no secret-looking variable in it.
+#[test]
+fn a_slow_dev_shell_holds_jobs_and_one_warm_up_starts_them_all() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("devshell-slow", false);
+    claude_account(&env.home, "a", 10, false);
+    let (shell, entries) = (env.root.join("dev-shell"), env.root.join("entries"));
+    write_executable(
+        &shell,
+        &format!(
+            "#!/bin/sh\necho entered >> '{}'\nsleep 4\nexport DEV_TOOL=from-the-shell API_TOKEN=s3cret\nexec \"$@\"\n",
+            entries.display()
+        ),
+    );
+    dev_shell(&env, &shell);
+    ok(&relay(&env, &["queue", "add", "one", "--text", "Look around. [env]", "--readonly"]), "queue one");
+    ok(&relay(&env, &["queue", "add", "two", "--text", "Look again.", "--readonly"]), "queue two");
+    ok(&relay(&env, &["queue", "add", "three", "--text", "Make a change."]), "queue three");
+    let text = board_until(&env, 3, |t| t.contains("dev shell warming ("));
+    assert!(text.contains("dev shell warming ("), "{text}");
+    for name in ["one", "two", "three"] {
+        assert_eq!(job(&env, name)["status"], "queued", "held, not started: {text}");
+    }
+    for name in ["one", "two", "three"] {
+        let j = wait_for(&env, name);
+        assert_eq!(j["status"], "done", "{j}");
+    }
+    let entered = std::fs::read_to_string(&entries).unwrap();
+    assert_eq!(entered.lines().count(), 1, "entered once for every job: {entered}");
+    let seen = std::fs::read_to_string(env.home.join(".claude.a/env")).unwrap();
+    assert!(seen.contains("DEV_TOOL=from-the-shell"), "{seen}");
+    assert!(!seen.contains("s3cret"), "a secret-looking variable is filtered: {seen}");
+}
+
+/// A development environment that does not start holds the jobs with why and the end of its
+/// stderr, and fails none of them; once fixed, a warm-up by hand starts them.
+#[test]
+fn a_failing_dev_shell_holds_jobs_with_its_reason_and_fails_none() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("devshell-fail", false);
+    claude_account(&env.home, "a", 10, false);
+    let shell = env.root.join("dev-shell");
+    write_executable(&shell, "#!/bin/sh\necho 'error: unable to download nixpkgs: HTTP 503' >&2\nexit 1\n");
+    dev_shell(&env, &shell);
+    ok(&relay(&env, &["queue", "add", "look", "--text", "Look around.", "--readonly"]), "queue");
+    let text = board_until(&env, 20, |t| t.contains("dev shell failed"));
+    assert!(text.contains("dev shell failed: exited 1 (attempt 1, retry "), "{text}");
+    assert!(text.contains("unable to download nixpkgs: HTTP 503"), "the end of its stderr: {text}");
+    assert_eq!(job(&env, "look")["status"], "queued", "held, not failed");
+    let world: serde_json::Value = serde_json::from_slice(&relay(&env, &["view", "status", "--json"]).stdout).unwrap();
+    assert_eq!(world["devshell"]["failed"]["why"], "exited 1", "{world}");
+    // Fixed: the operator warms it now rather than wait for the back-off.
+    write_executable(&shell, "#!/bin/sh\nexec \"$@\"\n");
+    let out = relay(&env, &["devshell", "warm"]);
+    ok(&out, "devshell warm");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "devshell: entered");
+    assert_eq!(wait_for(&env, "look")["status"], "done");
+}

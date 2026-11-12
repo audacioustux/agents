@@ -377,6 +377,83 @@ fn a_check_follows_nothing_the_session_planted() {
     assert!(!env.home.join("escaped").exists(), "the check's /tmp was the home the session linked to");
 }
 
+/// Tickify, 2026-11-12: each cache was a bind of its own, apart from the bind of the job's tree, so `link()`
+/// from the cache into the tree failed with EXDEV (one filesystem, but two mounts) and bun, pnpm and uv copied
+/// every package instead: a frozen install that takes 4 s on the host did not finish in 1800 s in a check.
+/// The session, the check at the tip and the check at the base now each hard-link from a cache into their
+/// tree; what each adds to the cache is there for the next; and the home around the cache shows what it
+/// showed before, read-only, with the host's own cache and what `hide_home` hides still out of sight.
+#[test]
+fn a_cache_and_the_tree_share_a_mount_so_a_package_manager_hard_links() {
+    // The home is not a hidden sibling of the repository here, as on a real machine: the cache sits among the
+    // host's own files, in a home rebuilt from them.
+    cache_link("cache-link", true);
+}
+
+/// The same where the home is hidden (here, a sibling of the repository): the cache is a symlink in the
+/// hidden home's empty tmpfs.
+#[test]
+fn a_cache_in_a_hidden_home_shares_a_mount_with_the_tree() {
+    cache_link("cache-link-hidden", false);
+}
+
+fn cache_link(tag: &str, home_shown: bool) {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup(tag, false);
+    configure(&env, "job_ceiling_usd = 100.0\n", if home_shown { "[sandbox]\nhide = []\n" } else { "" });
+    claude_account(&env.home, "a", 10, false);
+    std::fs::write(env.home.join("visible"), "here").unwrap();
+    std::fs::create_dir_all(env.home.join(".ssh")).unwrap();
+    std::fs::write(env.home.join(".ssh/id"), "key").unwrap();
+    // The host's own cache, which a job never sees, and the project's, which it does.
+    std::fs::create_dir_all(env.home.join(".cache")).unwrap();
+    std::fs::write(env.home.join(".cache/host-only"), "host").unwrap();
+    let shared = env.root.join("data/relay/flow/caches/.cache");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(shared.join("seed"), "a package").unwrap();
+    // Red at the base (no output file there yet), green at the tip. Each run first hard-links from the cache
+    // into its tree, then leaves a mark in the cache named after its commit.
+    let check = r#"ln "$HOME/.cache/seed" linked && : >"$HOME/.cache/linked-$(git rev-parse HEAD)" && test -f relay-output.txt"#;
+    let text = "[cache-link][status-done] Make a change.";
+    ok(&relay(&env, &["queue", "add", "linker", "--text", text, "--check", check, "--check-red-first"]), "queue");
+    let acct = env.home.join(".claude.a");
+    let said = |f: &str| std::fs::read_to_string(acct.join(f)).unwrap_or_default();
+    for _ in 0..600 {
+        if acct.join("cache-view").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(said("cache-link").trim(), "linked", "link() from the cache into the session's clone");
+    assert_eq!(
+        said("cache-view").lines().collect::<Vec<_>>(),
+        [
+            "host-cache-hidden",
+            if home_shown { "home-readable" } else { "home-unreadable" },
+            "home-read-only",
+            "ssh-hidden",
+            "relay-caches-hidden"
+        ],
+        "what the session sees around its cache"
+    );
+    let j = wait_for(&env, "linker");
+    assert_eq!(j["status"], "done", "{j}");
+    assert_eq!((j["bars"][0]["result"].as_str(), j["bars"][0]["base_exit"].as_i64()), (Some("pass"), Some(1)), "{j}");
+    let marks = std::fs::read_dir(&shared)
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("linked-"))
+        .count();
+    assert_eq!(marks, 2, "the checks at the tip and at the base both linked, and what they added stays");
+    assert_eq!(
+        std::fs::read_to_string(shared.join("from-session")).unwrap(),
+        "session\n",
+        "and what the session added"
+    );
+    assert!(!env.home.join(".cache/from-session").exists() && !env.home.join("created").exists(), "the host's own");
+}
+
 /// Audit finding 4: protected config an account does not have yet was not mounted at all, so its
 /// session could create it: a `settings.json` with a hook, a `hooks/` script, or a new omp profile that
 /// relay would then discover as an account. Each now gets a read-only placeholder.

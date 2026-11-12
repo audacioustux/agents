@@ -135,7 +135,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue add NAME ... --fork JOB` | Start as a fork of JOB's session, from its branch when it is a build job ([forks](#what-a-job-is)) |
 | `relay decide list [--wait [--timeout S]]` / `relay decide answer ID --action A ...` | Decisions waiting for the orchestrator / answer one ([hooks](#hooks)) |
 | `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
-| `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one. A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
+| `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one (or a job the [disk floor](#disk) holds, which then stays stopped). A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends and its runner has exited (it may re-review or wake the dispatcher after the end), and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |
 | `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)) |
@@ -361,7 +361,7 @@ job_ceiling_usd = 50                # required once any chain is set
 Every handler may also answer `defer`, which passes the decision to the next.
 When all defer, relay does what it does without hooks: at `cap` the job waits
 for a human (`failed`, resume with `--budget`), at `ended` the run's outcome
-stands, at `held` the job waits, at `disk` the job is stopped.
+stands, at `held` the job waits, at `disk` the job is stopped (held, when the floor did it: [disk](#disk)).
 
 - `rule`: relay's own checks, free and deterministic. At `cap`, no new commit
   and no changed file since the last checkpoint is `stop`. At `ended`, a done
@@ -750,6 +750,7 @@ pass_seconds = 300           # a pass stops here; the next goes on
 [limits]
 job_disk_gb = 40             # a running clone over this reaches the `disk` point (0: off)
 min_free_disk_gb = 10        # also: a pass runs at once below this, and holds new starts
+disk_resume_margin_gb = 3    # a held job resumes, and a queued one starts, this far over the floor
 disk_sample_minutes = 3      # how often a running clone is measured
 
 [session.env]
@@ -805,7 +806,8 @@ read-only job has too. The size is on the board (`12G`) and in `--json`
 point is reached. With no `disk` chain, or every handler deferring, the job is
 stopped with the reason `disk: clone 52G over 40G` or `disk: 8G free, under 20G`,
 its clone and session kept: free some space (`land gc` first), then `queue
-resume`. `wait` lets it go on, and asks again only after an hour. While the
+resume`. A job stopped by the free-space floor is not left for you: see
+[the floor holds](#the-floor-holds-a-job-and-resumes-it) below. `wait` lets it go on, and asks again only after an hour. While the
 chain decides (an orchestrator can take `orchestrator_timeout_minutes`), the run
 goes on under all its limits: its spend cap, silence limit and time limit still
 end it, and a decision still waiting then is withdrawn (`decided` by
@@ -814,6 +816,36 @@ end it, and a decision still waiting then is withdrawn (`decided` by
 whole process group is killed, an agent's session ended), so the job ends, frees
 its seat and `view result --wait` returns without waiting for the handler. Nothing is
 ever deleted inside a running job's clone.
+
+### The floor holds a job and resumes it
+
+Free disk on a shared machine swings as other projects build, so the floor
+(`min_free_disk_gb`) pauses a job rather than ending it. A job the floor stops
+(`disk: 8G free, under 20G`) is **held**: it is `stopped` with `held` set (`held: true`
+in `--json`), its clone, target and session kept, and the board shows
+`held: disk: 8G free, under 20G; resumes at 23 GB free`. A clone over `job_disk_gb`
+is not held, since free space does not cure it: that stop waits for a person.
+
+The dispatcher looks at free disk every minute while a job is held. When it is at least
+`min_free_disk_gb` plus `disk_resume_margin_gb` (default 3 GB, so a disk hovering at the
+floor does not flap), it puts the held job that has waited longest back in the queue,
+and its session is told the disk floor paused it, that nothing in its work caused it,
+and that free space is back. Only one resumes at a time: the next waits until the first
+has started and has run for one `disk_sample_minutes` (its clone measured), so the space
+is not eaten again at once. A held job not yet resumed counts as moving: a job queued
+`--after` it waits for it, and `view result --wait` goes on waiting.
+
+- A queued job obeys the same rule: a build job does not start while free disk is under
+  floor plus margin (the board says `free disk below 23 GB (the 20 GB floor and its
+  margin)`). Read-only jobs still start; the floor can still hold one that runs.
+- The floor itself is unchanged: its value, and what stops a running job (free disk under
+  it while that is the largest clone), are as above. The margin only moves when a job
+  goes back.
+- `queue stop` on a held job, or an earlier stop by a person, keeps it stopped for good:
+  the dispatcher resumes only what the floor held. `queue resume` by hand still works
+  at any time, and the dispatcher then leaves the job alone.
+- A `disk` handler answering `stop` for a job under the floor holds it the same way.
+  Nothing here deletes a held job's clone; `gc` keeps it by the rules above.
 
 `[session] env` sets variables in every job's environment (and the dispatcher's), over
 relay's own (see [What a job is](#what-a-job-is)) and the development environment's and under

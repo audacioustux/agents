@@ -291,8 +291,9 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, place: &Place<'_>) -
         let mut inv = Invocation::new("timeout");
         let secs = ctx.cfg.hooks.command_timeout_seconds.max(1).to_string();
         inv.args = ["-k", "5", &secs, "sh", "-c", command].map(OsString::from).to_vec();
-        // The project's own development environment, entered where the session cannot have edited it.
-        layer_env(ctx, &mut inv, &ctx.cfg.repo)?;
+        // The project's own development environment, as its warm-up recorded it from the repository,
+        // never from files the session could have edited.
+        layer_env(ctx, &mut inv)?;
         let file = place.inbox.create("check.out")?;
         let tmp = place.work.join("tmp");
         std::fs::create_dir(&tmp)?;

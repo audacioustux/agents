@@ -48,7 +48,7 @@ pub enum Cmd {
     },
     /// Detach the review chained to a build job: its reviewer no longer re-reviews or resumes it.
     Unreview { name: String },
-    /// Stop a queued job waiting for the jobs it was queued `--after`.
+    /// Stop a queued job, or one the disk floor holds, waiting for the jobs it was queued `--after`.
     Release {
         name: String,
         /// Drop only these (repeat, or comma-separate). Default: all of them.
@@ -189,16 +189,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             }
             (QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget, models }, None)
         }
-        Cmd::Release { from, .. } => {
-            let waiting = &when(|s| s == Status::Queued)?.after;
-            if waiting.is_empty() {
-                fail!(Conflict, "{name} waits for no job");
-            }
-            if let Some(other) = from.iter().find(|f| !waiting.contains(f)) {
-                fail!(Usage, "{name} does not wait for {other} (it waits for {})", waiting.join(", "));
-            }
-            (QueueEvent::Released { job: name.clone(), from }, None)
-        }
+        Cmd::Release { from, .. } => (release(job, &name, from)?, None),
         Cmd::Dequeue { .. } => {
             when(|s| s == Status::Queued)?;
             (QueueEvent::Dequeued { job: name.clone() }, None)
@@ -220,6 +211,23 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     }
     ctx.wake_dispatch()?;
     ctx.reply(&serde_json::json!({ "job": name, "recorded": recorded }), &format!("{name}: recorded"))
+}
+
+/// What `queue release` records for `job`: it stops waiting for `from` (all of its `--after` jobs when empty).
+fn release(job: Option<&Job>, name: &str, from: Vec<String>) -> Result<QueueEvent> {
+    let waiting = match job {
+        None => fail!(NotFound, "no job named {name}"),
+        // A job the disk floor holds waits for its prerequisites as a queued one does.
+        Some(j) if j.status != Status::Queued && !j.held => fail!(Conflict, "{name} is {}", j.status.as_str()),
+        Some(j) => &j.after,
+    };
+    if waiting.is_empty() {
+        fail!(Conflict, "{name} waits for no job");
+    }
+    if let Some(other) = from.iter().find(|f| !waiting.contains(f)) {
+        fail!(Usage, "{name} does not wait for {other} (it waits for {})", waiting.join(", "));
+    }
+    Ok(QueueEvent::Released { job: name.to_owned(), from })
 }
 
 /// The runner a stop of `job` signals: a running job's. A job the disk floor holds has none, and is stopped
@@ -744,6 +752,34 @@ mod tests {
         let e = r.unwrap_err();
         assert_eq!(e.downcast_ref::<crate::reply::Fail>().map(|f| f.kind), Some(crate::reply::Kind::Conflict));
         e.to_string()
+    }
+
+    /// `relay view result --wait` on a held job whose prerequisite failed prints `relay queue release NAME`:
+    /// that command has to work on the state it is printed for, and leave the job free to resume.
+    #[test]
+    fn release_frees_a_held_job_whose_prerequisite_failed() {
+        use crate::world::Status;
+        let mut w = World::default();
+        let failed = Job { name: "p".into(), status: Status::Failed, ..Job::default() };
+        let held = Job {
+            name: "c".into(),
+            status: Status::Stopped,
+            held: true,
+            after: vec!["p".into()],
+            reason: Some("disk: 56G free, under 60G".into()),
+            ..Job::default()
+        };
+        w.jobs_mut().extend([("p".to_owned(), failed), ("c".to_owned(), held)]);
+        let c = &w.jobs()["c"];
+        assert!(w.blocked(c) && !w.moves_on_its_own(c), "the state the command is printed for");
+        let event = release(Some(c), "c", Vec::new()).expect("the printed command succeeds");
+        w.apply(&Stamped { t: 9, from: None, event: Event::Queue(event) });
+        let c = &w.jobs()["c"];
+        assert!(w.waits(c).is_empty() && !w.blocked(c) && c.held, "free of p, still held for the disk");
+        assert!(w.moves_on_its_own(c), "the dispatcher resumes it when space is back");
+        // A job that is stopped for good, or running, has nothing to release.
+        let stopped = Job { held: false, ..c.clone() };
+        assert_eq!(refusal(release(Some(&stopped), "c", Vec::new()).map(|_| ())), "c is stopped");
     }
 
     #[test]

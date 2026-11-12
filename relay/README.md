@@ -134,7 +134,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue unreview JOB` | Detach the review chained to JOB, with no replacement: it no longer re-reviews or resumes JOB (exit 4 when none is chained) |
 | `relay queue add NAME ... --fork JOB` | Start as a fork of JOB's session, from its branch when it is a build job ([forks](#what-a-job-is)) |
 | `relay decide list [--wait [--timeout S]]` / `relay decide answer ID --action A ...` | Decisions waiting for the orchestrator / answer one ([hooks](#hooks)) |
-| `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
+| `relay queue release NAME [--from A,...]` | Stop a queued job, or one the [disk floor](#disk) holds, waiting for some or all of its `--after` jobs |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one (or a job the [disk floor](#disk) holds, which then stays stopped). A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends and its runner has exited (it may re-review or wake the dispatcher after the end), and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |
@@ -837,7 +837,8 @@ project resumed from a hold settles for this one too), and through an automatic 
 the resumed job; a hand `queue resume` of it ends the wait, and each job settles for the
 `disk_sample_minutes` of the project that resumed it. A held job whose `--after` jobs are
 not done (a parent held after it) waits for them, and if one of them fails it is blocked
-like a queued one (`waits for p (failed)`), so waiters on it exit 4 rather than wait forever.
+like a queued one (`waits for p (failed)`), so waiters on it exit 4 rather than wait forever;
+`queue release NAME` frees it of them, and the dispatcher then resumes it when space allows.
 A resume is another run, so it never passes `limits.job_ceiling_usd`: the run's cap is cut
 to what the ceiling leaves, and a job whose ceiling is spent stays stopped with a reason
 that says to raise it and `queue resume`. Turning the floor off

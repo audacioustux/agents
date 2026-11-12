@@ -120,13 +120,57 @@ fn workspace_note(ctx: &Ctx, job: &Job) -> String {
     }
 }
 
+/// Where in a job's run a process stands: its value is `RELAY_PHASE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Session,
+    /// The acceptance check on the branch's tip.
+    Check,
+    /// The acceptance check on the commit the branch started from.
+    CheckBase,
+    /// A decision agent (`agent:<profile>`) asked about the job.
+    Decision,
+}
+
+impl Phase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Phase::Session => "session",
+            Phase::Check => "check",
+            Phase::CheckBase => "check-base",
+            Phase::Decision => "decision",
+        }
+    }
+}
+
+/// The variables that say which job a process belongs to ([`crate::config::JOB_ENV`]), the one place they
+/// are built, for every process relay starts for a job: the session, each run of its check and a decision agent. The attempt counts resumes: 1 for the first.
+fn job_env(ctx: &Ctx, job: &Job, phase: Phase) -> [(OsString, Option<OsString>); 4] {
+    let var = |k: &str, v: String| (OsString::from(k), Some(OsString::from(v)));
+    let [project, name, attempt, phase_name] = crate::config::JOB_ENV;
+    [
+        var(project, ctx.cfg.name.clone()),
+        var(name, job.name.clone()),
+        var(attempt, job.attempts.to_string()),
+        var(phase_name, phase.as_str().to_owned()),
+    ]
+}
+
+/// Puts [`job_env`] on `inv`, last: nothing it already holds can change which job a process says it is.
+/// Every invocation relay starts for a job passes through here.
+fn name_the_job(ctx: &Ctx, job: &Job, phase: Phase, inv: &mut Invocation) {
+    inv.env.retain(|(k, _)| !crate::config::JOB_ENV.iter().any(|n| k == n));
+    inv.env.extend(job_env(ctx, job, phase));
+}
+
 /// The job's environment, in layers: the project's development environment
 /// (`session.env_shell`, as its one warm-up recorded it: see [`crate::systems::devshell`]) underneath, `session.env` over it, and the harness's
 /// own variables (the account) over both. Both of the job's layers pass `sandbox.env_deny`, as
 /// [`crate::sandbox::session_env`]'s base does: only the harness's own variables may name what it
 /// denies (`CLAUDE_CONFIG_DIR`). A `session.env` entry it names is refused at load; one that got past
-/// that would still be dropped here.
-fn layer_env(ctx: &Ctx, inv: &mut Invocation, dev: &[(OsString, Option<OsString>)]) {
+/// that would still be dropped here. Over all of them, last, [`name_the_job`]: nothing a layer holds, the
+/// development environment's record included, can change which job a process says it is.
+fn layer_env(ctx: &Ctx, job: &Job, phase: Phase, inv: &mut Invocation, dev: &[(OsString, Option<OsString>)]) {
     let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
     let session_env = ctx
         .cfg
@@ -136,6 +180,7 @@ fn layer_env(ctx: &Ctx, inv: &mut Invocation, dev: &[(OsString, Option<OsString>
         .filter(|(k, _)| !deny.is_match(k))
         .map(|(k, v)| (OsString::from(k), Some(OsString::from(v))));
     inv.env = dev.iter().cloned().chain(session_env).chain(std::mem::take(&mut inv.env)).collect();
+    name_the_job(ctx, job, phase, inv);
 }
 
 /// Where an attempt runs: the account, its harness, and the model the job uses on it.
@@ -363,7 +408,7 @@ fn launch(
         Ok(i) => i,
         Err(refusal) => return Ok(ControlFlow::Break((Outcome::Failed, Some(refusal)))),
     };
-    layer_env(ctx, &mut inv, dev);
+    layer_env(ctx, job, Phase::Session, &mut inv, dev);
     inv.write_files(&work.inbox).context("writing the prompt file")?;
     let mounts = Mounts {
         home: seat.home,
@@ -596,6 +641,7 @@ pub fn consult(
         let inv = harness.invocation(&home, &task).map_err(|r| anyhow::anyhow!(r.0))?;
         let mut inv = ctx.cfg.locate(harness.id(), inv).map_err(|r| anyhow::anyhow!(r.0))?;
         inv.args.extend(conf.extra_args.iter().map(OsString::from));
+        name_the_job(ctx, job, Phase::Decision, &mut inv);
         inv.write_files(&inbox).context("writing the prompt file")?;
         let mounts = Mounts {
             home: &home,
@@ -1313,10 +1359,11 @@ mod base_tests {
 mod env_tests {
     use std::ffi::OsString;
 
-    use super::layer_env;
+    use super::{Phase, layer_env};
     use crate::config::{Config, tempdir::Dir};
     use crate::ctx::Ctx;
     use crate::harness::Invocation;
+    use crate::world::Job;
 
     /// Review of #54 (third round): the warm-up stands in the repository, so its record held `PWD` there,
     /// and the session got it back after `session_env` dropped it: a build session in its clone was told it
@@ -1344,7 +1391,7 @@ mod env_tests {
             assert!(recorded.env.iter().all(|(k, _)| k != name), "{name} is not recorded: {:?}", recorded.env);
         }
         let mut inv = Invocation::new("claude");
-        layer_env(&ctx, &mut inv, &crate::systems::devshell::snapshot(&ctx).unwrap());
+        layer_env(&ctx, &Job::default(), Phase::Session, &mut inv, &crate::systems::devshell::snapshot(&ctx).unwrap());
         let env = crate::sandbox::session_env(&ctx, &inv);
         let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string_lossy().into_owned());
         assert_eq!(get("PWD"), None, "not the repository");
@@ -1369,7 +1416,7 @@ mod env_tests {
         let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
         let mut inv = Invocation::new("puku-cli");
         inv.env.push(("PUKU_CONFIG_DIR".into(), Some("/h/.puku-cli".into())));
-        layer_env(&ctx, &mut inv, &[]);
+        layer_env(&ctx, &Job::default(), Phase::Session, &mut inv, &[]);
         let env: Vec<(OsString, OsString)> = crate::sandbox::session_env(&ctx, &inv);
         let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string_lossy().into_owned());
         for denied in ["PUKU_WORKER_URL", "CLAUDE_CODE_X", "NPM_TOKEN"] {
@@ -1377,5 +1424,31 @@ mod env_tests {
         }
         assert_eq!(get("FROM_CONFIG").as_deref(), Some("yes"));
         assert_eq!(get("PUKU_CONFIG_DIR").as_deref(), Some("/h/.puku-cli"), "the harness's own variable");
+    }
+
+    /// A session and each run of its check hold the four variables that name the job, with the right values,
+    /// and nothing under them (a development environment's record, a config that got past load) changes them.
+    #[test]
+    fn a_session_and_its_check_know_which_job_they_are() {
+        let d = Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let mut cfg = Config::parse("name = \"tickify\"\n", &repo).unwrap();
+        for k in crate::config::JOB_ENV {
+            cfg.session.env.insert(k.into(), "from-config".into());
+        }
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        let job = Job { name: "add-login".into(), attempts: 2, ..Job::default() };
+        let dev = [(OsString::from("RELAY_JOB"), Some(OsString::from("from-devshell")))];
+        for (phase, want) in [(Phase::Session, "session"), (Phase::Check, "check"), (Phase::CheckBase, "check-base")] {
+            let mut inv = Invocation::new("claude");
+            layer_env(&ctx, &job, phase, &mut inv, &dev);
+            let env = crate::sandbox::session_env(&ctx, &inv);
+            let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string_lossy().into_owned());
+            assert_eq!(get("RELAY_PROJECT").as_deref(), Some("tickify"));
+            assert_eq!(get("RELAY_JOB").as_deref(), Some("add-login"));
+            assert_eq!(get("RELAY_ATTEMPT").as_deref(), Some("2"));
+            assert_eq!(get("RELAY_PHASE").as_deref(), Some(want));
+        }
     }
 }

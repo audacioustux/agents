@@ -10,6 +10,7 @@
 #   fail     every session there ends in an error
 #   decision a decision hook's answer, one line of JSON (default defer)
 #   decisions appended to by every decision hook run there
+#   decision-env  the decision hook's whole environment, sorted, written by every decision hook run there
 #   linger   a decision hook run there answers, then closes its stdout and sleeps (its pid in linger.pid)
 #   argv     appended to with every session's arguments
 #   pids     appended to with every session's pid, as it starts
@@ -92,6 +93,7 @@ case "$prompt" in
   ;;
 *"relay's decision hook"*)
   echo decide >>"$acct/decisions"
+  env | sort >"$acct/decision-env"
   answer=$(cat "$acct/decision" 2>/dev/null || echo '{"action": "defer"}')
   esc=$(printf '%s' "$answer" | sed 's/\\/\\\\/g; s/"/\\"/g')
   printf '{"type":"result","subtype":"success","is_error":false,"result":"%s","num_turns":1,"total_cost_usd":0.01}\n' "$esc"

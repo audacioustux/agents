@@ -3900,6 +3900,38 @@ fn outside_a_project_the_accounts_pane_is_machine_wide_and_calls_no_account_read
     assert!(!accounts.contains("ready"), "no project's rules judged it: {outside}");
 }
 
+/// A decision agent (`agent:<profile>`) is a model session started for a job, so it gets the same four
+/// variables naming the job as the job's own session does, with the phase `decision`.
+#[test]
+fn a_decision_agent_knows_which_job_it_decides_for() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("decision-env", false);
+    configure(
+        &env,
+        "job_ceiling_usd = 5.0\n",
+        "[hooks]\nended = [\"rule\", \"agent:triage\"]\n[profiles.triage]\nharness = \"claude\"\nbudget = 0.5\n",
+    );
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "work", "--text", "Make a change. [env]"]), "queue");
+    assert_eq!(wait_for(&env, "work")["status"], "done");
+    let var = |file: &str, name: &str| {
+        let text = std::fs::read_to_string(env.home.join(".claude.a").join(file)).unwrap();
+        text.lines().find_map(|l| l.strip_prefix(&format!("{name}=")).map(str::to_owned))
+    };
+    let project = var("env", "RELAY_PROJECT").expect("the session knows its project");
+    assert_eq!(var("env", "RELAY_PHASE").as_deref(), Some("session"));
+    for (name, want) in [
+        ("RELAY_PROJECT", project.as_str()),
+        ("RELAY_JOB", "work"),
+        ("RELAY_ATTEMPT", "1"),
+        ("RELAY_PHASE", "decision"),
+    ] {
+        assert_eq!(var("decision-env", name).as_deref(), Some(want), "{name} in the decision agent's environment");
+    }
+}
+
 #[test]
 fn a_jobs_own_state_root_in_session_env_does_not_move_relay_itself() {
     if !have_bwrap() {

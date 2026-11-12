@@ -773,6 +773,10 @@ impl Config {
             ensure!(valid_env_name(k), "session.env name {k:?} is not a variable name");
             // Refused, not dropped: a session never gets a variable the deny list names, and an entry
             // that silently did nothing (or, as it once did, got through) is worse than an error.
+            ensure!(
+                !JOB_ENV.contains(&k.as_str()),
+                "session.env {k} is set by relay for every session and check, so no config may set it: remove it"
+            );
             if let Some(m) = deny.find(k) {
                 bail!(
                     "session.env {k} matches sandbox.env_deny {:?} (at {:?}), so no session may get it: \
@@ -1041,6 +1045,10 @@ impl Missing {
     }
 }
 
+/// The variables relay sets in every session and check command to say which job it is (see
+/// `systems::session::job_env`): no `[session.env]` entry may name one.
+pub const JOB_ENV: [&str; 4] = ["RELAY_PROJECT", "RELAY_JOB", "RELAY_ATTEMPT", "RELAY_PHASE"];
+
 /// A shell-style variable name: letters, digits and underscores, not starting with a digit.
 fn valid_env_name(s: &str) -> bool {
     !s.is_empty()
@@ -1148,6 +1156,18 @@ mod tests {
         assert_eq!(script.args, [std::ffi::OsStr::new("-e"), std::ffi::OsStr::new("x"), pinned.as_os_str()]);
         let sh = cfg.locate("claude", crate::harness::Invocation::script("sh", &["-c", "x"], "claude"));
         assert_eq!(sh.unwrap_err().0, "harness claude: sh is not one of its helper programs");
+    }
+
+    /// The variables relay sets to name the job cannot be overridden: a `[session.env]` entry of the same
+    /// name is refused at load, with the reason.
+    #[test]
+    fn a_session_env_entry_naming_the_job_is_refused_at_load() {
+        let d = repo();
+        for name in JOB_ENV {
+            let text = format!("name = \"x\"\n[session.env]\n{name} = \"v\"\n");
+            let e = format!("{:#}", Config::parse(&text, d.path()).unwrap_err());
+            assert!(e.contains(name) && e.contains("set by relay"), "{e}");
+        }
     }
 
     /// Review of #40: a `[session.env]` entry that `sandbox.env_deny` names is refused when the config is

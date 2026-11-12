@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::bus::{DevShellEvent, now_micros};
 use crate::config::Config;
 use crate::ctx::Ctx;
+use crate::host::RelayEnv;
 use crate::os::Role;
 use crate::systems::dispatch::Hold;
 use crate::world::{DevShell, World};
@@ -271,7 +272,9 @@ fn warm(ctx: &Ctx) -> Result<String> {
     let port = ctx.port(&Source(()));
     port.emit(DevShellEvent::Warming { key: key.clone(), shell: shell.join(" ") })?;
     let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
-    match enter(shell, &deny, &ctx.cfg.repo, &stderr_file(ctx), ATTEMPT_SECS) {
+    // The environment the dispatcher would give it, never the caller's: a warm-up run by hand records
+    // the same variables as one dispatch started, and nothing of the shell that ran it.
+    match enter(&ctx.relay_env(), shell, &deny, &ctx.cfg.repo, &stderr_file(ctx), ATTEMPT_SECS) {
         Ok(env) => {
             record(ctx, &Recorded { key: key.clone(), env })?;
             port.emit(DevShellEvent::Warmed { key })?;
@@ -293,9 +296,11 @@ struct Failure {
     timed_out: bool,
 }
 
-/// The development environment entered on the host in `dir` through `shell`, under `timeout`
-/// for at most `limit` seconds, minus names `deny` matches. Its stderr goes to `stderr`.
+/// The development environment entered on the host in `dir` through `shell`, from `env` and
+/// nothing of the caller's, under `timeout` for at most `limit` seconds, minus names `deny`
+/// matches. Its stderr goes to `stderr`.
 fn enter(
+    env: &RelayEnv,
     shell: &[String],
     deny: &regex::Regex,
     dir: &Path,
@@ -314,7 +319,8 @@ fn enter(
         .open(stderr)
         .map_err(|e| fail(format!("could not open {}: {e}", stderr.display()), String::new(), false))?;
     let started = Instant::now();
-    let out = Command::new("timeout")
+    let out = env
+        .command("timeout")
         .args(["-k", "5", &limit.to_string()])
         .arg(program)
         .args(prefix)
@@ -409,6 +415,29 @@ mod tests {
         World::fold(&events)
     }
 
+    /// Review of #54: a warm-up run by hand (`relay devshell warm` from someone's shell) records what one
+    /// dispatch started would, never the caller's own variables: they would pass the deny filter
+    /// (`DATABASE_URL`, `GIT_WORK_TREE`) and reach every session.
+    #[test]
+    fn a_callers_own_variables_are_not_recorded() {
+        let d = Dir::new();
+        let ctx = project(&d, &[&script(&d, 0, true)]);
+        #[allow(clippy::disallowed_methods, reason = "the caller's environment is what must stay out")]
+        let callers: Vec<String> = std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()).collect();
+        let cmd = ctx.relay_env().command("true");
+        let relay: Vec<String> = cmd.get_envs().filter_map(|(k, _)| k.to_str().map(str::to_owned)).collect();
+        let theirs: Vec<&String> = callers.iter().filter(|k| !relay.contains(k)).collect();
+        assert!(!theirs.is_empty(), "the test process has variables of its own (cargo's, at least)");
+        assert_eq!(warm(&ctx).unwrap(), "entered");
+        let recorded = recorded(&ctx).unwrap();
+        // What the shell sets itself, and the script's own export.
+        let own = ["PWD", "OLDPWD", "SHLVL", "_", "DEV_TOOL"];
+        let leaked: Vec<&String> =
+            recorded.env.iter().map(|(k, _)| k).filter(|k| !relay.contains(k) && !own.contains(&k.as_str())).collect();
+        assert!(leaked.is_empty(), "the caller's variables reached the record: {leaked:?}");
+        assert!(recorded.env.iter().any(|(k, _)| k == "DEV_TOOL"));
+    }
+
     /// Review of #54: a shell that ignores the TERM gets `timeout` killed by SIGKILL, with no exit
     /// code. After the limit that is a timeout (retried at once), not a failure to back off from.
     #[test]
@@ -436,16 +465,17 @@ mod tests {
             strings(&["sh", "-c", "echo welcome; export DEV_TOOL=/nix/store/x API_TOKEN=s3cret; exec \"$@\"", "shell"]);
         let deny = regex::Regex::new("TOKEN").unwrap();
         let err = d.path().join("stderr");
-        let env = enter(&shell, &deny, Path::new("/"), &err, 30).unwrap();
+        let relay = RelayEnv::of([("PATH", "/usr/bin:/bin")]);
+        let env = enter(&relay, &shell, &deny, Path::new("/"), &err, 30).unwrap();
         let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
         assert_eq!(get("DEV_TOOL"), Some("/nix/store/x"));
         assert_eq!(get("API_TOKEN"), None, "secret-named variables stay out");
         assert!(env.iter().all(|(k, _)| !k.contains("welcome")), "the banner is not a variable");
-        let f = enter(&strings(&["sh", "-c", "echo broken >&2; exit 3", "s"]), &deny, Path::new("/"), &err, 30);
+        let f = enter(&relay, &strings(&["sh", "-c", "echo broken >&2; exit 3", "s"]), &deny, Path::new("/"), &err, 30);
         assert_eq!(f, Err(Failure { why: "exited 3".into(), tail: "broken\n".into(), timed_out: false }));
-        let slow = enter(&strings(&["sh", "-c", "sleep 5", "s"]), &deny, Path::new("/"), &err, 1).unwrap_err();
+        let slow = enter(&relay, &strings(&["sh", "-c", "sleep 5", "s"]), &deny, Path::new("/"), &err, 1).unwrap_err();
         assert!(slow.timed_out, "{slow:?}");
-        assert_eq!(enter(&[], &deny, Path::new("/"), &err, 30), Ok(Vec::new()));
+        assert_eq!(enter(&relay, &[], &deny, Path::new("/"), &err, 30), Ok(Vec::new()));
     }
 
     /// The incident of 2026-11-12: a shell that takes long to enter. Jobs are held while it warms, at

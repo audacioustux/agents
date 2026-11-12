@@ -173,14 +173,6 @@ impl Meter {
     pub fn named(name: &str, utilization: f64, resets_at: Option<i64>) -> Self {
         Self { utilization, resets_at, ..legacy(name) }
     }
-
-    /// Whether `model` names the meter's scope, so that the meter counts the model's use alone:
-    /// `claude-fable-5-2` and `Fable`. A meter with no scope counts every model's.
-    pub fn counts(&self, model: Option<&str>) -> bool {
-        self.scope
-            .as_ref()
-            .is_none_or(|s| model.is_some_and(|m| m.to_ascii_lowercase().contains(&s.to_ascii_lowercase())))
-    }
 }
 
 /// Named meters of one home, such as `seven_day`, or `openai-codex/7 days`. The name is the

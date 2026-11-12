@@ -169,7 +169,8 @@ impl Account for ClaudeAccount {
     }
 
     /// `Current session` is the five-hour meter and `Current week (all models)` the week's;
-    /// `Current week (Fable)` is the week's for that model alone, a meter of its own.
+    /// `Current week (Fable)` is the week's for that model alone, a meter of its own, scoped when
+    /// it names one of [`MODELS`]; any other `Current week (...)` is another week of the whole account.
     fn parse_quota(&self, text: &str, now_s: i64, local: &TimeZone) -> Meters {
         static LINE: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"^Current (week \(([^)]+)\)|session):\s+(\d+)% used(?:\s+·\s+resets\s+(.+?))?\s*$")
@@ -184,10 +185,11 @@ impl Account for ClaudeAccount {
             let (name, meter) = match c.get(2).map(|m| m.as_str().trim()) {
                 None => ("five_hour".to_owned(), Meter::new(Window::FiveHours, used / 100.0, resets_at)),
                 Some("all models") => ("seven_day".to_owned(), Meter::new(Window::Week, used / 100.0, resets_at)),
-                Some(model) => (
-                    format!("seven_day_{}", model.to_ascii_lowercase().replace(' ', "_")),
-                    Meter::new(Window::Week, used / 100.0, resets_at).scope(model),
-                ),
+                Some(what) => {
+                    let name = format!("seven_day_{}", what.to_ascii_lowercase().replace(' ', "_"));
+                    let meter = Meter { utilization: used / 100.0, resets_at, ..window_of(&name) };
+                    (name, meter)
+                }
             };
             out.insert(name, meter);
         }
@@ -195,26 +197,40 @@ impl Account for ClaudeAccount {
     }
 }
 
+/// The model families Claude meters a week of apart, as `/usage` names them (`Current week
+/// (Fable)`) and the API does after `seven_day_` (`seven_day_opus`). Only these are scopes: any
+/// other suffix (`overage_included`, `oauth_apps`) says how the account's week is counted, not
+/// whose it is, so that meter stays the whole account's.
+pub const MODELS: [&str; 4] = ["Opus", "Sonnet", "Haiku", "Fable"];
+
 /// What a meter named as Claude's API names its windows measures (`five_hour`, `seven_day`,
 /// `seven_day_opus`, `seven_day_overage_included`), and puku's, which uses the same names
-/// (`monthly`, `requests`): a `seven_day_` name is the week of what follows it alone, which governs
-/// only a model that names it ([`Meter::counts`]).
+/// (`monthly`, `requests`). A `seven_day_<model>` of [`MODELS`] is that model's week alone, which
+/// governs only a job whose model names it ([`covers`]); every other week is the account's.
 pub fn window_of(name: &str) -> Meter {
-    let scope = |rest: &str| {
-        let words = rest.replace('_', " ");
-        let mut c = words.chars();
-        c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
-    };
     match name {
         "five_hour" => Meter::new(Window::FiveHours, 0.0, None),
         "seven_day" => Meter::new(Window::Week, 0.0, None),
         "monthly" => Meter::new(Window::Month, 0.0, None),
         n => match n.strip_prefix("seven_day_").filter(|r| !r.is_empty()) {
-            Some(rest) => Meter::new(Window::Week, 0.0, None).scope(scope(rest)),
+            Some(rest) => {
+                let week = Meter::new(Window::Week, 0.0, None);
+                match MODELS.iter().find(|m| m.eq_ignore_ascii_case(rest)) {
+                    Some(model) => week.scope(*model),
+                    None => week,
+                }
+            }
             // `requests`, or a name this crate does not know: the whole allowance, of a length not said.
             None => Meter::new(Window::Other(None), 0.0, None),
         },
     }
+}
+
+/// Whether the meter `m` governs a job on `model`: a meter of the whole account always; one of a
+/// model of [`MODELS`] when the job's model names it (`claude-fable-5-2`). A job on the home's
+/// default model (`None`) is judged by the account's alone: relay cannot tell what that model is.
+pub fn covers(m: &Meter, model: Option<&str>) -> bool {
+    m.scope.as_ref().is_none_or(|s| model.is_some_and(|id| id.to_ascii_lowercase().contains(&s.to_ascii_lowercase())))
 }
 
 /// Tools that schedule the session's own later turns. Nothing is there to take
@@ -369,7 +385,7 @@ impl Harness for ClaudeCode {
     /// One allowance per account, whatever the model, and a meter of one model's own (the Fable
     /// week) for a model that names it. A model not named (the home's default) is not told.
     fn meters_for<'m>(&self, model: Option<&str>, meters: &'m Meters) -> Result<Vec<&'m Meter>, Refusal> {
-        Ok(meters.values().filter(|m| m.counts(model)).collect())
+        Ok(meters.values().filter(|m| covers(m, model)).collect())
     }
 
     fn carry(&self, session: &str, from: Option<&Home>, to: &Home, _scratch: &Path) -> bool {
@@ -784,6 +800,37 @@ mod tests {
         assert_eq!(m["seven_day"].window, Window::Week);
         assert_eq!((m["seven_day_opus"].window, m["seven_day_opus"].scope.as_deref()), (Window::Week, Some("Opus")));
         assert_eq!(m["five_hour"].window, Window::FiveHours);
+    }
+
+    /// Review of #66: only the suffixes that name a model are scopes. `overage_included` says how
+    /// the week is counted, not whose it is, so it stays the whole account's and governs every job.
+    #[test]
+    fn only_a_declared_models_week_is_scoped() {
+        for (name, scope) in [
+            ("seven_day_opus", Some("Opus")),
+            ("seven_day_sonnet", Some("Sonnet")),
+            ("seven_day_fable", Some("Fable")),
+            ("seven_day_overage_included", None),
+            ("seven_day_oauth_apps", None),
+        ] {
+            let m = window_of(name);
+            assert_eq!((m.window, m.scope.as_deref()), (Window::Week, scope), "{name}");
+        }
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"seven_day":{"utilization":0.3},"seven_day_overage_included":{"utilization":0.95}}}}"#;
+        let m = Claude.reader().line(line).unwrap();
+        let overage = &m["seven_day_overage_included"];
+        for model in [None, Some("claude-opus-5-5"), Some("fable")] {
+            let governing = Claude.meters_for(model, &m).unwrap();
+            assert!(governing.iter().any(|g| std::ptr::eq(*g, overage)), "{model:?}: account-wide");
+        }
+        // `/usage` alike: a model it names is scoped, anything else in the brackets is not.
+        let text = "Current week (all models): 20% used\nCurrent week (Sonnet): 5% used\nCurrent week (extra usage): 9% used\n";
+        let m = Claude.parse_quota(text, 0, &TimeZone::UTC);
+        assert_eq!(m["seven_day_sonnet"].scope.as_deref(), Some("Sonnet"));
+        assert_eq!(
+            (m["seven_day_extra_usage"].window, m["seven_day_extra_usage"].scope.as_deref()),
+            (Window::Week, None)
+        );
     }
 
     #[test]

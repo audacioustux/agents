@@ -61,7 +61,7 @@ pub fn spark(levels: &[Option<f64>]) -> String {
 /// negative. `None` when fewer than two readings remain, or they span under [`MIN_SPAN`].
 pub fn pace(points: &[Point], now: u64) -> Option<f64> {
     let recent: Vec<&Point> = points.iter().filter(|p| p.t >= now.saturating_sub(PACE_WINDOW)).collect();
-    let from = recent.windows(2).rposition(|w| is_reset(w[0], w[1])).map_or(0, |i| i + 1);
+    let from = new_window(&recent);
     let run = &recent[from..];
     let (first, last) = (run.first()?, run.last()?);
     let span = last.t.checked_sub(first.t).filter(|s| *s >= MIN_SPAN)?;
@@ -74,11 +74,21 @@ pub fn pace(points: &[Point], now: u64) -> Option<f64> {
 /// the time jitters by about a minute between readings of one window.
 const RESET_MOVE_S: i64 = 3600;
 
-/// Whether `next` is of a new window: the meter's own reset time moved forward by more than
-/// [`RESET_MOVE_S`]. The provider says so; a level that fell a point does not (it jitters), and
-/// a reading without a reset time says nothing.
-fn is_reset(prev: &Point, next: &Point) -> bool {
-    matches!((prev.resets_at, next.resets_at), (Some(a), Some(b)) if b - a > RESET_MOVE_S)
+/// Where the last window begins in `readings`: at the first reading to confirm that the meter's
+/// reset time moved forward by more than [`RESET_MOVE_S`] from the one before it that had a reset
+/// time. The provider says so; a level that fell a point does not (it jitters), and a reading without
+/// a reset time says nothing, so it is skipped over, not taken for a break. 0 when there is none.
+fn new_window(readings: &[&Point]) -> usize {
+    let mut known: Option<i64> = None;
+    let mut from = 0;
+    for (i, p) in readings.iter().enumerate() {
+        let Some(r) = p.resets_at else { continue };
+        if known.is_some_and(|k| r - k > RESET_MOVE_S) {
+            from = i;
+        }
+        known = Some(r);
+    }
+    from
 }
 
 /// What the pace comes to before the reset.
@@ -465,6 +475,35 @@ mod tests {
             None,
             "one reading since it says nothing"
         );
+    }
+
+    /// A reading may leave the reset time out: the rollover is then between the readings that have
+    /// one, and the new window begins at the first of them to confirm it.
+    #[test]
+    fn a_reading_without_a_reset_time_does_not_hide_the_rollover() {
+        let (week, next) = (NOW_S + 3600, NOW_S + 3600 + 7 * 86_400);
+        let at = |h, u, r: Option<i64>| Point { resets_at: r, ..p(h, u) };
+        let readings = [
+            at(4, 0.80, Some(week)),
+            at(3, 0.90, Some(week)),
+            at(2, 0.10, None),
+            at(1, 0.20, Some(next)),
+            at(0, 0.30, Some(next)),
+        ];
+        let got = pace(&readings, NOW).unwrap();
+        assert!((got - 2.4).abs() < 1e-9, "10 points in an hour is 240% a day, not +0%/d: {got}");
+        // Several unknowns in a row, still between the two known times.
+        let more = [
+            at(5, 0.7, Some(week)),
+            at(4, 0.9, None),
+            at(3, 0.1, None),
+            at(2, 0.2, Some(next)),
+            at(0, 0.3, Some(next)),
+        ];
+        assert!((pace(&more, NOW).unwrap() - 1.2).abs() < 1e-9);
+        // Unknown throughout: nothing says it rolled over, and the fall is not a negative pace.
+        let blind = [at(3, 0.9, None), at(2, 0.1, None), at(0, 0.3, None)];
+        assert!(pace(&blind, NOW).unwrap() >= 0.0);
     }
 
     /// Real readings jitter: the level by a point (0.69, 0.68, 0.69) and the reset time by a minute

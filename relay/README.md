@@ -483,6 +483,12 @@ handlers as untrusted.
   session left uncommitted or untracked are not there for it. The checkout is a fresh
   clone with a configuration of its own, so the session's `.git/config` cannot name a
   program for the host to run. Because it is fresh, a build starts from nothing.
+  What the check leaves behind never blocks the next one: its directory (the checkout and
+  its `TMPDIR`) is cleared before each run and after it, and a directory a test set to mode
+  `0o000` is made owner-readable and removed (a symlink in it is unlinked, never followed).
+  A directory that still cannot be cleared is logged on the job's events as
+  `cleanup-failed` with its path, and the check that needed it is `check-could-not-run`
+  ("could not clear the check directory ..."), not a failed checkout.
 - **In the session's sandbox plan** (the repository read-only, the same network and
   limits), under `hooks.command_timeout_seconds` (raise it for a long suite), but
   with the session's clone and **its account out of sight**: the check cannot read

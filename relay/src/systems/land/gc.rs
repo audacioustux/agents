@@ -211,7 +211,8 @@ fn in_repo(ctx: &Ctx, commit: &str) -> bool {
 
 /// Makes sure every commit of the job's branch is in the repository before
 /// its clone goes: `Some(ref)` when it had to fetch it into a rescue ref.
-/// Refuses a clone whose work is not all committed (build outputs aside).
+/// Refuses a clone whose work is not all committed (build outputs aside), or that git could not read
+/// whole (any warning from `git status`).
 fn secure(ctx: &Ctx, j: &Job, dir: &SessionRepo) -> Result<Option<String>> {
     let branch = j.branch.as_deref().context("the job has no branch")?;
     let tip = tip(dir, branch)?;
@@ -222,6 +223,15 @@ fn secure(ctx: &Ctx, j: &Job, dir: &SessionRepo) -> Result<Option<String>> {
     let dirty = status.output().context("git status")?;
     if !dirty.status.success() || !dirty.stdout.is_empty() {
         bail!("uncommitted changes in the clone");
+    }
+    // A warning is git saying it did not see everything (`could not open directory`, a directory a test
+    // left at mode 0): what it could not read may be work nobody committed or rescued, and a clone is the
+    // session's, not relay's, to repair and delete. Kept, as dirty.
+    if !dirty.stderr.iter().all(u8::is_ascii_whitespace) {
+        bail!(
+            "uncommitted changes in the clone (git status warned: {})",
+            String::from_utf8_lossy(&dirty.stderr).trim()
+        );
     }
     if in_repo(ctx, &tip) {
         return Ok(None);
@@ -397,7 +407,7 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
         return Ok(());
     }
     if item.kind == Kind::Scratch {
-        std::fs::remove_dir_all(&item.path).with_context(|| format!("removing {}", item.path.display()))?;
+        crate::hostdir::remove_tree(&item.path).with_context(|| format!("removing {}", item.path.display()))?;
         return collected(ctx, &item.job, "scratch", a.bytes);
     }
     let j = world.jobs().get(&item.job).context("the job is gone")?;
@@ -406,7 +416,7 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
         Kind::Log => gzip_log(&item.path),
         Kind::Outputs => {
             let meta = item.path.symlink_metadata()?;
-            if meta.is_dir() { std::fs::remove_dir_all(&item.path) } else { std::fs::remove_file(&item.path) }
+            if meta.is_dir() { crate::hostdir::remove_tree(&item.path) } else { std::fs::remove_file(&item.path) }
                 .with_context(|| format!("removing {}", item.path.display()))?;
             collected(ctx, &item.job, "outputs", a.bytes)
         }
@@ -416,7 +426,7 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
             if let Some(r) = a.rescued.as_ref().filter(|_| !ctx.json) {
                 println!("gc: rescued {}'s unfetched commits into {r}", item.job);
             }
-            std::fs::remove_dir_all(&item.path).with_context(|| format!("removing {}", item.path.display()))?;
+            crate::hostdir::remove_tree(&item.path).with_context(|| format!("removing {}", item.path.display()))?;
             collected(ctx, &item.job, "clone", a.bytes)
         }
     }

@@ -346,12 +346,15 @@ impl Ctx {
                 continue;
             }
             let path = entry.path();
-            let removed =
-                if entry.file_type()?.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+            let removed = if entry.file_type()?.is_dir() {
+                crate::hostdir::remove_tree(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
             gone(removed).with_context(|| format!("removing {}", path.display()))?;
         }
         let tmp = self.job_tmp(job);
-        gone(std::fs::remove_dir_all(&tmp)).with_context(|| format!("removing {}", tmp.display()))
+        gone(crate::hostdir::remove_tree(&tmp)).with_context(|| format!("removing {}", tmp.display()))
     }
 
     /// Writes a file readable by its owner only, replacing what was there.

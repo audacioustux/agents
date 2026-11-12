@@ -15,7 +15,11 @@ use crate::config::{Config, Limits};
 use crate::harness::Home;
 use crate::world::{AccountState, Job, World};
 
-use super::{may_use, model_for, profile_hold};
+use super::{kept, may_use, model_for, profile_hold};
+
+/// How long a job waits for a reading under way before it starts on an account read already: from
+/// when the reading went stale or the job was queued, whichever is later.
+pub const READING_WAIT_MICROS: u64 = 2 * 60 * 1_000_000;
 
 #[derive(Debug, Clone, Default)]
 pub struct Room {
@@ -179,6 +183,42 @@ impl Room {
         }
     }
 
+    /// Whether `j` should wait for a reading of `home`, which `refused` it on `model`, rather
+    /// than start elsewhere now: its only cause is a reading that is stale (or never taken), one
+    /// is due (no failed read backing off, so the dispatcher has asked for it), and the wait is
+    /// young ([`READING_WAIT_MICROS`]). Returns when the wait ends, and the fit its last reading
+    /// gave it, shared as [`Room::admit`] shares it (`None` never read: its room is unknown).
+    /// `None` when there is nothing worth waiting for: past its floor when last read, say.
+    fn awaited(
+        &self,
+        cfg: &Config,
+        j: &Job,
+        home: &Home,
+        model: Option<&str>,
+        refused: &Refused,
+        now_us: u64,
+    ) -> Option<(u64, Option<f64>)> {
+        if refused.busy.is_some() || !matches!(refused.fit, Some(Refusal::Stale | Refusal::Unread)) {
+            return None;
+        }
+        let key = home.key();
+        let st = self.accounts.get(&key);
+        if !accounts::due(accounts::harness_of(home), st, now_us) {
+            return None;
+        }
+        let since = accounts::stale_since(st).map_or(j.queued_at, |s| s.max(j.queued_at));
+        let until = since.saturating_add(READING_WAIT_MICROS);
+        if now_us >= until {
+            return None;
+        }
+        if st.and_then(|s| s.read_at).is_none() {
+            return Some((until, None));
+        }
+        let last = accounts::fit_as_read(home, st, model, &cfg.limits, now_us).ok()?;
+        let taken = self.taken(&key, &accounts::draws(model, "", home.harness));
+        Some((until, Some(share(last, taken))))
+    }
+
     /// Why `j`, queued and waiting for no other job, does not start at `now_us` by `cfg`'s rules:
     /// its profile's limits (unless a decision forced it past them), free disk for a build job,
     /// or no account it may use that [`Room::admit`]s it on its model there. `None` when it would
@@ -204,15 +244,37 @@ impl Room {
         // harness says govern the job's model there.
         let mut why = Vec::new();
         let mut fits = Vec::new();
+        let mut awaited = Vec::new();
         for a in self.found.iter().filter(|a| may_use(j, a)) {
-            match self.admit(&cfg.limits, a, model_for(cfg, j, a.harness).as_deref(), now_us) {
+            let model = model_for(cfg, j, a.harness);
+            match self.admit(&cfg.limits, a, model.as_deref(), now_us) {
                 Ok(score) => fits.push((a, score)),
-                Err(r) => why.push(format!("{} {}", a.key(), r.describe())),
+                Err(r) => {
+                    awaited.extend(self.awaited(cfg, j, a, model.as_deref(), &r, now_us).map(|w| (a.key(), w)));
+                    why.push(format!("{} {}", a.key(), r.describe()));
+                }
             }
         }
         if fits.is_empty() {
             let why = if why.is_empty() { "the job's harness or pin allows no account".into() } else { why.join("; ") };
             return Err(Hold { why: format!("no account has room ({why})"), until: None });
+        }
+        // An account read a moment ago should not take the job only because the others' readings are
+        // still under way: wait for those that may have more room, a little while, unless the job
+        // resumes a transcript on an account that fits now. Waiting admits nothing unread, so no floor moves.
+        let best = fits.iter().map(|&(_, s)| s).fold(f64::NEG_INFINITY, f64::max);
+        let resumes = kept(j).is_some_and(|k| fits.iter().any(|(a, _)| a.key() == k));
+        awaited.retain(|(_, (_, last))| last.is_none_or(|s| s > best));
+        if let Some(until) = awaited.iter().map(|(_, (u, _))| *u).min().filter(|_| !resumes) {
+            let names: Vec<&str> = awaited.iter().map(|(k, _)| k.as_str()).collect();
+            let fresh: Vec<String> = fits.iter().map(|(a, _)| a.key()).collect();
+            let why = format!(
+                "waiting for a reading of {} before starting on {}{}",
+                names.join(", "),
+                fresh.join(", "),
+                at(until).map_or_else(String::new, |t| format!(" (until {t} at most)"))
+            );
+            return Err(Hold { why, until: Some(until) });
         }
         Ok(fits)
     }
@@ -236,6 +298,12 @@ impl Room {
 #[allow(clippy::cast_precision_loss, reason = "a handful of sessions")]
 fn share(score: f64, taken: usize) -> f64 {
     score / (taken + 1) as f64
+}
+
+/// Bus time `us` as a local clock reading: `14:02 +06`.
+fn at(us: u64) -> Option<String> {
+    let t = jiff::Timestamp::from_microsecond(i64::try_from(us).ok()?).ok()?;
+    Some(crate::os::local(t).strftime("%H:%M %Z").to_string())
 }
 
 /// What `world` and `others` know of the accounts `found`, merged and settled against their files.

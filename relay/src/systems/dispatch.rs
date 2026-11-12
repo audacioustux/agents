@@ -378,15 +378,20 @@ pub fn model_for(cfg: &Config, job: &Job, harness: &str) -> Option<String> {
     job.models.get(harness).cloned().or_else(|| cfg.harness(harness).model)
 }
 
-/// Of the accounts that fit, the one a resumable session already ran on, so
+/// The account whose transcript `job` would resume, if any: its own resumable session's, or, for
+/// a fork that has no session of its own yet, the account of the session it forks.
+fn kept(job: &Job) -> Option<&str> {
+    let fork = job.fork.as_ref().filter(|f| job.session_id.as_deref().is_none_or(|s| s == f.session_id));
+    let own = job.session_id.as_ref().and(job.transcript_account.as_deref());
+    fork.map(|f| f.account.as_str()).or(own)
+}
+
+/// Of the accounts that fit, the one a resumable session already ran on ([`kept`]), so
 /// the provider's prompt cache still holds its transcript (moving it means
 /// re-reading all of it at full price); otherwise the best-scoring one, its room shared among the
 /// sessions it runs ([`Room::admit`]).
-/// A fork that has no session of its own yet prefers the account of the session it forks.
 fn choose<'a>(job: &Job, fits: &[(&'a Home, f64)]) -> Option<&'a Home> {
-    let fork = job.fork.as_ref().filter(|f| job.session_id.as_deref().is_none_or(|s| s == f.session_id));
-    let own = job.session_id.as_ref().and(job.transcript_account.as_deref());
-    let home = fork.map(|f| f.account.as_str()).or(own).and_then(|last| fits.iter().find(|(a, _)| a.key() == last));
+    let home = kept(job).and_then(|last| fits.iter().find(|(a, _)| a.key() == last));
     home.or_else(|| fits.iter().max_by(|(_, x), (_, y)| x.total_cmp(y))).map(|&(a, _)| a)
 }
 
@@ -836,6 +841,61 @@ mod tests {
         for name in ["j00", "j05", "j11"] {
             assert!(starts.contains(&(name.to_owned(), "claude:c".to_owned())), "{name}: {starts:?}");
         }
+    }
+
+    /// An account whose reading is under way, and whose last reading had more room, is waited for
+    /// a while rather than letting the account read a moment ago take the burst; never past the
+    /// wait, never for an account at its floor when last read, one whose read failed, one with less
+    /// room, or when the job resumes on a fresh account.
+    #[test]
+    fn a_reading_under_way_is_waited_for_a_while() {
+        let (_d, cfg) = burst_config();
+        let (mut world, found) = burst(&[("a", 0.6, 72), ("b", 0.1, 72), ("c", 0.6, 72)], NOW_US - 1, 1);
+        // b was read 11 minutes ago, so it went stale a minute ago and is being read again.
+        let b_read = NOW_US - 11 * 60 * 1_000_000;
+        world.accounts.get_mut("claude:b").unwrap().read_at = Some(b_read);
+        // Queued before that, so its wait runs from when b went stale.
+        let job = Job { queued_at: NOW_US - 30 * 60 * 1_000_000, ..world.jobs()["j00"].clone() };
+        // The accounts that admit the job, by key, or why it is held.
+        let judge = |w: &World, j: &Job, now| {
+            let room = Room::of(found.clone(), w.accounts.clone(), w, &[], true);
+            room.judge(&cfg, j, now).map(|fits| fits.iter().map(|(a, _)| a.key()).collect::<Vec<_>>())
+        };
+
+        let hold = judge(&world, &job, NOW_US).unwrap_err();
+        assert!(
+            hold.why.starts_with("waiting for a reading of claude:b before starting on claude:a, claude:c"),
+            "{}",
+            hold.why
+        );
+        let stale_at = b_read + accounts::STALE_MICROS + 1;
+        assert_eq!(hold.until, Some(stale_at + room::READING_WAIT_MICROS), "two minutes from when it went stale");
+        // A job queued later waits two minutes from then.
+        let later = Job { queued_at: NOW_US + 1, ..job.clone() };
+        assert_eq!(judge(&world, &later, NOW_US).unwrap_err().until, Some(NOW_US + 1 + room::READING_WAIT_MICROS));
+
+        let past = stale_at + room::READING_WAIT_MICROS;
+        let fits = judge(&world, &job, past).expect("the wait is over");
+        assert_eq!(fits, ["claude:a", "claude:c"]);
+
+        let resumes = Job { session_id: Some("s".into()), transcript_account: Some("claude:a".into()), ..job.clone() };
+        assert!(judge(&world, &resumes, NOW_US).is_ok(), "its transcript's account fits now");
+
+        let mut failed = world.clone();
+        failed.accounts.get_mut("claude:b").unwrap().unreadable_at = Some(NOW_US - 1);
+        assert!(judge(&failed, &job, NOW_US).is_ok(), "a failed read backs off: nothing is under way");
+
+        for (utilization, why) in [(0.95, "at its floor when last read"), (0.7, "less room than a fresh account")] {
+            let mut w = world.clone();
+            w.accounts.get_mut("claude:b").unwrap().meters.get_mut("seven_day").unwrap().utilization = utilization;
+            assert!(judge(&w, &job, NOW_US).is_ok(), "{why}");
+        }
+
+        let mut unread = world.clone();
+        unread.accounts.remove("claude:b");
+        let hold = judge(&unread, &later, NOW_US).unwrap_err();
+        assert_eq!(hold.until, Some(NOW_US + 1 + room::READING_WAIT_MICROS), "never read: its room is unknown");
+        assert!(judge(&unread, &job, NOW_US).is_ok(), "and the wait runs from when the job was queued");
     }
 
     #[test]

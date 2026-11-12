@@ -288,13 +288,27 @@ pub fn fit(
     now_us: u64,
 ) -> Result<f64, Refusal> {
     let h = harness_of(home);
+    // An old reading may say there is room that has since been spent.
+    if account_refusal(h, state, secs(now_us)).is_none() && is_stale(h, state, now_us) {
+        return Err(Refusal::Stale);
+    }
+    fit_as_read(home, state, model, limits, now_us)
+}
+
+/// As [`fit`], taking the last reading as it is however old: how the account stood when it was
+/// read. Never a reason to start a session (an old reading may say there is room since spent);
+/// dispatch asks it only to tell whether a reading under way is worth waiting for.
+pub fn fit_as_read(
+    home: &Home,
+    state: Option<&AccountState>,
+    model: Option<&str>,
+    limits: &Limits,
+    now_us: u64,
+) -> Result<f64, Refusal> {
+    let h = harness_of(home);
     let now_s = secs(now_us);
     if let Some(r) = account_refusal(h, state, now_s) {
         return Err(r);
-    }
-    // An old reading may say there is room that has since been spent.
-    if is_stale(h, state, now_us) {
-        return Err(Refusal::Stale);
     }
     let empty = Meters::new();
     let meters = state.map_or(&empty, |s| &s.meters);
@@ -319,6 +333,16 @@ pub fn is_stale(harness: &dyn Harness, state: Option<&AccountState>, now_us: u64
             .flat_map(|a| a.meters.values())
             .filter_map(|m| m.resets_at)
             .any(|r| read_s < r && r <= now_s)
+}
+
+/// When (bus time) the account's last reading went, or will go, stale: 10 minutes after it was
+/// taken, or at the first reset it names after it was taken, whichever is sooner. `None` unread.
+pub fn stale_since(state: Option<&AccountState>) -> Option<u64> {
+    let a = state?;
+    let read_us = a.read_at?;
+    let resets = a.meters.values().filter_map(|m| m.resets_at).filter(|&r| r > secs(read_us));
+    let resets = resets.filter_map(|r| u64::try_from(r).ok()).map(|r| r.saturating_mul(1_000_000));
+    resets.chain([read_us.saturating_add(STALE_MICROS + 1)]).min()
 }
 
 /// Whether to take a reading now: it is stale, and no failed read is still

@@ -48,10 +48,11 @@ pub enum Cmd {
     },
     /// Detach the review chained to a build job: its reviewer no longer re-reviews or resumes it.
     Unreview { name: String },
-    /// Stop a queued job waiting for the jobs it was queued `--after`.
+    /// Start a queued job now, without waiting for the jobs it was queued `--after` to finish (not a
+    /// cancel: `dequeue` withdraws it).
     Release {
         name: String,
-        /// Drop only these (repeat, or comma-separate). Default: all of them.
+        /// Stop waiting for only these (repeat, or comma-separate); it starts once none is left. Default: all of them.
         #[arg(long = "from", value_delimiter = ',')]
         from: Vec<String>,
     },

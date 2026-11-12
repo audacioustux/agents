@@ -196,7 +196,7 @@ fn layer_env(ctx: &Ctx, job: &Job, phase: Phase, inv: &mut Invocation, dev: &[(O
         .env
         .iter()
         .filter(|(k, _)| !deny.is_match(k))
-        .map(|(k, v)| (OsString::from(k), Some(OsString::from(v))));
+        .map(|(k, v)| (OsString::from(k), Some(crate::host::expand(v, &ctx.cfg, &ctx.state_root, &ctx.data_root))));
     inv.env = dev.iter().cloned().chain(session_env).chain(std::mem::take(&mut inv.env)).collect();
     name_the_job(ctx, job, phase, inv);
 }
@@ -1467,6 +1467,34 @@ mod env_tests {
             assert_eq!(get("RELAY_JOB").as_deref(), Some("add-login"));
             assert_eq!(get("RELAY_ATTEMPT").as_deref(), Some("2"));
             assert_eq!(get("RELAY_PHASE").as_deref(), Some(want));
+        }
+    }
+
+    /// Copilot on #65: the expanded `${RELAY_STATE}` was overwritten by the raw `session.env` the
+    /// invocation's overlay carried, so a session and a check saw the literal text. What matters is the
+    /// final sandbox environment, over the development environment, for both.
+    #[test]
+    fn session_env_names_are_expanded_in_the_final_environment_of_a_session_and_a_check() {
+        let d = Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let text = "name = \"t\"\n[session.env]\nMISE_TRUSTED_CONFIG_PATHS = \"${RELAY_STATE}:${RELAY_CLONES}\"\n";
+        let cfg = Config::parse(text, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        // The development environment names it too: `session.env` stays over it.
+        let dev = [(OsString::from("MISE_TRUSTED_CONFIG_PATHS"), Some(OsString::from("/dev")))];
+        let want = format!("{}:{}", ctx.state.display(), ctx.clones.display());
+        assert!(!want.contains("${"), "{want}");
+        let mut session = Invocation::new("harness");
+        layer_env(&ctx, &Job::default(), Phase::Session, &mut session, &dev);
+        let check = super::bar::invocation(&ctx, &Job::default(), Phase::Check, "true", &dev);
+        for (who, inv) in [("session", &session), ("check", &check)] {
+            let env = crate::sandbox::session_env(&ctx, inv);
+            let got = env
+                .iter()
+                .find(|(k, _)| k == "MISE_TRUSTED_CONFIG_PATHS")
+                .map(|(_, v)| v.to_string_lossy().into_owned());
+            assert_eq!(got.as_deref(), Some(want.as_str()), "the {who}'s environment");
         }
     }
 }

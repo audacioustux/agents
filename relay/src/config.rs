@@ -277,6 +277,10 @@ pub struct Hooks {
     pub seat_wait_minutes: f64,
     /// How long a `command:` handler may run.
     pub command_timeout_seconds: u64,
+    /// Exit codes (1-255) that an acceptance check uses to say it could not run, beyond the ones that
+    /// always mean so (124-127, 137, 143): relay ends such a run `check-could-not-run`, never `fail`
+    /// or `base-red`. Declared by the project, since only the project knows its check's codes.
+    pub check_could_not_run_exit_codes: Vec<i32>,
     /// Whether a `held` decision may `force` a job past its profile's limits.
     pub allow_force: bool,
     /// The most decisions that may act on one job (one incarnation) once any chain
@@ -302,6 +306,7 @@ impl Default for Hooks {
             orchestrator_timeout_minutes: 20.0,
             seat_wait_minutes: 30.0,
             command_timeout_seconds: 120,
+            check_could_not_run_exit_codes: Vec::new(),
             allow_force: false,
             max_decisions: 10,
         }
@@ -801,6 +806,10 @@ impl Config {
         ensure!(
             h.seat_wait_minutes.is_finite() && h.seat_wait_minutes >= 0.0,
             "hooks.seat_wait_minutes must not be negative"
+        );
+        ensure!(
+            h.check_could_not_run_exit_codes.iter().all(|c| (1..=255).contains(c)),
+            "hooks.check_could_not_run_exit_codes are exit codes from 1 to 255 (0 is a pass)"
         );
         self.validate_disk()?;
         let deny = regex::Regex::new(&self.sandbox.env_deny).context("sandbox.env_deny")?;

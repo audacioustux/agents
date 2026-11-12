@@ -1087,7 +1087,9 @@ what was recorded:
   for the current key, the dispatcher starts `relay devshell warm`. It enters the shell in your
   repository (never a clone a session could have edited) and records its variables, after
   `sandbox.env_deny`, in `devshell.json` in the project's state directory, which only you can read.
-  It holds a lock (`devshell.lock`), so at most one runs per project however many jobs wait;
+  It holds a lock (`devshell.lock`), so at most one runs per project however many jobs wait.
+  The shell runs supervised and holds the lock too (as its stdin), so a warm-up killed midway
+  leaves none running: its shell is ended with it, and no new one starts until all of it has;
   `relay devshell warm` by hand does the same, now, and exits 4 while another runs.
 - **The key** is the shell command and the repository's `flake.nix`, `flake.lock`, `shell.nix`,
   `default.nix`, `devenv.nix`, `devenv.lock`, `devbox.json` and `devbox.lock`. When any of them

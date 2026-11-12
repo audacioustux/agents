@@ -26,6 +26,7 @@ use crate::config::Config;
 use crate::ctx::Ctx;
 use crate::host::RelayEnv;
 use crate::os::Role;
+use crate::supervised::Supervised;
 use crate::systems::dispatch::Hold;
 use crate::world::{DevShell, World};
 
@@ -262,7 +263,7 @@ pub fn tend(ctx: &Ctx, world: &World, gate: Option<&Gate>) -> Result<()> {
 /// it did (`warm`, `entered`, `failed: ...`); a failure to start it is on the bus, not an error.
 fn warm(ctx: &Ctx) -> Result<String> {
     let Some(key) = key(&ctx.cfg) else { return Ok("no session.env_shell: nothing to enter".into()) };
-    let Some(_role) = Role::try_take(&lock_file(ctx))? else {
+    let Some(role) = Role::try_take(&lock_file(ctx))? else {
         fail!(Conflict, "a warm-up of the development environment is already running")
     };
     if recorded(ctx).is_some_and(|r| r.key == key) {
@@ -274,7 +275,10 @@ fn warm(ctx: &Ctx) -> Result<String> {
     let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
     // The environment the dispatcher would give it, never the caller's: a warm-up run by hand records
     // the same variables as one dispatch started, and nothing of the shell that ran it.
-    match enter(&ctx.relay_env(), shell, &deny, &ctx.cfg.repo, &stderr_file(ctx), ATTEMPT_SECS) {
+    // The shell holds the lock too, as its stdin: if this process is killed, no warm-up can start
+    // until every process of the attempt has ended (its supervisor ends them with this one).
+    let lock = role.share()?;
+    match enter(&ctx.relay_env(), lock, shell, &deny, &ctx.cfg.repo, &stderr_file(ctx), ATTEMPT_SECS) {
         Ok(env) => {
             record(ctx, &Recorded { key: key.clone(), env })?;
             port.emit(DevShellEvent::Warmed { key })?;
@@ -298,9 +302,11 @@ struct Failure {
 
 /// The development environment entered on the host in `dir` through `shell`, from `env` and
 /// nothing of the caller's, under `timeout` for at most `limit` seconds, minus names `deny`
-/// matches. Its stderr goes to `stderr`.
+/// matches. Its stderr goes to `stderr`, and `stdin` (the warm-up's lock, shared) is its stdin.
+/// It runs supervised: in a process group of its own, killed whole when this process ends.
 fn enter(
     env: &RelayEnv,
+    stdin: Stdio,
     shell: &[String],
     deny: &regex::Regex,
     dir: &Path,
@@ -319,29 +325,41 @@ fn enter(
         .open(stderr)
         .map_err(|e| fail(format!("could not open {}: {e}", stderr.display()), String::new(), false))?;
     let started = Instant::now();
-    let out = env
-        .command("timeout")
-        .args(["-k", "5", &limit.to_string()])
+    let mut cmd = env
+        .supervised("timeout")
+        .map_err(|e| fail(format!("could not run relay supervise: {e}"), String::new(), false))?;
+    cmd.args(["-k", "5", &limit.to_string()])
         .arg(program)
         .args(prefix)
         .args(["sh", "-c", &format!("printf '{}'; env -0", MARK.replace('\0', "\\0"))])
         .current_dir(dir)
-        .stdin(Stdio::null())
-        .stderr(err)
-        .output()
-        .map_err(|e| fail(format!("could not run {program}: {e}"), String::new(), false))?;
+        .stdin(stdin)
+        .stdout(Stdio::piped())
+        .stderr(err);
+    let mut child =
+        Supervised::spawn(&mut cmd).map_err(|e| fail(format!("could not run {program}: {e}"), String::new(), false))?;
+    let mut stdout = Vec::new();
+    if let Some(mut out) = child.child().stdout.take() {
+        // To its end: the supervisor kills whatever is left of the group once `timeout` exits.
+        let _ = out.read_to_end(&mut stdout);
+    }
+    let status = match child.finish(|| true, || None::<std::convert::Infallible>) {
+        Ok(Ok(status)) => status,
+        Ok(Err(never)) => match never {},
+        Err(e) => return Err(fail(format!("waiting for {program}: {e}"), String::new(), false)),
+    };
     let tail = std::fs::File::open(stderr).map(|f| tail_of(f, TAIL_BYTES)).unwrap_or_default();
-    if timed_out(out.status, started.elapsed(), limit) {
+    if timed_out(status, started.elapsed(), limit) {
         return Err(fail(format!("timed out after {limit} s"), tail, true));
     }
-    if !out.status.success() {
-        let why = out.status.code().map_or_else(|| "killed by a signal".to_owned(), |c| format!("exited {c}"));
+    if !status.success() {
+        let why = status.code().map_or_else(|| "killed by a signal".to_owned(), |c| format!("exited {c}"));
         return Err(fail(why, tail, false));
     }
-    let Some(at) = out.stdout.windows(MARK.len()).position(|w| w == MARK.as_bytes()) else {
+    let Some(at) = stdout.windows(MARK.len()).position(|w| w == MARK.as_bytes()) else {
         return Err(fail("printed no environment".into(), tail, false));
     };
-    Ok(out.stdout[at + MARK.len()..]
+    Ok(stdout[at + MARK.len()..]
         .split(|&b| b == 0)
         .filter_map(|kv| {
             // Only what is text: the record is JSON, and no variable a tool needs is otherwise.
@@ -438,6 +456,29 @@ mod tests {
         assert!(recorded.env.iter().any(|(k, _)| k == "DEV_TOOL"));
     }
 
+    /// Review of #54: a warmer killed mid-attempt released its own lock while `timeout` and the shell ran
+    /// on, so a second warm-up could enter beside them. The attempt's processes hold the lock too (their
+    /// stdin): with the warmer's own copy gone, no replacement starts until the attempt has ended.
+    #[test]
+    fn the_lock_is_held_until_the_attempt_has_ended_even_without_its_warmer() {
+        let d = Dir::new();
+        let ctx = project(&d, &[&script(&d, 2, true)]);
+        let role = Role::try_take(&lock_file(&ctx)).unwrap().unwrap();
+        let stdin = role.share().unwrap();
+        let (relay, deny) = (ctx.relay_env(), regex::Regex::new("TOKEN").unwrap());
+        let (shell, repo, err) = (ctx.cfg.session.env_shell.clone(), ctx.cfg.repo.clone(), stderr_file(&ctx));
+        let attempt = std::thread::spawn(move || enter(&relay, stdin, &shell, &deny, &repo, &err, 30));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // The warmer is gone: its own descriptor is closed.
+        drop(role);
+        assert!(Role::try_take(&lock_file(&ctx)).unwrap().is_none(), "the attempt still holds it");
+        let e = warm(&ctx).unwrap_err();
+        assert!(e.to_string().contains("already running"), "{e:#}");
+        assert_eq!(entries(&d), 1, "no second entry beside the first");
+        assert!(attempt.join().unwrap().is_ok());
+        assert!(Role::try_take(&lock_file(&ctx)).unwrap().is_some(), "free once the attempt has ended");
+    }
+
     /// Review of #54: a shell that ignores the TERM gets `timeout` killed by SIGKILL, with no exit
     /// code. After the limit that is a timeout (retried at once), not a failure to back off from.
     #[test]
@@ -466,16 +507,26 @@ mod tests {
         let deny = regex::Regex::new("TOKEN").unwrap();
         let err = d.path().join("stderr");
         let relay = RelayEnv::of([("PATH", "/usr/bin:/bin")]);
-        let env = enter(&relay, &shell, &deny, Path::new("/"), &err, 30).unwrap();
+        let env = enter(&relay, Stdio::null(), &shell, &deny, Path::new("/"), &err, 30).unwrap();
         let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
         assert_eq!(get("DEV_TOOL"), Some("/nix/store/x"));
         assert_eq!(get("API_TOKEN"), None, "secret-named variables stay out");
         assert!(env.iter().all(|(k, _)| !k.contains("welcome")), "the banner is not a variable");
-        let f = enter(&relay, &strings(&["sh", "-c", "echo broken >&2; exit 3", "s"]), &deny, Path::new("/"), &err, 30);
+        let f = enter(
+            &relay,
+            Stdio::null(),
+            &strings(&["sh", "-c", "echo broken >&2; exit 3", "s"]),
+            &deny,
+            Path::new("/"),
+            &err,
+            30,
+        );
         assert_eq!(f, Err(Failure { why: "exited 3".into(), tail: "broken\n".into(), timed_out: false }));
-        let slow = enter(&relay, &strings(&["sh", "-c", "sleep 5", "s"]), &deny, Path::new("/"), &err, 1).unwrap_err();
+        let slow =
+            enter(&relay, Stdio::null(), &strings(&["sh", "-c", "sleep 5", "s"]), &deny, Path::new("/"), &err, 1)
+                .unwrap_err();
         assert!(slow.timed_out, "{slow:?}");
-        assert_eq!(enter(&relay, &[], &deny, Path::new("/"), &err, 30), Ok(Vec::new()));
+        assert_eq!(enter(&relay, Stdio::null(), &[], &deny, Path::new("/"), &err, 30), Ok(Vec::new()));
     }
 
     /// The incident of 2026-11-12: a shell that takes long to enter. Jobs are held while it warms, at

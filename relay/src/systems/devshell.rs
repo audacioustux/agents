@@ -287,8 +287,9 @@ impl Gate {
         if let Some(since) = s.warming_since {
             let mut why = format!("dev shell warming ({})", crate::systems::view::ago(now_us, since));
             if s.failed.as_ref().is_some_and(|f| f.timed_out) {
-                let next = crate::systems::view::ago(Self::retry_at(s).max(now_us), now_us);
-                let _ = write!(why, "; attempt {} timed out after {}s; next in {next}", s.failures, self.limit);
+                // A timed-out attempt is retried at once, so the next one is this warm-up.
+                let _ =
+                    write!(why, "; attempt {} running, {} timed out after {}s", s.failures + 1, s.failures, self.limit);
             }
             return Some(Hold { why, until: None });
         }
@@ -910,7 +911,7 @@ pub(crate) mod tests {
         let gate = Gate::of(&ctx, &World::fold(&events)).unwrap();
         assert_eq!(
             gate.hold(10 + 12 * 60 * 1_000_000).unwrap().why,
-            "dev shell warming (12m); attempt 1 timed out after 1800s; next in 0s"
+            "dev shell warming (12m); attempt 2 running, 1 timed out after 1800s"
         );
         // Before any attempt has timed out, the board says only that it warms.
         let first = Gate::of(&ctx, &World::fold(&events[..1])).unwrap();
@@ -939,7 +940,7 @@ pub(crate) mod tests {
         let gate = Gate::of(&ctx, &World::fold(&events)).unwrap();
         let hold = gate.hold(10 + 15 * 60 * 1_000_000).unwrap();
         assert_eq!(
-            hold.why, "dev shell warming (15m); attempt 1 timed out after 600s; next in 0s",
+            hold.why, "dev shell warming (15m); attempt 2 running, 1 timed out after 600s",
             "since the first attempt"
         );
         assert!(gate.due(31), "one that died is started again; a live one holds the lock");

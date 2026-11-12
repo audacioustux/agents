@@ -1161,9 +1161,8 @@ what was recorded:
 - **The attempt limit** bounds one attempt, not a job. It is 600 s unless `[session]
   env_shell_attempt_secs` says otherwise (a value under 30 is refused when the config is loaded). A
   warm-up that takes longer is stopped there and tried again at once, and what Nix fetched stays in
-  its store, so each attempt goes further; the board says `dev shell warming (2h); attempt 12 timed
-  out after 600s; next in 0s` (`next in` is the wait before the next attempt, none after a
-  timeout), so slow (attempts that keep timing out, and the warming time keeps
+  its store, so each attempt goes further; the board says `dev shell warming (2h); attempt 13 running,
+  12 timed out after 600s`, so slow (attempts that keep timing out, and the warming time keeps
   growing) is told from stuck (one that fails, with its reason, as above), and the jobs stay held
   until one attempt finishes. A large flake on a loaded machine may need more than 600 s for one
   step; raise the limit rather than turning `env_shell` off:

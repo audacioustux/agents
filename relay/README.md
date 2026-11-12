@@ -266,7 +266,9 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   it measures beside its level: `window` (`fiveHours`, `week`, `month`, or `{"other":
   hours}`), and `provider` and `scope` when it has them. A narrow window leaves the
   emails out, then shrinks the bars (to five cells), then drops them and keeps the
-  numbers (`44%* 10m`), before it cuts a line; a row never wraps.
+  numbers (`44%* 10m`), before it cuts a line; a row never wraps. `view watch` does the
+  same per column: a gauge with no room for a five-cell bar shows its numbers alone,
+  whole, before a name is cut.
 - **Readings.** Showing the accounts in a project (`view status`, `view watch`, `quota
   show`) starts a reading of each stale one in the background, and the accounts title
   says `refreshing claude:a, …` until it lands. `view status --json` does too, with the
@@ -1009,10 +1011,15 @@ queued job's reason say it instead of `stale` or `usage unreadable`: `reading ti
 - the meters that govern the job's model are below `limits.floor` (omp meters
   each provider, so its model must name one: `minimax-code/MiniMax-M3.1-Flash`),
   or below `limits.floor_near_reset.floor` for a meter that resets soon (below). A
-  meter of one model's own (claude's `Current week (Fable)`) governs only a job whose
-  model names it (`claude-fable-5-2`, `fable`), beside the account's whole ones; a job
-  on the home's default model is judged by the whole ones alone, since relay cannot
-  tell which model that is;
+  meter of one model's own governs only a job whose model it covers, beside the
+  account's (or provider's) whole ones. Which are declared, never read off a name:
+  claude's model families (`Opus`, `Sonnet`, `Haiku`, `Fable`, in `Current week (Fable)`
+  or `seven_day_opus`) cover a model whose id names them (`claude-fable-5-2`); any other
+  week (`seven_day_overage_included`) is the whole account's. omp's antigravity groups
+  are `Gemini` (models named `gemini`) and `Claude & GPT (shared)` (`claude` or `gpt`);
+  a group not declared governs every model of its provider, and a model no meter covers
+  is refused as blind. A claude job on the home's default model is judged by the whole
+  ones alone, since relay cannot tell which model that is;
 - it is not limited or signed out;
 - it has a free seat.
 

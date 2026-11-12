@@ -242,7 +242,7 @@ fn base(cfg: &Config, state_root: &Path, data_root: &Path) -> BTreeMap<OsString,
 /// state directory (where a check's checkout is made) and `${RELAY_CLONES}` its clones directory, so
 /// a variable can name them without the home path. Nothing else is expanded: relay does not read the
 /// shell's `${...}`, and the caller's variables are not its to give.
-fn expand(value: &str, cfg: &Config, state_root: &Path, data_root: &Path) -> OsString {
+pub fn expand(value: &str, cfg: &Config, state_root: &Path, data_root: &Path) -> OsString {
     let (state, clones) = (state_root.join(&cfg.name), data_root.join(&cfg.name).join("clones"));
     let mut out = OsString::new();
     let mut rest = value;

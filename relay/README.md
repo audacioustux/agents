@@ -548,7 +548,7 @@ handlers as untrusted.
   records `check-could-not-run`, does not accept, and stops the job for you to look
   at: a broken check is not the session's to fix. This holds at the tip and at the
   base: a check that fails at the tip and could not run at the base ends so, never
-  base-red, and the record's `tail` begins with why (`the check could not run: it timed
+  base-red, and the record's `tail` begins with why, kept whole however long the output (`the check could not run: it timed
   out (exit 124, after 120 s: hooks.command_timeout_seconds)`; `at the base commit, …` for
   the base), from the exit status and the timeout relay applied. relay never reads the
   output's text for this. A tool that refuses to run exits with an ordinary failure code

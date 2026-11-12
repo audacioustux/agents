@@ -178,6 +178,21 @@ harness program's directory, then `/usr/local/bin`, `/usr/bin` and `/bin` (those
 exist). A job or `--check` that needs a tool from elsewhere, such as a devshell's, gets it
 from `session.env_shell` or a `PATH` in `[session] env`.
 
+Every session and every run of a job's acceptance check also gets four variables naming the job, a
+contract other tools may rely on. relay sets them last, after `[session] env`, the development
+environment and `sandbox.env_deny`, so nothing can override them (a `[session.env]` entry of the same
+name is refused when the config loads):
+
+| Variable | Value |
+|---|---|
+| `RELAY_PROJECT` | the project's name (`name` in `relay.toml`) |
+| `RELAY_JOB` | the job's name |
+| `RELAY_ATTEMPT` | the attempt number: `1` for the first run, counting each resume |
+| `RELAY_PHASE` | `session` for the session, `check` for the check at the branch's tip, `check-base` for the check at the commit the branch started from |
+
+A check can use them to label what it creates (a database per run, say), telling the session's resources
+from the tip's and the base's.
+
 A running dispatcher keeps the config it started with, so it checks the project's
 `relay.toml` and the policy file (the sources `relay config show` merges) on every
 pass, as it does its own binary. When either has changed and the result still

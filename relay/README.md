@@ -375,7 +375,8 @@ stands, at `held` the job waits, at `disk` the job is stopped.
 - `agent:<profile>`: a short read-only session on that profile's harness, model
   and budget, on another account than the worker's where one is free. Its seat is
   chosen as the dispatcher chooses a job's, by the same judgment and under the same
-  machine-wide lock, and booked on the bus (`seated`, then `unseated` once the
+  machine-wide lock (never waited on: a handler that finds it busy tries again within its own
+  wait, or a few seconds when it cannot wait), and booked on the bus (`seated`, then `unseated` once the
   session has ended), so every dispatcher and every other decision counts it as a
   session like any: with `per_account = 1`, a job queued meanwhile never joins it on
   its account, and two decisions at once take different accounts or one waits. A seat is
@@ -455,9 +456,11 @@ about at most once per queueing and once per five minutes. Hooks never land,
 push or delete: those stay with you.
 
 Every decision is on the bus: `decision-requested {id, job, point}`, `seated
-{id, account, model, provider}` and `unseated {id}` around an `agent:` handler's
+{id, account, model, provider, lock}` and `unseated {id}` around an `agent:` handler's
 session (its seat counts until `unseated`, even if the job is cleaned away meanwhile, and only
-while the process that asked lives; a booking for a decision already cleaned away is refused), `parked
+while something holds its `lock` file: the process that asked, and the session's whole supervised
+process tree, which inherits it, so a session outliving a killed runner for a moment still holds
+its seat; a booking for a decision already cleaned away is refused), `parked
 {id, until}` while it waits for the orchestrator, `answered {id, action, why}`
 from `decide answer` (heard only before `until`), and one `decided {id,
 handler, action, why, cost_usd, refused}` per handler asked, written by the

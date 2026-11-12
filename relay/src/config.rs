@@ -445,11 +445,18 @@ pub struct Session {
     /// `env` through it on the host before each attempt and passes the result
     /// in, as direnv would. Empty: the caller's environment as it is.
     pub env_shell: Vec<String>,
+    /// How long one attempt to enter `env_shell` may take, in seconds, before it is stopped and
+    /// tried again. At least [`MIN_ENV_SHELL_ATTEMPT_SECS`].
+    pub env_shell_attempt_secs: u64,
     /// Variables set in every job's environment, over the caller's and the
     /// development environment's, under the harness's own (the account).
     /// For Rust projects `CARGO_INCREMENTAL = "0"` keeps `target/` small.
     pub env: BTreeMap<String, String>,
 }
+
+/// The shortest `session.env_shell_attempt_secs`: a shell is not entered in less, and a smaller
+/// value would fail every warm-up and hold every job for good.
+pub const MIN_ENV_SHELL_ATTEMPT_SECS: u64 = 30;
 
 impl Session {
     pub fn banned(&self, model: &str) -> Option<&str> {
@@ -467,6 +474,7 @@ impl Default for Session {
             branch_prefix: "relay/".into(),
             final_marker: "FINAL".into(),
             env_shell: Vec::new(),
+            env_shell_attempt_secs: 600,
             env: BTreeMap::new(),
             banned_models: std::collections::BTreeMap::new(),
             max_hours: 4.0,
@@ -749,6 +757,12 @@ impl Config {
             ensure!(key.contains(':'), "accounts.exclude entries are harness:label, not {key:?}");
         }
         ensure!(self.session.max_hours > 0.0, "session.max_hours must be positive");
+        ensure!(
+            self.session.env_shell_attempt_secs >= MIN_ENV_SHELL_ATTEMPT_SECS,
+            "session.env_shell_attempt_secs is {}, under the {MIN_ENV_SHELL_ATTEMPT_SECS} s an attempt \
+             to enter the shell needs to get anywhere: raise it (a slow shell needs more, not less)",
+            self.session.env_shell_attempt_secs
+        );
         self.validate_policy()?;
         let h = &self.hooks;
         for (point, chain) in [("cap", &h.cap), ("ended", &h.ended), ("held", &h.held), ("disk", &h.disk)] {
@@ -1187,6 +1201,19 @@ mod tests {
         assert!(format!("{:#}", Config::parse(own, d.path()).unwrap_err()).contains("^SECRET_"));
         let kept = "name = \"x\"\n[session.env]\nGIT_AUTHOR_NAME = \"a\"\nPATH = \"/bin\"\n";
         assert_eq!(Config::parse(kept, d.path()).unwrap().session.env.len(), 2);
+    }
+
+    /// `session.env_shell_attempt_secs` defaults to the old fixed 600 s, is read from `[session]`, and a
+    /// value under 30 is refused at load with the reason.
+    #[test]
+    fn the_dev_shell_attempt_limit_is_read_and_a_value_under_30_is_refused() {
+        let d = repo();
+        assert_eq!(Config::parse("name = \"x\"\n", d.path()).unwrap().session.env_shell_attempt_secs, 600);
+        let set = |n: u64| format!("name = \"x\"\n[session]\nenv_shell_attempt_secs = {n}\n");
+        assert_eq!(Config::parse(&set(1800), d.path()).unwrap().session.env_shell_attempt_secs, 1800);
+        assert_eq!(Config::parse(&set(30), d.path()).unwrap().session.env_shell_attempt_secs, 30);
+        let e = format!("{:#}", Config::parse(&set(29), d.path()).unwrap_err());
+        assert!(e.contains("env_shell_attempt_secs is 29") && e.contains("30 s"), "{e}");
     }
 
     /// Review of #40: a missing helper is not fixed by `[harness.<id>] program` (that would replace

@@ -834,8 +834,13 @@ and that free space is back. Only one resumes at a time: the next waits until th
 has started and has run for one `disk_sample_minutes` (its clone measured), so the space
 is not eaten again at once. That holds across the machine's projects (a job another
 project resumed from a hold settles for this one too), and through an automatic retry of
-the resumed job; a hand `queue resume` of it ends the wait. A held job whose `--after`
-jobs are not done (a parent held after it) waits for them. Turning the floor off
+the resumed job; a hand `queue resume` of it ends the wait, and each job settles for the
+`disk_sample_minutes` of the project that resumed it. A held job whose `--after` jobs are
+not done (a parent held after it) waits for them, and if one of them fails it is blocked
+like a queued one (`waits for p (failed)`), so waiters on it exit 4 rather than wait forever.
+A resume is another run, so it never passes `limits.job_ceiling_usd`: the run's cap is cut
+to what the ceiling leaves, and a job whose ceiling is spent stays stopped with a reason
+that says to raise it and `queue resume`. Turning the floor off
 (`min_free_disk_gb = 0`) lets what is held resume, still one at a time. A held job not yet resumed counts as moving: a job queued
 `--after` it waits for it, and `view result --wait` goes on waiting.
 

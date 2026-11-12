@@ -230,8 +230,11 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     let states: Vec<_> = room.found().iter().map(|a| (harness_of(a), room.account(&a.key()))).collect();
     let due = next_due(&states, waiting, now_micros());
     // Free space coming back is no event: while the floor holds a job, look again soon.
-    let poll =
-        world.jobs().values().any(|j| j.held).then(|| now_micros() + u64::try_from(HELD_POLL.as_micros()).unwrap_or(0));
+    let poll = world
+        .jobs()
+        .values()
+        .any(|j| j.held && world.moves_on_its_own(j))
+        .then(|| now_micros() + u64::try_from(HELD_POLL.as_micros()).unwrap_or(0));
     Ok((busy, Held(held.0, None, Vec::new()), [due, held.1, held_due, poll].into_iter().flatten().min()))
 }
 
@@ -308,9 +311,20 @@ fn unhold(ctx: &Ctx, port: &crate::bus::Port<DispatchEvent>) -> Result<()> {
     let free = os::free_disk_gb(&ctx.clones);
     let neighbours = ctx.neighbours();
     let others: Vec<&World> = neighbours.iter().collect();
-    if let Some((job, message)) = resume_due(limits, &ctx.world()?, &others, free, now_micros()) {
-        eprintln!("{} resumed {job}: disk is back ({} GB free)", crate::os::stamp(), free.unwrap_or_default().round());
-        port.emit(DispatchEvent::Unheld { job, message })?;
+    match resume_due(limits, &ctx.world()?, &others, free, now_micros()) {
+        Some(Due::Resume { job, message, settle_us, budget_usd }) => {
+            eprintln!(
+                "{} resumed {job}: disk is back ({} GB free)",
+                crate::os::stamp(),
+                free.unwrap_or_default().round()
+            );
+            port.emit(DispatchEvent::Unheld { job, message, settle_us, budget_usd })?;
+        }
+        Some(Due::Release { job, why }) => {
+            eprintln!("{} {job} stays stopped: {why}", crate::os::stamp());
+            port.emit(DispatchEvent::HoldEnded { job, why })?;
+        }
+        None => {}
     }
     Ok(())
 }
@@ -320,18 +334,21 @@ fn settle_micros(limits: &Limits) -> u64 {
     u64::try_from(Duration::from_secs_f64(limits.disk_sample_minutes * 60.0).as_micros()).unwrap_or(u64::MAX)
 }
 
+/// What the dispatcher does about the floor's held jobs now.
+#[derive(Debug, Clone, PartialEq)]
+enum Due {
+    /// Resume `job`, telling its session `message`; `budget_usd` caps the run to what the job's ceiling leaves.
+    Resume { job: String, message: String, settle_us: u64, budget_usd: Option<f64> },
+    /// Another run would pass the job's ceiling: it stays stopped, for `why`, until a person acts.
+    Release { job: String, why: String },
+}
+
 /// The job to resume now, with the message its session is told: the one held longest whose dependencies are
 /// done (a child held before its parent waits for it), when `free_gb` is over the floor and its margin or the
 /// floor is off, and no job resumed from a hold, in this project or another on the machine (`others`), is
 /// still settling (queued, or started less than a disk sample ago), so the space is not eaten again by two
 /// at once.
-fn resume_due(
-    limits: &Limits,
-    world: &World,
-    others: &[&World],
-    free_gb: Option<f64>,
-    now_us: u64,
-) -> Option<(String, String)> {
+fn resume_due(limits: &Limits, world: &World, others: &[&World], free_gb: Option<f64>, now_us: u64) -> Option<Due> {
     if !enough_disk(limits, free_gb) {
         return None;
     }
@@ -340,7 +357,10 @@ fn resume_due(
         j.unheld_at.is_some_and(|at| match j.status {
             // Still queued, again after an automatic requeue too: it has not spent its space yet.
             Status::Queued => true,
-            s if s.has_runner() => j.started_at.is_some_and(|t| t >= at && now_us.saturating_sub(t) < settle),
+            // Each against the interval of the project that resumed it (recorded with the resume).
+            s if s.has_runner() => j.started_at.is_some_and(|t| {
+                t >= at && now_us.saturating_sub(t) < if j.settle_us > 0 { j.settle_us } else { settle }
+            }),
             _ => false,
         })
     });
@@ -352,6 +372,20 @@ fn resume_due(
         .values()
         .filter(|j| j.held && j.status == Status::Stopped && world.waits(j).is_empty())
         .min_by_key(|j| (j.ended_at, &j.name))?;
+    // A resume is another run: it may not pass the job's ceiling, so the run is capped to what is left of it.
+    let mut budget_usd = None;
+    if let Some(ceiling) = limits.job_ceiling_usd.filter(|c| j.cost_usd + j.budget_usd > *c) {
+        let left = ceiling - j.cost_usd;
+        if left <= 0.0 {
+            let why = format!(
+                "held by the disk floor, but another run would pass limits.job_ceiling_usd (${ceiling:.2}, ${:.2} spent): \
+                 raise it, then `relay queue resume {}`",
+                j.cost_usd, j.name
+            );
+            return Some(Due::Release { job: j.name.clone(), why });
+        }
+        budget_usd = Some(left);
+    }
     let seen = j.reason.as_deref().unwrap_or("free disk was under the floor");
     let back = if limits.min_free_disk_gb > 0.0 {
         format!("Free disk is back ({} GB free)", free_gb.unwrap_or_default().round())
@@ -363,7 +397,7 @@ fn resume_due(
          relay stopped the job rather than let the disk fill. Nothing in your work caused it, and your clone and \
          session are as you left them. {back}, so carry on from where you left off."
     );
-    Some((j.name.clone(), message))
+    Some(Due::Resume { job: j.name.clone(), message, settle_us: settle, budget_usd })
 }
 
 /// Why a job of profile `name` may not start at `now_us`, with when (bus time) that
@@ -1032,6 +1066,20 @@ mod tests {
     }
 
     /// A world of jobs by `(name, status, held, ended_at)`.
+    fn resumed(due: Due) -> Option<String> {
+        match due {
+            Due::Resume { job, .. } => Some(job),
+            Due::Release { .. } => None,
+        }
+    }
+
+    fn message(due: Due) -> String {
+        match due {
+            Due::Resume { message, .. } => message,
+            Due::Release { why, .. } => why,
+        }
+    }
+
     fn held_world(jobs: &[(&str, Status, bool, u64)]) -> World {
         let mut w = World::default();
         for &(name, status, held, ended) in jobs {
@@ -1049,14 +1097,14 @@ mod tests {
     fn a_held_job_resumes_only_over_the_floor_and_its_margin() {
         let l = floor(60.0, 3.0);
         let w = held_world(&[("a", Status::Stopped, true, 5)]);
-        let due = |free| resume_due(&l, &w, &[], free, NOW_US).map(|(job, _)| job);
+        let due = |free| resume_due(&l, &w, &[], free, NOW_US).and_then(resumed);
         assert_eq!(due(Some(57.0)), None, "under the floor");
         assert_eq!(due(Some(62.9)), None, "over the floor, not over its margin: no flapping");
         assert_eq!(due(None), None, "unmeasured is not room");
         assert_eq!(due(Some(63.0)).as_deref(), Some("a"));
         let off = floor(0.0, 3.0);
         assert!(off.min_free_disk_gb <= 0.0);
-        let (_, message) = resume_due(&l, &w, &[], Some(65.2), NOW_US).unwrap();
+        let message = message(resume_due(&l, &w, &[], Some(65.2), NOW_US).unwrap());
         assert!(message.contains("disk floor") && message.contains("Nothing in your work"), "{message}");
         assert!(message.contains("65 GB free"), "{message}");
     }
@@ -1073,7 +1121,7 @@ mod tests {
     fn held_jobs_resume_one_at_a_time_oldest_first() {
         let l = floor(60.0, 3.0);
         let mut w = held_world(&[("late", Status::Stopped, true, 9), ("early", Status::Stopped, true, 4)]);
-        let (first, _) = resume_due(&l, &w, &[], Some(70.0), NOW_US).unwrap();
+        let first = resumed(resume_due(&l, &w, &[], Some(70.0), NOW_US).unwrap()).unwrap();
         assert_eq!(first, "early", "the one held longest");
         // It is resumed: queued, and the next waits while it has not started.
         let at = NOW_US - 10;
@@ -1085,10 +1133,10 @@ mod tests {
         (j.status, j.started_at) = (Status::Running, Some(NOW_US - 5));
         assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US), None, "just started: not measured yet");
         let later = NOW_US + settle_micros(&l);
-        assert_eq!(resume_due(&l, &w, &[], Some(70.0), later).map(|(j, _)| j).as_deref(), Some("late"));
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), later).and_then(resumed).as_deref(), Some("late"));
         // The first ended; nothing settles.
         w.jobs_mut().get_mut("early").unwrap().status = Status::Done;
-        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).map(|(j, _)| j).as_deref(), Some("late"));
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).and_then(resumed).as_deref(), Some("late"));
     }
 
     /// A held project's neighbour has resumed a job from its own hold, as `unheld_at` says.
@@ -1123,10 +1171,10 @@ mod tests {
         // The child was held first (older), the done parent after it was resumed: the parent goes first.
         let mut w = held_world(&[("child", Status::Stopped, true, 3), ("parent", Status::Stopped, true, 8)]);
         w.jobs_mut().get_mut("child").unwrap().after = vec!["parent".into()];
-        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).map(|(j, _)| j).as_deref(), Some("parent"));
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).and_then(resumed).as_deref(), Some("parent"));
         // With the parent done, the child is free to go.
         w.jobs_mut().get_mut("parent").unwrap().status = Status::Done;
-        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).map(|(j, _)| j).as_deref(), Some("child"));
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).and_then(resumed).as_deref(), Some("child"));
     }
 
     #[test]
@@ -1136,7 +1184,8 @@ mod tests {
         let mut w = held_world(&[("a", Status::Stopped, true, 4), ("b", Status::Stopped, true, 9)]);
         assert_eq!(resume_due(&enabled, &w, &[], Some(10.0), NOW_US), None, "under the floor while it is on");
         for free in [Some(10.0), None] {
-            let (job, message) = resume_due(&off, &w, &[], free, NOW_US).unwrap();
+            let due = resume_due(&off, &w, &[], free, NOW_US).unwrap();
+            let (job, message) = (resumed(due.clone()).unwrap(), message(due));
             assert_eq!(job, "a", "the oldest, whatever the disk says: there is no floor");
             assert!(message.contains("turned off") && !message.contains("0 GB floor"), "{message}");
         }
@@ -1153,6 +1202,47 @@ mod tests {
         // Resumed at `at`, started, and sent back to the queue by a retry: `queued_at` moved on, the marker did not.
         (j.status, j.held, j.unheld_at, j.queued_at) = (Status::Queued, false, Some(NOW_US - 10), NOW_US - 5);
         assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US), None, "queued again: still not started");
+    }
+
+    #[test]
+    fn a_resumed_job_settles_for_its_own_projects_interval() {
+        let l = floor(60.0, 3.0);
+        let w = held_world(&[("mine", Status::Stopped, true, 4)]);
+        // Another project samples every 30 minutes, we every 3: its job, started 5 minutes ago, still settles.
+        let mut theirs = settling_neighbour(Status::Running);
+        let (at, started) = (NOW_US - 6 * 60_000_000, NOW_US - 5 * 60_000_000);
+        let j = theirs.jobs_mut().get_mut("n").unwrap();
+        (j.unheld_at, j.started_at, j.settle_us) = (Some(at), Some(started), 30 * 60_000_000);
+        assert_eq!(resume_due(&l, &w, &[&theirs], Some(70.0), NOW_US), None);
+        let after = started + 30 * 60_000_000;
+        assert!(resume_due(&l, &w, &[&theirs], Some(70.0), after).is_some(), "its own window has passed");
+        // One recorded without a window settles for ours.
+        theirs.jobs_mut().get_mut("n").unwrap().settle_us = 0;
+        assert!(resume_due(&l, &w, &[&theirs], Some(70.0), NOW_US).is_some());
+    }
+
+    #[test]
+    fn a_resume_never_passes_the_jobs_ceiling() {
+        let l = Limits { job_ceiling_usd: Some(10.0), ..floor(60.0, 3.0) };
+        let spent = |cost, budget| {
+            let mut w = held_world(&[("a", Status::Stopped, true, 4)]);
+            let j = w.jobs_mut().get_mut("a").unwrap();
+            (j.cost_usd, j.budget_usd) = (cost, budget);
+            resume_due(&l, &w, &[], Some(70.0), NOW_US)
+        };
+        let budget = |due| match due {
+            Some(Due::Resume { budget_usd, .. }) => Some(budget_usd),
+            _ => None,
+        };
+        assert_eq!(budget(spent(0.0, 10.0)), Some(None), "within the ceiling: its own budget");
+        assert_eq!(budget(spent(9.0, 10.0)), Some(Some(1.0)), "capped to what the ceiling leaves");
+        let Some(Due::Release { job, why }) = spent(10.0, 10.0) else { panic!("a spent ceiling resumes nothing") };
+        assert_eq!(job, "a");
+        assert!(why.contains("job_ceiling_usd") && why.contains("queue resume"), "{why}");
+        let no_ceiling = Limits { job_ceiling_usd: None, ..l };
+        let mut w = held_world(&[("a", Status::Stopped, true, 4)]);
+        w.jobs_mut().get_mut("a").unwrap().cost_usd = 99.0;
+        assert!(matches!(resume_due(&no_ceiling, &w, &[], Some(70.0), NOW_US), Some(Due::Resume { .. })));
     }
 
     #[test]

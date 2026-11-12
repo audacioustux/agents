@@ -145,7 +145,18 @@ pub enum DispatchEvent {
     Reaped { job: String },
     /// Free disk is back above the floor and its margin: the job the floor held goes back in the queue,
     /// and its session is told `message`. Acts only on a job that is still held.
-    Unheld { job: String, message: String },
+    /// `settle_us` is how long (bus time) the next held job, in any project, waits for this one to show what it does to
+    /// the disk; `budget_usd` caps the run when the job's ceiling leaves less than its budget.
+    Unheld {
+        job: String,
+        message: String,
+        #[serde(default)]
+        settle_us: u64,
+        #[serde(default)]
+        budget_usd: Option<f64>,
+    },
+    /// A held job is held no longer and is not resumed: it stays stopped, for `why`, until a person acts.
+    HoldEnded { job: String, why: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -722,7 +722,9 @@ one that resets soonest first, so the top row is the one to act on.
   as `quota show` puts them (`omp:default · google-antigravity └ Gemini`, `claude:a └
   Fable`), and the window when it is not the week's (`claude:a 5 hours`). Cut to fit,
   the provider gives way first, then the account, then the model or group, so the end
-  that tells two rows apart stays; two meters never read alike.
+  that tells two rows apart stays; two meters never read alike. Two that would (claude's
+  `seven_day` and `seven_day_overage_included` are both the account's week) carry their
+  meter's name, `claude:a (seven_day)`, in the rows and the chart's legend alike.
 - **Narrow.** The bar shrinks first (to five cells), then the sparkline (to six); then
   each outlook moves to a line under its row, and past that a line is cut.
 - **`--chart`** prints the line chart instead: one line per account, time across

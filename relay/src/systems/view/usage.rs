@@ -151,6 +151,24 @@ impl History {
         self.series.iter().flat_map(|(a, ms)| ms.iter().map(move |(m, p)| (a.as_str(), m.as_str(), p.as_slice())))
     }
 
+    /// What names each series, by account and meter: [`rows::Label`], and where two would read
+    /// alike (claude's `seven_day` and `seven_day_overage_included` are both `claude:a`), each with
+    /// its meter's name. The one rule the rows, the chart's legend and the watch's chart all read.
+    pub fn labels(&self) -> BTreeMap<(&str, &str), rows::Label> {
+        let mut labels: BTreeMap<(&str, &str), rows::Label> = self
+            .each()
+            .map(|(account, meter, _)| ((account, meter), rows::Label::of(account, &self.kind(account, meter))))
+            .collect();
+        let texts: Vec<String> = labels.values().map(rows::Label::text).collect();
+        for ((_, meter), label) in &mut labels {
+            let text = label.text();
+            if texts.iter().filter(|t| **t == text).count() > 1 {
+                label.name = Some(format!("({meter})"));
+            }
+        }
+        labels
+    }
+
     /// What the meter `name` of `account` measures; nothing said, when no reading said it.
     fn kind(&self, account: &str, name: &str) -> Meter {
         self.kinds.get(account).and_then(|k| k.get(name)).cloned().unwrap_or_default()
@@ -266,6 +284,7 @@ impl Usage<'_> {
     }
 
     fn series(&self) -> Vec<Drawn> {
+        let labels = self.history.labels();
         self.history
             .each()
             .enumerate()
@@ -280,7 +299,10 @@ impl Usage<'_> {
                     id: IDS.chars().nth(i).unwrap_or('*'),
                     color: PALETTE[i % PALETTE.len()],
                     data: points.iter().map(|p| (x(p.t), (p.utilization * 100.0).clamp(0.0, 100.0))).collect(),
-                    label: format!("{}{last}", rows::Label::of(account, &self.history.kind(account, meter)).text()),
+                    label: format!(
+                        "{}{last}",
+                        labels.get(&(account, meter)).map(rows::Label::text).unwrap_or_default()
+                    ),
                 }
             })
             .collect()
@@ -885,6 +907,33 @@ mod tests {
     }
 
     /// The text `history` prints as in `width` columns, without colour.
+    /// Review of #66: claude's `seven_day` and `seven_day_overage_included` are both the account's
+    /// week, so both would read `claude:a`. The rows, the chart's legend (which the watch chart
+    /// draws too) and `--json` tell them apart the same way, by the meter's name.
+    #[test]
+    fn two_meters_that_would_read_alike_are_told_apart_everywhere() {
+        let resets = i64::try_from(NOW / 1_000_000).unwrap() + 2 * 86_400;
+        let b = [vec![
+            reading(
+                NOW - 2 * H,
+                "claude:a",
+                &[("seven_day", 0.30, resets), ("seven_day_overage_included", 0.12, resets)],
+            ),
+            reading(NOW - H, "claude:b", &[("seven_day", 0.50, resets)]),
+        ]];
+        let h = History::fold(b.iter().map(Vec::as_slice), &week());
+        let legend: Vec<String> =
+            printed(&h, Some(120)).lines().filter(|l| l.contains(" ━━ ")).map(str::to_owned).collect();
+        let names: Vec<&str> =
+            legend.iter().map(|l| l.split(" ━━ ").nth(1).unwrap().split("  ").next().unwrap()).collect();
+        assert_eq!(names, ["claude:a (seven_day)", "claude:a (seven_day_overage_included)", "claude:b"], "{legend:#?}");
+        let (f, limits) = (week(), limits());
+        let rows: Vec<String> = rows::rows(&h, &limits, f.since, NOW).iter().map(rows::Row::label).collect();
+        for name in &names {
+            assert!(rows.iter().any(|r| r == name), "the rows read as the legend: {rows:?}");
+        }
+    }
+
     fn printed(history: &History, width: Option<usize>) -> String {
         let (f, limits, tz) = (week(), limits(), TimeZone::UTC);
         Usage { history, limits: &limits, filter: &f, now: NOW, tz: &tz }.print(width, false)

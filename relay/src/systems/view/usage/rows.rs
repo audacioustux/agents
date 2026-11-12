@@ -320,6 +320,7 @@ fn resample(levels: &[Option<f64>], cells: usize) -> Vec<Option<f64>> {
 /// The rows of `history`, the meters that reset soonest first (those that say no time last).
 pub fn rows(history: &History, limits: &Limits, since: u64, now: u64) -> Vec<Row> {
     let now_s = i64::try_from(now / 1_000_000).unwrap_or(i64::MAX);
+    let labels = history.labels();
     let mut rows: Vec<Row> = history
         .each()
         .filter_map(|(account, meter, points)| {
@@ -329,7 +330,7 @@ pub fn rows(history: &History, limits: &Limits, since: u64, now: u64) -> Vec<Row
             let m = Meter { utilization: last.utilization, resets_at: last.resets_at, ..Meter::default() };
             let kind = history.kind(account, meter);
             Some(Row {
-                name: Label::of(account, &kind),
+                name: labels.get(&(account, meter)).cloned().unwrap_or_else(|| Label::of(account, &kind)),
                 kind,
                 account: account.to_owned(),
                 meter: meter.to_owned(),
@@ -346,13 +347,6 @@ pub fn rows(history: &History, limits: &Limits, since: u64, now: u64) -> Vec<Row
         let key = |r: &Row| (r.resets_at.is_none(), r.resets_at);
         key(a).cmp(&key(b)).then_with(|| (&a.account, &a.meter).cmp(&(&b.account, &b.meter)))
     });
-    // Two meters that would read alike are told apart by their names.
-    let texts: Vec<String> = rows.iter().map(Row::label).collect();
-    for (i, r) in rows.iter_mut().enumerate() {
-        if texts.iter().filter(|t| **t == texts[i]).count() > 1 {
-            r.name.name = Some(format!("({})", r.meter));
-        }
-    }
     rows
 }
 

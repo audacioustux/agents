@@ -404,8 +404,10 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   not only until its output closes, and is killed with its group once its
   decision is withdrawn or goes stale, or a limit passes. Every handler and
   session runs under a small supervisor (`relay supervise`) that leads its
-  process group and kills the group when the handler exits, when it is stopped,
-  or within moments of its runner ending (`queue stop`, killed, crashed); nothing
+  process group and ends everything the handler started when the handler exits, when it
+  is stopped, or within moments of its runner ending (`queue stop`, killed, crashed). It is
+  a subreaper, so what leaves its group (a `setsid` child, a sandbox's processes) comes
+  back to it, and it exits only once it has ended and reaped every one of them; nothing
   is recorded and no stored pid is signalled.
 - `command:<argv>`: runs the program (argv split on spaces, with no quoting) on
   the host with the request as JSON on stdin, and reads one JSON object from
@@ -466,9 +468,10 @@ push or delete: those stay with you.
 Every decision is on the bus: `decision-requested {id, job, point}`, `seated
 {id, account, model, provider, lock}` and `unseated {id}` around an `agent:` handler's
 session (its seat counts until `unseated`, even if the job is cleaned away meanwhile, and only
-while something holds its `lock` file: the process that asked, and the session's whole supervised
-process tree, which inherits it, so a session outliving a killed runner for a moment still holds
-its seat; a booking for a decision already cleaned away is refused), `parked
+while something holds its `lock` file: the process that asked, and the session's supervisor, which
+holds it until it has ended and reaped the session's whole tree, so a session outliving a killed
+runner for a moment still holds its seat; a booking for a decision already cleaned away is
+refused), `parked
 {id, until}` while it waits for the orchestrator, `answered {id, action, why}`
 from `decide answer` (heard only before `until`), and one `decided {id,
 handler, action, why, cost_usd, refused}` per handler asked, written by the

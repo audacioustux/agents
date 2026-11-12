@@ -1275,6 +1275,34 @@ fn a_puku_session_runs_on_its_own_home_and_sign_in_and_sees_no_other() {
     }
 }
 
+/// Review of #66: a quota command that takes a while still has its reset time judged at the moment
+/// it answered. This one prints, after 3 s, a five-hour reset 5 h less a second ahead of that moment:
+/// in range when it printed, but past five hours from when the batch began.
+#[test]
+fn a_slow_quota_commands_reset_is_judged_when_it_answered() {
+    let env = setup("slow-reset", false);
+    std::fs::create_dir_all(env.root.join("state/relay")).unwrap();
+    std::fs::write(
+        env.root.join("state/relay/programs.json"),
+        serde_json::json!({ "node": env.repo.join(".stub/node-bin/node") }).to_string(),
+    )
+    .unwrap();
+    let stub = env.repo.join(".stub/puku-cli");
+    configure(&env, "", &format!("[harness.puku]\nprogram = \"{}\"\n", stub.display()));
+    puku_account(&env.home, "p", 10);
+    std::fs::write(
+        env.home.join(".puku-cli.p/usage-live"),
+        "sleep 3\nr=$(( $(date +%s) + 5 * 3600 - 1 ))\n\
+         printf '{\"chat\":{\"windows\":{\"fiveHour\":{\"limit\":100,\"used\":10,\"resetsAt\":%s}}}}\\n' \"$r\"\n",
+    )
+    .unwrap();
+    ok(&relay(&env, &["quota", "refresh"]), "refresh");
+    let shown: serde_json::Value = serde_json::from_slice(&relay(&env, &["--json", "quota", "show"]).stdout).unwrap();
+    let account = shown["accounts"].as_array().unwrap().iter().find(|a| a["account"] == "puku:p").expect("puku:p");
+    let reset = account["meters"]["five_hour"]["resetsAt"].as_i64();
+    assert!(reset.is_some(), "the reset it printed is in range at the moment it answered: {account}");
+}
+
 /// Review of #40: on a first run, with nothing recorded, puku's `node` was looked up only by the quota
 /// reader, a child of the dispatcher running on the config's `PATH`, which lacks the directory the
 /// caller's shell found it in. A harness's helpers are its programs: the foreground command that

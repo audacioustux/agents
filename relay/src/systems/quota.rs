@@ -239,15 +239,24 @@ fn read_accounts(ctx: &Ctx, select: &Select<'_>) -> Result<Taken> {
     let port = ctx.port(&Source(()));
     // In parallel: one reading can take a minute and a half.
     let readings: Vec<_> = std::thread::scope(|s| {
-        let handles: Vec<_> = todo.iter().map(|a| s.spawn(move || (a, read(ctx, a)))).collect();
+        // Each reading is timed when its own command answers: one can take a minute and a half, and
+        // a reset it names is judged against that moment, not the batch's start.
+        let handles: Vec<_> = todo
+            .iter()
+            .map(|a| {
+                s.spawn(move || {
+                    let run = read(ctx, a);
+                    (a, run, secs(now_micros()))
+                })
+            })
+            .collect();
         handles.into_iter().filter_map(|h| h.join().ok()).collect()
     });
-    let now_s = secs(now);
     let mut read: Vec<String> = taken.iter().map(Home::key).collect();
     let (mut unreadable, mut signed_out) = (Vec::new(), Vec::new());
-    for (home, run) in readings {
+    for (home, run, answered_s) in readings {
         let account = home.key();
-        match record(&port, home, run, now_s)? {
+        match record(&port, home, run, answered_s)? {
             Outcome::Read => read.push(account),
             Outcome::SignedOut => signed_out.push(account),
             Outcome::Unreadable => unreadable.push(account),

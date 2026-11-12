@@ -2038,8 +2038,9 @@ fn gc_removes_a_clone_whose_tests_left_a_mode_zero_directory() {
     assert_eq!(wait_for(&env, "stuck")["status"], "done");
     ok(&relay(&env, &["land", "fetch", "stuck"]), "land fetch");
 
-    // What a session's tests leave: a directory set to 0o000 with a file in it, in the clone (its build
-    // outputs included) and in the job's /tmp.
+    // What a session's tests leave: a directory set to 0o000 with a file in it, in the clone's build
+    // outputs, in the job's /tmp, and in the clone's own tree (untracked work: `git status` can only
+    // warn that it could not open it).
     let clone = workdir(&env, "stuck");
     let scratch = env.root.join("data/relay/flow/scratch/stuck");
     std::fs::create_dir_all(&scratch).unwrap();
@@ -2051,11 +2052,26 @@ fn gc_removes_a_clone_whose_tests_left_a_mode_zero_directory() {
             std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o0)).unwrap();
         }
     }
+    let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777;
     let out = relay(&env, &["land", "gc"]);
-    // Whatever happens, leave nothing the harness cannot delete.
-    let left = clone.exists() || scratch.exists();
+    let text = out_of(&out);
     ok(&out, "gc");
-    assert!(!left, "the clone and the job's /tmp are gone: {}", out_of(&out));
+    // The /tmp is relay's to clear whatever its modes; the clone is not: files in a directory git could
+    // not read were never committed or rescued, so it is kept, untouched.
+    assert!(!scratch.exists(), "the /tmp is gone: {text}");
+    assert!(clone.exists(), "a clone with an unreadable untracked directory is kept: {text}");
+    assert_eq!(mode(&clone.join("sub/locked")), 0, "and its modes are left as they were: {text}");
+    assert!(text.contains("uncommitted changes"), "{text}");
+    assert_ne!(job(&env, "stuck")["collected"], "clone");
+
+    // Once the work is gone (here: the test clears it), the clone goes like any other, and with it the
+    // mode-0 directory in its build outputs, which git is told to leave out.
+    std::fs::set_permissions(clone.join("sub/locked"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(clone.join("sub/locked/inner"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::remove_dir_all(clone.join("sub")).unwrap();
+    let out = relay(&env, &["land", "gc"]);
+    ok(&out, "gc");
+    assert!(!clone.exists(), "{}", out_of(&out));
     assert_eq!(job(&env, "stuck")["collected"], "clone");
 }
 

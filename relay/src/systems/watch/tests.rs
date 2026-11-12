@@ -689,9 +689,8 @@ impl Buses {
     /// A quota reading of `account`'s 7-day and 5-hour meters, landing on the bus now.
     fn read(&self, account: &str, week: f64, five: f64) {
         use std::io::Write as _;
-        let meter = |u| crate::harness::Meter { utilization: u, resets_at: Some(1_800_500_000), ..Default::default() };
-        let meters: crate::harness::Meters =
-            [("seven_day".to_owned(), meter(week)), ("five_hour".to_owned(), meter(five))].into();
+        let meter = |name: &str, u| (name.to_owned(), crate::harness::Meter::named(name, u, Some(1_800_500_000)));
+        let meters: crate::harness::Meters = [meter("seven_day", week), meter("five_hour", five)].into();
         let event = crate::bus::QuotaEvent::Reading { account: account.into(), meters, sign_in: Some("s".into()) };
         let mut v = serde_json::to_value(event).unwrap();
         v["t"] = crate::bus::now_micros().into();
@@ -778,7 +777,7 @@ fn c_switches_the_quota_between_its_rows_and_the_line_chart() {
     assert!(fr.last().unwrap().contains("c chart"), "{}", fr.last().unwrap());
     ui.apply(Action::Trend, &board);
     let fr = frame(&board, &mut ui, 120, 40);
-    assert!(fr.iter().any(|l| l.contains("claude:a 7 days") && l.contains("30% at the last reading")), "{fr:#?}");
+    assert!(fr.iter().any(|l| l.contains("claude:a  30% at the last reading")), "{fr:#?}");
     assert!(fr.last().unwrap().contains("c rows"), "{}", fr.last().unwrap());
     ui.apply(Action::Trend, &board);
     let fr = frame(&board, &mut ui, 120, 40);

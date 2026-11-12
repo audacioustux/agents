@@ -1406,7 +1406,10 @@ mod tests {
         assert_eq!((fable["window"].as_str(), fable["scope"].as_str()), (Some("week"), Some("Fable")), "{}", v.json);
         assert!(fable["utilization"].is_f64() && fable["resetsAt"].is_i64());
         let gemini = &v.json["accounts"][2]["meters"]["google-antigravity/Gemini (Weekly)"];
-        assert_eq!((gemini["provider"].as_str(), gemini["scope"].as_str()), (Some("google-antigravity"), Some("Gemini")));
+        assert_eq!(
+            (gemini["provider"].as_str(), gemini["scope"].as_str()),
+            (Some("google-antigravity"), Some("Gemini"))
+        );
     }
 
     #[test]

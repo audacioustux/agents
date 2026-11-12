@@ -19,7 +19,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::bus::{Stamped, now_micros};
 use crate::config::Limits;
-use crate::systems::quota::gauge;
+use crate::harness::{Meter, Window};
 use crate::systems::watch::ChartSpec;
 use crate::world::World;
 
@@ -30,8 +30,8 @@ pub mod rows;
 /// Which readings a chart shows.
 #[derive(Debug, Clone, Default)]
 pub struct Filter {
-    /// One meter by name, as the reading names it (`five_hour`) or as a board shows it (`5 hours`);
-    /// else each account's 7-day meters ([`gauge::weekly`]).
+    /// One meter by name, as the reading names it (`five_hour`), or every meter of a window, as a
+    /// board heads its column (`5 hours`); else every 7-day meter ([`Window::Week`]).
     pub meter: Option<String>,
     /// Only these accounts (`harness:label`); every one when empty.
     pub accounts: Vec<String>,
@@ -67,10 +67,10 @@ impl Within {
 }
 
 impl Filter {
-    fn meter(&self, name: &str) -> bool {
+    fn meter(&self, name: &str, m: &Meter) -> bool {
         match &self.meter {
-            Some(m) => name == m || gauge::heading(name) == *m,
-            None => gauge::weekly(name),
+            Some(wanted) => name == wanted || m.window.label() == *wanted,
+            None => m.window == Window::Week,
         }
     }
 
@@ -97,6 +97,8 @@ pub struct Point {
 #[derive(Debug, Default)]
 pub struct History {
     pub series: BTreeMap<String, BTreeMap<String, Vec<Point>>>,
+    /// What each series' meter measures (its window, provider and scope), as its last reading said.
+    pub kinds: BTreeMap<String, BTreeMap<String, Meter>>,
     /// Accounts named by a bare label on older buses (`adventor`): no rule says which harness they
     /// are on, so their readings are left out.
     pub bare: BTreeSet<String>,
@@ -120,9 +122,11 @@ impl History {
                 if !f.account(account) {
                     continue;
                 }
-                for (name, m) in meters.iter().filter(|(name, _)| f.meter(name)) {
+                for (name, m) in meters.iter().filter(|(name, m)| f.meter(name, m)) {
                     let point = Point { t: s.t, utilization: m.utilization, resets_at: m.resets_at };
                     h.series.entry(account.to_owned()).or_default().entry(name.clone()).or_default().push(point);
+                    let kind = Meter { utilization: 0.0, resets_at: None, ..m.clone() };
+                    h.kinds.entry(account.to_owned()).or_default().insert(name.clone(), kind);
                 }
             }
         }
@@ -145,6 +149,11 @@ impl History {
     /// Each series, as (account, meter, readings).
     fn each(&self) -> impl Iterator<Item = (&str, &str, &[Point])> {
         self.series.iter().flat_map(|(a, ms)| ms.iter().map(move |(m, p)| (a.as_str(), m.as_str(), p.as_slice())))
+    }
+
+    /// What the meter `name` of `account` measures; nothing said, when no reading said it.
+    fn kind(&self, account: &str, name: &str) -> Meter {
+        self.kinds.get(account).and_then(|k| k.get(name)).cloned().unwrap_or_default()
     }
 
     /// The `--json` reply: per account and meter, the readings as `{t, utilization, resets_at}`, and
@@ -271,7 +280,7 @@ impl Usage<'_> {
                     id: IDS.chars().nth(i).unwrap_or('*'),
                     color: PALETTE[i % PALETTE.len()],
                     data: points.iter().map(|p| (x(p.t), (p.utilization * 100.0).clamp(0.0, 100.0))).collect(),
-                    label: format!("{account} {}{last}", gauge::heading(meter)),
+                    label: format!("{}{last}", rows::Label::of(account, &self.history.kind(account, meter)).text()),
                 }
             })
             .collect()
@@ -791,7 +800,7 @@ mod tests {
         let used: Vec<f64> = h.series["claude:a"]["seven_day"].iter().map(|p| p.utilization).collect();
         assert_eq!(used, [0.30, 0.35], "a window with only live updates is charted");
         let text = printed(&h, Some(100));
-        assert!(text.contains("1 ━━ claude:a 7 days  35% at the last reading"), "{text}");
+        assert!(text.contains("1 ━━ claude:a  35% at the last reading"), "{text}");
         // Mixed: the last value is the latest of either kind.
         let mixed = [vec![
             reading(NOW - 6 * H, "claude:a", &[("seven_day", 0.20, resets)]),
@@ -833,7 +842,12 @@ mod tests {
     #[test]
     fn a_meter_account_and_harness_can_be_picked() {
         let h = fold(&Filter { meter: Some("5 hours".into()), ..week() });
-        assert_eq!(h.series.keys().collect::<Vec<_>>(), ["claude:a"], "a meter by its heading");
+        assert_eq!(
+            h.series.keys().collect::<Vec<_>>(),
+            ["claude:a", "omp:w"],
+            "every meter of a window, by its heading"
+        );
+        assert_eq!(h.series["omp:w"].keys().collect::<Vec<_>>(), ["openai-codex/5 hours"]);
         let h = fold(&Filter { meter: Some("openai-codex/5 hours".into()), ..week() });
         assert_eq!(h.series["omp:w"]["openai-codex/5 hours"].len(), 2, "or by its name");
         let h = fold(&Filter { harnesses: vec!["omp".into()], ..week() });
@@ -914,14 +928,14 @@ mod tests {
         let rows = usage.render(false, Some(120), false);
         let lines: Vec<&str> = rows.lines().collect();
         assert_eq!(lines[0], "quota since Jan 8 08:00 UTC, 7-day meters", "{rows}");
-        assert!(lines[1].starts_with("omp:w openai-codex/7 days") || lines[1].starts_with("claude:a"), "{rows}");
+        assert!(lines[1].starts_with("omp:w · openai-codex") || lines[1].starts_with("claude:a"), "{rows}");
         assert!(lines.iter().any(|l| l.starts_with("claude:a") && l.contains("5%") && l.contains("resets")), "{rows}");
         assert!(!rows.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)), "no chart braille in the rows:\n{rows}");
         assert!(!rows.contains('\x1b') && !rows.contains("at the last reading"), "{rows}");
         let chart = usage.render(true, Some(100), false);
         assert_eq!(chart, usage.print(Some(100), false));
         assert!(chart.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)), "the chart in braille:\n{chart}");
-        assert!(chart.contains("1 ━━ claude:a 7 days"), "and its legend:\n{chart}");
+        assert!(chart.contains("1 ━━ claude:a  "), "and its legend:\n{chart}");
         let coloured = usage.render(false, Some(120), true);
         assert!(coloured.contains("\x1b[32m") || coloured.contains("\x1b[33m"), "a gauge in its tone: {coloured}");
     }
@@ -952,11 +966,11 @@ mod tests {
         assert_eq!(lines[0], "quota since Jan 8 08:00 UTC, 7-day meters", "{text}");
         assert_eq!(lines.len(), 1 + usize::from(CHART_ROWS) + 4, "{text}");
         let legend = &lines[lines.len() - 4..];
-        assert!(legend[0].starts_with("1 ━━ claude:a 7 days  5% at the last reading, resets "), "{legend:?}");
-        assert!(legend[1].starts_with("2 ━━ omp:w openai-codex/7 days  50% at the last reading"), "{legend:?}");
+        assert!(legend[0].starts_with("1 ━━ claude:a  5% at the last reading, resets "), "{legend:?}");
+        assert!(legend[1].starts_with("2 ━━ omp:w · openai-codex  50% at the last reading"), "{legend:?}");
         assert_eq!(legend[2..], ["  ┄┄ floor 50%", "  ╌╌ floor 98% in the last 24h before a reset"]);
         let piped = printed(&fold(&week()), None);
-        assert!(piped.lines().any(|l| l.starts_with("1 ━━ claude:a 7 days") && l.ends_with("3 reading(s)")), "{piped}");
+        assert!(piped.lines().any(|l| l.starts_with("1 ━━ claude:a  ") && l.ends_with("3 reading(s)")), "{piped}");
     }
 
     #[test]
@@ -1017,8 +1031,8 @@ mod tests {
         let ((r1, c1), (r2, c2)) = (at[0][0], at[1][0]);
         assert_ne!((r1, c1), (r2, c2), "{text}");
         assert!(r1.abs_diff(r2) <= 1 && c1.abs_diff(c2) <= 1, "both beside the shared last point:\n{text}");
-        assert!(text.lines().any(|l| l.starts_with("1 ━━ claude:a 7 days  60%")), "{text}");
-        assert!(text.lines().any(|l| l.starts_with("2 ━━ claude:b 7 days  60%")), "{text}");
+        assert!(text.lines().any(|l| l.starts_with("1 ━━ claude:a  60%")), "{text}");
+        assert!(text.lines().any(|l| l.starts_with("2 ━━ claude:b  60%")), "{text}");
     }
 
     #[test]

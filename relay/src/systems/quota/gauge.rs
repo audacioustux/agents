@@ -125,68 +125,9 @@ fn share(fraction: f64, n: usize) -> usize {
     k.min(n)
 }
 
-/// A meter's name as a board shows it: claude's and puku's in words, any other as named.
-pub fn heading(window: &str) -> String {
-    match window {
-        "five_hour" => "5 hours".into(),
-        "seven_day" => "7 days".into(),
-        other => other.replace('_', " "),
-    }
-}
-
-/// How long a meter's window is, in hours, as its [`heading`] says: a length (`7 days`,
-/// `openai-codex/5 hours`, `minimax-code/General 7 Day`) or a period (`google-antigravity/Gemini
-/// (Weekly)`, `monthly`). A provider's prefix is not read. `None` when the name says neither.
-pub fn window_hours(window: &str) -> Option<u32> {
-    static LENGTH: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?i)\b(?:(\d+)\s*(hour|day|week)s?|(hourly|daily|weekly|monthly))\b").expect("regex")
-    });
-    let name = heading(window);
-    let c = LENGTH.captures(name.rsplit('/').next().unwrap_or(&name))?;
-    let unit = |u: &str| match u.to_ascii_lowercase().as_str() {
-        "hour" | "hourly" => Some(1),
-        "day" | "daily" => Some(24),
-        "week" | "weekly" => Some(7 * 24),
-        "monthly" => Some(30 * 24),
-        _ => None,
-    };
-    match (c.get(1), c.get(2), c.get(3)) {
-        (Some(n), Some(u), _) => n.as_str().parse::<u32>().ok()?.checked_mul(unit(u.as_str())?),
-        (_, _, Some(period)) => unit(period.as_str()),
-        _ => None,
-    }
-}
-
-/// Whether a meter is a weekly window, by the length its name says ([`window_hours`]): claude's and
-/// puku's `seven_day`, `openai-codex/7 days`, `minimax-code/General 7 Day`, `google-antigravity/... (Weekly)`.
-pub fn weekly(window: &str) -> bool {
-    window_hours(window) == Some(7 * 24)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every meter name a harness reports (the real-meter fixtures of `systems/quota.rs`), by its length.
-    #[test]
-    fn a_window_is_as_long_as_its_name_says() {
-        for (name, hours) in [
-            ("five_hour", Some(5)),
-            ("seven_day", Some(168)),
-            ("openai-codex/5 hours", Some(5)),
-            ("openai-codex/7 days", Some(168)),
-            ("minimax-code/General 5 Hour", Some(5)),
-            ("minimax-code/General 7 Day", Some(168)),
-            ("google-antigravity/Claude & GPT (shared) (Weekly)", Some(168)),
-            ("google-antigravity/Gemini (Weekly)", Some(168)),
-            ("monthly", Some(720)),
-            ("seven_day_overage_included", None),
-            ("tokens", None),
-        ] {
-            assert_eq!(window_hours(name), hours, "{name}");
-            assert_eq!(weekly(name), hours == Some(168), "{name}");
-        }
-    }
 
     fn gauge(used: f64, floor: Option<f64>) -> Gauge {
         Gauge { used, floor, left: Some(5 * 86_400 + 4 * 3600), governing: false }
@@ -237,12 +178,5 @@ mod tests {
         let text = |l: Line<'_>| l.spans.iter().map(|s| s.content.to_string()).collect::<String>();
         assert_eq!(text(g.line(BAR + TAIL)), "███▊░░░░░░│░  31%  30d  ");
         assert_eq!(text(g.line(MIN_BAR + TAIL)), "█▌░░│  31%  30d  ", "at the narrowest, still whole");
-    }
-
-    #[test]
-    fn a_meter_reads_as_words() {
-        let names = ["five_hour", "seven_day", "seven_day_overage_included", "openai-codex/5 hours"];
-        let words = ["5 hours", "7 days", "seven day overage included", "openai-codex/5 hours"];
-        assert_eq!(names.map(heading), words);
     }
 }

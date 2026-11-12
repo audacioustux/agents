@@ -829,6 +829,31 @@ fn a_view_with_no_rows_still_says_what_was_left_out() {
     }
 }
 
+/// A window as short as 80x4 has three lines for the quota: the heading, a line for a row or for the
+/// notice that rows are left out, and as much of the footer as is left; the key line stays below.
+#[test]
+fn a_short_window_gives_the_footer_up_before_the_rows() {
+    let bus = Buses::new();
+    bus.read("claude:a", 0.30, 0.1);
+    let mut ui = charting(ChartSpec::default());
+    bus.shown(&mut ui);
+    let fr = frame(&Board::default(), &mut ui, 80, 4);
+    assert_eq!(fr.len(), 4);
+    assert!(fr[0].starts_with("quota since"), "{fr:#?}");
+    assert!(fr[1].starts_with("claude:a"), "the row stays, the footer gives way: {fr:#?}");
+    assert!(fr[3].contains("q quit"), "the key line stays: {fr:#?}");
+    // More rows than the line left: the notice says so.
+    let bus = Buses::new();
+    for a in ["claude:a", "omp:w", "claude:b"] {
+        bus.read(a, 0.30, 0.1);
+    }
+    let mut ui = charting(ChartSpec::default());
+    bus.shown(&mut ui);
+    let fr = frame(&Board::default(), &mut ui, 80, 4);
+    assert!(fr[1..3].iter().any(|l| l.contains("more lines than the window shows")), "{fr:#?}");
+    assert!(fr[3].contains("q quit"), "{fr:#?}");
+}
+
 #[test]
 fn the_help_lists_u() {
     let f = two_jobs();

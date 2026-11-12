@@ -113,6 +113,9 @@ fn rows(f: &mut Frame<'_>, ui: &mut Ui) {
         }
     }
     let total = usize::from(body.height);
+    // The footer gives way first: one line stays for a row, or for the notice that rows are left out.
+    let reserve = usize::from(!table.is_empty());
+    foot.truncate(total.saturating_sub(head.len() + reserve));
     let room = total.saturating_sub(head.len() + foot.len());
     if table.len() > room {
         let shown = room.saturating_sub(1);

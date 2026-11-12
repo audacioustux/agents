@@ -26,6 +26,17 @@ pub fn record_in(state_root: &Path) -> PathBuf {
     state_root.join("programs.json")
 }
 
+/// What a lookup may do to the record of where programs were found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Record what `PATH` finds that the record lacks: under `programs.lock`, in `programs.json`. What
+    /// the dispatcher and everything that starts a session does, so later callers find the same program.
+    Record,
+    /// The record is read, never locked or written: what `PATH` finds that it lacks is used, and not
+    /// recorded. What a view that promises to write nothing does.
+    ReadOnly,
+}
+
 /// A harness's program, as this machine has it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Program {
@@ -55,8 +66,13 @@ pub fn executable(path: &Path) -> bool {
 /// shim, the program is missing, and shown so. A path the config names is the owner's own
 /// choice, and is taken as it is.
 pub fn resolve(record: Option<&Path>, name: &OsStr) -> Program {
+    resolve_in(Mode::Record, record, name)
+}
+
+/// As [`resolve`], recording only as `mode` allows.
+pub fn resolve_in(mode: Mode, record: Option<&Path>, name: &OsStr) -> Program {
     let dirs = search_path().unwrap_or_default();
-    resolve_as(record, name, &executable, &|p: &Path| executable(p) && !mise_shim(p), &dirs)
+    resolve_as(mode, record, name, &executable, &|p: &Path| executable(p) && !mise_shim(p), &dirs)
 }
 
 /// A harness's helper ([`crate::harness::Harness::helpers`]: the interpreter its launcher's
@@ -67,8 +83,13 @@ pub fn resolve(record: Option<&Path>, name: &OsStr) -> Program {
 /// caller's `PATH` (`~/.local/share/mise/installs/bun/<v>/bin/bun`) is found and recorded instead;
 /// with only a shim, the helper is missing, and shown so.
 pub fn resolve_helper(record: Option<&Path>, name: &OsStr) -> Program {
+    resolve_helper_in(Mode::Record, record, name)
+}
+
+/// As [`resolve_helper`], recording only as `mode` allows.
+pub fn resolve_helper_in(mode: Mode, record: Option<&Path>, name: &OsStr) -> Program {
     let dirs = search_path().unwrap_or_default();
-    resolve_as(record, name, &helper_runs(name), &helper_runs(name), &dirs)
+    resolve_as(mode, record, name, &helper_runs(name), &helper_runs(name), &dirs)
 }
 
 /// Whether `p` can serve as the helper `name`: a runnable file of that name, never a mise shim.
@@ -89,6 +110,7 @@ pub fn mise_shim(path: &Path) -> bool {
 /// The program `name` names: `explicit` judges a path the owner named (their own choice), and
 /// `discovered` judges what is found by name (the record, then `dirs`), so the two can differ.
 fn resolve_as(
+    mode: Mode,
     record: Option<&Path>,
     name: &OsStr,
     explicit: &dyn Fn(&Path) -> bool,
@@ -105,6 +127,9 @@ fn resolve_as(
         return Program::Found(p);
     }
     let Some(found) = on_path_in(dirs, name, discovered) else { return Program::Missing(name.to_owned()) };
+    if mode == Mode::ReadOnly {
+        return Program::Found(found);
+    }
     // A record that cannot be had or written is found again next time.
     match record.and_then(Held::take) {
         Some(held) => held.record(key, found, discovered),
@@ -447,6 +472,28 @@ mod tests {
         assert_eq!(resolve_helper(Some(&record), OsStr::new("bun")), Program::Found(linked), "a link to a real one is");
     }
 
+    /// A read-only lookup reads the record and finds on `PATH` as a recording one does, but never
+    /// takes `programs.lock` or writes `programs.json`.
+    #[test]
+    fn a_read_only_lookup_uses_the_record_and_path_and_writes_nothing() {
+        let d = crate::config::tempdir::Dir::new();
+        let (bin, name) = (d.path().join("bin"), OsStr::new("relay-readonly-program-xyz"));
+        std::fs::create_dir(&bin).unwrap();
+        let on_path = program(&bin, name.to_str().unwrap(), 0o755);
+        let record = d.path().join("programs.json");
+        let dirs = [bin.clone()];
+        let look = |mode| resolve_as(mode, Some(&record), name, &executable, &executable, &dirs);
+        assert_eq!(look(Mode::ReadOnly), Program::Found(on_path.clone()), "found on PATH");
+        assert!(!record.exists() && !record.with_extension("lock").exists(), "nothing written or locked");
+        let recorded = program(d.path(), "recorded", 0o755);
+        std::fs::write(&record, serde_json::json!({ name.to_str().unwrap(): recorded }).to_string()).unwrap();
+        let before = std::fs::read(&record).unwrap();
+        assert_eq!(look(Mode::ReadOnly), Program::Found(recorded), "the record first");
+        assert_eq!(std::fs::read(&record).unwrap(), before);
+        assert!(!record.with_extension("lock").exists());
+        assert_eq!(look(Mode::Record), look(Mode::ReadOnly), "and a recording lookup agrees");
+    }
+
     /// A mise shim is never a harness's program, recorded or on `PATH`: a shim fails wherever no
     /// mise config pins the tool, which is where sessions run. The real binary an activated mise
     /// put on `PATH` is found and recorded instead; with only a shim there, the program is missing.
@@ -469,7 +516,7 @@ mod tests {
         // A shim in the record is passed over, and the record replaced by the real binary found.
         std::fs::write(&record, serde_json::json!({ key: shim }).to_string()).unwrap();
         let dirs = [shims.clone(), real_dir.clone()];
-        let found = resolve_as(Some(&record), name, &executable, &runs, &dirs);
+        let found = resolve_as(Mode::Record, Some(&record), name, &executable, &runs, &dirs);
         assert_ne!(found, Program::Found(shim.clone()), "a shim in the record not");
         assert_eq!(found, Program::Found(real.clone()), "the real one instead");
         assert_eq!(read(&record).get(key), Some(&real), "and the record holds it");
@@ -480,13 +527,16 @@ mod tests {
         assert_eq!(on_path_in(&only, name, &runs), None, "a shim is not a program");
         let bare = d.path().join("bare.json");
         assert_eq!(
-            resolve_as(Some(&bare), name, &executable, &runs, &only),
+            resolve_as(Mode::Record, Some(&bare), name, &executable, &runs, &only),
             Program::Missing(name.into()),
             "with only a shim, the program is missing"
         );
         assert!(!bare.exists(), "and nothing is recorded");
         // A path the owner names is their own choice: a shim there is taken as it is.
-        assert_eq!(resolve_as(None, shim.as_os_str(), &executable, &runs, &only), Program::Found(shim.clone()));
+        assert_eq!(
+            resolve_as(Mode::Record, None, shim.as_os_str(), &executable, &runs, &only),
+            Program::Found(shim.clone())
+        );
     }
 
     /// Review of #40: a launcher finds its helper by name in the directory relay puts on its PATH, so

@@ -852,6 +852,11 @@ impl Config {
     /// its own, and, once that is found, each helper its runs need ([`crate::harness::Harness::helpers`]),
     /// so the first command that asks records them all, before any child runs on a narrower `PATH`.
     pub fn harness_programs(&self) -> Vec<HarnessPrograms> {
+        self.harness_programs_in(crate::host::Mode::Record)
+    }
+
+    /// As [`Config::harness_programs`], recording what `PATH` finds only as `mode` allows.
+    pub fn harness_programs_in(&self, mode: crate::host::Mode) -> Vec<HarnessPrograms> {
         crate::harness::ALL
             .iter()
             .copied()
@@ -861,10 +866,11 @@ impl Config {
                     return None;
                 }
                 let name = conf.and_then(|c| c.program.clone()).unwrap_or_else(|| PathBuf::from(h.program()));
-                let program = crate::host::resolve(self.programs.as_deref(), name.as_os_str());
+                let program = crate::host::resolve_in(mode, self.programs.as_deref(), name.as_os_str());
                 let found = matches!(program, crate::host::Program::Found(_));
                 let helpers = if found {
-                    let resolve = |n: &&'static str| crate::host::resolve_helper(self.programs.as_deref(), n.as_ref());
+                    let resolve =
+                        |n: &&'static str| crate::host::resolve_helper_in(mode, self.programs.as_deref(), n.as_ref());
                     h.helpers().iter().map(|n| (*n, resolve(n))).collect()
                 } else {
                     Vec::new()
@@ -878,7 +884,12 @@ impl Config {
     /// The harnesses relay may use: those whose programs [`Config::harness_programs`] all found, in
     /// registry order.
     pub fn harnesses(&self) -> Vec<&'static dyn crate::harness::Harness> {
-        self.harness_programs().into_iter().filter(|p| p.missing().is_none()).map(|p| p.harness).collect()
+        self.harnesses_in(crate::host::Mode::Record)
+    }
+
+    /// As [`Config::harnesses`], recording what `PATH` finds only as `mode` allows.
+    pub fn harnesses_in(&self, mode: crate::host::Mode) -> Vec<&'static dyn crate::harness::Harness> {
+        self.harness_programs_in(mode).into_iter().filter(|p| p.missing().is_none()).map(|p| p.harness).collect()
     }
 
     /// The harnesses this config expects with a program or helper not found, each with what it lacks.

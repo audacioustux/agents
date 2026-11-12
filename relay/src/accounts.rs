@@ -27,8 +27,14 @@ pub fn discover_all() -> Vec<Home> {
 
 /// Every usable account of every enabled harness, minus `accounts.exclude`.
 pub fn discover(cfg: &Config) -> Vec<Home> {
+    discover_in(crate::host::Mode::Record, cfg)
+}
+
+/// As [`discover`], the same accounts, recording the programs `PATH` finds only as `mode` allows:
+/// [`crate::host::Mode::ReadOnly`] for a view that writes nothing.
+pub fn discover_in(mode: crate::host::Mode, cfg: &Config) -> Vec<Home> {
     let user = home();
-    cfg.harnesses()
+    cfg.harnesses_in(mode)
         .into_iter()
         .flat_map(|h| h.homes(&user))
         .filter(|a| !cfg.accounts.exclude.contains(&a.key()))

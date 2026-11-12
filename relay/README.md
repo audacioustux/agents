@@ -822,6 +822,7 @@ waiting_retain_days = 7      # a failed or stopped job's clone is kept this long
 logs_gzip_after_days = 3     # <job>.log.ndjson is gzipped after this
 interval_minutes = 60        # the dispatcher runs a pass this often while awake
 pass_seconds = 300           # a pass stops here; the next goes on
+cache_copies_idle_days = 1   # an idle copy of the linked caches goes after this (see the sandbox)
 
 [limits]
 job_disk_gb = 40             # a running clone over this reaches the `disk` point (0: off)
@@ -861,6 +862,11 @@ a totals line, and a `collected` event per clone removed or emptied:
 - **Review refs**: `refs/relay/review/<job>` (the ref a review read its branch by) of
   a review that is gone, or ended `outputs_after_hours` ago and is not live. A review
   resumed later fetches it again.
+- **Idle copies of the linked caches** ([`sandbox.linked_caches`](#the-sandbox)) in the
+  pools (`farms/` in the data and state directories): one no run has taken for
+  `cache_copies_idle_days`, and any past the `limits.max_running` used last in its pool,
+  since no more runs than that hold one at once. Its files are the cache's own (hard
+  links), so it frees directories, not data, and counts as freeing nothing.
 - Never a clone with a live runner, never a symlink (skipped whole), never a
   path outside relay's own clone and state directories. A `build_outputs` entry
   must be a plain relative path (no `..`, not absolute).
@@ -1206,37 +1212,55 @@ Each session runs under `bwrap`. It sees the machine read-only, except for:
   by its sessions and never the host's. A session that could write the host's
   `~/.cargo` could replace what the host runs. The first build fetches afresh.
   A cache whose path the host does not have is left out, as before.
-- **Caches on the tree's mount.** `link()` fails across two mounts (EXDEV), even on one
-  filesystem, and bun, pnpm and uv install by hard-linking from their store, so a cache
-  mounted apart from the tree made them copy every package. A job with a tree (a session's
-  clone, each run of its acceptance check) therefore gets every `sandbox.caches` entry as a
-  **symlink** into its own copy of the caches, which sits inside the mount it works in
-  (`.git/relay-caches` in the clone; `caches/` in `<job>.bar.d`), so `link()` from the cache
-  into the tree works:
+- **Linked caches** (`sandbox.linked_caches`, default none): the caches a tool hard-links from
+  into the tree it installs. `link()` fails across two mounts (EXDEV), even on one filesystem, so
+  with a cache bound apart from the tree such a tool copies every package instead (Tickify: a frozen
+  `bun install` of 4 s on the host did not finish in 1800 s in a check; bun's own copy backend did not
+  either). **Declare a cache here when a tool links from it**: bun (`.bun/install/cache`), pnpm (its
+  store), uv (its cache, which it links from by default on Linux). Each must also be in
+  `sandbox.caches`; relay refuses the config otherwise. Do not declare one nothing links from (cargo
+  only reads its registry): it would cost every run and save nothing. A project that declares none
+  has every cache a bind, exactly as before.
+
+  A job with a tree (a session's clone, each run of its acceptance check) gets each linked cache as a
+  **symlink** into its own copy of it, inside the mount it works in (`.git/relay-caches` in the
+  clone; `caches/` in `<job>.bar.d`), so `link()` from the cache into the tree works:
 
   | what | where the job sees it | what it is |
   | --- | --- | --- |
-  | each cache (`~/.cache`, …) | its path under the home | a symlink into the job's copy |
-  | the job's copy of the caches | in its tree's own mount | a directory per directory of relay's caches and a hard link per file; no file's data |
-  | the directory holding the cache path (`~`, `~/.cargo`, …) | where it is | the host's entries, each bound back read-only (a symlink as itself), on an empty tmpfs made read-only: what showed before shows, what is hidden stays hidden, and nothing can be created there; entries the host makes later do not show |
+  | a linked cache (`~/.bun/install/cache`) | its path under the home | a symlink into the job's copy |
+  | the job's copy of the linked caches | in its tree's own mount | a directory per directory of relay's cache and a hard link per file; no file's data |
+  | the directory holding the cache path (`~/.bun/install`) | where it is | the host's entries, each bound back read-only (a symlink as itself), on an empty tmpfs made read-only: what showed before shows, what is hidden stays hidden, and nothing can be created there; entries the host makes later do not show |
+  | every other cache (`~/.cache`, …) | its path under the home | a bind of relay's directory, as before |
   | relay's caches themselves | nowhere | hidden, with the rest of relay's own directories |
 
-  The copies are kept, idle, in a pool beside where they are used (`farms/` in the project's data
-  directory for sessions, in its state directory for checks), so a link per file is made once per
-  copy, not per run. A run takes one by renaming it into place, brings it up to date when it starts
-  and, when it ends, links back into relay's caches every name it added, then renames it back to the
-  pool; each pass compares directory listings, so its cost follows the number of directories in the
-  caches, not files. What one job adds is there for the next. Two jobs adding one entry at once each
-  write their own, and the first linked back is kept; an entry already there stays as it is on each
-  side, so a file a job replaced by renaming over it stays in its copy only, while one changed in
-  place is the shared file itself (one inode), as when the caches were one bind. Relay walks a copy
-  only after its job's sandbox has ended, never following a symlink in it or in the caches.
-  A clone's measured size ([disk](#disk)) leaves its copy out, since its files are relay's caches'.
-  gc does not collect the pool: it holds as many copies as runs ever had one at once.
+  **What it costs.** The copies are kept, idle, in a pool beside where they are used (`farms/` in
+  the project's data directory for sessions, in its state directory for checks), so the link per
+  file is made once per copy, not per run. A run takes one by renaming it into place, brings it up
+  to date when it starts, links back into relay's cache every name it added when it ends, and renames
+  it back. Each of those two passes reads every directory of the linked caches on both sides, and
+  touches only the files one side lacks, so **every run pays two passes over the cache's
+  directories**, and the first run on a new copy also pays a link per file. Measured on this
+  machine's overlayfs under heavy load (load average ~70 on 12 CPUs): a 105 MB bun cache of 10,931
+  entries in 627 directories cost 236 s to copy the first time, then 24 s at the start and 27 s at the
+  end of each run; a 113 MB cargo registry (1,338 directories) cost 64 s and 37 to 87 s. On an idle
+  disk these are a fraction of a second to a few seconds. Each copy holds one inode per directory of
+  the cache; a link takes none.
+
+  **Shared and persistent.** What one job adds is there for the next. Two jobs adding one entry at
+  once each write their own, and the first linked back is kept; an entry already there stays as it
+  is on each side, so a file a job replaced by renaming over it stays in its copy only, while one
+  changed in place is the shared file itself (one inode), as when the cache was one bind. With hard
+  links working, a tool that edits an installed file in place (patch-package) changes the cache for
+  every job, as with bun or pnpm on any machine. Relay walks a copy only after its job's sandbox has
+  ended, never following a symlink in it or in the cache. A clone's measured size
+  ([disk](#disk)) leaves its copy out, since its files are relay's cache's. gc removes an idle copy
+  unused for `gc.cache_copies_idle_days` (default 1), and any past the `limits.max_running` used last
+  in its pool. `relay probe` checks the layout from inside for a project that declares a linked cache.
   Without the sandbox, for a job with no tree (a review, a decision's agent), where the copy cannot
-  be made (the caches on another filesystem than the clones, or than relay's state directory for
-  a check), or where something else is mounted at or under the cache path, each cache is a bind of
-  relay's directory as before, and a package manager copies.
+  be made (the cache on another filesystem than the clones, or than relay's state directory for a
+  check), or where something else is mounted at or under the cache path, a linked cache is a bind
+  as the others, and the tool copies.
 
 What is left open, by design or by necessity:
 

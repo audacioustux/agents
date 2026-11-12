@@ -389,6 +389,9 @@ pub struct Gc {
     pub interval_minutes: f64,
     /// A pass stops after this long, and the next one goes on.
     pub pass_seconds: u64,
+    /// An idle copy of the linked caches (`sandbox.linked_caches`) goes once no run has taken it for
+    /// this many days; and a pool keeps no more idle copies than `limits.max_running`.
+    pub cache_copies_idle_days: f64,
 }
 
 impl Default for Gc {
@@ -401,6 +404,7 @@ impl Default for Gc {
             logs_gzip_after_days: 3.0,
             interval_minutes: 60.0,
             pass_seconds: 300,
+            cache_copies_idle_days: 1.0,
         }
     }
 }
@@ -534,6 +538,12 @@ pub struct Sandbox {
     /// directory for the project, mounted there, never the host's: a session
     /// that could write the host's `~/.cargo` could replace what the host runs.
     pub caches: Vec<PathBuf>,
+    /// Those of `caches` a job with a tree gets as a symlink into its own copy of them, made of hard
+    /// links, on its tree's mount, so a tool that hard-links from its store into the tree (bun, pnpm,
+    /// uv) can: across two mounts `link()` fails and it copies instead. Each run then pays for bringing
+    /// its copy up to date and linking back what it added (it reads every directory of the cache
+    /// twice), so only a cache a tool links from is worth declaring. Every other cache stays a bind.
+    pub linked_caches: Vec<PathBuf>,
     /// Environment variables whose names match this regex are not passed in.
     pub env_deny: String,
     /// `/dev/shm`: a RAM tmpfs of at most this many MiB per session, for what wants one (POSIX
@@ -569,6 +579,7 @@ impl Default for Sandbox {
             .map(PathBuf::from)
             .to_vec(),
             caches: [".cache", ".cargo/registry", ".cargo/git"].map(PathBuf::from).to_vec(),
+            linked_caches: Vec::new(),
             env_deny: DEFAULT_ENV_DENY.into(),
             shm_mb: 256,
         }
@@ -835,6 +846,12 @@ impl Config {
                 bail!("{} must be a path inside $HOME, written relative to it", p.display());
             }
         }
+        if let Some(p) = self.sandbox.linked_caches.iter().find(|p| !self.sandbox.caches.contains(p)) {
+            bail!(
+                "sandbox.linked_caches names {}, which is not in sandbox.caches: a linked cache is one of the caches",
+                p.display()
+            );
+        }
         Ok(())
     }
 
@@ -878,6 +895,7 @@ impl Config {
             ("clones_after_days", g.clones_after_days),
             ("waiting_retain_days", g.waiting_retain_days),
             ("logs_gzip_after_days", g.logs_gzip_after_days),
+            ("cache_copies_idle_days", g.cache_copies_idle_days),
         ] {
             ensure!(v.is_finite() && v >= 0.0, "gc.{key} must not be negative");
         }
@@ -1358,6 +1376,8 @@ mod tests {
             "[gc]\nbuild_outputs = [\".\"]",
             "[gc]\nbuild_outputs = [\"\"]",
             "[gc]\nclones_after_days = -1",
+            "[gc]\ncache_copies_idle_days = -1",
+            "[sandbox]\nlinked_caches = [\".bun/install/cache\"]",
             "[gc]\npass_seconds = 0",
             "[limits]\njob_disk_gb = -5",
             "[session.env]\n\"A-B\" = \"1\"",

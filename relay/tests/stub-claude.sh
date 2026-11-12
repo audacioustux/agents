@@ -27,11 +27,12 @@
 # [plant-check] plants, like a hostile session, symlinks in every relay job directory it can write: where the
 # acceptance check's output went (check.out, to $acct/victim) and its /tmp (check-tmp, to $HOME).
 # [plant-config] tries to create, in its own account, config the host would obey: a settings.json with a hook and a hooks/ script.
-# [cache-link] hard-links $HOME/.cache/seed into its clone, as a package manager links from its store, and records in
-# $acct/cache-link `linked` or why link() failed; adds $HOME/.cache/from-session; and records in $acct/cache-view what it
-# sees of the home around the cache: whether the host's own cache file (host-only) shows, whether the host's
-# $HOME/visible is readable, whether it can create a file in $HOME, whether ~/.ssh's key shows, and whether
-# relay's own caches directory shows.
+# [cache-link] works on the cache $HOME/<rel>, <rel> read from $acct/cache-rel (default .cache): hard-links its
+# `seed` into its clone, as a package manager links from its store, and records in $acct/cache-link `linked` or why
+# link() failed; records in $acct/cache-mount the mount (findmnt TARGET) the cache is on, then the one ~/.cache is on;
+# adds from-session to the cache; and records in $acct/cache-view what it sees around the cache: whether the host's
+# own cache file (host-only) shows, whether the host's `visible` beside the cache is readable, whether it can create
+# a file there, whether ~/.ssh's key shows, and whether relay's own caches directory shows.
 # [fsmonitor] leaves a core.fsmonitor in the clone's own configuration that touches $acct/fsmonitor-ran if anything ever runs it.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
@@ -120,13 +121,15 @@ esac
 printf '%s\n--\n' "$prompt" >>"$acct/prompts"
 case "$prompt" in *"[env]"*) env | sort >"$acct/env" ;; esac
 case "$prompt" in *"[cache-link]"*)
-  if ln "$HOME/.cache/seed" cache-linked 2>"$acct/cache-link"; then echo linked >"$acct/cache-link"; fi
+  cache="$HOME/$(cat "$acct/cache-rel" 2>/dev/null || echo .cache)"
+  if ln "$cache/seed" cache-linked 2>"$acct/cache-link"; then echo linked >"$acct/cache-link"; fi
   rm -f cache-linked
-  echo session >"$HOME/.cache/from-session" || true
+  { findmnt -n -o TARGET -T "$cache/seed"; findmnt -n -o TARGET -T "$HOME/.cache"; } >"$acct/cache-mount" 2>&1 || true
+  echo session >"$cache/from-session" || true
   {
-    if [ -e "$HOME/.cache/host-only" ]; then echo host-cache-shown; else echo host-cache-hidden; fi
-    if [ "$(cat "$HOME/visible" 2>/dev/null)" = here ]; then echo home-readable; else echo home-unreadable; fi
-    if touch "$HOME/created" 2>/dev/null; then echo home-writable; else echo home-read-only; fi
+    if [ -e "$cache/host-only" ]; then echo host-cache-shown; else echo host-cache-hidden; fi
+    if [ "$(cat "$(dirname "$cache")/visible" 2>/dev/null)" = here ]; then echo home-readable; else echo home-unreadable; fi
+    if touch "$(dirname "$cache")/created" 2>/dev/null; then echo home-writable; else echo home-read-only; fi
     if [ -s "$HOME/.ssh/id" ]; then echo ssh-shown; else echo ssh-hidden; fi
     if ls -d "$XDG_DATA_HOME"/relay/*/caches >/dev/null 2>&1; then echo relay-caches-shown; else echo relay-caches-hidden; fi
   } >"$acct/cache-view.part"

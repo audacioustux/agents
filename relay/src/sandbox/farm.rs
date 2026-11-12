@@ -1,10 +1,12 @@
-//! A job's own copy of the project's caches, made of hard links, inside the mount that holds its tree.
+//! A job's own copy of the project's linked caches, made of hard links, inside the mount that holds its tree.
 //!
 //! `link()` works within one mount only: across two it fails with EXDEV, even on one filesystem. A
 //! package manager links from its store into the tree it installs (bun, pnpm, uv), so a cache bound
-//! apart from the tree made it copy every package. A job with a tree therefore gets this copy, in the
-//! tree's own mount (a directory in its clone's `.git`, or in its check's directory), and each
-//! `sandbox.caches` path is a symlink into it ([`super::Mount::Symlink`]).
+//! apart from the tree made it copy every package. For the caches a project declares such a tool links
+//! from (`sandbox.linked_caches`), a job with a tree therefore gets this copy, in the tree's own mount
+//! (a directory in its clone's `.git`, or in its check's directory), and each such cache path is a
+//! symlink into it ([`super::Mount::Symlink`]). Every other cache stays a bind: the copy costs every run
+//! a pass over its directories. gc removes idle copies (`gc.cache_copies_idle_days`).
 //!
 //! - **Cost.** A copy is a directory for each directory of the caches and a hard link for each file:
 //!   no file's data, and no inode for a link. Copies are kept in a pool beside the place they are used
@@ -157,11 +159,9 @@ impl Drop for Farm {
 /// another filesystem). Taking one is a rename, so two runs never take the same.
 fn from_pool(pool: &Path, parent: &OwnedFd, name: &CStr) -> bool {
     let Ok(pool_fd) = open_path(pool) else { return false };
-    let Ok(idle) = entries(&pool_fd) else { return false };
-    for (entry, is_dir) in idle {
-        if !is_dir {
-            continue;
-        }
+    // The one used last first: it is the most up to date, and the others age out (`idle`).
+    for (entry, _) in idle(pool).into_iter().rev() {
+        let Ok(entry) = CString::new(entry.into_os_string().into_encoded_bytes()) else { continue };
         match rustix::fs::renameat(&pool_fd, &entry, parent, name) {
             Ok(()) => return true,
             Err(Errno::XDEV) => return false,
@@ -175,8 +175,40 @@ fn from_pool(pool: &Path, parent: &OwnedFd, name: &CStr) -> bool {
 fn to_pool(pool: &Path, parent: &OwnedFd, name: &CStr) -> bool {
     let made = std::fs::DirBuilder::new().recursive(true).create(pool);
     let Ok(pool_fd) = made.and_then(|()| open_path(pool)) else { return false };
-    let idle = format!("idle-{}", uuid::Uuid::now_v7());
+    let idle = format!("{IDLE}{}", uuid::Uuid::now_v7());
     rustix::fs::renameat(parent, name, &pool_fd, idle.as_str()).is_ok()
+}
+
+/// An idle copy's name in a pool: this, then a v7 UUID made when it was given back, so it says when.
+const IDLE: &str = "idle-";
+
+/// The idle copies in `pool`, each with when it was last given back (Unix microseconds), oldest first.
+pub fn idle(pool: &Path) -> Vec<(PathBuf, u64)> {
+    let mut out: Vec<(PathBuf, u64)> = std::fs::read_dir(pool)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let id = uuid::Uuid::parse_str(name.strip_prefix(IDLE)?).ok()?;
+            let (secs, nanos) = id.get_timestamp()?.to_unix();
+            Some((PathBuf::from(name), secs * 1_000_000 + u64::from(nanos) / 1000))
+        })
+        .collect();
+    out.sort_by_key(|(_, at)| *at);
+    out
+}
+
+/// Removes the idle copy `name` from `pool`: first renamed out of the pool, so a run taking it at the
+/// same moment has either it whole or none; then emptied, never following a symlink a job left in it.
+/// Its files are the caches' own (hard links), so this frees directories, not data.
+pub fn remove_idle(pool: &Path, name: &Path) -> io::Result<()> {
+    let pool_fd = open_path(pool)?;
+    let gone = format!("gone-{}", uuid::Uuid::now_v7());
+    rustix::fs::renameat(&pool_fd, name, &pool_fd, gone.as_str())?;
+    let copy = open_dir(&pool_fd, gone.as_str())?;
+    empty(&copy)?;
+    Ok(rustix::fs::unlinkat(&pool_fd, gone.as_str(), AtFlags::REMOVEDIR)?)
 }
 
 /// A directory of relay's own, by path: only its last component is not followed.
@@ -489,6 +521,28 @@ mod tests {
             t
         });
         timed("release", &mut || farm.as_mut().unwrap().release());
+    }
+
+    /// An idle copy says when it was given back, and goes whole, read-only directories and all, while
+    /// the shared caches keep every file.
+    #[test]
+    fn an_idle_copy_says_when_it_was_used_and_can_be_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = place();
+        std::fs::create_dir_all(p.shared.join(".cache/a")).unwrap();
+        std::fs::write(p.shared.join(".cache/a/f"), "x").unwrap();
+        let before = crate::bus::now_micros();
+        let (farm, _) = take(&p);
+        std::fs::create_dir_all(farm.path().join(".cache/go")).unwrap();
+        std::fs::set_permissions(farm.path().join(".cache/go"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        drop(farm);
+        let idle = idle(&p.pool);
+        assert_eq!(idle.len(), 1);
+        assert!(idle[0].1 >= before / 1000 * 1000 && idle[0].1 <= crate::bus::now_micros(), "{idle:?}");
+        remove_idle(&p.pool, &idle[0].0).unwrap();
+        assert_eq!(pooled(&p), 0);
+        assert_eq!(std::fs::read_to_string(p.shared.join(".cache/a/f")).unwrap(), "x");
+        assert!(remove_idle(&p.pool, &idle[0].0).is_err(), "taken or gone already: nothing to do");
     }
 
     /// A copy left by a run relay never saw end is used again in place, and nothing it held is lost.

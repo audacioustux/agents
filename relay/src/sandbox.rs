@@ -9,16 +9,18 @@
 //! | 1 | `sandbox.hide` (default: the repository's siblings); the user's runtime dir and host sockets | hidden |
 //! | 2 | the repository, and its git directories when it is a linked worktree | read-only |
 //! | 3 | every home of every harness but the session's own; its own home; what in it the host runs or obeys (settings, hooks, scripts) | hidden; writable; read-only |
-//! | 0 | the parent of each cache a job with a tree gets as a symlink (see layer 4): the host's entries, each bound back | read-only |
-//! | 4 | `sandbox.caches`: relay's own directory for each, never the host's; for a job with a tree, a symlink into its own copy of them, in its tree's mount | writable |
+//! | 0 | the directory holding each linked cache path of a job with a tree (see layer 4): the host's entries, each bound back | read-only |
+//! | 4 | `sandbox.caches`: relay's own directory for each, never the host's; each of `sandbox.linked_caches`, for a job with a tree, a symlink into its own copy of them, in its tree's mount | writable |
 //! | 5 | `sandbox.hide_home` (credential stores) | hidden |
 //! | 6 | relay's own state and clones | hidden |
 //! | 7 | the job's own clone and directory; its inbox (what relay writes for it) | writable; read-only |
 //!
-//! `link()` fails across two mounts (EXDEV), even on one filesystem, and a package manager links from
-//! its store into the tree it installs. So a job with a tree (a session's clone, a check's checkout)
-//! does not get its caches as binds of their own: relay makes it a copy of them in hard links inside
-//! its tree's mount ([`farm::Farm`]), and each cache path is a symlink into that copy. A symlink cannot
+//! `link()` fails across two mounts (EXDEV), even on one filesystem, and some package managers (bun,
+//! pnpm, uv) install by linking from their store into the tree. So a job with a tree (a session's
+//! clone, a check's checkout) does not get the caches a project declares in `sandbox.linked_caches` as
+//! binds of their own: relay makes it a copy of them in hard links inside its tree's mount
+//! ([`farm::Farm`]), and each such cache path is a symlink into that copy. Every other cache is a
+//! bind, as it always was: the copy costs every run a pass over the cache's directories. A symlink cannot
 //! stand in the read-only host directory that holds the cache path, so that directory is layer 0: an
 //! empty tmpfs with each of the host's entries bound back read-only (a symlink copied as itself), made
 //! read-only like a hidden one. Where the cache path's directory is hidden already, the symlink goes in
@@ -144,6 +146,9 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
         .map(|(r, p)| {
             let bind = (p.clone(), Mount::From(ctx.caches.join(r)));
             let (Some(farm), Some(parent)) = (m.caches, p.parent()) else { return bind };
+            if !cfg.sandbox.linked_caches.contains(r) {
+                return bind;
+            }
             // Anything mounted at or under the cache path would land in the job's copy.
             let crowded = before.iter().chain(&after).any(|(q, _)| q.starts_with(p))
                 || paths.iter().any(|q| q != p && q.starts_with(p));
@@ -182,16 +187,16 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
 }
 
 /// The job's own copy of the caches ([`farm::Farm`]), put at `name` in `parent`, a directory in the mount
-/// that holds its tree, from the idle copies in `pool` (beside it, on its filesystem), of each cache the
-/// sandbox mounts (one whose path is there in the home). None without the sandbox, or when it cannot be
-/// made (`parent` on another filesystem than relay's caches): then each cache is a bind of the project's
-/// caches, as for a job with no tree.
+/// that holds its tree, from the idle copies in `pool` (beside it, on its filesystem), of each linked
+/// cache (`sandbox.linked_caches`) the sandbox mounts (one whose path is there in the home). None
+/// without the sandbox, with no such cache, or when it cannot be made (`parent` on another filesystem
+/// than relay's caches): then each cache is a bind of the project's caches, as for a job with no tree.
 pub fn own_caches(ctx: &Ctx, parent: &Path, name: &str, pool: &Path) -> Option<farm::Farm> {
     if !ctx.cfg.sandbox.enabled {
         return None;
     }
     let home = crate::accounts::home();
-    let rels: Vec<PathBuf> = ctx.cfg.sandbox.caches.iter().filter(|r| home.join(r).exists()).cloned().collect();
+    let rels: Vec<PathBuf> = ctx.cfg.sandbox.linked_caches.iter().filter(|r| home.join(r).exists()).cloned().collect();
     if rels.is_empty() {
         return None;
     }
@@ -493,10 +498,10 @@ mod tests {
         assert!(at(&root.join("profiles")) < at(&root.join("profiles/work")), "hidden after, so it stays hidden");
     }
 
-    /// The caches and a job's tree on one mount: with a copy of the caches in the tree's mount, each cache
-    /// path is a symlink into it, standing in its directory rebuilt from the host's entries (or in the
-    /// hidden tmpfs already there); without one, or where something else is mounted under the cache path,
-    /// it is a bind of relay's caches as before.
+    /// The caches and a job's tree on one mount: with a copy of the caches in the tree's mount, each linked
+    /// cache path is a symlink into it, standing in its directory rebuilt from the host's entries (or in the
+    /// hidden tmpfs already there); without one, for a cache not declared linked, or where something else is
+    /// mounted under the cache path, it is a bind of relay's caches as before.
     #[test]
     fn a_cache_is_a_symlink_into_the_jobs_copy_when_it_has_one() {
         let d = Dir::new();
@@ -504,14 +509,15 @@ mod tests {
         let repo = root.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         let user = root.join("user");
-        for p in [".cache", ".cargo/registry", ".cargo/git", ".npm/_cacache", "keep"] {
+        for p in [".cache", ".cargo/registry", ".cargo/git", ".npm/_cacache", ".rustup", "keep"] {
             std::fs::create_dir_all(user.join(p)).unwrap();
         }
         std::os::unix::fs::symlink("keep", user.join("link")).unwrap();
         std::fs::write(user.join(".rc"), "x").unwrap();
         let conf = format!(
             "name = \"t\"\n[sandbox]\nhide = [{:?}]\nhide_home = [\".cargo/git/secret\"]\n\
-             caches = [\".cache\", \".cargo/registry\", \".cargo/git\", \".npm/_cacache\", \".absent\"]\n",
+             caches = [\".cache\", \".cargo/registry\", \".cargo/git\", \".npm/_cacache\", \".absent\", \".rustup\"]\n\
+             linked_caches = [\".cache\", \".cargo/registry\", \".cargo/git\", \".npm/_cacache\", \".absent\"]\n",
             user.join(".npm")
         );
         let cfg = Config::parse(&conf, &repo).unwrap();
@@ -542,6 +548,7 @@ mod tests {
         assert_eq!(mount_of(&plan, &user.join(".npm")).cloned(), Some(Mount::Hidden));
         assert!(matches!(mount_of(&plan, &user.join(".cargo/git")), Some(Mount::From(_))));
         assert!(mount_of(&plan, &user.join(".absent")).is_none());
+        assert!(matches!(mount_of(&plan, &user.join(".rustup")), Some(Mount::From(_))), "not declared linked");
 
         let args = args(&ctx, &user, &m(Some(&farm)), Vec::new());
         let s = |p: &Path| OsString::from(p);

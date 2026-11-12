@@ -380,45 +380,82 @@ fn a_check_follows_nothing_the_session_planted() {
 /// Tickify, 2026-11-12: each cache was a bind of its own, apart from the bind of the job's tree, so `link()`
 /// from the cache into the tree failed with EXDEV (one filesystem, but two mounts) and bun, pnpm and uv copied
 /// every package instead: a frozen install that takes 4 s on the host did not finish in 1800 s in a check.
-/// The session, the check at the tip and the check at the base now each hard-link from a cache into their
-/// tree; what each adds to the cache is there for the next; and the home around the cache shows what it
-/// showed before, read-only, with the host's own cache and what `hide_home` hides still out of sight.
+/// A project that declares bun's cache in `sandbox.linked_caches` now has the session, the check at the tip
+/// and the check at the base each hard-link from it into their tree; what each adds to the cache is there for
+/// the next; the home around the cache shows what it showed before, read-only, with the host's own cache and
+/// what `hide_home` hides still out of sight; and a cache it does not declare is a bind as before.
 #[test]
 fn a_cache_and_the_tree_share_a_mount_so_a_package_manager_hard_links() {
     // The home is not a hidden sibling of the repository here, as on a real machine: the cache sits among the
     // host's own files, in a home rebuilt from them.
-    cache_link("cache-link", true);
+    cache_link("cache-link", true, true);
 }
 
 /// The same where the home is hidden (here, a sibling of the repository): the cache is a symlink in the
 /// hidden home's empty tmpfs.
 #[test]
 fn a_cache_in_a_hidden_home_shares_a_mount_with_the_tree() {
-    cache_link("cache-link-hidden", false);
+    cache_link("cache-link-hidden", false, true);
 }
 
-fn cache_link(tag: &str, home_shown: bool) {
+/// A project that declares no linked cache keeps the layout it had: each cache a bind of its own (its own
+/// mount, by findmnt), so `link()` from it into the tree fails with EXDEV, and no copy is made.
+#[test]
+fn an_undeclared_cache_stays_a_bind_of_its_own() {
+    cache_link("cache-bind", true, false);
+}
+
+fn cache_link(tag: &str, home_shown: bool, declared: bool) {
     if !have_bwrap() {
         return;
     }
     let env = setup(tag, false);
-    configure(&env, "job_ceiling_usd = 100.0\n", if home_shown { "[sandbox]\nhide = []\n" } else { "" });
+    let rel = ".bun/install/cache";
+    let sandbox = format!(
+        "[sandbox]\n{}caches = [\".cache\", \"{rel}\"]\nlinked_caches = [{}]\n",
+        if home_shown { "hide = []\n" } else { "" },
+        if declared { format!("\"{rel}\"") } else { String::new() }
+    );
+    configure(&env, "job_ceiling_usd = 100.0\n", &sandbox);
     claude_account(&env.home, "a", 10, false);
-    std::fs::write(env.home.join("visible"), "here").unwrap();
+    let acct = env.home.join(".claude.a");
+    std::fs::write(acct.join("cache-rel"), rel).unwrap();
+    // Beside the cache: the directory a linked cache's symlink stands in.
+    std::fs::create_dir_all(env.home.join(".bun/install")).unwrap();
+    std::fs::write(env.home.join(".bun/install/visible"), "here").unwrap();
     std::fs::create_dir_all(env.home.join(".ssh")).unwrap();
     std::fs::write(env.home.join(".ssh/id"), "key").unwrap();
-    // The host's own cache, which a job never sees, and the project's, which it does.
-    std::fs::create_dir_all(env.home.join(".cache")).unwrap();
-    std::fs::write(env.home.join(".cache/host-only"), "host").unwrap();
-    let shared = env.root.join("data/relay/flow/caches/.cache");
+    // The host's own caches, which a job never sees, and the project's, which it does.
+    for r in [rel, ".cache"] {
+        std::fs::create_dir_all(env.home.join(r)).unwrap();
+        std::fs::write(env.home.join(r).join("host-only"), "host").unwrap();
+    }
+    let shared = env.root.join("data/relay/flow/caches").join(rel);
     std::fs::create_dir_all(&shared).unwrap();
     std::fs::write(shared.join("seed"), "a package").unwrap();
     // Red at the base (no output file there yet), green at the tip. Each run first hard-links from the cache
     // into its tree, then leaves a mark in the cache named after its commit.
-    let check = r#"ln "$HOME/.cache/seed" linked && : >"$HOME/.cache/linked-$(git rev-parse HEAD)" && test -f relay-output.txt"#;
+    let check = format!(
+        r#"ln "$HOME/{rel}/seed" linked && : >"$HOME/{rel}/linked-$(git rev-parse HEAD)" && test -f relay-output.txt"#
+    );
+    // The probe checks the layout from inside: the linked cache on the clone's mount, its directory the host's.
+    let probe = relay(&env, &["probe", "--account", "claude:a"]);
+    ok(&probe, "probe");
+    let p = out_of(&probe);
+    if declared {
+        assert!(p.contains("PASS  linked caches share the tree's mount"), "{p}");
+        assert!(p.contains("PASS  a directory holding a linked cache shows the host's entries, read-only"), "{p}");
+        // It took a copy for its clone (the check was not vacuous), and gave it back to the pool.
+        let farms = std::fs::read_dir(env.root.join("data/relay/flow/farms")).map_or(0, Iterator::count);
+        assert_eq!(farms, 1, "the probe's copy, idle");
+    }
+    assert!(!env.root.join("data/relay/flow/caches").join(rel).join(".relay-probe-link").exists());
     let text = "[cache-link][status-done] Make a change.";
-    ok(&relay(&env, &["queue", "add", "linker", "--text", text, "--check", check, "--check-red-first"]), "queue");
-    let acct = env.home.join(".claude.a");
+    let mut add = vec!["queue", "add", "linker", "--text", text];
+    if declared {
+        add.extend(["--check", &check, "--check-red-first"]);
+    }
+    ok(&relay(&env, &add), "queue");
     let said = |f: &str| std::fs::read_to_string(acct.join(f)).unwrap_or_default();
     for _ in 0..600 {
         if acct.join("cache-view").exists() {
@@ -426,32 +463,52 @@ fn cache_link(tag: &str, home_shown: bool) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(said("cache-link").trim(), "linked", "link() from the cache into the session's clone");
-    assert_eq!(
-        said("cache-view").lines().collect::<Vec<_>>(),
-        [
-            "host-cache-hidden",
-            if home_shown { "home-readable" } else { "home-unreadable" },
-            "home-read-only",
-            "ssh-hidden",
-            "relay-caches-hidden"
-        ],
-        "what the session sees around its cache"
-    );
+    let clone = workdir(&env, "linker");
+    let mounts: Vec<String> = said("cache-mount").lines().map(str::to_owned).collect();
+    let home = |r: &str| env.home.join(r).display().to_string();
+    if declared {
+        assert_eq!(said("cache-link").trim(), "linked", "link() from the cache into the session's clone");
+        assert_eq!(
+            mounts,
+            [clone.display().to_string(), home(".cache")],
+            "the cache on the clone's mount; .cache its own"
+        );
+    } else {
+        assert!(said("cache-link").contains("Invalid cross-device link"), "{}", said("cache-link"));
+        assert_eq!(mounts, [home(rel), home(".cache")], "each cache a mount of its own, as before");
+        assert!(!clone.join(".git/relay-caches").exists(), "no copy is made");
+    }
+    // (The test's home is under the system /tmp, which a sandbox replaces with the job's own: only what is
+    // mounted in it shows. So what is around the cache is looked at where the plan rebuilt it.)
+    if declared {
+        assert_eq!(
+            said("cache-view").lines().collect::<Vec<_>>(),
+            [
+                "host-cache-hidden",
+                if home_shown { "home-readable" } else { "home-unreadable" },
+                "home-read-only",
+                "ssh-hidden",
+                "relay-caches-hidden"
+            ],
+            "what the session sees around its cache"
+        );
+    }
     let j = wait_for(&env, "linker");
     assert_eq!(j["status"], "done", "{j}");
+    assert_eq!(std::fs::read_to_string(shared.join("from-session")).unwrap(), "session\n", "what the session added");
+    assert!(!env.home.join(rel).join("from-session").exists(), "the host's own cache");
+    assert!(!env.home.join(".bun/install/created").exists(), "the host's own directory");
+    if !declared {
+        let farms = env.root.join("data/relay/flow/farms");
+        assert!(std::fs::read_dir(&farms).map_or(true, |mut d| d.next().is_none()), "no copy in a pool");
+        return;
+    }
     assert_eq!((j["bars"][0]["result"].as_str(), j["bars"][0]["base_exit"].as_i64()), (Some("pass"), Some(1)), "{j}");
     let marks = std::fs::read_dir(&shared)
         .unwrap()
         .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("linked-"))
         .count();
     assert_eq!(marks, 2, "the checks at the tip and at the base both linked, and what they added stays");
-    assert_eq!(
-        std::fs::read_to_string(shared.join("from-session")).unwrap(),
-        "session\n",
-        "and what the session added"
-    );
-    assert!(!env.home.join(".cache/from-session").exists() && !env.home.join("created").exists(), "the host's own");
 }
 
 /// Audit finding 4: protected config an account does not have yet was not mounted at all, so its

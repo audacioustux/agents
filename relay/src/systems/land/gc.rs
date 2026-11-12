@@ -13,7 +13,11 @@
 //!   branch is in the repository (else rescued into `refs/relay/rescue/<job>`);
 //! - a log (`<job>.log.ndjson`) older than `logs_gzip_after_days` is gzipped;
 //! - the ref a review read its branch by (`refs/relay/review/<job>`) goes once the review is gone,
-//!   or has ended `outputs_after_hours` ago: a resumed review fetches it again.
+//!   or has ended `outputs_after_hours` ago: a resumed review fetches it again;
+//! - an idle copy of the linked caches (`sandbox.linked_caches`) in a pool goes once no run has taken
+//!   it for `cache_copies_idle_days`, and so does every idle copy past the `limits.max_running` most
+//!   recently used: no more runs than that hold one at once. Its files are the caches' own (hard
+//!   links), so it frees directories, not data, and is counted as freeing nothing.
 //!
 //! A clone with a live runner, a symlink, or a path outside relay's own
 //! directories is left alone.
@@ -44,6 +48,8 @@ pub enum Kind {
     Log,
     /// The ref in the repository a review read its branch by, deleted.
     ReviewRef,
+    /// An idle copy of the linked caches, in a pool; its job is "".
+    CacheCopy,
 }
 
 /// One place a pass acts on, for one job.
@@ -170,6 +176,30 @@ pub fn plan(ctx: &Ctx, world: &World, now_us: u64) -> Vec<Item> {
     }
     items.extend(scratches(ctx, world, gc, now_us));
     items.extend(review_refs(ctx, world, gc, now_us));
+    items.extend(cache_copies(ctx, gc, now_us));
+    items
+}
+
+/// The pools of copies of the linked caches: a session's, beside the clones, and a check's, beside its
+/// directory in the jobs directory.
+pub fn pools(ctx: &Ctx) -> [PathBuf; 2] {
+    [ctx.farms.clone(), ctx.state.join("farms")]
+}
+
+/// The idle copies of the linked caches no run needs: unused for `cache_copies_idle_days`, or past the
+/// `limits.max_running` used last in their pool.
+fn cache_copies(ctx: &Ctx, gc: &Gc, now_us: u64) -> Vec<Item> {
+    let stale = micros(gc.cache_copies_idle_days * 86_400.0);
+    let mut items = Vec::new();
+    for pool in pools(ctx) {
+        let idle = crate::sandbox::farm::idle(&pool);
+        let kept = ctx.cfg.limits.max_running;
+        for (i, (name, used)) in idle.iter().rev().enumerate() {
+            if i >= kept || now_us.saturating_sub(*used) >= stale {
+                items.push(Item { job: String::new(), kind: Kind::CacheCopy, path: pool.join(name) });
+            }
+        }
+    }
     items
 }
 
@@ -343,7 +373,9 @@ pub fn run(ctx: &Ctx, dry_run: bool) -> Result<()> {
             left = items.len() - i;
             break;
         };
-        let (bytes, complete) = if matches!(item.kind, Kind::Log | Kind::ReviewRef) {
+        let (bytes, complete) = if item.kind == Kind::CacheCopy {
+            (0, true)
+        } else if matches!(item.kind, Kind::Log | Kind::ReviewRef) {
             (item.path.metadata().map_or(0, |m| m.len()), true)
         } else {
             os::dir_size(&item.path, within)
@@ -406,13 +438,18 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
         anyhow::ensure!(out.status.success(), "could not delete {name}");
         return Ok(());
     }
+    if item.kind == Kind::CacheCopy {
+        let (Some(pool), Some(name)) = (item.path.parent(), item.path.file_name()) else { bail!("not in a pool") };
+        return crate::sandbox::farm::remove_idle(pool, Path::new(name))
+            .with_context(|| format!("removing {}", item.path.display()));
+    }
     if item.kind == Kind::Scratch {
         crate::hostdir::remove_tree(&item.path).with_context(|| format!("removing {}", item.path.display()))?;
         return collected(ctx, &item.job, "scratch", a.bytes);
     }
     let j = world.jobs().get(&item.job).context("the job is gone")?;
     match item.kind {
-        Kind::ReviewRef | Kind::Scratch => unreachable!("handled above"),
+        Kind::ReviewRef | Kind::Scratch | Kind::CacheCopy => unreachable!("handled above"),
         Kind::Log => gzip_log(&item.path),
         Kind::Outputs => {
             let meta = item.path.symlink_metadata()?;
@@ -530,5 +567,30 @@ mod tests {
         assert_eq!(inside(&clone, "../elsewhere"), None);
         assert_eq!(inside(&clone, "/etc"), None);
         assert_eq!(inside(&clone, ""), None);
+    }
+
+    /// An idle copy of the linked caches goes once unused for `cache_copies_idle_days`, or when more are
+    /// idle in its pool than `limits.max_running`; the ones used last stay.
+    #[test]
+    fn idle_cache_copies_go_by_age_and_past_the_most_runs_at_once() {
+        let d = crate::config::tempdir::Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let cfg = crate::config::Config::parse("name = \"t\"\n[limits]\nmax_running = 2\n", &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        let now = 100 * DAY;
+        let copy = |pool: &Path, hours: u64| {
+            let at = (now - hours * HOUR) / 1_000_000;
+            let id = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, at, 0));
+            let p = pool.join(format!("idle-{id}"));
+            std::fs::create_dir_all(&p).unwrap();
+            p
+        };
+        let [sessions, checks] = pools(&ctx);
+        let (h0, h1, h2, h30) = (copy(&sessions, 0), copy(&sessions, 1), copy(&sessions, 2), copy(&sessions, 30));
+        let fresh = copy(&checks, 3);
+        let named: Vec<PathBuf> = cache_copies(&ctx, &ctx.cfg.gc, now).into_iter().map(|i| i.path).collect();
+        assert!(named.contains(&h2) && named.contains(&h30), "{named:?}");
+        assert!(!named.contains(&h0) && !named.contains(&h1) && !named.contains(&fresh), "{named:?}");
     }
 }

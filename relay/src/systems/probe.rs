@@ -133,6 +133,52 @@ impl<'a> Probe<'a> {
         self.ctx.cfg.locate(self.home.harness, inv).map_err(|e| anyhow::anyhow!(e.0))
     }
 
+    /// The checks of the linked caches' layout ([`Mount::Symlink`], [`Mount::Rebuilt`]); each passes with
+    /// none to check, for a project that declares no linked cache.
+    fn linked(&self, plan: &[(PathBuf, Mount)]) -> [Check; 2] {
+        // A linked cache is a symlink into the clone's copy, on the clone's mount: link() from it into the
+        // clone works, where across two mounts it fails with EXDEV.
+        let link = self.clone.join(".relay-probe-link");
+        let linked = plan.iter().filter_map(|(p, k)| match k {
+            Mount::Symlink(_) => Some(format!(
+                "test -L {p} && ln {m} {l} && rm {l}",
+                p = q(p),
+                m = q(&p.join(cache_marker())),
+                l = q(&link)
+            )),
+            _ => None,
+        });
+        // The directory holding a linked cache is the host's, rebuilt: what is in it shows, read-only.
+        let rebuilt: Vec<(String, String)> = plan
+            .iter()
+            .filter(|(_, k)| *k == Mount::Rebuilt)
+            .map(|(p, _)| {
+                let shown: Vec<PathBuf> = std::fs::read_dir(p)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|e| !plan.iter().any(|(m, k)| m == e && matches!(k, Mount::Symlink(_))))
+                    .take(3)
+                    .collect();
+                let exist = all(shown.iter().map(|e| format!("test -e {}", q(e))));
+                (format!("{exist} && ! test -w {}", q(p)), exist)
+            })
+            .collect();
+        [
+            Check {
+                what: "linked caches share the tree's mount: link() from one into the clone works".into(),
+                inside: all(linked),
+                outside: None,
+            },
+            Check {
+                what: "a directory holding a linked cache shows the host's entries, read-only".into(),
+                inside: all(rebuilt.iter().map(|(i, _)| i.clone())),
+                outside: Some(all(rebuilt.into_iter().map(|(_, o)| o))),
+            },
+        ]
+    }
+
     fn checks(&self, plan: &[(PathBuf, Mount)], inv: &Invocation) -> Vec<Check> {
         // A hidden path must hide what is inside it, except what a later mount shows again.
         let shown_later =
@@ -147,13 +193,14 @@ impl<'a> Probe<'a> {
             }
         }
         let paths = |want: fn(&Mount) -> bool| plan.iter().filter(move |(_, k)| want(k)).map(|(p, _)| p);
-        let writable = paths(|k| matches!(k, Mount::Writable | Mount::From(_))).map(|p| format!("test -w {}", q(p)));
+        let writable = paths(|k| matches!(k, Mount::Writable | Mount::From(_) | Mount::Symlink(_)))
+            .map(|p| format!("test -w {}", q(p)));
         // A placeholder is read-only too: protected config the account does not have yet stays uncreatable.
         let read_only =
             paths(|k| matches!(k, Mount::ReadOnly | Mount::Placeholder { .. })).map(|p| format!("! test -w {}", q(p)));
         // Each cache shows relay's directory, which holds the marker, not the host's.
         let caches = plan.iter().filter_map(|(p, k)| match k {
-            Mount::From(_) => Some(format!("test -e {}", q(&p.join(cache_marker())))),
+            Mount::From(_) | Mount::Symlink(_) => Some(format!("test -e {}", q(&p.join(cache_marker())))),
             _ => None,
         });
         let repo = &self.ctx.cfg.repo;
@@ -225,6 +272,18 @@ impl<'a> Probe<'a> {
     fn run(self) -> Result<Vec<Outcome>> {
         let user = accounts::home();
         let inv = self.invocation()?;
+        // Every cache of relay's holds the marker, so a cache shown inside is known to be relay's; it is
+        // there before the clone takes its copy of the linked caches, so the copy has it too.
+        let markers: Vec<PathBuf> =
+            self.ctx.cfg.sandbox.caches.iter().map(|r| self.ctx.caches.join(r).join(cache_marker())).collect();
+        std::fs::write(self.tmp.join(cache_marker()), "")?;
+        for m in &markers {
+            std::fs::create_dir_all(m.parent().unwrap_or(m))?;
+            std::fs::write(m, "")?;
+        }
+        // The clone is a session's: its linked caches are a copy in its `.git`, as a session's are.
+        std::fs::create_dir_all(self.clone.join(".git"))?;
+        let copy = sandbox::own_caches(self.ctx, &self.clone.join(".git"), sandbox::farm::IN_CLONE, &self.ctx.farms);
         let mounts = Mounts {
             home: self.home,
             workdir: Some(&self.clone),
@@ -233,21 +292,9 @@ impl<'a> Probe<'a> {
             tmp: &self.tmp,
             cwd: &self.clone,
             account: true,
-            caches: None,
+            caches: copy.as_ref().map(sandbox::farm::Farm::path),
         };
         let plan = sandbox::plan(self.ctx, &user, &mounts);
-        let markers: Vec<PathBuf> = plan
-            .iter()
-            .filter_map(|(_, k)| match k {
-                Mount::From(src) => Some(src.join(cache_marker())),
-                _ => None,
-            })
-            .collect();
-        std::fs::write(self.tmp.join(cache_marker()), "")?;
-        for m in &markers {
-            std::fs::create_dir_all(m.parent().unwrap_or(m))?;
-            std::fs::write(m, "")?;
-        }
         let args = sandbox::args(self.ctx, &user, &mounts, sandbox::session_env(self.ctx, &inv));
         let inside =
             |sh: &str| Command::new("bwrap").args(&args).args([OsString::from("sh"), "-c".into(), sh.into()]).output();
@@ -256,7 +303,7 @@ impl<'a> Probe<'a> {
             let detail = if ok { String::new() } else { detail.to_owned() };
             outcomes.push(Outcome { what: what.to_owned(), ok, detail });
         };
-        for c in self.checks(&plan, &inv) {
+        for c in self.checks(&plan, &inv).into_iter().chain(self.linked(&plan)) {
             if let Some(control) = &c.outside {
                 let ok = Command::new("sh").args(["-c", control]).status()?.success();
                 report(ok, &format!("{} (control: present outside)", c.what), "");
@@ -274,6 +321,13 @@ impl<'a> Probe<'a> {
             .filter(|k| deny.is_match(k) && !inv.env.iter().any(|(own, _)| own.as_os_str() == *k))
             .collect();
         report(leaked.is_empty(), "no secret-named variables", &leaked.join(" "));
+        // Out of the copy first, so it goes back to the pool without it.
+        if let Some(copy) = &copy {
+            for r in &self.ctx.cfg.sandbox.linked_caches {
+                let _ = std::fs::remove_file(copy.path().join(r).join(cache_marker()));
+            }
+        }
+        drop(copy);
         for m in &markers {
             let _ = std::fs::remove_file(m);
         }

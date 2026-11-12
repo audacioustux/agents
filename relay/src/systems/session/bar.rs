@@ -42,11 +42,29 @@ enum Said {
 
 /// What an exit status says. The shell's own codes (125-127), the timeout's (124) and a kill (137,
 /// 143, or no code at all) mean the command did not get to judge anything.
-fn said(code: Option<i32>) -> Said {
+fn said(code: Option<i32>, declared: &[i32]) -> Said {
     match code {
         Some(0) => Said::Passed,
         Some(124..=127 | 137 | 143) | None => Said::Broke,
+        Some(c) if declared.contains(&c) => Said::Broke,
         Some(_) => Said::Failed,
+    }
+}
+
+/// Why a command that said nothing about the code could not run, from what relay saw: its exit status
+/// and the timeout it applied. Never from the command's output.
+fn why(code: Option<i32>, declared: &[i32], timeout_secs: u64) -> String {
+    match code {
+        Some(124) => format!("it timed out (exit 124, after {timeout_secs} s: hooks.command_timeout_seconds)"),
+        Some(125) => "the shell or timeout could not start it (exit 125)".to_owned(),
+        Some(126) => "the command was found but is not runnable (exit 126)".to_owned(),
+        Some(127) => "the command was not found (exit 127)".to_owned(),
+        Some(c @ (137 | 143)) => format!("it was killed (exit {c})"),
+        Some(c) if declared.contains(&c) => {
+            format!("it exited {c}, which hooks.check_could_not_run_exit_codes declares as \"could not run\"")
+        }
+        Some(c) => format!("exit {c}"),
+        None => "it was ended by a signal".to_owned(),
     }
 }
 
@@ -102,7 +120,7 @@ pub(super) fn run(
                     None => BarResult::Fail,
                 },
                 Said::Broke => {
-                    text = format!("the check could not run at the base commit: {}", at.text);
+                    text = format!("at the base commit, {}", at.text);
                     BarResult::CheckCouldNotRun
                 }
             }
@@ -118,7 +136,7 @@ pub(super) fn run(
                     BarResult::CheckProvesNothing
                 }
                 Said::Broke => {
-                    text = format!("the check could not run at the base commit: {}", at.text);
+                    text = format!("at the base commit, {}", at.text);
                     BarResult::CheckCouldNotRun
                 }
             }
@@ -362,12 +380,22 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, phase: Phase, place:
         let status = c.status().context("running the acceptance check")?;
         let text = place.inbox.read("check.out").map(|f| tail_text(f, 2 * TAIL as u64)).unwrap_or_default();
         let code = status.code();
-        let failing = match said(code) {
+        let declared = &ctx.cfg.hooks.check_could_not_run_exit_codes;
+        let said = said(code, declared);
+        // A command that could not judge the code says why first, from what relay saw, before its output.
+        let text = match said {
+            Said::Broke => format!(
+                "the check could not run: {}\n{text}",
+                why(code, declared, ctx.cfg.hooks.command_timeout_seconds)
+            ),
+            _ => text,
+        };
+        let failing = match said {
             Said::Failed => place.inbox.read("check.out").ok().and_then(|f| failing_tests(std::io::BufReader::new(f))),
             _ => Some(Vec::new()),
         };
         let _ = place.inbox.remove("check.out");
-        Ok(Ran { said: said(code), code: code.unwrap_or(-1), text, failing })
+        Ok(Ran { said, code: code.unwrap_or(-1), text, failing })
     };
     go().unwrap_or_else(|e| broke(&format!("the acceptance check could not run: {e:#}")))
 }
@@ -457,12 +485,34 @@ mod tests {
 
     #[test]
     fn only_a_command_that_ran_and_failed_has_failed() {
-        assert_eq!(said(Some(0)), Said::Passed);
-        assert_eq!(said(Some(1)), Said::Failed);
-        assert_eq!(said(Some(101)), Said::Failed, "a test runner's own failure code");
+        assert_eq!(said(Some(0), &[]), Said::Passed);
+        assert_eq!(said(Some(1), &[]), Said::Failed);
+        assert_eq!(said(Some(101), &[]), Said::Failed, "a test runner's own failure code");
         for broken in [Some(124), Some(125), Some(126), Some(127), Some(137), Some(143), None] {
-            assert_eq!(said(broken), Said::Broke, "{broken:?}");
+            assert_eq!(said(broken, &[]), Said::Broke, "{broken:?}");
         }
+    }
+
+    /// NS-9 follow-up (Tickify): a check that is refused by its environment exits like any failure (mise
+    /// exits 1), and relay cannot tell that from the text. The project declares the code its check uses
+    /// for "could not run"; relay then ends it so, and says why from the code and the timeout it applied.
+    #[test]
+    fn a_declared_exit_code_is_a_check_that_could_not_run() {
+        assert_eq!(said(Some(3), &[]), Said::Failed, "undeclared, 3 is a failure");
+        assert_eq!(said(Some(3), &[3]), Said::Broke);
+        assert_eq!(said(Some(1), &[3]), Said::Failed, "only what is declared");
+        assert_eq!(said(Some(0), &[0]), Said::Passed, "a pass is never a refusal");
+    }
+
+    #[test]
+    fn a_check_that_could_not_run_says_why_from_what_relay_saw() {
+        assert!(why(Some(124), &[], 120).contains("120 s"), "{}", why(Some(124), &[], 120));
+        assert!(why(Some(127), &[], 120).contains("not found"));
+        assert!(why(Some(126), &[], 120).contains("not runnable"));
+        assert!(why(Some(137), &[], 120).contains("killed"));
+        assert!(why(None, &[], 120).contains("signal"));
+        let declared = why(Some(3), &[3], 120);
+        assert!(declared.contains("exited 3") && declared.contains("check_could_not_run_exit_codes"), "{declared}");
     }
 
     const RED: &str = "running 3 tests\ntest a::one ... ok\ntest a::two ... FAILED\n\nfailures:\n\n\

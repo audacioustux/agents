@@ -238,6 +238,33 @@ fn base(cfg: &Config, state_root: &Path, data_root: &Path) -> BTreeMap<OsString,
     env
 }
 
+/// A `session.env` value with relay's two directory names filled in: `${RELAY_STATE}` is this project's
+/// state directory (where a check's checkout is made) and `${RELAY_CLONES}` its clones directory, so
+/// a variable can name them without the home path. Nothing else is expanded: relay does not read the
+/// shell's `${...}`, and the caller's variables are not its to give.
+fn expand(value: &str, cfg: &Config, state_root: &Path, data_root: &Path) -> OsString {
+    let (state, clones) = (state_root.join(&cfg.name), data_root.join(&cfg.name).join("clones"));
+    let mut out = OsString::new();
+    let mut rest = value;
+    while let Some(at) = rest.find("${RELAY_") {
+        out.push(&rest[..at]);
+        rest = &rest[at..];
+        let (name, dir) = if rest.starts_with("${RELAY_STATE}") {
+            ("${RELAY_STATE}", &state)
+        } else if rest.starts_with("${RELAY_CLONES}") {
+            ("${RELAY_CLONES}", &clones)
+        } else {
+            out.push("${RELAY_");
+            rest = &rest["${RELAY_".len()..];
+            continue;
+        };
+        out.push(dir);
+        rest = &rest[name.len()..];
+    }
+    out.push(rest);
+    out
+}
+
 fn without(env: &BTreeMap<OsString, OsString>, deny: &regex::Regex) -> BTreeMap<OsString, OsString> {
     env.iter().filter(|(k, _)| !deny.is_match(&k.to_string_lossy())).map(|(k, v)| (k.clone(), v.clone())).collect()
 }
@@ -266,7 +293,7 @@ impl RelayEnv {
     pub fn new(cfg: &Config, which: Selectors<'_>) -> Self {
         let mut env = base(cfg, which.state_root, which.data_root);
         for (k, v) in cfg.session.env.iter().filter(|(k, _)| !SELECTORS.contains(&k.as_str())) {
-            env.insert(k.into(), v.into());
+            env.insert(k.into(), expand(v, cfg, which.state_root, which.data_root));
         }
         env.insert("RELAY_CONFIG".into(), which.config.into());
         Self(env)
@@ -314,7 +341,7 @@ impl JobEnv {
     pub fn new(cfg: &Config, state_root: &Path, data_root: &Path) -> Self {
         let mut env = base(cfg, state_root, data_root);
         for (k, v) in &cfg.session.env {
-            env.insert(k.into(), v.into());
+            env.insert(k.into(), expand(v, cfg, state_root, data_root));
         }
         Self(env)
     }
@@ -692,5 +719,28 @@ mod tests {
         for k in SELECTORS {
             assert!(job.get(k).is_some_and(|v| v.to_string_lossy().starts_with("/job")), "the job gets its {k}");
         }
+    }
+
+    /// Tickify: mise's shims refuse a clone's `mise.toml` unless `MISE_TRUSTED_CONFIG_PATHS` names it, and
+    /// `[session] env` cannot name the project's own directories without hardcoding the home path.
+    #[test]
+    fn session_env_can_name_the_projects_own_state_and_clone_directories() {
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let text = "name = \"x\"\n[session.env]\nMISE_TRUSTED_CONFIG_PATHS = \"${RELAY_STATE}:${RELAY_CLONES}\"\n\
+                    OTHER = \"${HOME}/${RELAY_STATE}x\"\n";
+        let cfg = Config::parse(text, d.path()).unwrap();
+        let (state, data) = (Path::new("/s/relay"), Path::new("/d/relay"));
+        let job = JobEnv::new(&cfg, state, data);
+        let ours =
+            RelayEnv::new(&cfg, Selectors { config: Path::new("/p/relay.toml"), state_root: state, data_root: data });
+        let want = OsString::from("/s/relay/x:/d/relay/x/clones");
+        assert_eq!(job.get("MISE_TRUSTED_CONFIG_PATHS"), Some(&want));
+        assert_eq!(ours.get("MISE_TRUSTED_CONFIG_PATHS"), Some(&want));
+        assert_eq!(
+            job.get("OTHER"),
+            Some(&OsString::from("${HOME}//s/relay/xx")),
+            "only relay's two names are expanded"
+        );
     }
 }

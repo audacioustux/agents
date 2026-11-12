@@ -2659,6 +2659,34 @@ fn a_check_that_also_fails_at_the_base_does_not_resume_the_session() {
     assert!(result.contains("check base-red: report::tests::reset_time"), "{result}");
 }
 
+/// Tickify: a base that fails because its environment refused the check (mise: untrusted config) is not
+/// "base-red, not the job's to fix". The project declares the exit code its check uses for "could not
+/// run"; at the base the same check exits it, and the job ends `check-could-not-run` with the reason.
+#[test]
+fn a_base_whose_check_could_not_run_is_not_base_red() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("bar-base-env", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "[hooks]\nmax_decisions = 2\ncheck_could_not_run_exit_codes = [3]\n");
+    claude_account(&env.home, "a", 10, false);
+
+    // Fails at the tip (the job's file is there: exit 1), and at the base the environment refuses it (exit 3).
+    let j = build(&env, "refused", &["--check", "test -f relay-output.txt && exit 1; exit 3"]);
+    assert_eq!(j["status"], "failed", "{j}");
+    let bars = j["bars"].as_array().unwrap();
+    assert_eq!(bars.len(), 1, "not resumed: {j}");
+    assert_eq!(
+        (bars[0]["result"].as_str(), bars[0]["base_exit"].as_i64()),
+        (Some("check-could-not-run"), Some(3)),
+        "{j}"
+    );
+    assert!(bars[0]["tail"].as_str().unwrap_or_default().contains("check_could_not_run_exit_codes"), "{j}");
+    assert!(j["reason"].as_str().unwrap_or_default().starts_with("check-could-not-run"), "{j}");
+    assert_eq!(acts(&steps(&env, "refused")), ["stop"]);
+    assert!(board(&env).contains("check check-could-not-run"), "{}", board(&env));
+}
+
 #[test]
 fn a_check_that_fails_only_at_the_tip_resumes_the_session() {
     if !have_bwrap() {

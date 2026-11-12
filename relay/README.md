@@ -73,8 +73,9 @@ dependent shows `waits for a (failed)` and does not start on its own, nor keep
 the dispatcher awake. So does every job queued behind it, however deep the chain
 (`waits for b (blocked)`), and jobs that wait for each other (`a cycle`); `view result --wait` on it exits 4 with that line rather
 than wait forever. Queue the dependency again (or `queue resume` it), or
-`relay queue release NAME [--from a]`. Only existing jobs can be named, so there
-are no cycles.
+`relay queue release NAME [--from a]`, which **starts the job now** (once a seat is free): it
+drops the waits and does not cancel anything. To withdraw the job instead, `relay queue dequeue NAME`.
+Only existing jobs can be named, so there are no cycles.
 
 **Where a build job starts.** A build job starts from the repository's `HEAD`,
 unless it waits for build jobs (`--after`) or forks one (`--fork`): then its
@@ -134,7 +135,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue unreview JOB` | Detach the review chained to JOB, with no replacement: it no longer re-reviews or resumes JOB (exit 4 when none is chained) |
 | `relay queue add NAME ... --fork JOB` | Start as a fork of JOB's session, from its branch when it is a build job ([forks](#what-a-job-is)) |
 | `relay decide list [--wait [--timeout S]]` / `relay decide answer ID --action A ...` | Decisions waiting for the orchestrator / answer one ([hooks](#hooks)) |
-| `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
+| `relay queue release NAME [--from A,...]` | Start a queued job now, without waiting for some or all of its `--after` jobs to finish (not a cancel: `dequeue` withdraws it) |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one. A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends and its runner has exited (it may re-review or wake the dispatcher after the end), and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |
@@ -539,12 +540,24 @@ handlers as untrusted.
   worker fixing what it did not break; when only one does,
   they failed differently and the failure is the job's. A new failing test is the job's:
   it is resumed as above. A timeout or failed checkout at the base is
-  `check-could-not-run`, never base-red. A job with a revert control expects its base to
-  fail, so its fails are always the job's.
+  `check-could-not-run`, never base-red, and so is a base run that exited a code the project
+  declares (below). A job with a revert control expects its base to fail, so its fails are
+  always the job's.
 - **Could not run:** a command that timed out (124), was not found or not runnable
   (126, 127), was killed, or whose checkout failed said nothing about the code. relay
   records `check-could-not-run`, does not accept, and stops the job for you to look
-  at: a broken check is not the session's to fix.
+  at: a broken check is not the session's to fix. This holds at the tip and at the
+  base: a check that fails at the tip and could not run at the base ends so, never
+  base-red, and the record's `tail` begins with why (`the check could not run: it timed
+  out (exit 124, after 120 s: hooks.command_timeout_seconds)`; `at the base commit, …` for
+  the base), from the exit status and the timeout relay applied. relay never reads the
+  output's text for this. A tool that refuses to run exits with an ordinary failure code
+  (mise's untrusted-config refusal exits 1), which relay cannot tell from a failing check;
+  the project says which code its check uses: `hooks.check_could_not_run_exit_codes = [125]`
+  (codes 1-255; 124-127, 137 and 143 always count), and the check ends with that code where
+  it knows the environment refused it (`mise trust -q || exit 125`, or
+  `some-tool --version || exit 125` before the suite). A declared code is the project's
+  word: it also turns a real failure that exits it into `check-could-not-run`.
 - **Revert control:** `--check-red-first` (or `check_red_first = true` beside the
   profile's `check`) also runs the check at the commit the job's branch started from
   (its base), and requires it to **fail** there. Only a real failure counts: a
@@ -820,6 +833,25 @@ relay's own (see [What a job is](#what-a-job-is)) and the development environmen
 the harness's own account variables; a `PATH` there replaces relay's default. Nothing is
 taken from the shell that queued the job. relay hard-codes none: `CARGO_INCREMENTAL = "0"`
 is the suggestion above.
+
+A value may name the project's own directories without the home path: `${RELAY_STATE}` is this
+project's state directory (an acceptance check's checkout is made under it) and `${RELAY_CLONES}`
+its clones directory (every build job's clone). They are the only two names relay expands; any
+other `${...}` stays as written.
+
+**Recipe: mise.** Inside the sandbox `bun`, `node` and the like resolve to mise's shims
+(`~/.local/share/mise/shims`), which read the `mise.toml` of the directory they run in and refuse
+a clone's, or a check's checkout's, as untrusted (`mise ERROR Config files in …/mise.toml are not
+trusted`, exit 1). relay knows nothing of mise; declare the trust yourself. mise trusts every
+config below a path named in `MISE_TRUSTED_CONFIG_PATHS` (colon-separated):
+
+```toml
+[session.env]
+MISE_TRUSTED_CONFIG_PATHS = "${RELAY_STATE}:${RELAY_CLONES}"
+```
+
+This trusts files written by the session's own clone, so use it only for a project whose
+`mise.toml` you would run anyway (a `mise.toml` can set environment variables and run tasks).
 
 ## Harnesses and accounts
 
@@ -1291,7 +1323,7 @@ It drops:
 - **Scheduling extras:** per-model caps.
 
 `--after` is kept, with one change: a dependency that did not finish blocks
-its dependents (`relay queue release` frees them) instead of freeing them.
+its dependents (`relay queue release` starts them anyway) instead of freeing them.
 
 Like lanes, relay never pushes or merges. Landing work on your main branch
 stays with your project's gate.

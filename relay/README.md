@@ -224,7 +224,8 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   eighths with `│` at that meter's floor, how full, and the time to its reset (`6d5h`).
   The meter that decides is bold (`*` in `view status`, which is never coloured); on the
   board a gauge is green, yellow within 10 points of its floor and red at it. `room/day`
-  is how dispatch ranks the account and `▸` the one the next start would take, also named
+  is the account's room, which dispatch ranks shared among the sessions in `run` and
+  the next one, and `▸` the one the next start would take, also named
   in the title with the floors. A stale reading says how old it is (`stale (read 3h ago)`).
   Who a home is signed in as is in `--json` (`identity`); twins say `same sign-in as`.
   A narrow window shrinks the bars (to five cells) before it cuts a name.
@@ -844,6 +845,22 @@ as `refreshing` is always read. An account is used only when:
 - it is not limited or signed out;
 - it has a free seat.
 
+A reading under way is waited for, briefly, rather than letting an account read
+a moment ago take every job because the others are still being read (twelve jobs
+queued at once once all went to the one account whose reading had landed). A job
+that some account admits waits instead when another account it may use is refused
+only for a stale or missing reading, that reading is due (no failed read is
+backing off; the dispatcher has asked for it), and on its last reading that account
+would rank above every one that admits the job now (a never-read one always might).
+The wait lasts at most two minutes from when that reading went stale or the job was
+queued, whichever is later, and is shown as what holds the job: `waiting for a
+reading of claude:b before starting on claude:a (until 14:02 +06 at most)`. A job
+that resumes its transcript on an account that admits it does not wait. Waiting was
+chosen over starting on the last reading because waiting starts nothing: an
+account is still only used on a fresh reading below its floor, so the wait can
+delay a job but never drive an account past its floor. An old reading can say
+there is room that has since been spent.
+
 The accounts pane makes the same judgment, seats included, so an account it calls
 `ready` is one the dispatcher would start a session on; a full one says
 `busy (1 of 1 seat on openai-codex)`.
@@ -865,11 +882,17 @@ The accounts' gauges move that meter's `│` to it (`floorWhy` in `--json` says
 `at floor: 99% seven_day, resets Nov 4 13:15 +06 (floor 98%, resets in 10h)`.
 
 Of those, relay picks the one with the most room left per day until reset,
-because quota still unused at a reset is lost. A session that already ran
-stays on its account while that account is usable, since moving it loses the
-provider's prompt cache and its whole transcript is read again at full price.
-The accounts' `room/day` column is that ranking, and `▸` marks the account the
-next start would take (`next` in `--json`, `score` per account).
+because quota still unused at a reset is lost, shared among the sessions already
+on its seat and the new one: an account with 30% a day and two sessions ranks as
+10%, below an idle one with 20%. A pass counts each start it makes before it judges
+the next job, and readings land minutes apart, so this is what spreads a burst:
+twelve jobs on three accounts with like room start four on each, while an account
+with twice the room per day (one resetting soon) takes about twice as many. A
+session that already ran stays on its account while that account is usable,
+since moving it loses the provider's prompt cache and its whole transcript is
+read again at full price. The accounts' `room/day` column is the account's own
+room, `run` the sessions on it, and `▸` marks the account the next start would
+take (`next` in `--json`, `score` per account).
 
 Accounts belong to the machine, not the project, so every project on it
 shares what it knows of them: each listens to the others' state (never

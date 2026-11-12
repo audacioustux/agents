@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
-use super::{command, layer_env, port};
+use super::{Phase, command, layer_env, port};
 use crate::bus::{BarResult, SessionEvent};
 use crate::ctx::{Ctx, SessionRepo};
 use crate::harness::{Home, Invocation};
@@ -75,9 +75,9 @@ pub(super) fn run(
 ) -> Result<CheckRun> {
     let command = job.check().context("a check was asked of a job that declares none")?.to_owned();
     let tip = dir.rev("HEAD");
-    let place = Place { inbox, work: &ctx.job_scratch(&format!("{}.bar", job.name)), dev };
+    let place = Place { job, inbox, work: &ctx.job_scratch(&format!("{}.bar", job.name)), dev };
     let head = match &tip {
-        Some(tip) => at(ctx, home, &command, dir, tip, &place),
+        Some(tip) => at(ctx, home, &command, dir, tip, Phase::Check, &place),
         None => broke("the clone has no commit to check"),
     };
     let red_first = matches!(job.acceptance, crate::bus::Acceptance::CheckRedFirst(_));
@@ -284,7 +284,7 @@ fn test_target(line: &str) -> Option<String> {
 /// The check at the commit the branch started from.
 fn at_base(ctx: &Ctx, base: Option<&str>, home: &Home, command: &str, dir: &SessionRepo, place: &Place<'_>) -> Ran {
     match base.map(str::to_owned).or_else(|| checkpoint::base(dir, &[]).head) {
-        Some(base) => at(ctx, home, command, dir, &base, place),
+        Some(base) => at(ctx, home, command, dir, &base, Phase::CheckBase, place),
         None => broke("no base commit is known for the revert control"),
     }
 }
@@ -296,6 +296,7 @@ fn broke(why: &str) -> Ran {
 /// Where a check runs: its working directory, made fresh for each run in a place only relay writes,
 /// and the job's inbox, where its output goes.
 struct Place<'a> {
+    job: &'a Job,
     inbox: &'a HostDir,
     work: &'a Path,
     /// The attempt's development environment, read when it started: the same at the tip and the base.
@@ -303,11 +304,11 @@ struct Place<'a> {
 }
 
 /// Runs `command` on a clean checkout of `rev` from the clone `source`.
-fn at(ctx: &Ctx, home: &Home, command: &str, source: &SessionRepo, rev: &str, place: &Place<'_>) -> Ran {
+fn at(ctx: &Ctx, home: &Home, command: &str, source: &SessionRepo, rev: &str, phase: Phase, place: &Place<'_>) -> Ran {
     let tree = place.work.join("tree");
     let ran =
         match hostdir::fresh_dir(place.work).map_err(anyhow::Error::from).and_then(|()| checkout(source, rev, &tree)) {
-            Ok(()) => exec(ctx, home, command, &tree, place),
+            Ok(()) => exec(ctx, home, command, &tree, phase, place),
             Err(e) => broke(&format!("could not check out {rev} for the check: {e:#}")),
         };
     let _ = std::fs::remove_dir_all(place.work);
@@ -334,19 +335,19 @@ fn checkout(source: &SessionRepo, rev: &str, into: &Path) -> Result<()> {
 /// `sh -c command` under `timeout`, on the attempt's development environment `dev`: the one its
 /// warm-up recorded from the repository, never from files the session could have edited, and read
 /// when the attempt started, so a warm-up for a new key during the run does not change it.
-fn invocation(ctx: &Ctx, command: &str, dev: &[(OsString, Option<OsString>)]) -> Invocation {
+fn invocation(ctx: &Ctx, job: &Job, phase: Phase, command: &str, dev: &[(OsString, Option<OsString>)]) -> Invocation {
     let mut inv = Invocation::new("timeout");
     let secs = ctx.cfg.hooks.command_timeout_seconds.max(1).to_string();
     inv.args = ["-k", "5", &secs, "sh", "-c", command].map(OsString::from).to_vec();
-    layer_env(ctx, &mut inv, dev);
+    layer_env(ctx, job, phase, &mut inv, dev);
     inv
 }
 
 /// Runs `sh -c command` in `tree`, bounded by `hooks.command_timeout_seconds` (killed 5 s later if it
 /// ignores the TERM), in the session's sandbox plan without the session's account or clone.
-fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, place: &Place<'_>) -> Ran {
+fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, phase: Phase, place: &Place<'_>) -> Ran {
     let go = || -> Result<Ran> {
-        let inv = invocation(ctx, command, place.dev);
+        let inv = invocation(ctx, place.job, phase, command, place.dev);
         let file = place.inbox.create("check.out")?;
         let tmp = place.work.join("tmp");
         std::fs::create_dir(&tmp)?;
@@ -424,8 +425,29 @@ mod tests {
         assert_eq!(tool_in(&now).as_deref(), Some("rust-2.0".as_ref()), "the record moved on");
         // The tip check and the base check both run on what the session ran on.
         for _ in ["tip", "base"] {
-            let inv = invocation(&ctx, "true", &dev);
+            let inv = invocation(&ctx, &Job::default(), Phase::Check, "true", &dev);
             assert_eq!(tool_in(&inv.env).as_deref(), Some("rust-1.99".as_ref()));
+        }
+    }
+
+    /// The check at the tip and the check at the base are each told their job and their phase, through the
+    /// invocation the check is run with.
+    #[test]
+    fn the_check_at_the_tip_and_at_the_base_each_hold_their_own_phase() {
+        use crate::config::{Config, tempdir::Dir};
+        let d = Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let cfg = Config::parse("name = \"tickify\"\n", &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        let job = Job { name: "add-login".into(), attempts: 3, ..Job::default() };
+        for (phase, want) in [(Phase::Check, "check"), (Phase::CheckBase, "check-base")] {
+            let env = crate::sandbox::session_env(&ctx, &invocation(&ctx, &job, phase, "true", &[]));
+            let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string_lossy().into_owned());
+            assert_eq!(get("RELAY_PROJECT").as_deref(), Some("tickify"));
+            assert_eq!(get("RELAY_JOB").as_deref(), Some("add-login"));
+            assert_eq!(get("RELAY_ATTEMPT").as_deref(), Some("3"));
+            assert_eq!(get("RELAY_PHASE").as_deref(), Some(want));
         }
     }
 

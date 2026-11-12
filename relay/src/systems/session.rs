@@ -128,6 +128,8 @@ enum Phase {
     Check,
     /// The acceptance check on the commit the branch started from.
     CheckBase,
+    /// A decision agent (`agent:<profile>`) asked about the job.
+    Decision,
 }
 
 impl Phase {
@@ -136,12 +138,13 @@ impl Phase {
             Phase::Session => "session",
             Phase::Check => "check",
             Phase::CheckBase => "check-base",
+            Phase::Decision => "decision",
         }
     }
 }
 
 /// The variables that say which job a process belongs to ([`crate::config::JOB_ENV`]), the one place they
-/// are built, for the session and for each run of its check. The attempt counts resumes: 1 for the first.
+/// are built, for every process relay starts for a job: the session, each run of its check and a decision agent. The attempt counts resumes: 1 for the first.
 fn job_env(ctx: &Ctx, job: &Job, phase: Phase) -> [(OsString, Option<OsString>); 4] {
     let var = |k: &str, v: String| (OsString::from(k), Some(OsString::from(v)));
     let [project, name, attempt, phase_name] = crate::config::JOB_ENV;
@@ -153,12 +156,19 @@ fn job_env(ctx: &Ctx, job: &Job, phase: Phase) -> [(OsString, Option<OsString>);
     ]
 }
 
+/// Puts [`job_env`] on `inv`, last: nothing it already holds can change which job a process says it is.
+/// Every invocation relay starts for a job passes through here.
+fn name_the_job(ctx: &Ctx, job: &Job, phase: Phase, inv: &mut Invocation) {
+    inv.env.retain(|(k, _)| !crate::config::JOB_ENV.iter().any(|n| k == n));
+    inv.env.extend(job_env(ctx, job, phase));
+}
+
 /// The job's environment, in layers: the project's development environment
 /// (`session.env_shell`, as its one warm-up recorded it: see [`crate::systems::devshell`]) underneath, `session.env` over it, and the harness's
 /// own variables (the account) over both. Both of the job's layers pass `sandbox.env_deny`, as
 /// [`crate::sandbox::session_env`]'s base does: only the harness's own variables may name what it
 /// denies (`CLAUDE_CONFIG_DIR`). A `session.env` entry it names is refused at load; one that got past
-/// that would still be dropped here. Over all of them, last, [`job_env`]: nothing a layer holds, the
+/// that would still be dropped here. Over all of them, last, [`name_the_job`]: nothing a layer holds, the
 /// development environment's record included, can change which job a process says it is.
 fn layer_env(ctx: &Ctx, job: &Job, phase: Phase, inv: &mut Invocation, dev: &[(OsString, Option<OsString>)]) {
     let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
@@ -169,13 +179,8 @@ fn layer_env(ctx: &Ctx, job: &Job, phase: Phase, inv: &mut Invocation, dev: &[(O
         .iter()
         .filter(|(k, _)| !deny.is_match(k))
         .map(|(k, v)| (OsString::from(k), Some(OsString::from(v))));
-    inv.env = dev
-        .iter()
-        .cloned()
-        .chain(session_env)
-        .chain(std::mem::take(&mut inv.env))
-        .chain(job_env(ctx, job, phase))
-        .collect();
+    inv.env = dev.iter().cloned().chain(session_env).chain(std::mem::take(&mut inv.env)).collect();
+    name_the_job(ctx, job, phase, inv);
 }
 
 /// Where an attempt runs: the account, its harness, and the model the job uses on it.
@@ -636,6 +641,7 @@ pub fn consult(
         let inv = harness.invocation(&home, &task).map_err(|r| anyhow::anyhow!(r.0))?;
         let mut inv = ctx.cfg.locate(harness.id(), inv).map_err(|r| anyhow::anyhow!(r.0))?;
         inv.args.extend(conf.extra_args.iter().map(OsString::from));
+        name_the_job(ctx, job, Phase::Decision, &mut inv);
         inv.write_files(&inbox).context("writing the prompt file")?;
         let mounts = Mounts {
             home: &home,

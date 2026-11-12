@@ -325,13 +325,11 @@ fn enter(
         .output()
         .map_err(|e| fail(format!("could not run {program}: {e}"), String::new(), false))?;
     let tail = std::fs::File::open(stderr).map(|f| tail_of(f, TAIL_BYTES)).unwrap_or_default();
-    let code = out.status.code();
-    // 124: `timeout` stopped it; 137 after the limit: it ignored the TERM and was killed.
-    if code == Some(124) || code == Some(137) && started.elapsed().as_secs() >= limit {
+    if timed_out(out.status, started.elapsed(), limit) {
         return Err(fail(format!("timed out after {limit} s"), tail, true));
     }
     if !out.status.success() {
-        let why = code.map_or_else(|| "killed by a signal".to_owned(), |c| format!("exited {c}"));
+        let why = out.status.code().map_or_else(|| "killed by a signal".to_owned(), |c| format!("exited {c}"));
         return Err(fail(why, tail, false));
     }
     let Some(at) = out.stdout.windows(MARK.len()).position(|w| w == MARK.as_bytes()) else {
@@ -345,6 +343,16 @@ fn enter(
             (!k.is_empty() && !deny.is_match(k)).then(|| (k.to_owned(), v.to_owned()))
         })
         .collect())
+}
+
+/// Whether an attempt that ended with `status` after `elapsed` was stopped at its `limit` (seconds):
+/// `timeout` exits 124 when the shell ends on its TERM; one that ignores the TERM is killed 5 s
+/// later, and `timeout` dies by that SIGKILL itself, seen as the signal or, through a supervisor
+/// that reports a signal as 128 + its number, as 137.
+fn timed_out(status: std::process::ExitStatus, elapsed: std::time::Duration, limit: u64) -> bool {
+    use std::os::unix::process::ExitStatusExt as _;
+    let killed = status.signal() == Some(9) || status.code() == Some(137);
+    status.code() == Some(124) || killed && elapsed.as_secs() >= limit
 }
 
 fn tail_of(mut f: std::fs::File, max: u64) -> String {
@@ -399,6 +407,25 @@ mod tests {
     fn world(ctx: &Ctx) -> World {
         let events: Vec<Stamped> = ctx.events().unwrap();
         World::fold(&events)
+    }
+
+    /// Review of #54: a shell that ignores the TERM gets `timeout` killed by SIGKILL, with no exit
+    /// code. After the limit that is a timeout (retried at once), not a failure to back off from.
+    #[test]
+    fn a_kill_after_the_limit_is_a_timeout() {
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::process::ExitStatus;
+        use std::time::Duration;
+        let (code, signal) = (|c: i32| ExitStatus::from_raw(c << 8), ExitStatus::from_raw);
+        let (late, early) = (Duration::from_secs(605), Duration::from_secs(3));
+        assert!(timed_out(code(124), early, 600), "timeout's own exit: whenever it says so");
+        assert!(timed_out(signal(9), late, 600), "killed by SIGKILL after the limit");
+        assert!(timed_out(code(137), late, 600), "the same, reported through a supervisor");
+        assert!(!timed_out(signal(9), early, 600), "killed before the limit: something else killed it");
+        assert!(!timed_out(code(137), early, 600));
+        assert!(!timed_out(signal(15), late, 600), "a TERM is not the kill after it");
+        assert!(!timed_out(code(1), late, 600), "a failure is a failure");
+        assert!(!timed_out(code(0), late, 600));
     }
 
     #[test]

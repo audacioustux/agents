@@ -26,6 +26,7 @@ max_retries = 1          # automatic retries for a session that died with no out
 # (claude:default for ~/.claude, claude:work for ~/.claude.work, omp:default for
 # ~/.omp, omp:work for ~/.omp/profiles/work, puku:work for ~/.puku-cli.work). These are never used:
 exclude = []
+read_secs = 180   # how long one account's quota read may run before it is recorded as timed out (at least 30)
 
 # One table per harness, all with the same keys. A harness is enabled by
 # default when its program is found: `program`, else the path relay recorded

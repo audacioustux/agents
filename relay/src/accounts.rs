@@ -131,7 +131,7 @@ pub fn settle(world: &mut World, found: &[Home]) {
         if let SignIn::As(id) = &current
             && a.sign_in.as_ref().is_some_and(|s| *s != id.stamp)
         {
-            (a.read_at, a.unreadable_at, a.signed_out) = (None, None, false);
+            (a.read_at, a.unreadable_at, a.signed_out, a.failing) = (None, None, false, None);
         }
     }
     for (twin, first) in twins(found) {
@@ -234,9 +234,11 @@ pub enum Refusal {
     Unread,
     /// Never read, and the last attempt failed: nothing will change until
     /// someone signs it in or excludes it.
-    Unreadable,
-    /// The last reading is too old to trust; a fresh one has been asked for.
-    Stale,
+    /// What the reads since said went wrong ([`Failing::describe`]), when they did.
+    Unreadable(Option<String>),
+    /// The last reading is too old to trust; a fresh one has been asked for. With why the reads
+    /// since gave nothing, when they did not.
+    Stale(Option<String>),
     /// The harness cannot tell which meters govern this job.
     Blind(String),
 }
@@ -250,11 +252,17 @@ impl Refusal {
             Self::Limited => "limited".into(),
             Self::AtFloor(meter) => format!("at floor: {meter}"),
             Self::Unread => "not read yet".into(),
-            Self::Unreadable => "usage unreadable (sign it in, or list it in accounts.exclude)".into(),
-            Self::Stale => "reading is stale".into(),
+            Self::Unreadable(None) => "usage unreadable (sign it in, or list it in accounts.exclude)".into(),
+            Self::Stale(None) => "reading is stale".into(),
+            Self::Unreadable(Some(why)) | Self::Stale(Some(why)) => format!("reading {why}"),
             Self::Blind(why) => why.clone(),
         }
     }
+}
+
+/// Why the reads since the last good one gave nothing, in words, when they did not.
+fn failing(state: Option<&AccountState>) -> Option<String> {
+    state?.failure().map(|f| f.describe())
 }
 
 /// The account's own state, before any job is considered.
@@ -270,7 +278,7 @@ fn account_refusal(harness: &dyn Harness, state: Option<&AccountState>, now_s: i
         Some(Refusal::Limited)
     } else if harness.caps().quota && a.read_at.is_none() {
         // Unread is not the same as having room.
-        Some(if a.unreadable_at.is_some() { Refusal::Unreadable } else { Refusal::Unread })
+        Some(if a.unreadable_at.is_some() { Refusal::Unreadable(failing(state)) } else { Refusal::Unread })
     } else {
         None
     }
@@ -281,7 +289,7 @@ fn account_refusal(harness: &dyn Harness, state: Option<&AccountState>, now_s: i
 pub fn shared_refusal(harness: &dyn Harness, state: Option<&AccountState>, now_us: u64) -> Option<Refusal> {
     let a = AccountState { enabled: true, ..state.cloned().unwrap_or_default() };
     account_refusal(harness, Some(&a), secs(now_us))
-        .or_else(|| is_stale(harness, Some(&a), now_us).then_some(Refusal::Stale))
+        .or_else(|| is_stale(harness, Some(&a), now_us).then(|| Refusal::Stale(failing(state))))
 }
 
 /// Whether the account can take a job on `model` now (`now_us`, bus time),
@@ -296,7 +304,7 @@ pub fn fit(
     let h = harness_of(home);
     // An old reading may say there is room that has since been spent.
     if account_refusal(h, state, secs(now_us)).is_none() && is_stale(h, state, now_us) {
-        return Err(Refusal::Stale);
+        return Err(Refusal::Stale(failing(state)));
     }
     fit_as_read(home, state, model, limits, now_us)
 }
@@ -377,10 +385,10 @@ mod tests {
         let read = AccountState { read_at: Some(now_us - 1), ..Default::default() };
         assert_eq!(fit(&claude("a"), None, None, &Limits::default(), now_us), Err(Refusal::Unread));
         let failed = AccountState { unreadable_at: Some(now_us - 1), ..Default::default() };
-        assert_eq!(fit(&claude("a"), Some(&failed), None, &Limits::default(), now_us), Err(Refusal::Unreadable));
+        assert_eq!(fit(&claude("a"), Some(&failed), None, &Limits::default(), now_us), Err(Refusal::Unreadable(None)));
         assert!(fit(&claude("a"), Some(&read), None, &Limits::default(), now_us).is_ok());
         let old = AccountState { read_at: Some(now_us - STALE_MICROS - 1), ..read.clone() };
-        assert_eq!(fit(&claude("a"), Some(&old), None, &Limits::default(), now_us), Err(Refusal::Stale));
+        assert_eq!(fit(&claude("a"), Some(&old), None, &Limits::default(), now_us), Err(Refusal::Stale(None)));
         let mut full = read.clone();
         full.meters.insert("seven_day".into(), m(0.95, Some(now + 10)));
         let held = fit(&claude("a"), Some(&full), None, &Limits::default(), now_us).unwrap_err();
@@ -449,10 +457,19 @@ mod tests {
         w.accounts.insert("claude:c".into(), out);
         settle(&mut w, &found);
         assert!(w.accounts["claude:c"].signed_out, "the sign-in is the one it was found signed out under");
+        // A reading that works on a twin ends what a failed read of this home said.
+        let failed = crate::world::Failing { why: crate::bus::ReadFailure::NoMeters, tries: 2, since: 1, last: 4 };
+        w.accounts.get_mut("claude:b").unwrap().failing = Some(failed.clone());
+        w.accounts.get_mut("claude:b").unwrap().read_at = Some(3);
+        settle(&mut w, &found);
+        assert_eq!(w.accounts["claude:b"].failure(), None, "claude:a was read at 5, after the failure at 4");
+        // A new sign-in is a new account: nothing said about the old one stands.
+        w.accounts.get_mut("claude:c").unwrap().failing = Some(failed);
         let again = signed_in(d.path(), "c", Some((three, "Pro")));
         settle(&mut w, &[again]);
         let c = &w.accounts["claude:c"];
         assert!(!c.signed_out && c.read_at.is_none(), "a new sign-in is read again and no longer taken for lapsed");
+        assert!(c.failing.is_none(), "and a failed read of the old sign-in says nothing of it");
     }
 
     #[test]

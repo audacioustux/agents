@@ -245,7 +245,7 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   board a gauge is green, yellow within 10 points of its floor and red at it. `room/day`
   is the account's room, which dispatch ranks shared among the sessions in `run` and
   the next one, and `▸` the one the next start would take, also named
-  in the title with the floors. A stale reading says how old it is (`stale (read 3h ago)`).
+  in the title with the floors. A stale reading says how old it is (`stale (read 3h ago)`), or, when the reads since gave nothing, why (`reading timed out after 180 s (3 tries since Nov 12 18:08 +06); read 3h ago`).
   Who a home is signed in as is in `--json` (`identity`); twins say `same sign-in as`.
   A narrow window shrinks the bars (to five cells) before it cuts a name.
 - **Readings.** Showing the accounts in a project (`view status`, `view watch`, `quota
@@ -968,7 +968,18 @@ that finds a reading under way (any project's) waits for it, then reads only wha
 it did not. A reading relay asks for itself joins the project's pending set
 (`<state>/quota.pending`), which one background reader per project reads to the
 last, waiting its turn for the machine's reader, before it exits: an account shown
-as `refreshing` is always read. An account is used only when:
+as `refreshing` is always read. The accounts due are read at the same time, one process each, under
+that one hold of the machine's reader role, so a refresh of every account takes as long as the slowest.
+
+A read ends at `accounts.read_secs` (default 180, at least 30: refused below it when the config
+loads). `claude -p /usage` also computes "What's contributing to your usage?" from this machine's
+local sessions, and `claude` has no flag or setting that skips it, so a heavy account is slow, slower
+under load (58 s at load average 77). A read that gives nothing records why (`unreadable` carries
+`why`): `timed out after 180 s`, `exited 1: <last line of stderr>` (cut, with anything shaped like an
+email address or a token taken out; no raw output is kept), or `printed no meters`, with how many reads
+in a row failed and since when. The board's state cell, `quota show --json` (`readFailure`) and a
+queued job's reason say it instead of `stale` or `usage unreadable`: `reading timed out after 180 s
+(3 tries since Nov 12 18:08 +06)`. Any good reading ends it, however it came (the quota command, a session's rate events, another project's or a twin home's reading); a failure after it starts a count of its own. The stderr tail has terminal controls replaced. An account is used only when:
 
 - it has a reading, and not a stale one (unread or stale is not the same as
   having room; a job waits while a fresh one is taken);

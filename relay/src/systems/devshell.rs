@@ -38,10 +38,32 @@ const TAIL_BYTES: u64 = 2048;
 /// The wait after the first failed attempt, doubled after each one since, up to `MAX_BACKOFF_US`.
 const FIRST_BACKOFF_US: u64 = 60 * 1_000_000;
 const MAX_BACKOFF_US: u64 = 15 * 60 * 1_000_000;
-/// The files in the repository that define a development environment: a change to any of them
-/// changes the key, and the environment is entered again.
-const DEFINED_BY: &[&str] =
-    &["flake.nix", "flake.lock", "shell.nix", "default.nix", "devenv.nix", "devenv.lock", "devbox.json", "devbox.lock"];
+/// The files in the repository that define a development environment, for each shell the README
+/// names: a change to any of them changes the key, and the environment is entered again.
+const DEFINED_BY: &[&str] = &[
+    // `nix develop` (a flake), and `nix-shell`.
+    "flake.nix",
+    "flake.lock",
+    "shell.nix",
+    "default.nix",
+    // `devenv shell`: its inputs and imports are in devenv.yaml, local overrides in devenv.local.nix.
+    "devenv.nix",
+    "devenv.lock",
+    "devenv.yaml",
+    "devenv.local.nix",
+    // `devbox run`.
+    "devbox.json",
+    "devbox.lock",
+    // `mise exec --`: the project's config files, in each place mise reads one.
+    "mise.toml",
+    "mise.local.toml",
+    ".mise.toml",
+    ".mise.local.toml",
+    ".config/mise.toml",
+    ".config/mise/config.toml",
+    ".mise/config.toml",
+    ".tool-versions",
+];
 
 /// The capability to write devshell's port; only this module can make one.
 #[derive(Debug)]
@@ -749,6 +771,23 @@ pub(crate) mod tests {
         assert_eq!(gate.hold(at).unwrap().until, Some(at + 2 * FIRST_BACKOFF_US), "doubled");
         assert_eq!(entries(&d), 2);
         assert!(snapshot(&ctx).is_none(), "nothing recorded");
+    }
+
+    /// Review of #54 (third round): devenv's inputs and imports live in devenv.yaml, which no other
+    /// hashed file reflects; and each shell the README names has its own files.
+    #[test]
+    fn each_documented_shells_own_files_are_in_the_key() {
+        let d = Dir::new();
+        let ctx = project(&d, &["devenv", "shell"]);
+        for file in
+            ["devenv.yaml", "devenv.local.nix", "devbox.json", "mise.toml", ".tool-versions", ".config/mise.toml"]
+        {
+            let path = ctx.cfg.repo.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let before = key(&ctx.cfg).unwrap();
+            std::fs::write(&path, "inputs:\n  nixpkgs:\n    url: github:cachix/devenv-nixpkgs/rolling\n").unwrap();
+            assert_ne!(key(&ctx.cfg).unwrap(), before, "{file} is in the key");
+        }
     }
 
     #[test]

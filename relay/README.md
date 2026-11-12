@@ -1092,9 +1092,12 @@ what was recorded:
   leaves none running: its shell is ended with it, and no new one starts until all of it has;
   `relay devshell warm` by hand does the same, now, and exits 4 while another runs.
 - **The key** is the shell command, `[session] env` (what the shell is entered from),
-  `sandbox.env_deny` (what is left out of the record) and the repository's `flake.nix`, `flake.lock`,
-  `shell.nix`, `default.nix`, `devenv.nix`, `devenv.lock`, `devbox.json` and `devbox.lock`. When any
-  of them changes, the record no longer counts and the next job waits for a new warm-up.
+  `sandbox.env_deny` (what is left out of the record) and the repository's files that define a shell:
+  `flake.nix`, `flake.lock`, `shell.nix` and `default.nix` (Nix); `devenv.nix`, `devenv.lock`,
+  `devenv.yaml` and `devenv.local.nix` (devenv); `devbox.json` and `devbox.lock` (devbox); and
+  `mise.toml`, `mise.local.toml`, `.mise.toml`, `.mise.local.toml`, `.config/mise.toml`,
+  `.config/mise/config.toml`, `.mise/config.toml` and `.tool-versions` (mise). When any of them
+  changes, the record no longer counts and the next job waits for a new warm-up.
 - **Still whole.** The record also lists the paths the environment stands on, of those that existed
   when it was taken: every `PATH` directory, and every store path (`/nix/store/<name>`,
   `/gnu/store/<name>`) any of its variables names. Before the record admits a job, or `relay devshell

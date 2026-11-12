@@ -148,23 +148,19 @@ fn record(ctx: &Ctx, r: &Recorded) -> Result<()> {
     std::fs::rename(&tmp, &file).with_context(|| format!("writing {}", file.display()))
 }
 
-/// Whether a session may start: the project names no development environment, or the one
-/// recorded is for the current key.
-pub fn ready(ctx: &Ctx) -> bool {
-    key(&ctx.cfg).is_none_or(|k| recorded(ctx).is_some_and(|r| r.key == k))
-}
+/// A development environment's variables, as a job's environment takes them.
+pub type Env = Vec<(OsString, Option<OsString>)>;
 
-/// The recorded environment's variables for a session or a check, minus names `deny` matches
-/// (again: the setting may have narrowed since). Empty when the project names none; an error
-/// when none has been recorded yet.
-pub fn env(ctx: &Ctx, deny: &regex::Regex) -> Result<Vec<(OsString, Option<OsString>)>> {
-    if ctx.cfg.session.env_shell.is_empty() {
-        return Ok(Vec::new());
-    }
-    let r = recorded(ctx).with_context(|| {
-        format!("the development environment ({}) has not been entered yet", ctx.cfg.session.env_shell.join(" "))
-    })?;
-    Ok(r.env.into_iter().filter(|(k, _)| !deny.is_match(k)).map(|(k, v)| (k.into(), Some(v.into()))).collect())
+/// The environment one attempt runs on, read once when it starts and given to its session and to
+/// both runs of its acceptance check, so a warm-up for a new key during the run changes none of
+/// them. Empty when the project names no development environment; `None` when the one recorded is
+/// not for the current key (or none is), and the attempt must wait for its warm-up.
+pub fn snapshot(ctx: &Ctx) -> Option<Env> {
+    let Some(key) = key(&ctx.cfg) else { return Some(Vec::new()) };
+    let r = recorded(ctx).filter(|r| r.key == key)?;
+    // Filtered again: what a session gets is judged by the setting it runs under.
+    let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
+    Some(r.env.into_iter().filter(|(k, _)| !deny.is_match(k)).map(|(k, v)| (k.into(), Some(v.into()))).collect())
 }
 
 /// Whether the development environment lets jobs start, judged once per pass or board: the
@@ -261,7 +257,7 @@ pub fn tend(ctx: &Ctx, world: &World, gate: Option<&Gate>) -> Result<()> {
 
 /// One warm-up: enters the environment under the project's lock and records it. Returns what
 /// it did (`warm`, `entered`, `failed: ...`); a failure to start it is on the bus, not an error.
-fn warm(ctx: &Ctx) -> Result<String> {
+pub(crate) fn warm(ctx: &Ctx) -> Result<String> {
     let Some(key) = key(&ctx.cfg) else { return Ok("no session.env_shell: nothing to enter".into()) };
     let Some(role) = Role::try_take(&lock_file(ctx))? else {
         fail!(Conflict, "a warm-up of the development environment is already running")
@@ -554,12 +550,11 @@ mod tests {
         let gate = Gate::of(&ctx, &world(&ctx)).unwrap();
         assert_eq!(gate.hold(now_micros()), None);
         assert!(!gate.due(now_micros()));
-        assert!(ready(&ctx));
+        assert!(snapshot(&ctx).is_some());
         assert_eq!(warm(&ctx).unwrap(), "warm", "already recorded: not entered again");
         assert_eq!(entries(&d), 1);
         // Every session reads the record; the secret-looking variable is not in it.
-        let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).unwrap();
-        let env = env(&ctx, &deny).unwrap();
+        let env = snapshot(&ctx).unwrap();
         assert!(env.iter().any(|(k, v)| k == "DEV_TOOL" && v.as_deref() == Some("/nix/store/x-tool".as_ref())));
         assert!(env.iter().all(|(k, _)| k != "API_TOKEN"), "filtered");
         let on_disk = std::fs::read_to_string(recorded_file(&ctx)).unwrap();
@@ -572,7 +567,7 @@ mod tests {
         let d = Dir::new();
         let ctx = project(&d, &[&script(&d, 0, false)]);
         assert_eq!(warm(&ctx).unwrap(), "failed: exited 1");
-        assert!(!ready(&ctx));
+        assert!(snapshot(&ctx).is_none());
         let w = world(&ctx);
         let gate = Gate::of(&ctx, &w).unwrap();
         let at = w.devshell.as_ref().unwrap().failed.as_ref().unwrap().at;
@@ -588,7 +583,7 @@ mod tests {
         let at = w.devshell.as_ref().unwrap().failed.as_ref().unwrap().at;
         assert_eq!(gate.hold(at).unwrap().until, Some(at + 2 * FIRST_BACKOFF_US), "doubled");
         assert_eq!(entries(&d), 2);
-        assert!(env(&ctx, &regex::Regex::new("X").unwrap()).is_err(), "nothing recorded");
+        assert!(snapshot(&ctx).is_none(), "nothing recorded");
     }
 
     #[test]
@@ -597,11 +592,11 @@ mod tests {
         let ctx = project(&d, &[&script(&d, 0, true)]);
         let before = key(&ctx.cfg).unwrap();
         assert_eq!(warm(&ctx).unwrap(), "entered");
-        assert!(ready(&ctx));
+        assert!(snapshot(&ctx).is_some());
         std::fs::write(ctx.cfg.repo.join("flake.lock"), "{\"nodes\":{}}").unwrap();
         let after = key(&ctx.cfg).unwrap();
         assert_ne!(before, after, "the lock is in the key");
-        assert!(!ready(&ctx));
+        assert!(snapshot(&ctx).is_none());
         let gate = Gate::of(&ctx, &world(&ctx)).unwrap();
         assert_eq!(
             gate.hold(now_micros()).unwrap().why,
@@ -611,7 +606,7 @@ mod tests {
         assert!(gate.due(now_micros()));
         assert_eq!(warm(&ctx).unwrap(), "entered");
         assert_eq!(entries(&d), 2, "entered again");
-        assert!(ready(&ctx));
+        assert!(snapshot(&ctx).is_some());
         // The shell command is in the key too.
         let mut other = ctx.cfg.clone();
         other.session.env_shell.push("--impure".into());

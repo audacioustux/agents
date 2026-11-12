@@ -126,9 +126,8 @@ fn workspace_note(ctx: &Ctx, job: &Job) -> String {
 /// [`crate::sandbox::session_env`]'s base does: only the harness's own variables may name what it
 /// denies (`CLAUDE_CONFIG_DIR`). A `session.env` entry it names is refused at load; one that got past
 /// that would still be dropped here.
-fn layer_env(ctx: &Ctx, inv: &mut Invocation) -> Result<()> {
+fn layer_env(ctx: &Ctx, inv: &mut Invocation, dev: &[(OsString, Option<OsString>)]) {
     let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
-    let dev = crate::systems::devshell::env(ctx, &deny)?;
     let session_env = ctx
         .cfg
         .session
@@ -136,8 +135,7 @@ fn layer_env(ctx: &Ctx, inv: &mut Invocation) -> Result<()> {
         .iter()
         .filter(|(k, _)| !deny.is_match(k))
         .map(|(k, v)| (OsString::from(k), Some(OsString::from(v))));
-    inv.env = dev.into_iter().chain(session_env).chain(std::mem::take(&mut inv.env)).collect();
-    Ok(())
+    inv.env = dev.iter().cloned().chain(session_env).chain(std::mem::take(&mut inv.env)).collect();
 }
 
 /// Where an attempt runs: the account, its harness, and the model the job uses on it.
@@ -188,17 +186,18 @@ macro_rules! go {
 /// One attempt: take the seat and the workspace, launch the session, drive it, and judge what it did.
 fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     // Dispatch starts no job before the development environment is warm; one that changed since
-    // goes back to wait for its warm-up, never entering the shell itself.
-    if !crate::systems::devshell::ready(ctx) {
+    // goes back to wait for its warm-up, never entering the shell itself. What is read here is the
+    // environment of the whole attempt: its session and both runs of its check.
+    let Some(dev) = crate::systems::devshell::snapshot(ctx) else {
         return Ok((Outcome::Retry, Some("the development environment changed; waiting for it to warm again".into())));
-    }
+    };
     let found = accounts::discover(&ctx.cfg);
     let seat = go!(seat(ctx, job, &found));
     let work = go!(workspace(ctx, job)?);
     if let Some(failed) = forkable(job, &found, seat.home, &work.cwd) {
         return Ok(failed);
     }
-    let mut launch = go!(launch(ctx, job, &seat, &work, &found)?);
+    let mut launch = go!(launch(ctx, job, &seat, &work, &found, &dev)?);
     // An earlier attempt's answer must not pass for this one's.
     let _ = std::fs::remove_file(ctx.job_file(&job.name, "result.md"));
     let run = Run {
@@ -229,6 +228,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         brief: &launch.brief,
         reviewing: launch.reviewing.as_ref(),
         model: seat.model.as_deref(),
+        dev: &dev,
     };
     // A review's answer is not enough: it needs its report and the verdict in it.
     let v = match verdict(&report, ending, marker, job.readonly() && ran.reviewing.is_none(), now_s()) {
@@ -315,7 +315,14 @@ fn workspace(ctx: &Ctx, job: &Job) -> Result<Step<Workspace>> {
 }
 
 /// Chooses the session (new, resumed or forked), records that it started, and builds its command.
-fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home]) -> Result<Step<Launch>> {
+fn launch(
+    ctx: &Ctx,
+    job: &Job,
+    seat: &Seat<'_>,
+    work: &Workspace,
+    found: &[Home],
+    dev: &[(OsString, Option<OsString>)],
+) -> Result<Step<Launch>> {
     let fork = job.fork.as_ref().filter(|f| job.session_id.as_deref().is_none_or(|s| s == f.session_id));
     let resumed = if fork.is_some() { None } else { resumable(job, found, seat.home, &work.scratch) };
     let session_id =
@@ -356,7 +363,7 @@ fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home
         Ok(i) => i,
         Err(refusal) => return Ok(ControlFlow::Break((Outcome::Failed, Some(refusal)))),
     };
-    layer_env(ctx, &mut inv)?;
+    layer_env(ctx, &mut inv, dev);
     inv.write_files(&work.inbox).context("writing the prompt file")?;
     let mounts = Mounts {
         home: seat.home,
@@ -432,6 +439,8 @@ struct Ran<'a> {
     reviewing: Option<&'a Reviewing>,
     /// The model the run used.
     model: Option<&'a str>,
+    /// The development environment the attempt runs on, read once when it started: its checks get it too.
+    dev: &'a [(OsString, Option<OsString>)],
 }
 
 /// The request at `point`, with the brief, the earlier decisions and what was spent.
@@ -1315,7 +1324,7 @@ mod env_tests {
         let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
         let mut inv = Invocation::new("puku-cli");
         inv.env.push(("PUKU_CONFIG_DIR".into(), Some("/h/.puku-cli".into())));
-        layer_env(&ctx, &mut inv).unwrap();
+        layer_env(&ctx, &mut inv, &[]);
         let env: Vec<(OsString, OsString)> = crate::sandbox::session_env(&ctx, &inv);
         let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string_lossy().into_owned());
         for denied in ["PUKU_WORKER_URL", "CLAUDE_CODE_X", "NPM_TOKEN"] {

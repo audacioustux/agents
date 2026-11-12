@@ -1111,8 +1111,10 @@ what was recorded:
   download that slow) never does: enter the shell by hand once (`nix develop -c true`), and the next
   attempt is quick.
 
-A job started on a recorded environment keeps it for its whole run; a warm-up for a new key
-changes only the jobs that start after it.
+A job started on a recorded environment keeps it for its whole run: each attempt reads the
+record once, when it starts, and its session and both runs of its acceptance check (at the tip and
+at the base) get that same environment. A warm-up for a new key changes only the attempts that
+start after it.
 
 The session also gets its own PID namespace, so nothing it starts outlives it.
 With the sandbox as the boundary, the session runs without approval prompts. Without it

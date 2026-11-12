@@ -71,10 +71,11 @@ pub(super) fn run(
     dir: &SessionRepo,
     base: Option<&str>,
     inbox: &HostDir,
+    dev: &[(OsString, Option<OsString>)],
 ) -> Result<CheckRun> {
     let command = job.check().context("a check was asked of a job that declares none")?.to_owned();
     let tip = dir.rev("HEAD");
-    let place = Place { inbox, work: &ctx.job_scratch(&format!("{}.bar", job.name)) };
+    let place = Place { inbox, work: &ctx.job_scratch(&format!("{}.bar", job.name)), dev };
     let head = match &tip {
         Some(tip) => at(ctx, home, &command, dir, tip, &place),
         None => broke("the clone has no commit to check"),
@@ -253,6 +254,8 @@ fn broke(why: &str) -> Ran {
 struct Place<'a> {
     inbox: &'a HostDir,
     work: &'a Path,
+    /// The attempt's development environment, read when it started: the same at the tip and the base.
+    dev: &'a [(OsString, Option<OsString>)],
 }
 
 /// Runs `command` on a clean checkout of `rev` from the clone `source`.
@@ -284,16 +287,22 @@ fn checkout(source: &SessionRepo, rev: &str, into: &Path) -> Result<()> {
     git(switch, "git checkout")
 }
 
+/// `sh -c command` under `timeout`, on the attempt's development environment `dev`: the one its
+/// warm-up recorded from the repository, never from files the session could have edited, and read
+/// when the attempt started, so a warm-up for a new key during the run does not change it.
+fn invocation(ctx: &Ctx, command: &str, dev: &[(OsString, Option<OsString>)]) -> Invocation {
+    let mut inv = Invocation::new("timeout");
+    let secs = ctx.cfg.hooks.command_timeout_seconds.max(1).to_string();
+    inv.args = ["-k", "5", &secs, "sh", "-c", command].map(OsString::from).to_vec();
+    layer_env(ctx, &mut inv, dev);
+    inv
+}
+
 /// Runs `sh -c command` in `tree`, bounded by `hooks.command_timeout_seconds` (killed 5 s later if it
 /// ignores the TERM), in the session's sandbox plan without the session's account or clone.
 fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, place: &Place<'_>) -> Ran {
     let go = || -> Result<Ran> {
-        let mut inv = Invocation::new("timeout");
-        let secs = ctx.cfg.hooks.command_timeout_seconds.max(1).to_string();
-        inv.args = ["-k", "5", &secs, "sh", "-c", command].map(OsString::from).to_vec();
-        // The project's own development environment, as its warm-up recorded it from the repository,
-        // never from files the session could have edited.
-        layer_env(ctx, &mut inv)?;
+        let inv = invocation(ctx, command, place.dev);
         let file = place.inbox.create("check.out")?;
         let tmp = place.work.join("tmp");
         std::fs::create_dir(&tmp)?;
@@ -336,6 +345,45 @@ fn tail_text(mut f: std::fs::File, max: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review of #54: each check read the project's latest record, so a warm-up for a changed key during
+    /// a run could give the session, the tip check and the base check different toolchains. The check
+    /// takes the environment its attempt read when it started.
+    #[test]
+    fn a_warm_up_during_the_run_does_not_change_the_checks_environment() {
+        use crate::config::{Config, tempdir::Dir};
+        let d = Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let (shell, tool) = (d.path().join("shell"), d.path().join("tool"));
+        std::fs::write(&shell, format!("#!/bin/sh\nexport DEV_TOOL=\"$(cat '{}')\"\nexec \"$@\"\n", tool.display()))
+            .unwrap();
+        std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let mut cfg = Config::parse("name = \"t\"\n", &repo).unwrap();
+        cfg.session.env_shell = vec![shell.display().to_string()];
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        std::fs::create_dir_all(&ctx.bus).unwrap();
+        let warm = |toolchain: &str| {
+            std::fs::write(&tool, toolchain).unwrap();
+            assert_eq!(crate::systems::devshell::warm(&ctx).unwrap(), "entered");
+        };
+        let tool_in = |env: &[(OsString, Option<OsString>)]| {
+            env.iter().rev().find(|(k, _)| k == "DEV_TOOL").and_then(|(_, v)| v.clone())
+        };
+        warm("rust-1.99");
+        // The attempt starts: its environment is read once.
+        let dev = crate::systems::devshell::snapshot(&ctx).unwrap();
+        // Mid-run, the flake lock moves and the environment is entered again for the new key.
+        std::fs::write(repo.join("flake.lock"), "{}").unwrap();
+        warm("rust-2.0");
+        let now = crate::systems::devshell::snapshot(&ctx).unwrap();
+        assert_eq!(tool_in(&now).as_deref(), Some("rust-2.0".as_ref()), "the record moved on");
+        // The tip check and the base check both run on what the session ran on.
+        for _ in ["tip", "base"] {
+            let inv = invocation(&ctx, "true", &dev);
+            assert_eq!(tool_in(&inv.env).as_deref(), Some("rust-1.99".as_ref()));
+        }
+    }
 
     #[test]
     fn only_a_command_that_ran_and_failed_has_failed() {

@@ -480,6 +480,27 @@ mod tests {
         assert_eq!(fit(&claude("a"), Some(&st), None, &Limits::default(), 2_000_000), Err(Refusal::NotSignedIn));
     }
 
+    /// Review of #66: antigravity meters its model groups apart. A Gemini job is judged by the
+    /// Gemini week, not by the spent Claude & GPT one; a Claude job by the shared group's.
+    #[test]
+    fn an_omp_job_is_judged_by_the_groups_that_cover_its_model() {
+        let now_us = 1_000 * 1_000_000;
+        let reset = Some(secs(now_us) + 86_400 * 3);
+        let omp = Home { harness: "omp", label: "default".into(), dir: PathBuf::from("/o") };
+        let mut st = AccountState { read_at: Some(now_us - 1), ..Default::default() };
+        for (name, used) in
+            [("google-antigravity/Gemini (Weekly)", 0.3), ("google-antigravity/Claude & GPT (shared) (Weekly)", 1.0)]
+        {
+            st.meters.insert(name.into(), Meter::named(name, used, reset));
+        }
+        let fit = |model| fit(&omp, Some(&st), Some(model), &Limits::default(), now_us);
+        assert!(fit("google-antigravity/gemini-3-pro").is_ok(), "{:?}", fit("google-antigravity/gemini-3-pro"));
+        for model in ["google-antigravity/claude-opus-4-6", "google-antigravity/gpt-oss-120b"] {
+            assert!(matches!(fit(model), Err(Refusal::AtFloor(_))), "{model}: {:?}", fit(model));
+        }
+        assert!(matches!(fit("google-antigravity/llama-9"), Err(Refusal::Blind(_))), "no group covers it");
+    }
+
     #[test]
     fn omp_fit_depends_on_the_model() {
         let now_us = 1_000 * 1_000_000;

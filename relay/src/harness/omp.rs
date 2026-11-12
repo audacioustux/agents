@@ -61,6 +61,22 @@ pub fn window_of(label: &str) -> Meter {
     if rest.is_empty() || rest.eq_ignore_ascii_case("general") { meter } else { meter.scope(rest) }
 }
 
+/// The model groups `omp usage` meters apart within a provider (google-antigravity's), each with
+/// the words of a model's id that put the model in it. `Claude & GPT (shared)` is one allowance
+/// two families share, so it covers both.
+pub const GROUPS: [(&str, &[&str]); 2] = [("Gemini", &["gemini"]), ("Claude & GPT (shared)", &["claude", "gpt"])];
+
+/// Whether `m`, a meter of the provider of `model` (`provider/name`), governs a job on it: one of
+/// the provider's whole allowance always; one of a group of [`GROUPS`] when the model's name is in
+/// that group; one of a group not declared there always, since which models it counts cannot be told.
+pub fn covers(m: &Meter, model: &str) -> bool {
+    let name = model.split_once('/').map_or(model, |(_, n)| n).to_ascii_lowercase();
+    m.scope.as_deref().is_none_or(|scope| match GROUPS.iter().find(|(g, _)| g.eq_ignore_ascii_case(scope)) {
+        Some((_, words)) => words.iter().any(|w| name.contains(w)),
+        None => true,
+    })
+}
+
 /// "Openai Codex" is `openai-codex`, the prefix of its model ids.
 pub fn provider_of(section: &str) -> String {
     section.trim().to_lowercase().replace(' ', "-")
@@ -232,9 +248,14 @@ impl Harness for Omp {
                 "omp needs a provider-qualified model (provider/name, e.g. openai-codex/gpt-5.2) to know whose quota it draws on".into(),
             ));
         };
-        let found: Vec<&Meter> = meters.values().filter(|m| m.provider.as_deref() == Some(provider)).collect();
-        if found.is_empty() {
+        let of_provider: Vec<&Meter> = meters.values().filter(|m| m.provider.as_deref() == Some(provider)).collect();
+        if of_provider.is_empty() {
             return Err(Refusal(format!("cannot read omp's {provider} quota; not starting blind")));
+        }
+        let model = model.unwrap_or_default();
+        let found: Vec<&Meter> = of_provider.into_iter().filter(|m| covers(m, model)).collect();
+        if found.is_empty() {
+            return Err(Refusal(format!("no meter of omp's {provider} quota counts {model}; not starting blind")));
         }
         Ok(found)
     }

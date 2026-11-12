@@ -243,8 +243,6 @@ pub struct Gate {
     /// A path the record for this key stands on that is gone: it must be entered again.
     gone: Option<String>,
     state: Option<DevShell>,
-    /// `session.env_shell_attempt_secs`, for the board to say what an attempt timed out at.
-    limit: u64,
 }
 
 impl Gate {
@@ -256,7 +254,7 @@ impl Gate {
         let gone = record.as_ref().and_then(|r| r.missing().map(str::to_owned));
         let ready = record.is_some() && gone.is_none();
         let state = world.devshell.clone().filter(|s| s.key == key);
-        Some(Self { key, ready, gone, state, limit: ctx.cfg.session.env_shell_attempt_secs })
+        Some(Self { key, ready, gone, state })
     }
 
     /// When the next warm-up may start after the latest failed one: at once after a timeout,
@@ -286,10 +284,10 @@ impl Gate {
         let Some(s) = &self.state else { return Some(not_yet()) };
         if let Some(since) = s.warming_since {
             let mut why = format!("dev shell warming ({})", crate::systems::view::ago(now_us, since));
-            if s.failed.as_ref().is_some_and(|f| f.timed_out) {
-                // A timed-out attempt is retried at once, so the next one is this warm-up.
-                let _ =
-                    write!(why, "; attempt {} running, {} timed out after {}s", s.failures + 1, s.failures, self.limit);
+            // A timed-out attempt is retried at once, so the next one is this warm-up. The latest
+            // failure's own `why` names the limit it ran under, which a later config may have changed.
+            if let Some(f) = s.failed.as_ref().filter(|f| f.timed_out) {
+                let _ = write!(why, "; attempt {} running; the last {}", s.failures + 1, f.why);
             }
             return Some(Hold { why, until: None });
         }
@@ -897,6 +895,16 @@ pub(crate) mod tests {
         let events = vec![
             st(10, DevShellEvent::Warming { key: k.clone(), shell: "s".into() }),
             st(
+                15,
+                DevShellEvent::WarmFailed {
+                    key: k.clone(),
+                    why: "exited 1".into(),
+                    tail: String::new(),
+                    timed_out: false,
+                },
+            ),
+            st(16, DevShellEvent::Warming { key: k.clone(), shell: "s".into() }),
+            st(
                 20,
                 DevShellEvent::WarmFailed {
                     key: k.clone(),
@@ -907,11 +915,13 @@ pub(crate) mod tests {
             ),
             st(30, DevShellEvent::Warming { key: k, shell: "s".into() }),
         ];
-        ctx.cfg.session.env_shell_attempt_secs = 1800;
+        // The limit was raised after the timeout: the board names the limit that attempt ran under,
+        // and counts the ordinary failure as an attempt without calling it a timeout.
+        ctx.cfg.session.env_shell_attempt_secs = 3600;
         let gate = Gate::of(&ctx, &World::fold(&events)).unwrap();
         assert_eq!(
-            gate.hold(10 + 12 * 60 * 1_000_000).unwrap().why,
-            "dev shell warming (12m); attempt 2 running, 1 timed out after 1800s"
+            gate.hold(16 + 12 * 60 * 1_000_000).unwrap().why,
+            "dev shell warming (12m); attempt 3 running; the last timed out after 1800 s"
         );
         // Before any attempt has timed out, the board says only that it warms.
         let first = Gate::of(&ctx, &World::fold(&events[..1])).unwrap();
@@ -940,7 +950,7 @@ pub(crate) mod tests {
         let gate = Gate::of(&ctx, &World::fold(&events)).unwrap();
         let hold = gate.hold(10 + 15 * 60 * 1_000_000).unwrap();
         assert_eq!(
-            hold.why, "dev shell warming (15m); attempt 2 running, 1 timed out after 600s",
+            hold.why, "dev shell warming (15m); attempt 2 running; the last timed out after 600 s",
             "since the first attempt"
         );
         assert!(gate.due(31), "one that died is started again; a live one holds the lock");

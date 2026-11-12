@@ -436,6 +436,20 @@ pub struct Decision {
     pub steps: Vec<Step>,
     /// The action carried out, once a handler gave one that passed.
     pub action: Option<Action>,
+    /// The seat its `agent:` handler's session holds, from `seated` until `unseated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat: Option<SessionSeat>,
+}
+
+/// A seat a session that is no job's own run holds (a decision's `agent:` session), as its booking
+/// recorded it: the account, and the model and provider it was judged on there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSeat {
+    pub account: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider: String,
 }
 
 /// One handler's answer to a decision.
@@ -449,6 +463,18 @@ pub struct Step {
 }
 
 impl Decision {
+    /// The seat its `agent:` session holds while the process that waits for the answer lives: that
+    /// process runs the session, so one that died without a word (killed, crashed) holds nothing.
+    pub fn seat(&self) -> Option<(&str, crate::accounts::Draws)> {
+        let seat = self.seat.as_ref()?;
+        let (pid, started) = self.waiter?;
+        if !crate::os::same_process(pid, started) {
+            return None;
+        }
+        let harness = seat.account.split_once(':').map_or(seat.account.as_str(), |(h, _)| h);
+        Some((&seat.account, crate::accounts::draws(seat.model.as_deref(), &seat.provider, harness)))
+    }
+
     /// Parked at `now` (bus time) with nothing answered or carried out yet. Not enough to answer it:
     /// the job may have moved on since (`World::awaiting`).
     fn open(&self, now: u64) -> bool {
@@ -465,7 +491,8 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// fixed bus, so a fold that changes without a bump fails the tests.
 /// 13: `dispatched` records the model and provider; a job back in the queue has no account.
 /// 14: the development environment's warm-ups (`devshell`).
-const FOLD_VERSION: u32 = 14;
+/// 15: a decision's `agent:` session holds a seat (`seated`, `unseated`).
+const FOLD_VERSION: u32 = 15;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -1269,8 +1296,23 @@ impl World {
                         answer_why: String::new(),
                         steps: Vec::new(),
                         action: None,
+                        seat: None,
                     },
                 );
+            }
+            DecideEvent::Seated { id, account, model, provider } => {
+                if let Some(d) = self.decisions.get_mut(id) {
+                    d.seat = Some(SessionSeat {
+                        account: account.clone(),
+                        model: model.clone(),
+                        provider: provider.clone(),
+                    });
+                }
+            }
+            DecideEvent::Unseated { id } => {
+                if let Some(d) = self.decisions.get_mut(id) {
+                    d.seat = None;
+                }
             }
             DecideEvent::Parked { id, until } => {
                 if let Some(d) = self.decisions.get_mut(id).filter(|d| d.action.is_none()) {
@@ -1436,7 +1478,8 @@ mod tests {
     /// new pair; never change a pair already recorded.
     #[test]
     fn the_fold_version_moves_with_the_fold() {
-        const PINNED: &[(u32, u64)] = &[(13, 0x1d75_bf1b_971c_dfd9), (14, 0x0599_7a27_1a95_7bbd)];
+        const PINNED: &[(u32, u64)] =
+            &[(13, 0x1d75_bf1b_971c_dfd9), (14, 0x0599_7a27_1a95_7bbd), (15, 0x96da_3e17_b6db_c0d4)];
         let dispatched = |t, model: Option<&str>| {
             st(
                 t,
@@ -1482,6 +1525,26 @@ mod tests {
                     why: "exited 1".into(),
                     tail: "error".into(),
                     timed_out: false,
+                }),
+            ),
+            st(
+                12,
+                Event::Decide(DecideEvent::DecisionRequested {
+                    id: "d".into(),
+                    job: "a".into(),
+                    point: Point::Held,
+                    created: 1,
+                    attempt: 2,
+                    waiter: None,
+                }),
+            ),
+            st(
+                13,
+                Event::Decide(DecideEvent::Seated {
+                    id: "d".into(),
+                    account: "omp:w".into(),
+                    model: Some("minimax-code/M3".into()),
+                    provider: "minimax-code".into(),
                 }),
             ),
         ];

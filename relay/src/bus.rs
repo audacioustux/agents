@@ -644,6 +644,18 @@ pub enum DecideEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         waiter: Option<(u32, u64)>,
     },
+    /// An `agent:` handler's session took a seat: chosen and booked as a dispatch books a job's, under
+    /// the machine's seat lock, so every project's dispatcher counts it until `unseated`.
+    Seated {
+        id: String,
+        account: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        provider: String,
+    },
+    /// That session has ended, and its seat is free.
+    Unseated { id: String },
     /// The chain reached `orchestrator`: the request waits for `relay decide answer` until `until` (bus time).
     Parked { id: String, until: u64 },
     /// `relay decide answer`: what the orchestrator answered. It counts only if

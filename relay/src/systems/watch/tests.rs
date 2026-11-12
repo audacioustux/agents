@@ -380,6 +380,7 @@ fn decisions_waiting_are_a_badge_and_a_pane() {
         answer_why: String::new(),
         steps: Vec::new(),
         action: None,
+        seat: None,
     };
     f.machine.projects[0].world.decisions.insert(d.id.clone(), d.clone());
     let mut ui = Ui::new(false, false, true);

@@ -6,14 +6,15 @@
 //! [`Room::hold`] the one judgment of why a queued job does not start. The dispatcher, the accounts
 //! pane, the board's reasons and a checker's seat all ask these, so none of them can call an
 //! account `ready` or a job startable where another would not. A seat is read from what its
-//! dispatch recorded (`Job::seat`), never resolved again through a config.
+//! dispatch recorded (`Job::seat`), or a decision's session from what its booking recorded
+//! (`Decision::seat`), never resolved again through a config.
 
 use std::collections::BTreeMap;
 
 use crate::accounts::{self, Draws, Refusal};
 use crate::config::{Config, Limits};
 use crate::harness::Home;
-use crate::world::{AccountState, Job, World};
+use crate::world::{AccountState, Decision, Job, World};
 
 use super::{kept, may_use, model_for, profile_hold};
 use crate::systems::devshell::Gate;
@@ -108,6 +109,11 @@ impl Room {
         // their runner lives, since nobody here reaps them.
         let theirs = others.iter().flat_map(|w| w.jobs().values()).filter(|j| j.runner_alive());
         for (account, draws) in world.jobs().values().chain(theirs).filter_map(Job::seat) {
+            room.book(account, draws);
+        }
+        // A decision's `agent:` session is a session like any: every project's, while its process lives.
+        let sessions = std::iter::once(world).chain(others.iter().copied()).flat_map(|w| w.decisions.values());
+        for (account, draws) in sessions.filter_map(Decision::seat) {
             room.book(account, draws);
         }
         for p in world.jobs().values().filter(|j| j.status.has_runner()).filter_map(|j| j.profile.as_deref()) {

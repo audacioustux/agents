@@ -225,6 +225,12 @@ pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsS
     a
 }
 
+/// The variables that say where a process on the host stands (its working and temporary
+/// directories), which a session never takes from any layer of its environment: it stands in its own
+/// clone, with its own `/tmp`. A development environment's record leaves them out too
+/// (`systems::devshell`), reading this same list.
+pub const WHERE_IT_STANDS: [&str; 5] = ["TMPDIR", "TEMP", "TMP", "PWD", "OLDPWD"];
+
 /// The environment a session gets: [`Ctx::job_env`] (built from the config, never
 /// the caller's) minus names matching `sandbox.env_deny`, then the invocation's own variables
 /// (which may name what the filter removes, such as `CLAUDE_CONFIG_DIR`).
@@ -234,7 +240,7 @@ pub fn session_env(ctx: &Ctx, inv: &crate::harness::Invocation) -> Vec<(OsString
         .job_env()
         .without(&deny)
         .vars()
-        .filter(|(k, _)| !matches!(k.to_string_lossy().as_ref(), "TMPDIR" | "TEMP" | "TMP" | "PWD" | "OLDPWD"))
+        .filter(|(k, _)| !WHERE_IT_STANDS.contains(&k.to_string_lossy().as_ref()))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     // Signing keys are hidden, so git inside cannot sign: say so up front

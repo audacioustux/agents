@@ -221,9 +221,17 @@ pub type Env = Vec<(OsString, Option<OsString>)>;
 pub fn snapshot(ctx: &Ctx) -> Option<Env> {
     let Some(key) = key(&ctx.cfg) else { return Some(Vec::new()) };
     let r = recorded(ctx).filter(|r| r.key == key && r.missing().is_none())?;
-    // Filtered again: what a session gets is judged by the setting it runs under.
+    // Filtered again: what a session gets is judged by the setting it runs under (and a record from
+    // before working directories were left out has none of them either).
     let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
-    Some(r.env.into_iter().filter(|(k, _)| !deny.is_match(k)).map(|(k, v)| (k.into(), Some(v.into()))).collect())
+    Some(r.env.into_iter().filter(|(k, _)| carried(k, &deny)).map(|(k, v)| (k.into(), Some(v.into()))).collect())
+}
+
+/// Whether the variable `name` of an entered environment is recorded and given to sessions: not
+/// one `deny` names, and not one that says where the warm-up stood (`PWD`, the repository; its
+/// `TMPDIR`), which [`crate::sandbox::session_env`] drops from every layer and must not get back.
+fn carried(name: &str, deny: &regex::Regex) -> bool {
+    !name.is_empty() && !deny.is_match(name) && !crate::sandbox::WHERE_IT_STANDS.contains(&name)
 }
 
 /// Whether the development environment lets jobs start, judged once per pass or board: the
@@ -445,7 +453,7 @@ fn enter(
         .filter_map(|kv| {
             // Only what is text: the record is JSON, and no variable a tool needs is otherwise.
             let (k, v) = std::str::from_utf8(kv).ok()?.split_once('=')?;
-            (!k.is_empty() && !deny.is_match(k)).then(|| (k.to_owned(), v.to_owned()))
+            carried(k, deny).then(|| (k.to_owned(), v.to_owned()))
         })
         .collect())
 }

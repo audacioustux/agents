@@ -1308,6 +1308,41 @@ mod env_tests {
     use crate::ctx::Ctx;
     use crate::harness::Invocation;
 
+    /// Review of #54 (third round): the warm-up stands in the repository, so its record held `PWD` there,
+    /// and the session got it back after `session_env` dropped it: a build session in its clone was told it
+    /// stood in the original tree. The record leaves out every variable `session_env` drops.
+    #[test]
+    fn the_recorded_environment_says_nothing_of_where_the_warm_up_stood() {
+        let d = Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let shell = d.path().join("shell");
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\ncd /tmp && cd \"$OLDPWD\"\nexport TMPDIR=/tmp/nix-shell.x DEV_TOOL=y\nexec \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let mut cfg = Config::parse("name = \"t\"\n", &repo).unwrap();
+        cfg.session.env_shell = vec![shell.display().to_string()];
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        std::fs::create_dir_all(&ctx.bus).unwrap();
+        assert_eq!(crate::systems::devshell::tests::settled(&ctx), "entered");
+        let recorded = crate::systems::devshell::recorded(&ctx).unwrap();
+        assert!(recorded.env.iter().any(|(k, _)| k == "DEV_TOOL"));
+        for name in crate::sandbox::WHERE_IT_STANDS {
+            assert!(recorded.env.iter().all(|(k, _)| k != name), "{name} is not recorded: {:?}", recorded.env);
+        }
+        let mut inv = Invocation::new("claude");
+        layer_env(&ctx, &mut inv, &crate::systems::devshell::snapshot(&ctx).unwrap());
+        let env = crate::sandbox::session_env(&ctx, &inv);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string_lossy().into_owned());
+        assert_eq!(get("PWD"), None, "not the repository");
+        assert_eq!(get("OLDPWD"), None);
+        assert_eq!(get("TMPDIR"), None, "the sandbox sets its own /tmp");
+        assert_eq!(get("DEV_TOOL").as_deref(), Some("y"));
+    }
+
     /// Review of #40: `[session.env]` entries that `sandbox.env_deny` names never reach a worker. They
     /// are refused at load; this checks the environment a session is built with (the job's layers, then
     /// `sandbox::session_env`) holds none even when one gets past the config, while the harness's own

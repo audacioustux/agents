@@ -400,11 +400,28 @@ impl Default for Gc {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Accounts {
     /// Accounts never used, as `harness:label` (`claude:work`, `omp:default`).
     pub exclude: Vec<String>,
+    /// How long one account's quota command may run, in seconds, before it is ended and the read
+    /// recorded as timed out. At least [`MIN_READ_SECS`]. `claude -p /usage` also reads this machine's
+    /// local sessions, so a heavy account under load is slow (58 s measured at load 77).
+    pub read_secs: u64,
+}
+
+/// The default of `accounts.read_secs`: three times the 58 s one heavy account took at load 77.
+pub const DEFAULT_READ_SECS: u64 = 180;
+
+/// The least `accounts.read_secs` is refused below: shorter than a command that starts a CLI and asks
+/// a server can answer on a loaded machine, so every read would time out.
+pub const MIN_READ_SECS: u64 = 30;
+
+impl Default for Accounts {
+    fn default() -> Self {
+        Self { exclude: Vec::new(), read_secs: DEFAULT_READ_SECS }
+    }
 }
 
 /// One harness's settings. Every harness takes the same keys.
@@ -756,6 +773,10 @@ impl Config {
         for key in &self.accounts.exclude {
             ensure!(key.contains(':'), "accounts.exclude entries are harness:label, not {key:?}");
         }
+        ensure!(
+            self.accounts.read_secs >= MIN_READ_SECS,
+            "accounts.read_secs must be at least {MIN_READ_SECS}: a quota read cannot finish sooner on a loaded machine"
+        );
         ensure!(self.session.max_hours > 0.0, "session.max_hours must be positive");
         ensure!(
             self.session.env_shell_attempt_secs >= MIN_ENV_SHELL_ATTEMPT_SECS,
@@ -1083,6 +1104,20 @@ fn find_upwards(start: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_quota_read_has_a_declared_limit_with_a_floor() {
+        let d = repo();
+        let parse = |secs: &str| Config::parse(&format!("name = \"x\"\n[accounts]\nread_secs = {secs}\n"), d.path());
+        assert_eq!(Config::parse("name = \"x\"", d.path()).unwrap().accounts.read_secs, DEFAULT_READ_SECS);
+        assert_eq!(parse("240").unwrap().accounts.read_secs, 240);
+        assert_eq!(parse("30").unwrap().accounts.read_secs, MIN_READ_SECS);
+        for bad in ["29", "0"] {
+            let err = parse(bad).unwrap_err().to_string();
+            assert!(err.contains("accounts.read_secs must be at least 30"), "{err}");
+        }
+        assert!(parse("-1").is_err() && parse("\"90\"").is_err());
+    }
+
     #[test]
     fn a_model_belongs_to_the_family_its_provider_names() {
         let f = super::model_family;
@@ -1467,7 +1502,7 @@ pub mod tempdir {
 
     impl Drop for Dir {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = crate::hostdir::remove_tree(&self.0);
         }
     }
 }

@@ -5,7 +5,7 @@
 
 #![allow(clippy::disallowed_methods, reason = "a test reads its own switches and passes its PATH on by config")]
 
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
@@ -2026,6 +2026,55 @@ fn a_done_clone_is_removed_with_its_unfetched_commits_rescued_and_the_job_can_re
     assert_eq!(log.matches("stub work").count(), 2, "the resumed clone started from the rescued work: {log}");
 }
 
+#[test]
+fn gc_removes_a_clone_whose_tests_left_a_mode_zero_directory() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("gc-mode0", false);
+    configure(&env, "", "[gc]\noutputs_after_hours = 0\nclones_after_days = 0\n");
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "stuck", "--text", "Make a change."]), "queue");
+    assert_eq!(wait_for(&env, "stuck")["status"], "done");
+    ok(&relay(&env, &["land", "fetch", "stuck"]), "land fetch");
+
+    // What a session's tests leave: a directory set to 0o000 with a file in it, in the clone's build
+    // outputs, in the job's /tmp, and in the clone's own tree (untracked work: `git status` can only
+    // warn that it could not open it).
+    let clone = workdir(&env, "stuck");
+    let scratch = env.root.join("data/relay/flow/scratch/stuck");
+    std::fs::create_dir_all(&scratch).unwrap();
+    for base in [clone.join("target/debug"), clone.join("sub"), scratch.join(".tmpAbC1")] {
+        let inner = base.join("locked/inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("f"), "x").unwrap();
+        for d in [&inner, &base.join("locked")] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o0)).unwrap();
+        }
+    }
+    let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777;
+    let out = relay(&env, &["land", "gc"]);
+    let text = out_of(&out);
+    ok(&out, "gc");
+    // The /tmp is relay's to clear whatever its modes; the clone is not: files in a directory git could
+    // not read were never committed or rescued, so it is kept, untouched.
+    assert!(!scratch.exists(), "the /tmp is gone: {text}");
+    assert!(clone.exists(), "a clone with an unreadable untracked directory is kept: {text}");
+    assert_eq!(mode(&clone.join("sub/locked")), 0, "and its modes are left as they were: {text}");
+    assert!(text.contains("uncommitted changes"), "{text}");
+    assert_ne!(job(&env, "stuck")["collected"], "clone");
+
+    // Once the work is gone (here: the test clears it), the clone goes like any other, and with it the
+    // mode-0 directory in its build outputs, which git is told to leave out.
+    std::fs::set_permissions(clone.join("sub/locked"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(clone.join("sub/locked/inner"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::remove_dir_all(clone.join("sub")).unwrap();
+    let out = relay(&env, &["land", "gc"]);
+    ok(&out, "gc");
+    assert!(!clone.exists(), "{}", out_of(&out));
+    assert_eq!(job(&env, "stuck")["collected"], "clone");
+}
+
 /// Audit finding 2: gc reads a clone the session wrote, configuration and all, so it must not run
 /// what that configuration names. The session plants a `core.fsmonitor`; gc's pass over its clone
 /// (`git status` before it removes it) must not run it on the host.
@@ -2552,6 +2601,23 @@ fn a_revert_control_needs_the_check_to_fail_for_real_at_the_base_commit() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     let out = relay(&env, &["queue", "add", "ro", "--text", "x", "--readonly", "--check", "true"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn a_directory_a_check_left_unreadable_does_not_block_the_next_check() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("bar-mode0", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+
+    // The tip run leaves a mode-0 directory with a file in it under its TMPDIR, as a test that never
+    // restored its tempdir does; the base run then needs the work directory cleared first.
+    let leave = "mkdir -p \"$TMPDIR/stuck/in\" && touch \"$TMPDIR/stuck/in/f\" && chmod 000 \"$TMPDIR/stuck/in\" \"$TMPDIR/stuck\"";
+    let j = build(&env, "stuck", &["--check", &format!("{leave}; test -f relay-output.txt"), "--check-red-first"]);
+    assert_eq!(j["status"], "done", "{j}");
+    assert_eq!((j["bars"][0]["result"].as_str(), j["bars"][0]["base_exit"].as_i64()), (Some("pass"), Some(1)), "{j}");
 }
 
 /// A check that prints `cargo test`'s failure summary for `tests` and exits as it does, 101.

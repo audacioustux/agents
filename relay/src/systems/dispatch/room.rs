@@ -205,7 +205,7 @@ impl Room {
         refused: &Refused,
         now_us: u64,
     ) -> Option<(u64, Option<f64>)> {
-        if refused.busy.is_some() || !matches!(refused.fit, Some(Refusal::Stale | Refusal::Unread)) {
+        if refused.busy.is_some() || !matches!(refused.fit, Some(Refusal::Stale(_) | Refusal::Unread)) {
             return None;
         }
         let key = home.key();

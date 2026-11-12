@@ -283,7 +283,7 @@ impl<'a> Probe<'a> {
 impl Drop for Probe<'_> {
     fn drop(&mut self) {
         for d in [&self.clone, &self.neighbour, &self.scratch, &self.inbox, &self.tmp] {
-            let _ = std::fs::remove_dir_all(d);
+            let _ = crate::hostdir::remove_tree(d);
         }
     }
 }

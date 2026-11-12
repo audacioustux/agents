@@ -108,7 +108,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 if !dir.starts_with(&ctx.clones) || dir == ctx.clones {
                     bail!("{} is outside relay's clones; refusing", dir.display());
                 }
-                std::fs::remove_dir_all(dir).with_context(|| format!("removing {}", dir.display()))?;
+                crate::hostdir::remove_tree(dir).with_context(|| format!("removing {}", dir.display()))?;
             }
             ctx.wipe_job_files(&name)?;
             // The ref a review read its branch by is the review's own, and goes with it.

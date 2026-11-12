@@ -2,10 +2,11 @@
 //! `view status` reads, for this project or every project on the machine, and
 //! draws its panes to fit the window: the jobs, any decisions waiting, the
 //! selected job, and the accounts. Each pane scrolls on its own; `?` lists the
-//! keys. It writes no state. A reinstalled relay takes over the window on its
+//! keys. `u` swaps the board for the quota chart of `view usage`, refolded as readings land. It writes no state. A reinstalled relay takes over the window on its
 //! own, so nothing needs to restart the board after an upgrade.
 
 mod board;
+mod chart;
 mod draw;
 mod pane;
 mod ui;
@@ -26,7 +27,9 @@ use ratatui::crossterm::{cursor, execute};
 use crate::bus::now_micros;
 use crate::systems::view::machine::Scope;
 use board::Board;
-use ui::{Action, Ui};
+use chart::Chart;
+pub use chart::Spec as ChartSpec;
+use ui::{Action, Ui, View};
 
 /// Why the board closed.
 enum Close {
@@ -53,8 +56,8 @@ impl Drop for Mouse {
 
 /// Runs the board until a quit key, or SIGTERM, SIGHUP or SIGINT, each of which gives the terminal
 /// back as `q` does (and exits with 128 plus its number). Redraws on every project's events (the accounts are shared), on any key, click
-/// or resize, and each second for the clock.
-pub fn run(scope: Scope<'_>, all: bool, everywhere: bool) -> Result<()> {
+/// or resize, and each second for the clock. With `chart`, it opens on the quota chart of those readings.
+pub fn run(scope: Scope<'_>, all: bool, everywhere: bool, chart: Option<ChartSpec>) -> Result<()> {
     // A bus that cannot be watched is left out: the read names its project as unreadable.
     let bell = crate::os::Doorbell::watch_readable(&crate::ctx::buses_in(scope.root))?;
     let (tx, rang) = mpsc::channel();
@@ -63,6 +66,10 @@ pub fn run(scope: Scope<'_>, all: bool, everywhere: bool) -> Result<()> {
     let close = ratatui::run(|terminal| {
         let _mouse = Mouse::capture()?;
         let mut ui = Ui::new(all, everywhere, scope.home.is_some());
+        // Opened on the chart, the board is not read until `u` asks for it: only it starts readings.
+        if let Some(spec) = chart {
+            (ui.usage, ui.view) = (spec, View::Usage);
+        }
         board_loop(terminal, scope, &mut ui, &rang, &handoff)
     })?;
     match close {
@@ -143,6 +150,15 @@ fn read(scope: Scope<'_>, ui: &Ui) -> Result<Board> {
     Ok(Board::new(scope.cfg, &m, &room, &accounts, ui.shown.all, ui.shown.everywhere, now_micros()))
 }
 
+/// Folds the chart again at `now`; one that cannot be read keeps the last good chart, with the cause
+/// above it. Reads the buses and nothing else: no reading is started.
+fn refold(scope: Scope<'_>, ui: &mut Ui, now: u64) {
+    match Chart::read(scope, &ui.usage, now) {
+        Ok(c) => (ui.chart, ui.error) = (Some(c), None),
+        Err(e) => ui.error = Some(format!("read failed (chart as of its last read): {e:#}")),
+    }
+}
+
 fn board_loop(
     terminal: &mut DefaultTerminal,
     scope: Scope<'_>,
@@ -163,14 +179,18 @@ fn board_loop(
             if crate::os::binary_version() != version {
                 return Ok(Close::Upgraded);
             }
-            match read(scope, ui) {
-                Ok(b) => {
-                    (board, ui.error) = (b, None);
-                    good_at = crate::os::local(jiff::Timestamp::now()).strftime("%H:%M:%S %Z").to_string();
+            if ui.view == View::Usage {
+                refold(scope, ui, now_micros());
+            } else {
+                match read(scope, ui) {
+                    Ok(b) => {
+                        (board, ui.error) = (b, None);
+                        good_at = crate::os::local(jiff::Timestamp::now()).strftime("%H:%M:%S %Z").to_string();
+                    }
+                    Err(e) => ui.error = Some(format!("read failed (board as of {good_at}): {e:#}")),
                 }
-                Err(e) => ui.error = Some(format!("read failed (board as of {good_at}): {e:#}")),
+                ui.sync(&board);
             }
-            ui.sync(&board);
             (read_at, changed) = (Instant::now(), true);
         }
         // Drawn on a change, else once a second for the clock: an idle board stays quiet.
@@ -191,6 +211,11 @@ fn board_loop(
             Action::Quit => return Ok(Close::Quit),
             Action::ToggleAll => (ui.shown.all, stale) = (!ui.shown.all, true),
             Action::ToggleEverywhere if ui.can_toggle => (ui.shown.everywhere, stale) = (!ui.shown.everywhere, true),
+            Action::Chart => {
+                ui.apply(action, &board);
+                stale = true;
+            }
+            Action::Trend => ui.apply(action, &board),
             Action::Open => {
                 if let Some(text) = ui.detail(&board).page.clone()
                     && let Err(e) = page(terminal, &text, handoff)

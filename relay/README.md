@@ -138,10 +138,10 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one. A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends and its runner has exited (it may re-review or wake the dispatcher after the end), and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |
-| `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)) |
+| `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)); `u` swaps it for the quota rows ([usage](#usage)), `c` there for the chart |
 | `relay view events` | The merged event log |
 | `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |
-| `relay view usage [--meter NAME] [--account H:L] [--harness H] [--since DURATION]` | Each account's quota over time as a chart in the terminal, the floors drawn across it ([usage](#usage)); inside a project, its accounts from every project's readings; outside one, every account |
+| `relay view usage [--meter NAME] [--account H:L] [--harness H] [--since DURATION] [--chart] [--watch]` | Each account's quota as a row: gauge, sparkline, pace, and what the pace comes to by the reset ([usage](#usage)); `--chart` the line chart over time instead; inside a project, its accounts from every project's readings; outside one, every account. `--watch` opens `view watch` on the rows, redrawn as readings land |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it, judged as the dispatcher judges it (a full account is `busy`, not `ready`); `show` starts a reading of each stale account and says `refreshing`. A fresh reading (one under way anywhere on the machine is waited for); switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout), noting when no review has accepted its tip / delete its clone and records |
 | `relay land gc [--dry-run]` | Remove what finished jobs no longer need: build outputs, old clones, old logs ([disk](#disk)) |
@@ -245,7 +245,7 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   board a gauge is green, yellow within 10 points of its floor and red at it. `room/day`
   is the account's room, which dispatch ranks shared among the sessions in `run` and
   the next one, and `▸` the one the next start would take, also named
-  in the title with the floors. A stale reading says how old it is (`stale (read 3h ago)`).
+  in the title with the floors. A stale reading says how old it is (`stale (read 3h ago)`), or, when the reads since gave nothing, why (`reading timed out after 180 s (3 tries since Nov 12 18:08 +06); read 3h ago`).
   Who a home is signed in as is in `--json` (`identity`); twins say `same sign-in as`.
   A narrow window shrinks the bars (to five cells) before it cuts a name.
 - **Readings.** Showing the accounts in a project (`view status`, `view watch`, `quota
@@ -253,6 +253,14 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   says `refreshing claude:a, …` until it lands. `view status --json` does too, with the
   accounts in a top-level `refreshing` list beside the folded state (absent when none). The machine-wide pane outside every
   project starts none: a reading is taken by a project's rules.
+- **The quota rows.** `u` swaps the board for the rows of [`view usage`](#usage), drawn
+  by the same code, and `u` again brings the board back; `c` there turns the rows into the
+  line chart and back. They refold as quota readings
+  land on any project's bus, for the same accounts `view usage` shows (inside a project
+  its own; outside one, every account). While they show, only `q`, `?`, `u` and `c` do anything,
+  and it reads the buses and nothing else: no reading is started (the board's accounts pane
+  does that), and nothing is written. `relay view usage --watch` opens on the rows,
+  `--watch --chart` on the chart. A window too short for every row says how many it leaves out.
 - **What stays put.** The selection follows a job by name as rows move; a failed
   read keeps the last good board with the cause in red in the title, and the next
   read retries; columns are a fixed set (project when every project shows, job, state,
@@ -495,6 +503,12 @@ handlers as untrusted.
   session left uncommitted or untracked are not there for it. The checkout is a fresh
   clone with a configuration of its own, so the session's `.git/config` cannot name a
   program for the host to run. Because it is fresh, a build starts from nothing.
+  What the check leaves behind never blocks the next one: its directory (the checkout and
+  its `TMPDIR`) is cleared before each run and after it, and a directory a test set to mode
+  `0o000` is made owner-readable and removed (a symlink in it is unlinked, never followed).
+  A directory that still cannot be cleared is logged on the job's events as
+  `cleanup-failed` with its path, and the check that needed it is `check-could-not-run`
+  ("could not clear the check directory ..."), not a failed checkout.
 - **In the session's sandbox plan** (the repository read-only, the same network and
   limits), under `hooks.command_timeout_seconds` (raise it for a long suite), but
   with the session's clone and **its account out of sight**: the check cannot read
@@ -668,15 +682,45 @@ its runs' alone.
 
 ## Usage
 
-`relay view usage` charts each account's quota over time, printed inline at the
-terminal's width so it stays in scrollback: one line per account, time across
-(in your local zone), utilization 0–100 % up. A reset is a drop. The policy's
-`floor` is drawn across it (`┄`), and the `floor_near_reset` one (`╌`) when the
-policy sets it, so the room left is the gap. Each line ends in its id (`1`, `2`,
-..., then `a`, `b`, ...), which needs no colour; under the chart, each id's
-account and meter with its last reading and when that meter resets, wrapped to
-the terminal's width, never cut. A narrow terminal gets shorter time labels, and
-a very narrow one none.
+`relay view usage` is a table of each account's quota, printed inline at the
+terminal's width so it stays in scrollback: one row per account and meter, the
+one that resets soonest first, so the top row is the one to act on.
+
+    claude:tj.pro     ██████████│░  91%  ▁▂▂▃▃▄▄▅▅▆▆▆▇▇  +13%/d  resets 19h    full now
+    claude:studyac17  ██▊░░░░░░░│░  23%             ▂▂▃   +8%/d  resets 5d22h  ~72% at reset: 28% unused
+
+- **Gauge.** The bar, floor mark (`│`) and percent of `quota show`, the
+  same code, coloured on a terminal by how close it is to the floor (green, yellow
+  within ten points, red at it). Then when it resets.
+- **Sparkline.** The meter's level across the `--since` window, oldest at the left:
+  the window cut into 14 equal buckets (fewer on a narrow terminal), each the level
+  at its last reading, `▁` for 0 % up to `█` for 100 %. A bucket with no reading
+  repeats the one before it; before the first reading, blank. A reset is the
+  drop it is.
+- **Pace.** How fast the meter is filling, in percent of the window per day: the
+  rise across the readings of the last 24 hours, counted from the last reset
+  in them. A reset is the meter's own statement: its reset time moving on by more
+  than an hour. A level that dips a point between readings, or a reset time that
+  shifts by a minute, is jitter and starts nothing; a pace never goes below `+0%/d`.
+  Under two readings, or readings less than an hour apart, there is no pace (`—`).
+- **Outlook.** The level at the reset if the pace holds, from the last reading, and
+  the floor in force then (`floor_near_reset` as the reset nears). Where it reaches
+  the floor first: `full in 1h at this pace` (`full now` when it is there), full
+  being the floor, where dispatch stops. Where it does not: `~41% at reset: 59%
+  unused`, the quota that will go to waste. No pace, no reset time, or a reset that has
+  passed: `—`.
+- **The label** is the account, and the meter when it is not claude's 7-day one
+  (`omp:w openai-codex/7 days`).
+- **Narrow.** The bar shrinks first (to five cells), then the sparkline (to six); then
+  each outlook moves to a line under its row, and past that a line is cut.
+- **`--chart`** prints the line chart instead: one line per account, time across
+  (in your local zone), utilization 0–100 % up. A reset is a drop. The policy's
+  `floor` is drawn across it (`┄`), and the `floor_near_reset` one (`╌`) when the
+  policy sets it, so the room left is the gap. Each line ends in its id (`1`, `2`,
+  ..., then `a`, `b`, ...), which needs no colour; under the chart, each id's
+  account and meter with its last reading and when that meter resets, wrapped to
+  the terminal's width, never cut. A narrow terminal gets shorter time labels, and
+  a very narrow one none. Many accounts overlap on it, which is why it is not the default.
 
 - **What it reads.** The readings already on the bus, as the project's fold takes
   them in: a quota command's (`quota` `reading` events) and a live session's
@@ -684,7 +728,7 @@ a very narrow one none.
   in `programs.json`), and starts no reading. Every
   project's bus on this machine is read, in a project or outside one: an account
   is the machine's, so where a reading happened to be taken says nothing about
-  whose it is. An account read by several projects is one line, its readings
+  whose it is. An account read by several projects is one row, its readings
   merged by time, one seen on two buses kept once.
 - **Whose accounts.** Outside a project, every account. Inside one, only those it
   can dispatch to: the accounts its dispatcher considers, so its enabled
@@ -694,19 +738,29 @@ a very narrow one none.
 - **Which meter.** By default each account's weekly meters: those whose name, as
   `view status` shows it, says a 7-day or weekly window (`7 days`,
   `openai-codex/7 days`, `minimax-code/General 7 Day`, `google-antigravity/Gemini
-  (Weekly)`), one line each; `--meter NAME` picks another, by its name or as the
+  (Weekly)`), one row each; `--meter NAME` picks another, by its name or as the
   board shows it (`five_hour` or `5 hours`). A reading without that meter adds no
   point.
 - **Which accounts and when.** `--account harness:label` (repeatable) and
   `--harness` (repeatable) narrow it; `--since` (`12h`, `7d`, `2w`; default `7d`)
   is the window.
-- **Piped**, it is plain text with no colour. `--json` gives the readings instead:
+- **Live.** `--watch` opens [`view watch`](#the-board) on the rows (`--watch --chart`
+  on the chart) with the same `--meter`, `--account`, `--harness` and `--since`; it is
+  redrawn as readings land, `c` switches between rows and chart, `u` to the job board
+  and back, `q` quits. It cannot be combined with `--json`. Without `--watch`, the
+  rows print once.
+- **Piped**, it is plain text with no colour. `--json` gives the readings:
   `accounts.<account>.<meter>` is a list of `{t, utilization, resets_at}` (`t` in
   bus microseconds, `resets_at` in unix seconds, `utilization` a fraction), with
-  `floor` and `floor_near_reset` beside it.
+  `floor` and `floor_near_reset` beside it; and `rows`, one per row of the table in
+  its order: `account`, `meter`, `readings`, `utilization`, `floor`, `resets_at`,
+  `pace_per_day` (a fraction of the window), `projected_at_reset` (a fraction; null
+  when it would be full first, or without a pace), `full_in_seconds` (null unless
+  it would), `outlook` as printed and `sparkline`. `pace_window_hours` says how far
+  back the pace looks.
 - **Bare labels.** Old buses name some accounts by label alone (`adventor`).
   relay has no rule saying which harness such a label was on, so their readings
-  are left out, and the chart names them (`left out: ...`; `left_out` in `--json`).
+  are left out, and the view names them (`left out: ...`; `left_out` in `--json`).
 - Meters only: never who an account is signed in as.
 
 ## Escalation
@@ -926,7 +980,18 @@ that finds a reading under way (any project's) waits for it, then reads only wha
 it did not. A reading relay asks for itself joins the project's pending set
 (`<state>/quota.pending`), which one background reader per project reads to the
 last, waiting its turn for the machine's reader, before it exits: an account shown
-as `refreshing` is always read. An account is used only when:
+as `refreshing` is always read. The accounts due are read at the same time, one process each, under
+that one hold of the machine's reader role, so a refresh of every account takes as long as the slowest.
+
+A read ends at `accounts.read_secs` (default 180, at least 30: refused below it when the config
+loads). `claude -p /usage` also computes "What's contributing to your usage?" from this machine's
+local sessions, and `claude` has no flag or setting that skips it, so a heavy account is slow, slower
+under load (58 s at load average 77). A read that gives nothing records why (`unreadable` carries
+`why`): `timed out after 180 s`, `exited 1: <last line of stderr>` (cut, with anything shaped like an
+email address or a token taken out; no raw output is kept), or `printed no meters`, with how many reads
+in a row failed and since when. The board's state cell, `quota show --json` (`readFailure`) and a
+queued job's reason say it instead of `stale` or `usage unreadable`: `reading timed out after 180 s
+(3 tries since Nov 12 18:08 +06)`. Any good reading ends it, however it came (the quota command, a session's rate events, another project's or a twin home's reading); a failure after it starts a count of its own. The stderr tail has terminal controls replaced. An account is used only when:
 
 - it has a reading, and not a stale one (unread or stale is not the same as
   having room; a job waits while a fresh one is taken);

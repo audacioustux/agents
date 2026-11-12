@@ -10,7 +10,7 @@ use clap::Subcommand;
 use jiff::tz::TimeZone;
 
 use crate::accounts::{self, harness_of};
-use crate::bus::{QuotaEvent, now_micros, secs};
+use crate::bus::{QuotaEvent, ReadFailure, now_micros, secs};
 use crate::config::{Config, Limits};
 use crate::ctx::Ctx;
 use crate::harness::report::zone_of;
@@ -245,48 +245,86 @@ fn read_accounts(ctx: &Ctx, select: &Select<'_>) -> Result<Taken> {
     let now_s = secs(now);
     let mut read: Vec<String> = taken.iter().map(Home::key).collect();
     let (mut unreadable, mut signed_out) = (Vec::new(), Vec::new());
-    for (home, text) in readings {
-        let h = harness_of(home);
-        let meters = text.as_ref().map(|(t, zone)| h.parse_quota(t, now_s, zone)).unwrap_or_default();
+    for (home, run) in readings {
         let account = home.key();
-        let sign_in = match accounts::sign_in(home) {
-            SignIn::As(id) => Some(id.stamp),
-            _ => None,
-        };
-        if !meters.is_empty() {
-            read.push(account.clone());
-            port.emit(QuotaEvent::Reading { account, meters, sign_in })?;
-        } else if text.as_ref().is_some_and(|(t, _)| h.lapsed(t)) {
-            signed_out.push(account.clone());
-            port.emit(QuotaEvent::SignedOut { account, sign_in })?;
-        } else {
-            // An unreadable account stays unread, which is not the same as having room.
-            unreadable.push(account.clone());
-            port.emit(QuotaEvent::Unreadable { account })?;
+        match record(&port, home, run, now_s)? {
+            Outcome::Read => read.push(account),
+            Outcome::SignedOut => signed_out.push(account),
+            Outcome::Unreadable => unreadable.push(account),
         }
     }
     Ok(Taken { read, unreadable, signed_out })
 }
 
-/// What the home's quota command printed, and the zone it ran in: its environment is the config's,
-/// never relay's own, so a time it printed with no zone is in that environment's `TZ`.
-fn read(ctx: &Ctx, home: &Home) -> Option<(String, TimeZone)> {
-    let inv = ctx.cfg.locate(home.harness, harness_of(home).quota(home)?).ok()?;
+/// How one account's read came out.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Read,
+    SignedOut,
+    Unreadable,
+}
+
+/// Records what `run` of `home` found: a reading, a sign-out, or that it gave nothing and why.
+fn record(port: &crate::bus::Port<QuotaEvent>, home: &Home, run: Run, now_s: i64) -> Result<Outcome> {
+    let h = harness_of(home);
+    let text = run.text.as_ref();
+    let meters = text.map(|(t, zone)| h.parse_quota(t, now_s, zone)).unwrap_or_default();
+    let account = home.key();
+    let sign_in = match accounts::sign_in(home) {
+        SignIn::As(id) => Some(id.stamp),
+        _ => None,
+    };
+    if !meters.is_empty() {
+        port.emit(QuotaEvent::Reading { account, meters, sign_in })?;
+        Ok(Outcome::Read)
+    } else if text.is_some_and(|(t, _)| h.lapsed(t)) {
+        port.emit(QuotaEvent::SignedOut { account, sign_in })?;
+        Ok(Outcome::SignedOut)
+    } else {
+        // An unreadable account stays unread, which is not the same as having room; and it says why.
+        let why = Some(run.failure.unwrap_or(ReadFailure::NoMeters));
+        port.emit(QuotaEvent::Unreadable { account, why })?;
+        Ok(Outcome::Unreadable)
+    }
+}
+
+/// What running a home's quota command came to: what it printed and the zone it ran in (its
+/// environment is the config's, never relay's own, so a time it printed with no zone is in that
+/// environment's `TZ`), and why it failed when it did.
+struct Run {
+    text: Option<(String, TimeZone)>,
+    failure: Option<ReadFailure>,
+}
+
+/// Runs the home's quota command for at most `accounts.read_secs`.
+fn read(ctx: &Ctx, home: &Home) -> Run {
+    let Some(inv) = harness_of(home).quota(home).and_then(|i| ctx.cfg.locate(home.harness, i).ok()) else {
+        return Run { text: None, failure: Some(ReadFailure::Exited { code: None, stderr: String::new() }) };
+    };
     let env = sandbox::session_env(ctx, &inv);
     let tz = env.iter().find(|(k, _)| k == "TZ").map(|(_, v)| v.to_string_lossy());
     let zone = zone_of(tz.as_deref());
+    let limit = ctx.cfg.accounts.read_secs;
     let out = Command::new("timeout")
-        .arg("90")
+        .arg(limit.to_string())
         .arg(&inv.program)
         .args(&inv.args)
         .env_clear()
         .envs(env)
         .current_dir(&ctx.state)
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    Some((String::from_utf8_lossy(&out.stdout).into_owned(), zone))
+        .stderr(Stdio::piped())
+        .output();
+    let Ok(out) = out else {
+        return Run { text: None, failure: Some(ReadFailure::Exited { code: None, stderr: String::new() }) };
+    };
+    let failure = match out.status.code() {
+        Some(0) => None,
+        // `timeout` ends the command at its limit and says so by exiting 124.
+        Some(124) => Some(ReadFailure::TimedOut { secs: limit }),
+        code => Some(ReadFailure::exited(code, &String::from_utf8_lossy(&out.stderr))),
+    };
+    Run { text: Some((String::from_utf8_lossy(&out.stdout).into_owned(), zone)), failure }
 }
 
 /// One account, as `show --json` reports it. What relay keeps of who it is signed in as is
@@ -307,6 +345,10 @@ struct Row<'a> {
     running: usize,
     meters: Option<&'a Meters>,
     read_at: Option<u64>,
+    /// Why the reads since the last good one gave nothing, when they did not: `timed out after 90 s
+    /// (3 tries since ...)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    read_failure: Option<String>,
     /// Room left per day on the meters that govern, as dispatch ranks it, when its quota fits.
     #[serde(skip_serializing_if = "Option::is_none")]
     score: Option<f64>,
@@ -389,9 +431,15 @@ fn refusal_cell(r: &accounts::Refusal, st: Option<&AccountState>, now: u64) -> S
         accounts::Refusal::Limited => {
             format!("limited until {}", accounts::fmt_time(st.and_then(|s| s.limited_until).unwrap_or(0)))
         }
-        accounts::Refusal::Stale => st
-            .and_then(|s| s.read_at)
-            .map_or_else(|| r.describe(), |t| format!("stale (read {} ago)", crate::systems::view::ago(now, t))),
+        accounts::Refusal::Stale(why) => {
+            let ago = st.and_then(|s| s.read_at).map(|t| crate::systems::view::ago(now, t));
+            match (why, ago) {
+                // Why the reads since gave nothing, which `stale` alone leaves out.
+                (Some(_), Some(ago)) => format!("{}; read {ago} ago", r.describe()),
+                (None, Some(ago)) => format!("stale (read {ago} ago)"),
+                (Some(_) | None, None) => r.describe(),
+            }
+        }
         // The meter's gauge shows it.
         accounts::Refusal::AtFloor(_) => "at floor".to_owned(),
         r => r.describe(),
@@ -689,6 +737,7 @@ fn machine_wide(room: &Room, now: u64) -> AccountsView {
             state,
             meters: st.map(|s| &s.meters),
             read_at: st.and_then(|s| s.read_at),
+            read_failure: st.and_then(AccountState::failure).map(|f| f.describe()),
             score: None,
             floor: Floor::default(),
             by_model: Vec::new(),
@@ -785,6 +834,7 @@ impl<'a> Judge<'a> {
             state: own.state,
             meters: st.map(|s| &s.meters),
             read_at: st.and_then(|s| s.read_at),
+            read_failure: st.and_then(AccountState::failure).map(|f| f.describe()),
             score: own.score,
             floor: own.floor,
             by_model: by_model
@@ -864,6 +914,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::bus::{Event, Stamped};
     use crate::config::tempdir;
     use crate::harness::Meter;
     use crate::world::Job;
@@ -1306,5 +1357,126 @@ mod tests {
         let cells = cells(&v);
         assert_eq!(cells[0][1], "at floor");
         assert_eq!(cells[0][2..4], ["openai-codex/5 hours", "██████████│█ 100%* 1h   "], "the meter that decides");
+    }
+
+    /// A project whose claude quota command is `script` (run by `sh`), read as home `a`, with
+    /// `accounts.read_secs` set to `limit` (below the config's minimum, as only a test may).
+    fn reader(d: &tempdir::Dir, script: &str, limit: u64) -> (Ctx, Home) {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let program = d.path().join("claude");
+        std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let text = format!("name = \"t\"\n[harness.claude]\nprogram = \"{}\"\n", program.display());
+        let mut cfg = Config::parse(&text, &repo).unwrap();
+        cfg.accounts.read_secs = limit;
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        std::fs::create_dir_all(&ctx.bus).unwrap();
+        std::fs::create_dir_all(&ctx.state).unwrap();
+        let dir = d.path().join("home-a");
+        std::fs::create_dir_all(&dir).unwrap();
+        (ctx, Home { harness: "claude", label: "a".into(), dir })
+    }
+
+    /// Reads `home` once and records it, as `read_accounts` does; the world the bus now folds to.
+    fn read_once(ctx: &Ctx, home: &Home) -> (Outcome, World) {
+        let outcome = record(&ctx.port(&Source(())), home, read(ctx, home), secs(now_micros())).unwrap();
+        (outcome, World::fold(&ctx.events().unwrap()))
+    }
+
+    /// The owner's measurement of 2026-11-12: `claude:studyac17` read 58 s at load 77 and timed out
+    /// under the fixed 90 s, and nothing said so; the job waited 3 h on `reading is stale`.
+    #[test]
+    fn a_read_past_its_limit_is_recorded_as_timed_out_and_the_board_says_why() {
+        let d = tempdir::Dir::new();
+        let (ctx, home) = reader(&d, "exec sleep 30", 1);
+        let started = std::time::Instant::now();
+        let (outcome, w) = read_once(&ctx, &home);
+        assert!(started.elapsed().as_secs() < 20, "ended at its limit, not when the reader chose to");
+        assert_eq!(outcome, Outcome::Unreadable);
+        let st = &w.accounts[&home.key()];
+        let failing = st.failing.as_ref().expect("recorded");
+        assert_eq!((failing.why.clone(), failing.tries), (ReadFailure::TimedOut { secs: 1 }, 1));
+        // Never read: the board says why, in place of `usage unreadable (sign it in ...)`.
+        let now = now_micros();
+        let held = accounts::fit(&home, Some(st), None, &Limits::default(), now).unwrap_err().describe();
+        assert!(held.starts_with("reading timed out after 1 s (1 try since "), "{held}");
+        // A reading that went stale: the reason replaces `stale`, and says how long ago it was read.
+        let mut old = st.clone();
+        old.read_at = Some(now - 3 * 3_600 * 1_000_000);
+        let held = accounts::fit(&home, Some(&old), None, &Limits::default(), now).unwrap_err();
+        assert!(matches!(held, accounts::Refusal::Stale(Some(_))), "{held:?}");
+        let cell = refusal_cell(&held, Some(&old), now);
+        assert!(
+            cell.starts_with("reading timed out after 1 s (1 try since ") && cell.ends_with("; read 3h ago"),
+            "{cell}"
+        );
+        // Another failure is another try, from the same start.
+        let (_, w) = read_once(&ctx, &home);
+        let again = w.accounts[&home.key()].failing.as_ref().unwrap();
+        assert_eq!((again.tries, again.since), (2, failing.since));
+        assert!(again.describe().contains("(2 tries since "), "{}", again.describe());
+    }
+
+    #[test]
+    fn a_failed_exit_keeps_a_short_stderr_tail_and_never_an_email_or_a_token() {
+        let d = tempdir::Dir::new();
+        let script = "echo 'first line' >&2\n\
+            echo 'error: sign-in for ada@fixture.invalid refused, token sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123' >&2\n\
+            exit 3";
+        let (ctx, home) = reader(&d, script, 30);
+        let (outcome, w) = read_once(&ctx, &home);
+        assert_eq!(outcome, Outcome::Unreadable);
+        let why = w.accounts[&home.key()].failing.as_ref().unwrap().why.clone();
+        let ReadFailure::Exited { code, stderr } = &why else { panic!("{why:?}") };
+        assert_eq!(*code, Some(3));
+        assert!(stderr.starts_with("error: sign-in for … refused, token …"), "{stderr}");
+        let everything = format!("{:?}", ctx.events().unwrap());
+        for secret in ["ada@fixture.invalid", "sk-ant-oat01", "first line"] {
+            assert!(!everything.contains(secret), "{secret} reached the bus");
+        }
+        assert!(everything.contains("Exited"), "{everything}");
+        // Long output is cut, from the front.
+        let long = ReadFailure::exited(Some(1), &format!("{}\n", "word ".repeat(100)));
+        let ReadFailure::Exited { stderr, .. } = long else { panic!() };
+        assert!(stderr.chars().count() <= ReadFailure::TAIL, "{}", stderr.len());
+    }
+
+    /// Review of #64: a stderr tail is persisted and later printed to a terminal, so it holds no control
+    /// character, an escape or a one-character CSI (U+009B) included.
+    #[test]
+    fn a_stderr_tail_holds_no_terminal_control() {
+        for raw in ["error: \x1b[2Jrefused\n", "error: \u{9b}2Jrefused", "a\rb\x07c\x7fd"] {
+            let ReadFailure::Exited { stderr, .. } = ReadFailure::exited(Some(1), raw) else { panic!() };
+            assert!(!stderr.chars().any(char::is_control), "{raw:?} -> {stderr:?}");
+        }
+        let ReadFailure::Exited { stderr, .. } = ReadFailure::exited(Some(1), "error: \x1b[2Jrefused") else {
+            panic!()
+        };
+        assert_eq!(stderr, "error: [2Jrefused");
+        // An event that carries one (written by hand, or by another build) is still printed clean.
+        let hand = ReadFailure::Exited { code: Some(1), stderr: "x\x1b[2Jy".into() };
+        assert!(!hand.describe().chars().any(char::is_control), "{:?}", hand.describe());
+    }
+
+    #[test]
+    fn a_good_reading_clears_what_a_failed_one_said_and_exit_zero_without_meters_says_so() {
+        let d = tempdir::Dir::new();
+        let (ctx, home) = reader(&d, "echo 'nothing here'", 30);
+        let (_, w) = read_once(&ctx, &home);
+        assert_eq!(w.accounts[&home.key()].failing.as_ref().unwrap().why, ReadFailure::NoMeters);
+        let good = QuotaEvent::Reading { account: home.key(), meters: Meters::new(), sign_in: None };
+        ctx.port(&Source(())).emit(good).unwrap();
+        let w = World::fold(&ctx.events().unwrap());
+        assert_eq!(w.accounts[&home.key()].failing, None);
+    }
+
+    #[test]
+    fn an_old_unreadable_event_without_a_reason_still_reads() {
+        let e: QuotaEvent = serde_json::from_str(r#"{"type":"unreadable","account":"claude:a"}"#).unwrap();
+        assert_eq!(e, QuotaEvent::Unreadable { account: "claude:a".into(), why: None });
+        let w = World::fold(&[Stamped { t: 5, event: Event::Quota(e), from: None }]);
+        assert_eq!((w.accounts["claude:a"].unreadable_at, &w.accounts["claude:a"].failing), (Some(5), &None));
     }
 }

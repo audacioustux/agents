@@ -12,13 +12,16 @@ use ratatui::widgets::{
 
 use super::board::Board;
 use super::pane::{Column, Pane, Step, Tone, cut, heights, width, widths, wrap};
-use super::ui::{Action, Id, Ui};
+use super::ui::{Action, Id, Ui, View};
 use crate::world::Status;
 
 const GAP: u16 = 2;
 const MARK: &str = "› ";
 
 pub fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
+    if ui.view == View::Usage {
+        return super::chart::draw(f, ui);
+    }
     let area = f.area();
     // Borders and a heading row; an empty accounts pane says why in two rows.
     let want = |n: usize| u16::try_from(n + 3).unwrap_or(u16::MAX);
@@ -221,20 +224,30 @@ fn scrollbar(f: &mut Frame<'_>, pane: &Pane) {
 }
 
 /// The bottom line: each key's hint, clickable where it is drawn, then a note on selecting text.
-fn key_line(f: &mut Frame<'_>, area: Rect, ui: &Ui) -> Vec<(Rect, Action)> {
-    let mut keys = vec![
-        ("q", "quit", Action::Quit),
-        ("?", "help", Action::Help),
-        ("↑", "", Action::Step(Step::Rows(-1))),
-        ("↓", "", Action::Step(Step::Rows(1))),
-        ("PgUp", "", Action::Step(Step::Pages(-1))),
-        ("PgDn", "", Action::Step(Step::Pages(1))),
-        ("Tab", "pane", Action::Cycle(1)),
-        ("⏎", "pager", Action::Open),
-        ("a", if ui.shown.all { "recent" } else { "older" }, Action::ToggleAll),
-    ];
-    if ui.can_toggle {
-        keys.push(("p", if ui.shown.everywhere { "this project" } else { "all projects" }, Action::ToggleEverywhere));
+pub(super) fn key_line(f: &mut Frame<'_>, area: Rect, ui: &Ui) -> Vec<(Rect, Action)> {
+    let mut keys = vec![("q", "quit", Action::Quit), ("?", "help", Action::Help)];
+    if ui.view == View::Usage {
+        keys.push(("u", "board", Action::Chart));
+        keys.push(("c", if ui.usage.chart { "rows" } else { "chart" }, Action::Trend));
+    } else {
+        keys.extend([
+            ("↑", "", Action::Step(Step::Rows(-1))),
+            ("↓", "", Action::Step(Step::Rows(1))),
+            ("PgUp", "", Action::Step(Step::Pages(-1))),
+            ("PgDn", "", Action::Step(Step::Pages(1))),
+            ("Tab", "pane", Action::Cycle(1)),
+            ("⏎", "pager", Action::Open),
+            ("a", if ui.shown.all { "recent" } else { "older" }, Action::ToggleAll),
+        ]);
+        if ui.can_toggle {
+            keys.push((
+                "p",
+                if ui.shown.everywhere { "this project" } else { "all projects" },
+                Action::ToggleEverywhere,
+            ));
+        }
+        // Last, so a narrow window cuts it before the keys that were there first.
+        keys.push(("u", "quota", Action::Chart));
     }
     let (mut spans, mut hits, mut x) = (Vec::new(), Vec::new(), 0u16);
     for (key, label, action) in keys {
@@ -264,6 +277,8 @@ const HELP: &[&str] = &[
     "Enter                      the selected job in $PAGER",
     "a                          older jobs too, or recent ones only",
     "p                          every project, or this one",
+    "u                          the quota rows, or the job board (the quota: q ? u c only)",
+    "c                          in the quota view, the line chart, or the rows",
     "?                          this help         q, Esc, ^C   quit",
     "",
     "The wheel scrolls the pane under it; a click selects a job or focuses a pane.",
@@ -274,7 +289,7 @@ const HELP: &[&str] = &[
     "since: how long a job has run, been queued, or been over.",
 ];
 
-fn help(f: &mut Frame<'_>, area: Rect) {
+pub(super) fn help(f: &mut Frame<'_>, area: Rect) {
     let w = u16::try_from(HELP.iter().map(|l| width(l)).max().unwrap_or(0) + 4).unwrap_or(u16::MAX).min(area.width);
     let h = u16::try_from(HELP.len() + 2).unwrap_or(u16::MAX).min(area.height);
     let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);

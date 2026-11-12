@@ -371,7 +371,7 @@ mod tests {
     use super::*;
 
     fn m(u: f64, r: Option<i64>) -> Meter {
-        Meter { utilization: u, resets_at: r }
+        Meter { utilization: u, resets_at: r, ..Meter::default() }
     }
 
     fn claude(label: &str) -> Home {
@@ -486,7 +486,8 @@ mod tests {
         let now = secs(now_us);
         let omp = Home { harness: "omp", label: "default".into(), dir: PathBuf::from("/o") };
         let mut st = AccountState { read_at: Some(now_us - 1), ..Default::default() };
-        st.meters.insert("openai-codex/7 days".into(), m(0.2, Some(now + 86_400 * 5)));
+        st.meters
+            .insert("openai-codex/7 days".into(), Meter::named("openai-codex/7 days", 0.2, Some(now + 86_400 * 5)));
         assert!(fit(&omp, Some(&st), Some("openai-codex/gpt-5.2"), &Limits::default(), now_us).is_ok());
         assert!(matches!(
             fit(&omp, Some(&st), Some("anthropic/x"), &Limits::default(), now_us),

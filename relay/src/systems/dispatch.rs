@@ -520,8 +520,8 @@ mod tests {
         assert_eq!(next_due(&[(claude, Some(&a))], true, now_us), Some(stale_at));
         assert_eq!(next_due(&[(claude, Some(&a))], false, now_us), None, "staleness matters only to a waiting job");
 
-        a.meters.insert("five_hour".into(), Meter { utilization: 1.0, resets_at: Some(1_100) });
-        a.meters.insert("old".into(), Meter { utilization: 1.0, resets_at: Some(900) });
+        a.meters.insert("five_hour".into(), Meter { utilization: 1.0, resets_at: Some(1_100), ..Meter::default() });
+        a.meters.insert("old".into(), Meter { utilization: 1.0, resets_at: Some(900), ..Meter::default() });
         assert_eq!(next_due(&[(claude, Some(&a))], false, now_us), Some(1_100 * 1_000_000), "a future reset");
 
         let b = AccountState { limited_until: Some(1_050), unreadable_at: Some(now_us - 5), ..Default::default() };
@@ -553,15 +553,15 @@ mod tests {
     /// One omp account with both providers read just now at `codex` and `minimax` utilization.
     fn omp_world(jobs: &[(&str, Status, &str)], codex: f64, minimax: f64) -> (World, Vec<Home>) {
         let reset = i64::try_from(NOW_US / 1_000_000).unwrap() + 3600;
-        let meter = |utilization| Meter { utilization, resets_at: Some(reset) };
+        let meter = |name: &str, utilization| Meter::named(name, utilization, Some(reset));
         let mut world = World::default();
         world.accounts.insert(
             "omp:default".into(),
             AccountState {
                 read_at: Some(NOW_US - 1),
                 meters: [
-                    ("openai-codex/5 hours".to_owned(), meter(codex)),
-                    ("minimax-code/5 hours".to_owned(), meter(minimax)),
+                    ("openai-codex/5 hours".to_owned(), meter("openai-codex/5 hours", codex)),
+                    ("minimax-code/5 hours".to_owned(), meter("minimax-code/5 hours", minimax)),
                 ]
                 .into(),
                 ..Default::default()
@@ -589,7 +589,8 @@ mod tests {
         let reset = |hours: i64| Some(i64::try_from(NOW_US / 1_000_000).unwrap() + hours * 3600);
         let mut world = World::default();
         for (label, utilization, hours) in [("a", 0.5, 24), ("b", 0.2, 144)] {
-            let meters = [("seven_day".to_owned(), Meter { utilization, resets_at: reset(hours) })].into();
+            let meters =
+                [("seven_day".to_owned(), Meter { utilization, resets_at: reset(hours), ..Meter::default() })].into();
             let st = AccountState { read_at: Some(NOW_US - 1), meters, ..Default::default() };
             world.accounts.insert(format!("claude:{label}"), st);
         }
@@ -652,7 +653,8 @@ mod tests {
         let reset = i64::try_from(NOW_US / 1_000_000).unwrap() + 3600;
         let state = |utilization| AccountState {
             read_at: Some(NOW_US - 1),
-            meters: [("seven_day".to_owned(), Meter { utilization, resets_at: Some(reset) })].into(),
+            meters: [("seven_day".to_owned(), Meter { utilization, resets_at: Some(reset), ..Meter::default() })]
+                .into(),
             ..Default::default()
         };
         let room = |accounts: &[(&str, AccountState)], world: &World| {
@@ -782,7 +784,10 @@ mod tests {
         let now_s = i64::try_from(NOW_US / 1_000_000).unwrap();
         let mut world = World::default();
         for &(label, utilization, hours) in accounts {
-            let meters = [("seven_day".to_owned(), Meter { utilization, resets_at: Some(now_s + hours * 3600) })];
+            let meters = [(
+                "seven_day".to_owned(),
+                Meter { utilization, resets_at: Some(now_s + hours * 3600), ..Meter::default() },
+            )];
             let st = AccountState { read_at: Some(read_at), meters: meters.into(), ..Default::default() };
             world.accounts.insert(format!("claude:{label}"), st);
         }

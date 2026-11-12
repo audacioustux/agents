@@ -258,7 +258,7 @@ pub fn rows(history: &History, limits: &Limits, since: u64, now: u64) -> Vec<Row
             let last = points.last()?;
             let read_s = i64::try_from(last.t / 1_000_000).unwrap_or(i64::MAX);
             let pace = pace(points, now);
-            let m = Meter { utilization: last.utilization, resets_at: last.resets_at };
+            let m = Meter { utilization: last.utilization, resets_at: last.resets_at, ..Meter::default() };
             Some(Row {
                 account: account.to_owned(),
                 meter: meter.to_owned(),

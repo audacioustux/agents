@@ -15,7 +15,8 @@ use serde_json::Value;
 use crate::harness::claude::strip_ansi;
 use crate::harness::report::{Report, duration_seconds};
 use crate::harness::{
-    Caps, Harness, Home, Invocation, Kind, Meter, Meters, Permissions, Reader, Refusal, Session, Task, printable,
+    Caps, Harness, Home, Invocation, Kind, Meter, Meters, Permissions, Reader, Refusal, Session, Task, Window,
+    printable,
 };
 
 #[derive(Debug)]
@@ -27,6 +28,37 @@ fn root(user_home: &Path) -> PathBuf {
 
 fn usable(dir: &Path) -> bool {
     dir.join("agent/agent.db").is_file()
+}
+
+/// What a window `omp usage` names under a provider measures: its length (`7 days`, `General 5
+/// Hour`, `Gemini (Weekly)`) and, when the name says one, the group of models it counts alone
+/// (`Gemini`, `Claude & GPT (shared)`). `General` is the provider's whole allowance. A name that
+/// says no length is a window of its own, of a length not said, scoped by that name.
+pub fn window_of(label: &str) -> Meter {
+    static LENGTH: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\(?\b(?:(\d+)\s*(hour|day|week|month)s?|(hourly|daily|weekly|monthly))\b\)?").expect("regex")
+    });
+    let label = label.trim();
+    let Some(c) = LENGTH.captures(label) else {
+        return Meter::new(Window::Other(None), 0.0, None).scope(label);
+    };
+    let unit = |u: &str| match u.to_ascii_lowercase().as_str() {
+        "hour" | "hourly" => 1,
+        "day" | "daily" => 24,
+        "week" | "weekly" => 7 * 24,
+        _ => 30 * 24,
+    };
+    let hours = match (c.get(1), c.get(2), c.get(3)) {
+        (Some(n), Some(u), _) => n.as_str().parse::<u32>().ok().and_then(|n| n.checked_mul(unit(u.as_str()))),
+        (_, _, Some(period)) => Some(unit(period.as_str())),
+        _ => None,
+    };
+    let window = hours.map_or(Window::Other(None), Window::of_hours);
+    let whole = c.get(0).map_or(0..0, |m| m.range());
+    let rest = format!("{} {}", &label[..whole.start], &label[whole.end..]);
+    let rest = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+    let meter = Meter::new(window, 0.0, None);
+    if rest.is_empty() || rest.eq_ignore_ascii_case("general") { meter } else { meter.scope(rest) }
 }
 
 /// "Openai Codex" is `openai-codex`, the prefix of its model ids.
@@ -180,8 +212,11 @@ impl Harness for Omp {
             }
             let (Some(p), Some(w)) = (&provider, WINDOW.captures(line)) else { continue };
             let used: f64 = w[2].parse().unwrap_or(0.0);
-            let meter =
-                Meter { utilization: used / 100.0, resets_at: w.get(3).map(|r| now_s + duration_seconds(r.as_str())) };
+            let meter = Meter {
+                utilization: used / 100.0,
+                resets_at: w.get(3).map(|r| now_s + duration_seconds(r.as_str())),
+                ..window_of(&w[1]).provider(p.as_str())
+            };
             // Several accounts under one provider: the fullest one speaks for it.
             let slot = out.entry(format!("{p}/{}", w[1].trim())).or_default();
             if meter.utilization >= slot.utilization {
@@ -197,8 +232,7 @@ impl Harness for Omp {
                 "omp needs a provider-qualified model (provider/name, e.g. openai-codex/gpt-5.2) to know whose quota it draws on".into(),
             ));
         };
-        let prefix = format!("{provider}/");
-        let found: Vec<&Meter> = meters.iter().filter(|(k, _)| k.starts_with(&prefix)).map(|(_, m)| m).collect();
+        let found: Vec<&Meter> = meters.values().filter(|m| m.provider.as_deref() == Some(provider)).collect();
         if found.is_empty() {
             return Err(Refusal(format!("cannot read omp's {provider} quota; not starting blind")));
         }
@@ -313,6 +347,29 @@ Openai Codex — 1 account\n  ● someone · plan: plus\n      ● 5 hours  ░�
         assert_eq!(Omp.meters_for(Some("openai-codex/gpt-5.2"), &m).unwrap().len(), 2);
         assert!(Omp.meters_for(Some("anthropic/claude-opus"), &m).unwrap_err().0.contains("not starting blind"));
         assert!(Omp.meters_for(Some("opus"), &m).is_err(), "an unqualified model cannot be metered");
+        let week = &m["openai-codex/7 days"];
+        assert_eq!(
+            (week.window, week.provider.as_deref(), week.scope.as_deref()),
+            (Window::Week, Some("openai-codex"), None)
+        );
+    }
+
+    /// Every window name `omp usage` printed on this machine, by its length and the group it counts.
+    #[test]
+    fn a_window_says_its_length_and_its_group() {
+        for (label, window, scope) in [
+            ("5 hours", Window::FiveHours, None),
+            ("7 days", Window::Week, None),
+            ("General 5 Hour", Window::FiveHours, None),
+            ("General 7 Day", Window::Week, None),
+            ("Claude & GPT (shared) (Weekly)", Window::Week, Some("Claude & GPT (shared)")),
+            ("Gemini (Weekly)", Window::Week, Some("Gemini")),
+            ("Daily", Window::Other(Some(24)), None),
+            ("tokens", Window::Other(None), Some("tokens")),
+        ] {
+            let m = window_of(label);
+            assert_eq!((m.window, m.scope.as_deref()), (window, scope), "{label}");
+        }
     }
 
     #[test]

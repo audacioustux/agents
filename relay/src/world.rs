@@ -334,6 +334,7 @@ pub struct AccountState {
     /// across projects, the latest change wins.
     #[serde(default)]
     pub signed_at: Option<u64>,
+    #[serde(deserialize_with = "crate::harness::deserialize_meters")]
     pub meters: Meters,
     /// Unix microseconds of the last reading.
     pub read_at: Option<u64>,
@@ -511,7 +512,8 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// fixed bus, so a fold that changes without a bump fails the tests.
 /// 13: `dispatched` records the model and provider; a job back in the queue has no account.
 /// 14: the development environment's warm-ups (`devshell`).
-const FOLD_VERSION: u32 = 16;
+/// 18: a meter says its window, provider and scope (17 is the decision seats, #63).
+const FOLD_VERSION: u32 = 18;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -1507,6 +1509,7 @@ mod tests {
             (14, 0x0599_7a27_1a95_7bbd),
             (15, 0x5351_e6de_0d8d_bfd8),
             (16, 0x5351_e6de_0d8d_bfd8),
+            (18, 0x0000_0000_0000_0000),
         ];
         let dispatched = |t, model: Option<&str>| {
             st(
@@ -1531,7 +1534,7 @@ mod tests {
             account: "omp:w".into(),
             meters: BTreeMap::from([(
                 "openai-codex/5 hours".to_owned(),
-                crate::harness::Meter { utilization: 0.5, resets_at: Some(99) },
+                crate::harness::Meter { utilization: 0.5, resets_at: Some(99), ..Default::default() },
             )]),
             sign_in: None,
         });
@@ -2321,7 +2324,7 @@ mod tests {
 
         fn read(at: u64, utilization: f64) -> AccountState {
             let mut a = AccountState { read_at: Some(at), ..AccountState::default() };
-            a.meters.insert("five_hour".into(), Meter { utilization, resets_at: None });
+            a.meters.insert("five_hour".into(), Meter { utilization, resets_at: None, ..Meter::default() });
             a
         }
 

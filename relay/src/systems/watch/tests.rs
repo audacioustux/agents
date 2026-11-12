@@ -682,7 +682,7 @@ impl Buses {
     /// A quota reading of `account`'s 7-day and 5-hour meters, landing on the bus now.
     fn read(&self, account: &str, week: f64, five: f64) {
         use std::io::Write as _;
-        let meter = |u| crate::harness::Meter { utilization: u, resets_at: Some(1_800_500_000) };
+        let meter = |u| crate::harness::Meter { utilization: u, resets_at: Some(1_800_500_000), ..Default::default() };
         let meters: crate::harness::Meters =
             [("seven_day".to_owned(), meter(week)), ("five_hour".to_owned(), meter(five))].into();
         let event = crate::bus::QuotaEvent::Reading { account: account.into(), meters, sign_in: Some("s".into()) };

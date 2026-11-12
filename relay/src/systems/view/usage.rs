@@ -637,7 +637,7 @@ mod tests {
     const NOW: u64 = 1_800_000_000 * 1_000_000;
 
     fn meters(meters: &[(&str, f64, i64)]) -> Meters {
-        meters.iter().map(|&(n, u, r)| (n.to_owned(), Meter { utilization: u, resets_at: Some(r) })).collect()
+        meters.iter().map(|&(n, u, r)| (n.to_owned(), Meter::named(n, u, Some(r)))).collect()
     }
 
     fn reading(t: u64, account: &str, m: &[(&str, f64, i64)]) -> Stamped {

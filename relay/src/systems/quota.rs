@@ -952,8 +952,8 @@ mod tests {
     fn world(jobs: &[Job]) -> World {
         let mut st = AccountState { read_at: Some(NOW - 1), ..Default::default() };
         let now_s = secs(NOW);
-        st.meters.insert("minimax-code/General 7 Day".into(), Meter { utilization: 0.04, resets_at: None });
-        st.meters.insert("openai-codex/5 hours".into(), Meter { utilization: 1.0, resets_at: Some(now_s + 3_600) });
+        st.meters.insert("minimax-code/General 7 Day".into(), Meter::named("minimax-code/General 7 Day", 0.04, None));
+        st.meters.insert("openai-codex/5 hours".into(), Meter::named("openai-codex/5 hours", 1.0, Some(now_s + 3_600)));
         let mut w = World::default();
         w.accounts.insert(omp().key(), st);
         for j in jobs {
@@ -1187,7 +1187,7 @@ mod tests {
         for (label, meters) in accounts {
             let mut st = AccountState { read_at: Some(read), ..Default::default() };
             for &(window, utilization, hours) in *meters {
-                st.meters.insert(window.into(), Meter { utilization, resets_at: Some(secs(NOW) + hours * 3600) });
+                st.meters.insert(window.into(), Meter::named(window, utilization, Some(secs(NOW) + hours * 3600)));
             }
             w.accounts.insert(claude(label).key(), st);
         }
@@ -1271,7 +1271,7 @@ mod tests {
             let mut st = AccountState { read_at: Some(NOW - 1), ..Default::default() };
             for &(window, utilization, minutes) in meters {
                 let resets_at = Some(secs(NOW) + minutes * 60);
-                st.meters.insert(window.into(), Meter { utilization, resets_at });
+                st.meters.insert(window.into(), Meter::named(window, utilization, resets_at));
             }
             st
         };

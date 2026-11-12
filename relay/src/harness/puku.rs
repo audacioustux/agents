@@ -24,7 +24,7 @@ use jiff::tz::TimeZone;
 use serde_json::Value;
 
 use crate::harness::claude::{Account, ClaudeCode, digest};
-use crate::harness::{Home, Identity, Invocation, Meter, Meters, SignIn, read_json};
+use crate::harness::{Home, Identity, Invocation, Meter, Meters, SignIn, Window, read_json};
 
 #[allow(non_upper_case_globals)]
 pub const Puku: ClaudeCode = ClaudeCode {
@@ -115,7 +115,7 @@ fn last_object(text: &str) -> Option<Value> {
 
 /// `{"limit": 100, "used": 25, "resetsAt": "2026-11-09T05:00:00Z"}`. A window
 /// with no limit says nothing about room, so it is not a meter.
-fn window(w: &Value) -> Option<Meter> {
+fn window(w: &Value, window: Window) -> Option<Meter> {
     let limit = w.get("limit").and_then(Value::as_f64).filter(|l| *l > 0.0)?;
     let used = w.get("used").and_then(Value::as_f64)?;
     let resets_at = match w.get("resetsAt") {
@@ -123,7 +123,7 @@ fn window(w: &Value) -> Option<Meter> {
         Some(Value::Number(n)) => n.as_i64().map(|n| if n > 100_000_000_000 { n / 1000 } else { n }),
         _ => None,
     };
-    Some(Meter { utilization: used / limit, resets_at })
+    Some(Meter::new(window, used / limit, resets_at))
 }
 
 /// puku's own sign-in, `~/.config/<app>/session.json`: `accessToken`,
@@ -187,15 +187,21 @@ impl Account for PukuSession {
     fn parse_quota(&self, text: &str, _now_s: i64, _local: &TimeZone) -> Meters {
         let mut out = Meters::new();
         let Some(chat) = last_object(text).and_then(|v| v.get("chat").cloned()) else { return out };
-        for (key, name) in [("fiveHour", "five_hour"), ("weekly", "seven_day"), ("monthly", "monthly")] {
-            if let Some(m) = chat.pointer(&format!("/windows/{key}")).and_then(window) {
+        let windows = [
+            ("fiveHour", "five_hour", Window::FiveHours),
+            ("weekly", "seven_day", Window::Week),
+            ("monthly", "monthly", Window::Month),
+        ];
+        for (key, name, length) in windows {
+            if let Some(m) = chat.pointer(&format!("/windows/{key}")).and_then(|w| window(w, length)) {
                 out.insert(name.into(), m);
             }
         }
         if out.is_empty() {
             let limit = chat.get("req_limit").and_then(Value::as_f64).filter(|l| *l > 0.0);
             if let (Some(limit), Some(used)) = (limit, chat.get("used_req").and_then(Value::as_f64)) {
-                out.insert("requests".into(), Meter { utilization: used / limit, resets_at: None });
+                // A count of requests: its period is not said.
+                out.insert("requests".into(), Meter::new(Window::Other(None), used / limit, None));
             }
         }
         out

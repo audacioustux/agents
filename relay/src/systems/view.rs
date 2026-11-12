@@ -54,8 +54,9 @@ pub enum Cmd {
         #[arg(long)]
         since: Option<String>,
     },
-    /// Each account's quota over time, as a chart printed inline: by default its 7-day meter, with
-    /// the floors drawn across it. With `--json`, the readings. Outside a project, every project's.
+    /// Each account's quota as a row (gauge, sparkline, pace, and what the pace comes to by the
+    /// reset): by default its 7-day meter. With `--chart`, the line chart over time instead; with
+    /// `--json`, the rows and readings. Outside a project, every project's.
     Usage {
         /// Another meter, by name (`five_hour`, `openai-codex/5 hours`) or as `view status` shows it (`5 hours`).
         #[arg(long)]
@@ -69,9 +70,12 @@ pub enum Cmd {
         /// How far back (`12h`, `7d`, `2w`).
         #[arg(long, default_value = "7d")]
         since: String,
-        /// Live: open `view watch` on the chart, refolded as readings land (`u` for the job board, `q` quits).
+        /// Live: open `view watch` on the rows, refolded as readings land (`c` the chart, `u` the job board, `q` quits).
         #[arg(long)]
         watch: bool,
+        /// The line chart of every account's level over the window, not the rows.
+        #[arg(long)]
+        chart: bool,
     },
 }
 
@@ -89,12 +93,13 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Watch { all, everywhere } => crate::systems::watch::run(scope, all, everywhere, None),
         Cmd::Result { name, wait } => result(ctx, &name, wait),
         Cmd::Stats { since } => stats::run(ctx, since.as_deref()),
-        Cmd::Usage { meter, accounts, harnesses, since, watch } => usage::run(
+        Cmd::Usage { meter, accounts, harnesses, since, watch, chart } => usage::run(
             scope,
             ctx.json,
             usage::Filter { meter, accounts, harnesses, ..Default::default() },
             &since,
             watch,
+            chart,
         ),
         Cmd::Events => {
             for e in ctx.events()? {
@@ -123,14 +128,14 @@ pub fn outside(json: bool, cmd: &Cmd) -> Result<()> {
     match cmd {
         Cmd::Status { all, .. } => status(scope, json, *all, true),
         Cmd::Watch { all, .. } => crate::systems::watch::run(scope, *all, true, None),
-        Cmd::Usage { meter, accounts, harnesses, since, watch } => {
+        Cmd::Usage { meter, accounts, harnesses, since, watch, chart } => {
             let filter = usage::Filter {
                 meter: meter.clone(),
                 accounts: accounts.clone(),
                 harnesses: harnesses.clone(),
                 ..Default::default()
             };
-            usage::run(scope, json, filter, since, *watch)
+            usage::run(scope, json, filter, since, *watch, *chart)
         }
         _ => unreachable!("only the boards and the usage chart run outside a project"),
     }

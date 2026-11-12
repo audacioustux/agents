@@ -73,8 +73,9 @@ dependent shows `waits for a (failed)` and does not start on its own, nor keep
 the dispatcher awake. So does every job queued behind it, however deep the chain
 (`waits for b (blocked)`), and jobs that wait for each other (`a cycle`); `view result --wait` on it exits 4 with that line rather
 than wait forever. Queue the dependency again (or `queue resume` it), or
-`relay queue release NAME [--from a]`. Only existing jobs can be named, so there
-are no cycles.
+`relay queue release NAME [--from a]`, which **starts the job now** (once a seat is free): it
+drops the waits and does not cancel anything. To withdraw the job instead, `relay queue dequeue NAME`.
+Only existing jobs can be named, so there are no cycles.
 
 **Where a build job starts.** A build job starts from the repository's `HEAD`,
 unless it waits for build jobs (`--after`) or forks one (`--fork`): then its
@@ -134,14 +135,14 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue unreview JOB` | Detach the review chained to JOB, with no replacement: it no longer re-reviews or resumes JOB (exit 4 when none is chained) |
 | `relay queue add NAME ... --fork JOB` | Start as a fork of JOB's session, from its branch when it is a build job ([forks](#what-a-job-is)) |
 | `relay decide list [--wait [--timeout S]]` / `relay decide answer ID --action A ...` | Decisions waiting for the orchestrator / answer one ([hooks](#hooks)) |
-| `relay queue release NAME [--from A,...]` | Stop a queued job, or one the [disk floor](#disk) holds, waiting for some or all of its `--after` jobs |
+| `relay queue release NAME [--from A,...]` | Start a queued job now, without waiting for some or all of its `--after` jobs to finish (not a cancel: `dequeue` withdraws it). A job the [disk floor](#disk) holds is freed of those jobs too, and starts when there is room |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one (or a job the [disk floor](#disk) holds, which then stays stopped). A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends and its runner has exited (it may re-review or wake the dispatcher after the end), and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |
-| `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)) |
+| `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)); `u` swaps it for the quota rows ([usage](#usage)), `c` there for the chart |
 | `relay view events` | The merged event log |
 | `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |
-| `relay view usage [--meter NAME] [--account H:L] [--harness H] [--since DURATION]` | Each account's quota over time as a chart in the terminal, the floors drawn across it ([usage](#usage)); inside a project, its accounts from every project's readings; outside one, every account |
+| `relay view usage [--meter NAME] [--account H:L] [--harness H] [--since DURATION] [--chart] [--watch]` | Each account's quota as a row: gauge, sparkline, pace, and what the pace comes to by the reset ([usage](#usage)); `--chart` the line chart over time instead; inside a project, its accounts from every project's readings; outside one, every account. `--watch` opens `view watch` on the rows, redrawn as readings land |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it, judged as the dispatcher judges it (a full account is `busy`, not `ready`); `show` starts a reading of each stale account and says `refreshing`. A fresh reading (one under way anywhere on the machine is waited for); switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout), noting when no review has accepted its tip / delete its clone and records |
 | `relay land gc [--dry-run]` | Remove what finished jobs no longer need: build outputs, old clones, old logs ([disk](#disk)) |
@@ -245,7 +246,7 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   board a gauge is green, yellow within 10 points of its floor and red at it. `room/day`
   is the account's room, which dispatch ranks shared among the sessions in `run` and
   the next one, and `▸` the one the next start would take, also named
-  in the title with the floors. A stale reading says how old it is (`stale (read 3h ago)`).
+  in the title with the floors. A stale reading says how old it is (`stale (read 3h ago)`), or, when the reads since gave nothing, why (`reading timed out after 180 s (3 tries since Nov 12 18:08 +06); read 3h ago`).
   Who a home is signed in as is in `--json` (`identity`); twins say `same sign-in as`.
   A narrow window shrinks the bars (to five cells) before it cuts a name.
 - **Readings.** Showing the accounts in a project (`view status`, `view watch`, `quota
@@ -253,6 +254,14 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   says `refreshing claude:a, …` until it lands. `view status --json` does too, with the
   accounts in a top-level `refreshing` list beside the folded state (absent when none). The machine-wide pane outside every
   project starts none: a reading is taken by a project's rules.
+- **The quota rows.** `u` swaps the board for the rows of [`view usage`](#usage), drawn
+  by the same code, and `u` again brings the board back; `c` there turns the rows into the
+  line chart and back. They refold as quota readings
+  land on any project's bus, for the same accounts `view usage` shows (inside a project
+  its own; outside one, every account). While they show, only `q`, `?`, `u` and `c` do anything,
+  and it reads the buses and nothing else: no reading is started (the board's accounts pane
+  does that), and nothing is written. `relay view usage --watch` opens on the rows,
+  `--watch --chart` on the chart. A window too short for every row says how many it leaves out.
 - **What stays put.** The selection follows a job by name as rows move; a failed
   read keeps the last good board with the cause in red in the title, and the next
   read retries; columns are a fixed set (project when every project shows, job, state,
@@ -373,10 +382,17 @@ stands, at `held` the job waits, at `disk` the job is stopped (held, when the fl
   Otherwise it defers. A job that declares any of these has an `ended` chain
   of `["rule"]` when `hooks.ended` is unset, so it costs nothing to leave unset.
 - `agent:<profile>`: a short read-only session on that profile's harness, model
-  and budget, on another account than the worker's where one is free. A seat is
+  and budget, on another account than the worker's where one is free. Its seat is
+  chosen as the dispatcher chooses a job's, by the same judgment and under the same
+  machine-wide lock (never waited on: a handler that finds it busy tries again within its own
+  wait, or a few seconds when it cannot wait), and booked on the bus (`seated`, then `unseated` once the
+  session has ended), so every dispatcher and every other decision counts it as a
+  session like any: with `per_account = 1`, a job queued meanwhile never joins it on
+  its account, and two decisions at once take different accounts or one waits. A seat is
   free when the account has room under `limits.per_account` (counting every
   project's sessions) and a quota reading that is fresh and above the floor; the
-  worker's own account serves when no other does. At `cap` and `ended` the
+  worker's own account serves when no other does. A worker at `cap` or `ended` holds no seat
+  while it is asked about; one at `disk` still runs, so it keeps its seat. At `cap` and `ended` the
   handler waits up to `hooks.seat_wait_minutes` for a seat (taking a new quota
   reading where one is old), then defers with a reason that names that bound;
   at `held` and `disk` it does not wait, since neither can: a held job is asked
@@ -389,8 +405,10 @@ stands, at `held` the job waits, at `disk` the job is stopped (held, when the fl
   not only until its output closes, and is killed with its group once its
   decision is withdrawn or goes stale, or a limit passes. Every handler and
   session runs under a small supervisor (`relay supervise`) that leads its
-  process group and kills the group when the handler exits, when it is stopped,
-  or within moments of its runner ending (`queue stop`, killed, crashed); nothing
+  process group and ends everything the handler started when the handler exits, when it
+  is stopped, or within moments of its runner ending (`queue stop`, killed, crashed). It is
+  a subreaper, so what leaves its group (a `setsid` child, a sandbox's processes) comes
+  back to it, and it exits only once it has ended and reaped every one of them; nothing
   is recorded and no stored pid is signalled.
 - `command:<argv>`: runs the program (argv split on spaces, with no quoting) on
   the host with the request as JSON on stdin, and reads one JSON object from
@@ -448,7 +466,13 @@ only if the job is still queued as it was when asked, and one job is asked
 about at most once per queueing and once per five minutes. Hooks never land,
 push or delete: those stay with you.
 
-Every decision is on the bus: `decision-requested {id, job, point}`, `parked
+Every decision is on the bus: `decision-requested {id, job, point}`, `seated
+{id, account, model, provider, lock}` and `unseated {id}` around an `agent:` handler's
+session (its seat counts until `unseated`, even if the job is cleaned away meanwhile, and only
+while something holds its `lock` file: the process that asked, and the session's supervisor, which
+holds it until it has ended and reaped the session's whole tree, so a session outliving a killed
+runner for a moment still holds its seat; a booking for a decision already cleaned away is
+refused), `parked
 {id, until}` while it waits for the orchestrator, `answered {id, action, why}`
 from `decide answer` (heard only before `until`), and one `decided {id,
 handler, action, why, cost_usd, refused}` per handler asked, written by the
@@ -539,12 +563,24 @@ handlers as untrusted.
   worker fixing what it did not break; when only one does,
   they failed differently and the failure is the job's. A new failing test is the job's:
   it is resumed as above. A timeout or failed checkout at the base is
-  `check-could-not-run`, never base-red. A job with a revert control expects its base to
-  fail, so its fails are always the job's.
+  `check-could-not-run`, never base-red, and so is a base run that exited a code the project
+  declares (below). A job with a revert control expects its base to fail, so its fails are
+  always the job's.
 - **Could not run:** a command that timed out (124), was not found or not runnable
   (126, 127), was killed, or whose checkout failed said nothing about the code. relay
   records `check-could-not-run`, does not accept, and stops the job for you to look
-  at: a broken check is not the session's to fix.
+  at: a broken check is not the session's to fix. This holds at the tip and at the
+  base: a check that fails at the tip and could not run at the base ends so, never
+  base-red, and the record's `tail` begins with why, kept whole however long the output (`the check could not run: it timed
+  out (exit 124, after 120 s: hooks.command_timeout_seconds)`; `at the base commit, …` for
+  the base), from the exit status and the timeout relay applied. relay never reads the
+  output's text for this. A tool that refuses to run exits with an ordinary failure code
+  (mise's untrusted-config refusal exits 1), which relay cannot tell from a failing check;
+  the project says which code its check uses: `hooks.check_could_not_run_exit_codes = [125]`
+  (codes 1-255; 124-127, 137 and 143 always count), and the check ends with that code where
+  it knows the environment refused it (`mise trust -q || exit 125`, or
+  `some-tool --version || exit 125` before the suite). A declared code is the project's
+  word: it also turns a real failure that exits it into `check-could-not-run`.
 - **Revert control:** `--check-red-first` (or `check_red_first = true` beside the
   profile's `check`) also runs the check at the commit the job's branch started from
   (its base), and requires it to **fail** there. Only a real failure counts: a
@@ -662,15 +698,45 @@ its runs' alone.
 
 ## Usage
 
-`relay view usage` charts each account's quota over time, printed inline at the
-terminal's width so it stays in scrollback: one line per account, time across
-(in your local zone), utilization 0–100 % up. A reset is a drop. The policy's
-`floor` is drawn across it (`┄`), and the `floor_near_reset` one (`╌`) when the
-policy sets it, so the room left is the gap. Each line ends in its id (`1`, `2`,
-..., then `a`, `b`, ...), which needs no colour; under the chart, each id's
-account and meter with its last reading and when that meter resets, wrapped to
-the terminal's width, never cut. A narrow terminal gets shorter time labels, and
-a very narrow one none.
+`relay view usage` is a table of each account's quota, printed inline at the
+terminal's width so it stays in scrollback: one row per account and meter, the
+one that resets soonest first, so the top row is the one to act on.
+
+    claude:tj.pro     ██████████│░  91%  ▁▂▂▃▃▄▄▅▅▆▆▆▇▇  +13%/d  resets 19h    full now
+    claude:studyac17  ██▊░░░░░░░│░  23%             ▂▂▃   +8%/d  resets 5d22h  ~72% at reset: 28% unused
+
+- **Gauge.** The bar, floor mark (`│`) and percent of `quota show`, the
+  same code, coloured on a terminal by how close it is to the floor (green, yellow
+  within ten points, red at it). Then when it resets.
+- **Sparkline.** The meter's level across the `--since` window, oldest at the left:
+  the window cut into 14 equal buckets (fewer on a narrow terminal), each the level
+  at its last reading, `▁` for 0 % up to `█` for 100 %. A bucket with no reading
+  repeats the one before it; before the first reading, blank. A reset is the
+  drop it is.
+- **Pace.** How fast the meter is filling, in percent of the window per day: the
+  rise across the readings of the last 24 hours, counted from the last reset
+  in them. A reset is the meter's own statement: its reset time moving on by more
+  than an hour. A level that dips a point between readings, or a reset time that
+  shifts by a minute, is jitter and starts nothing; a pace never goes below `+0%/d`.
+  Under two readings, or readings less than an hour apart, there is no pace (`—`).
+- **Outlook.** The level at the reset if the pace holds, from the last reading, and
+  the floor in force then (`floor_near_reset` as the reset nears). Where it reaches
+  the floor first: `full in 1h at this pace` (`full now` when it is there), full
+  being the floor, where dispatch stops. Where it does not: `~41% at reset: 59%
+  unused`, the quota that will go to waste. No pace, no reset time, or a reset that has
+  passed: `—`.
+- **The label** is the account, and the meter when it is not claude's 7-day one
+  (`omp:w openai-codex/7 days`).
+- **Narrow.** The bar shrinks first (to five cells), then the sparkline (to six); then
+  each outlook moves to a line under its row, and past that a line is cut.
+- **`--chart`** prints the line chart instead: one line per account, time across
+  (in your local zone), utilization 0–100 % up. A reset is a drop. The policy's
+  `floor` is drawn across it (`┄`), and the `floor_near_reset` one (`╌`) when the
+  policy sets it, so the room left is the gap. Each line ends in its id (`1`, `2`,
+  ..., then `a`, `b`, ...), which needs no colour; under the chart, each id's
+  account and meter with its last reading and when that meter resets, wrapped to
+  the terminal's width, never cut. A narrow terminal gets shorter time labels, and
+  a very narrow one none. Many accounts overlap on it, which is why it is not the default.
 
 - **What it reads.** The readings already on the bus, as the project's fold takes
   them in: a quota command's (`quota` `reading` events) and a live session's
@@ -678,7 +744,7 @@ a very narrow one none.
   in `programs.json`), and starts no reading. Every
   project's bus on this machine is read, in a project or outside one: an account
   is the machine's, so where a reading happened to be taken says nothing about
-  whose it is. An account read by several projects is one line, its readings
+  whose it is. An account read by several projects is one row, its readings
   merged by time, one seen on two buses kept once.
 - **Whose accounts.** Outside a project, every account. Inside one, only those it
   can dispatch to: the accounts its dispatcher considers, so its enabled
@@ -688,19 +754,29 @@ a very narrow one none.
 - **Which meter.** By default each account's weekly meters: those whose name, as
   `view status` shows it, says a 7-day or weekly window (`7 days`,
   `openai-codex/7 days`, `minimax-code/General 7 Day`, `google-antigravity/Gemini
-  (Weekly)`), one line each; `--meter NAME` picks another, by its name or as the
+  (Weekly)`), one row each; `--meter NAME` picks another, by its name or as the
   board shows it (`five_hour` or `5 hours`). A reading without that meter adds no
   point.
 - **Which accounts and when.** `--account harness:label` (repeatable) and
   `--harness` (repeatable) narrow it; `--since` (`12h`, `7d`, `2w`; default `7d`)
   is the window.
-- **Piped**, it is plain text with no colour. `--json` gives the readings instead:
+- **Live.** `--watch` opens [`view watch`](#the-board) on the rows (`--watch --chart`
+  on the chart) with the same `--meter`, `--account`, `--harness` and `--since`; it is
+  redrawn as readings land, `c` switches between rows and chart, `u` to the job board
+  and back, `q` quits. It cannot be combined with `--json`. Without `--watch`, the
+  rows print once.
+- **Piped**, it is plain text with no colour. `--json` gives the readings:
   `accounts.<account>.<meter>` is a list of `{t, utilization, resets_at}` (`t` in
   bus microseconds, `resets_at` in unix seconds, `utilization` a fraction), with
-  `floor` and `floor_near_reset` beside it.
+  `floor` and `floor_near_reset` beside it; and `rows`, one per row of the table in
+  its order: `account`, `meter`, `readings`, `utilization`, `floor`, `resets_at`,
+  `pace_per_day` (a fraction of the window), `projected_at_reset` (a fraction; null
+  when it would be full first, or without a pace), `full_in_seconds` (null unless
+  it would), `outlook` as printed and `sparkline`. `pace_window_hours` says how far
+  back the pace looks.
 - **Bare labels.** Old buses name some accounts by label alone (`adventor`).
   relay has no rule saying which harness such a label was on, so their readings
-  are left out, and the chart names them (`left out: ...`; `left_out` in `--json`).
+  are left out, and the view names them (`left out: ...`; `left_out` in `--json`).
 - Meters only: never who an account is signed in as.
 
 ## Escalation
@@ -863,6 +939,25 @@ the harness's own account variables; a `PATH` there replaces relay's default. No
 taken from the shell that queued the job. relay hard-codes none: `CARGO_INCREMENTAL = "0"`
 is the suggestion above.
 
+A value may name the project's own directories without the home path: `${RELAY_STATE}` is this
+project's state directory (an acceptance check's checkout is made under it) and `${RELAY_CLONES}`
+its clones directory (every build job's clone). They are the only two names relay expands; any
+other `${...}` stays as written.
+
+**Recipe: mise.** Inside the sandbox `bun`, `node` and the like resolve to mise's shims
+(`~/.local/share/mise/shims`), which read the `mise.toml` of the directory they run in and refuse
+a clone's, or a check's checkout's, as untrusted (`mise ERROR Config files in …/mise.toml are not
+trusted`, exit 1). relay knows nothing of mise; declare the trust yourself. mise trusts every
+config below a path named in `MISE_TRUSTED_CONFIG_PATHS` (colon-separated):
+
+```toml
+[session.env]
+MISE_TRUSTED_CONFIG_PATHS = "${RELAY_STATE}:${RELAY_CLONES}"
+```
+
+This trusts files written by the session's own clone, so use it only for a project whose
+`mise.toml` you would run anyway (a `mise.toml` can set environment variables and run tasks).
+
 ## Harnesses and accounts
 
 Every harness is scheduled alike. An adapter in [`src/harness/`](src/harness/)
@@ -962,7 +1057,18 @@ that finds a reading under way (any project's) waits for it, then reads only wha
 it did not. A reading relay asks for itself joins the project's pending set
 (`<state>/quota.pending`), which one background reader per project reads to the
 last, waiting its turn for the machine's reader, before it exits: an account shown
-as `refreshing` is always read. An account is used only when:
+as `refreshing` is always read. The accounts due are read at the same time, one process each, under
+that one hold of the machine's reader role, so a refresh of every account takes as long as the slowest.
+
+A read ends at `accounts.read_secs` (default 180, at least 30: refused below it when the config
+loads). `claude -p /usage` also computes "What's contributing to your usage?" from this machine's
+local sessions, and `claude` has no flag or setting that skips it, so a heavy account is slow, slower
+under load (58 s at load average 77). A read that gives nothing records why (`unreadable` carries
+`why`): `timed out after 180 s`, `exited 1: <last line of stderr>` (cut, with anything shaped like an
+email address or a token taken out; no raw output is kept), or `printed no meters`, with how many reads
+in a row failed and since when. The board's state cell, `quota show --json` (`readFailure`) and a
+queued job's reason say it instead of `stale` or `usage unreadable`: `reading timed out after 180 s
+(3 tries since Nov 12 18:08 +06)`. Any good reading ends it, however it came (the quota command, a session's rate events, another project's or a twin home's reading); a failure after it starts a count of its own. The stderr tail has terminal controls replaced. An account is used only when:
 
 - it has a reading, and not a stale one (unread or stale is not the same as
   having room; a job waits while a fresh one is taken);
@@ -1030,7 +1136,8 @@ too: `limits.per_account` counts the sessions every project runs on the
 account (for omp, on the account *and provider*: one profile serves several
 providers, each with a quota of its own, so a `minimax-code/...` review does not
 hold the seat an `openai-codex/...` job needs; two jobs on one provider still
-share it). A seat is the account and provider the job's dispatch recorded
+share it). A decision's `agent:` session holds a seat too, from its `seated` to its
+`unseated`. A seat is the account and provider the job's dispatch recorded
 (`dispatched` carries the model and provider it resolved), so another project's
 job that names no model counts on the provider its own config chose, not this
 project's default. One machine-wide lock keeps two dispatchers from giving out the
@@ -1206,12 +1313,23 @@ what was recorded:
   --json` (`devshell`) and on the bus (`warm-failed`). It is tried again after a minute, then
   after twice as long each time, up to 15 minutes; fix the cause and run `relay devshell warm`
   to try at once. The jobs wait meanwhile and are never failed for it.
-- **The 600 s limit** bounds one attempt, not a job. A warm-up that takes longer is stopped
-  there and tried again at once, and what Nix fetched stays in its store, so each attempt goes
-  further; the board says `dev shell warming (2h); attempt 12 stopped at 600 s, going on`, and the
-  jobs stay held until one attempt finishes. One step that cannot finish in 600 s at all (a single
-  download that slow) never does: enter the shell by hand once (`nix develop -c true`), and the next
-  attempt is quick.
+- **The attempt limit** bounds one attempt, not a job. It is 600 s unless `[session]
+  env_shell_attempt_secs` says otherwise (a value under 30 is refused when the config is loaded). A
+  warm-up that takes longer is stopped there and tried again at once, and what Nix fetched stays in
+  its store, so each attempt goes further; the board says `dev shell warming (2h); attempt 13 running;
+  the last timed out after 600 s` (the limit that attempt ran under), so slow (attempts that keep timing out, and the warming time keeps
+  growing) is told from stuck (one that fails, with its reason, as above), and the jobs stay held
+  until one attempt finishes. A large flake on a loaded machine may need more than 600 s for one
+  step; raise the limit rather than turning `env_shell` off:
+
+  ```toml
+  [session]
+  env_shell = ["nix", "develop", "-c"]
+  env_shell_attempt_secs = 1800
+  ```
+
+  One step that cannot finish in any limit (a single download that slow) never does: enter the shell
+  by hand once (`nix develop -c true`), and the next attempt is quick.
 
 **Keeping it through a garbage collection.** The record is a list of variables, not a Nix GC root,
 so `nix-store --gc` may collect what it names, and the next job then waits for a warm-up that
@@ -1291,7 +1409,7 @@ own process, and owns one output port:
 | queue | takes work in (under a profile, if asked), withdraws it, stops it, releases it from its `--after` jobs, reroutes or forces a held one, replaces or detaches a review chain | queued, released, resumed, rerouted, forced, dequeued, unchained, review-briefed, stop-requested |
 | dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
 | session | runs one job, carries out the decisions at its cap and its end, runs its acceptance check, fetches a review's branch, measures its clone and stops it at the disk ceiling, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, requeued, overran, checking, checked, bar-checked, reviewed, disk, ended |
-| decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); takes the orchestrator's answers | decision-requested, parked, decided |
+| decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); books an `agent:` session's seat; takes the orchestrator's answers | decision-requested, seated, unseated, parked, decided |
 | quota | account readings and switches | reading, unreadable, signed-out, account-enabled |
 | land | brings branches back; cleans up, and gc | forgotten, collected |
 | devshell | enters the project's development environment once, under a lock, and records it for every session | warming, warmed, warm-failed |
@@ -1322,7 +1440,7 @@ It drops:
 - **Scheduling extras:** per-model caps.
 
 `--after` is kept, with one change: a dependency that did not finish blocks
-its dependents (`relay queue release` frees them) instead of freeing them.
+its dependents (`relay queue release` starts them anyway) instead of freeing them.
 
 Like lanes, relay never pushes or merges. Landing work on your main branch
 stays with your project's gate.

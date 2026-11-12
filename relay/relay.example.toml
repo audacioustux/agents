@@ -27,6 +27,7 @@ max_retries = 1          # automatic retries for a session that died with no out
 # (claude:default for ~/.claude, claude:work for ~/.claude.work, omp:default for
 # ~/.omp, omp:work for ~/.omp/profiles/work, puku:work for ~/.puku-cli.work). These are never used:
 exclude = []
+read_secs = 180   # how long one account's quota read may run before it is recorded as timed out (at least 30)
 
 # One table per harness, all with the same keys. A harness is enabled by
 # default when its program is found: `program`, else the path relay recorded
@@ -114,6 +115,10 @@ held_after_minutes = 60.0            # a queued job held this long by a limit re
 orchestrator_timeout_minutes = 20.0  # then the next handler decides
 seat_wait_minutes = 30.0             # how long an `agent:` handler waits for an account to take its session
 command_timeout_seconds = 120        # a `command:` handler's bound, and an acceptance check's
+# Exit codes (1-255) a check uses to say it could not run, such as `|| exit 125` after a step that
+# refuses the environment. 124-127, 137 and 143 always mean so. Such a run ends `check-could-not-run`,
+# never `fail` or `base-red`.
+# check_could_not_run_exit_codes = [125]
 allow_force = false                  # whether a `held` decision may start a job past its profile's limits
 max_decisions = 10                   # decisions that may act on one job before every action is refused
 

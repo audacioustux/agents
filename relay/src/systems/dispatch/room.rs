@@ -6,14 +6,15 @@
 //! [`Room::hold`] the one judgment of why a queued job does not start. The dispatcher, the accounts
 //! pane, the board's reasons and a checker's seat all ask these, so none of them can call an
 //! account `ready` or a job startable where another would not. A seat is read from what its
-//! dispatch recorded (`Job::seat`), never resolved again through a config.
+//! dispatch recorded (`Job::seat`), or a decision's session from what its booking recorded
+//! (`SessionSeat::held`), never resolved again through a config.
 
 use std::collections::BTreeMap;
 
 use crate::accounts::{self, Draws, Refusal};
 use crate::config::{Config, Limits};
 use crate::harness::Home;
-use crate::world::{AccountState, Job, World};
+use crate::world::{AccountState, Job, SessionSeat, World};
 
 use super::{kept, may_use, model_for, profile_hold};
 use crate::systems::devshell::Gate;
@@ -110,6 +111,11 @@ impl Room {
         for (account, draws) in world.jobs().values().chain(theirs).filter_map(Job::seat) {
             room.book(account, draws);
         }
+        // A decision's `agent:` session is a session like any: every project's, while its process lives.
+        let sessions = std::iter::once(world).chain(others.iter().copied()).flat_map(|w| w.seats.values());
+        for (account, draws) in sessions.filter_map(SessionSeat::held) {
+            room.book(account, draws);
+        }
         for p in world.jobs().values().filter(|j| j.status.has_runner()).filter_map(|j| j.profile.as_deref()) {
             *room.running.entry(p.to_owned()).or_default() += 1;
         }
@@ -164,15 +170,6 @@ impl Room {
         }
     }
 
-    /// Gives back the seat `job` holds, if any: a checker may take the seat its worker's ended run frees.
-    pub fn free(&mut self, job: &Job) {
-        if let Some((account, draws)) = job.seat()
-            && let Some(n) = self.load.get_mut(&self.seat(account, draws))
-        {
-            *n = n.saturating_sub(1);
-        }
-    }
-
     /// Whether `home` takes a session on `model` now (`now_us`, bus time): a seat free under
     /// `limits.per_account` (per provider on omp), and its own state and quota fit
     /// ([`accounts::fit`]). `Ok` is how good a fit it is: its room per day shared among the
@@ -208,7 +205,7 @@ impl Room {
         refused: &Refused,
         now_us: u64,
     ) -> Option<(u64, Option<f64>)> {
-        if refused.busy.is_some() || !matches!(refused.fit, Some(Refusal::Stale | Refusal::Unread)) {
+        if refused.busy.is_some() || !matches!(refused.fit, Some(Refusal::Stale(_) | Refusal::Unread)) {
             return None;
         }
         let key = home.key();

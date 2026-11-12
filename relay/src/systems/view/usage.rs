@@ -1,4 +1,4 @@
-//! `relay view usage`: each account's quota over time, as a chart printed inline. A read-only fold
+//! `relay view usage`: each account's quota, a row per account and meter (or with `--chart`, over time as a chart), printed inline. A read-only fold
 //! over the readings already on the bus (a quota command's `QuotaEvent::Reading` and a live
 //! session's `SessionEvent::Rate`); it writes nothing and never starts a reading. Meters only: who
 //! an account is signed in as is never read here.
@@ -20,9 +20,12 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::bus::{Stamped, now_micros};
 use crate::config::Limits;
 use crate::systems::quota::gauge;
+use crate::systems::watch::ChartSpec;
 use crate::world::World;
 
 use super::machine::Scope;
+
+pub mod rows;
 
 /// Which readings a chart shows.
 #[derive(Debug, Clone, Default)]
@@ -132,18 +135,29 @@ impl History {
         h
     }
 
+    /// What the chart leaves out, if anything: the bare labels.
+    pub fn left_out(&self) -> Option<String> {
+        let names = self.bare.iter().cloned().collect::<Vec<_>>().join(", ");
+        (!self.bare.is_empty())
+            .then(|| format!("left out: readings under a bare label, which names no harness ({names})"))
+    }
+
     /// Each series, as (account, meter, readings).
     fn each(&self) -> impl Iterator<Item = (&str, &str, &[Point])> {
         self.series.iter().flat_map(|(a, ms)| ms.iter().map(move |(m, p)| (a.as_str(), m.as_str(), p.as_slice())))
     }
 
-    /// The `--json` reply: per account and meter, the readings as `{t, utilization, resets_at}`.
-    pub fn to_json(&self, f: &Filter, limits: &Limits) -> serde_json::Value {
+    /// The `--json` reply: per account and meter, the readings as `{t, utilization, resets_at}`, and
+    /// `rows`, one per account and meter by reset time, with its pace and what it comes to by then.
+    pub fn to_json(&self, f: &Filter, limits: &Limits, now: u64) -> serde_json::Value {
+        let rows: Vec<_> = rows::rows(self, limits, f.since, now).iter().map(rows::Row::json).collect();
         let mut v = json!({
             "since": f.since,
             "meter": f.meter,
             "floor": limits.floor,
+            "pace_window_hours": rows::PACE_WINDOW / 3_600_000_000,
             "accounts": self.series,
+            "rows": rows,
         });
         if let Some(n) = limits.floor_near_reset {
             v["floor_near_reset"] = json!({ "within_hours": n.within_hours, "floor": n.floor });
@@ -171,7 +185,7 @@ const PALETTE: [Color; 12] = [
     Color::Red,
 ];
 /// The chart's rows, its axes and labels included: the heading and legend are lines of their own.
-const CHART_ROWS: u16 = 18;
+pub const CHART_ROWS: u16 = 18;
 
 /// What names each series on the chart and in its legend, in turn: one character, so it takes
 /// one cell beside the series' last point, and needs no colour to be read. Past the last, `*`.
@@ -280,6 +294,49 @@ impl Usage<'_> {
         (x, y)
     }
 
+    /// What `view usage` prints: the rows, or with `chart` the line chart.
+    pub fn render(&self, chart: bool, width: Option<usize>, colour: bool) -> String {
+        if chart { self.print(width, colour) } else { self.print_rows(width, colour) }
+    }
+
+    /// The rows of the table, soonest reset first.
+    pub fn rows(&self) -> Vec<rows::Row> {
+        rows::rows(self.history, self.limits, self.filter.since, self.now)
+    }
+
+    /// The table's lines in `width` columns ([`rows::table`]).
+    pub fn table_lines(&self, width: Option<usize>) -> Vec<rows::Line> {
+        rows::table(&self.rows(), width)
+    }
+
+    /// What the table's marks mean, wrapped to `width` when it is known.
+    pub fn key_lines(&self, width: Option<usize>) -> Vec<String> {
+        let floors = self.floors().into_iter().map(|f| f.name).collect::<Vec<_>>().join("; ");
+        let hours = rows::PACE_WINDOW / 3_600_000_000;
+        let words = format!(
+            "│ marks the {floors}. Sparkline: the window, oldest first, 0% to 100%. Pace: the last {hours}h of readings."
+        );
+        wrap("", &words, width)
+    }
+
+    /// The view as text: the heading, the table in `width` columns (the widest where none is known),
+    /// then what its marks mean. With `colour`, a gauge in its tone and a full outlook in red.
+    pub fn print_rows(&self, width: Option<usize>, colour: bool) -> String {
+        let mut lines = self.heading_lines(width);
+        for line in self.table_lines(width) {
+            let text: String = line
+                .into_iter()
+                .map(|p| match p.color.filter(|_| colour) {
+                    Some(c) => format!("\x1b[{}m{}\x1b[39m", sgr(c), p.text),
+                    None => p.text,
+                })
+                .collect();
+            lines.push(text);
+        }
+        lines.extend(self.key_lines(width));
+        lines.join("\n")
+    }
+
     /// The chart alone (its axes, floors and series), filling `area`.
     pub fn draw(&self, area: Rect, buf: &mut Buffer) {
         let (x0, x1) = (x(self.filter.since), x(self.now).max(x(self.filter.since) + 1.0));
@@ -345,6 +402,24 @@ impl Usage<'_> {
         series.chain(floors).collect()
     }
 
+    /// The heading, wrapped to `width` when it is known.
+    pub fn heading_lines(&self, width: Option<usize>) -> Vec<String> {
+        wrap("", &self.heading(), width)
+    }
+
+    /// The legend wrapped to `width` when it is known, never cut: a block per series and floor,
+    /// each starting with spaces where its sample goes.
+    pub fn legend_lines(&self, width: Option<usize>) -> Vec<Legend> {
+        self.legend()
+            .into_iter()
+            .map(|(sample, color, words)| {
+                let sample_width = sample.width();
+                let lines = wrap(&" ".repeat(sample_width), &words, width.map(|w| w.max(sample_width + 1)));
+                Legend { sample, color, sample_width, lines }
+            })
+            .collect()
+    }
+
     /// The whole view as text: the heading, the chart `width` columns wide (100 where no width is
     /// known), then the legend. Heading and legend are lines of their own, wrapped to `width` when
     /// it is known, never cut; with `colour`, each sample in its series' colour.
@@ -353,18 +428,28 @@ impl Usage<'_> {
         let area = Rect::new(0, 0, u16::try_from(cols).unwrap_or(u16::MAX), CHART_ROWS);
         let mut buf = Buffer::empty(area);
         self.draw(area, &mut buf);
-        let mut lines = wrap("", &self.heading(), width);
+        let mut lines = self.heading_lines(width);
         lines.push(text(&buf, colour));
-        for (sample, color, words) in self.legend() {
-            let shown = if colour { format!("\x1b[{}m{sample}\x1b[39m", sgr(color)) } else { sample.clone() };
-            let mut wrapped = wrap(&" ".repeat(sample.width()), &words, width.map(|w| w.max(sample.width() + 1)));
-            if let Some(first) = wrapped.first_mut() {
-                first.replace_range(..sample.width(), &shown);
+        for mut l in self.legend_lines(width) {
+            let shown = if colour { format!("\x1b[{}m{}\x1b[39m", sgr(l.color), l.sample) } else { l.sample.clone() };
+            if let Some(first) = l.lines.first_mut() {
+                first.replace_range(..l.sample_width, &shown);
             }
-            lines.extend(wrapped);
+            lines.extend(l.lines);
         }
         lines.join("\n")
     }
+}
+
+/// One legend entry, wrapped.
+#[derive(Debug)]
+pub struct Legend {
+    /// Its id and a sample of its colour.
+    pub sample: String,
+    pub color: Color,
+    pub sample_width: usize,
+    /// Its words in lines, the first beginning with `sample_width` spaces where the sample goes.
+    pub lines: Vec<String>,
 }
 
 /// Where ratatui's `Chart` plots in `area` with these axis labels (its own layout, which it does
@@ -475,7 +560,7 @@ fn sgr(c: Color) -> u8 {
 /// The buses a chart reads: every project's on this machine, in a project or outside one (accounts
 /// are the machine's, so a reading is wherever it happened to be taken), with each that cannot be
 /// read named. Inside a project the chart is then limited to its accounts ([`Within`]).
-fn buses(scope: Scope<'_>) -> Result<(Vec<Vec<Stamped>>, Vec<String>)> {
+pub fn buses(scope: Scope<'_>) -> Result<(Vec<Vec<Stamped>>, Vec<String>)> {
     let (mut read, mut unreadable) = (Vec::new(), Vec::new());
     let mut dirs = crate::ctx::try_project_dirs(scope.root)?;
     dirs.sort();
@@ -491,13 +576,25 @@ fn buses(scope: Scope<'_>) -> Result<(Vec<Vec<Stamped>>, Vec<String>)> {
     Ok((read, unreadable))
 }
 
-pub fn run(scope: Scope<'_>, json: bool, mut filter: Filter, since: &str) -> Result<()> {
+/// Tabulates the readings once, or with `chart` charts them; with `watch`, opens the watch on the same instead.
+pub fn run(scope: Scope<'_>, json: bool, mut filter: Filter, since: &str, watch: bool, chart: bool) -> Result<()> {
     if let Some(a) = filter.accounts.iter().find(|a| !a.contains(':')) {
         fail!(Usage, "--account {a}: an account is harness:label");
     }
     let Some(window) = super::stats::parse_duration(since) else {
         fail!(Usage, "--since {since}: a duration such as 30m, 12h, 7d or 2w");
     };
+    if watch {
+        if json {
+            fail!(Usage, "--watch draws a terminal UI; --json prints the readings once: use one");
+        }
+        return crate::systems::watch::run(
+            scope,
+            false,
+            scope.home.is_none(),
+            Some(ChartSpec { filter, window, chart }),
+        );
+    }
     let now = now_micros();
     filter.since = now.saturating_sub(window);
     filter.within = scope.home.map(|ctx| Within::of(&ctx.cfg));
@@ -505,7 +602,7 @@ pub fn run(scope: Scope<'_>, json: bool, mut filter: Filter, since: &str) -> Res
     let history = History::fold(read.iter().map(Vec::as_slice), &filter);
     let limits = &scope.cfg.limits;
     if json {
-        let mut v = history.to_json(&filter, limits);
+        let mut v = history.to_json(&filter, limits, now);
         if !unreadable.is_empty() {
             v["unreadable"] = unreadable.into();
         }
@@ -518,11 +615,11 @@ pub fn run(scope: Scope<'_>, json: bool, mut filter: Filter, since: &str) -> Res
     if history.series.is_empty() {
         out!("{}: no readings", usage.heading());
     } else {
-        out!("{}", usage.print(size.map(|(cols, _)| cols), size.is_some()));
+        let (cols, colour) = (size.map(|(cols, _)| cols), size.is_some());
+        out!("{}", usage.render(chart, cols, colour));
     }
-    if !history.bare.is_empty() {
-        let names = history.bare.iter().cloned().collect::<Vec<_>>().join(", ");
-        out!("left out: readings under a bare label, which names no harness ({names})");
+    if let Some(left_out) = history.left_out() {
+        out!("{left_out}");
     }
     for u in unreadable {
         out!("unreadable: {u}");
@@ -754,7 +851,7 @@ mod tests {
             ..Limits::default()
         };
         let f = week();
-        let v = fold(&f).to_json(&f, &limits);
+        let v = fold(&f).to_json(&f, &limits, NOW);
         let first = &v["accounts"]["claude:a"]["seven_day"][0];
         assert_eq!(first, &json!({ "t": NOW - 30 * H, "utilization": 0.80, "resets_at": 1_800_500_000 - 604_800 }));
         assert_eq!(v["accounts"]["omp:w"]["openai-codex/7 days"].as_array().unwrap().len(), 2);
@@ -806,6 +903,46 @@ mod tests {
         assert!(lines.iter().any(|l| l.matches('╌').count() > 40), "the near-reset floor too:\n{text}");
         assert!(text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)), "the series in braille:\n{text}");
         assert!(!text.contains('\x1b'), "plain text has no escapes");
+    }
+
+    /// `view usage` prints the rows; `--chart` the chart, with the legend; plain text has no escapes.
+    #[test]
+    fn view_usage_prints_the_rows_and_chart_prints_the_chart() {
+        let (f, limits, tz) = (week(), limits(), TimeZone::UTC);
+        let h = fold(&f);
+        let usage = Usage { history: &h, limits: &limits, filter: &f, now: NOW, tz: &tz };
+        let rows = usage.render(false, Some(120), false);
+        let lines: Vec<&str> = rows.lines().collect();
+        assert_eq!(lines[0], "quota since Jan 8 08:00 UTC, 7-day meters", "{rows}");
+        assert!(lines[1].starts_with("omp:w openai-codex/7 days") || lines[1].starts_with("claude:a"), "{rows}");
+        assert!(lines.iter().any(|l| l.starts_with("claude:a") && l.contains("5%") && l.contains("resets")), "{rows}");
+        assert!(!rows.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)), "no chart braille in the rows:\n{rows}");
+        assert!(!rows.contains('\x1b') && !rows.contains("at the last reading"), "{rows}");
+        let chart = usage.render(true, Some(100), false);
+        assert_eq!(chart, usage.print(Some(100), false));
+        assert!(chart.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)), "the chart in braille:\n{chart}");
+        assert!(chart.contains("1 ━━ claude:a 7 days"), "and its legend:\n{chart}");
+        let coloured = usage.render(false, Some(120), true);
+        assert!(coloured.contains("\x1b[32m") || coloured.contains("\x1b[33m"), "a gauge in its tone: {coloured}");
+    }
+
+    #[test]
+    fn json_has_each_rows_pace_and_projection() {
+        let f = week();
+        let v = fold(&f).to_json(&f, &limits(), NOW);
+        let rows = v["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let a = rows.iter().find(|r| r["account"] == "claude:a").unwrap();
+        assert_eq!(
+            (a["meter"].clone(), a["utilization"].clone(), a["readings"].clone()),
+            (json!("seven_day"), json!(0.05), json!(3))
+        );
+        assert_eq!(a["pace_per_day"], json!(null), "the readings since the reset are one");
+        assert_eq!(a["outlook"], json!("—"));
+        assert_eq!(v["pace_window_hours"], json!(24));
+        let w = rows.iter().find(|r| r["account"] == "omp:w").unwrap();
+        assert!(w["sparkline"].as_str().unwrap().chars().count() == 14, "{w}");
+        assert!(v["accounts"]["claude:a"]["seven_day"].is_array(), "the readings stay where they were");
     }
 
     #[test]

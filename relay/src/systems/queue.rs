@@ -48,10 +48,12 @@ pub enum Cmd {
     },
     /// Detach the review chained to a build job: its reviewer no longer re-reviews or resumes it.
     Unreview { name: String },
-    /// Stop a queued job, or one the disk floor holds, waiting for the jobs it was queued `--after`.
+    /// Start a queued job now, without waiting for the jobs it was queued `--after` to finish (not a
+    /// cancel: `dequeue` withdraws it). A job the disk floor holds is freed of them too and starts when
+    /// there is room.
     Release {
         name: String,
-        /// Drop only these (repeat, or comma-separate). Default: all of them.
+        /// Stop waiting for only these (repeat, or comma-separate); it starts once none is left. Default: all of them.
         #[arg(long = "from", value_delimiter = ',')]
         from: Vec<String>,
     },

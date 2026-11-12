@@ -281,6 +281,10 @@ pub struct Hooks {
     pub seat_wait_minutes: f64,
     /// How long a `command:` handler may run.
     pub command_timeout_seconds: u64,
+    /// Exit codes (1-255) that an acceptance check uses to say it could not run, beyond the ones that
+    /// always mean so (124-127, 137, 143): relay ends such a run `check-could-not-run`, never `fail`
+    /// or `base-red`. Declared by the project, since only the project knows its check's codes.
+    pub check_could_not_run_exit_codes: Vec<i32>,
     /// Whether a `held` decision may `force` a job past its profile's limits.
     pub allow_force: bool,
     /// The most decisions that may act on one job (one incarnation) once any chain
@@ -306,6 +310,7 @@ impl Default for Hooks {
             orchestrator_timeout_minutes: 20.0,
             seat_wait_minutes: 30.0,
             command_timeout_seconds: 120,
+            check_could_not_run_exit_codes: Vec::new(),
             allow_force: false,
             max_decisions: 10,
         }
@@ -405,11 +410,28 @@ impl Default for Gc {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Accounts {
     /// Accounts never used, as `harness:label` (`claude:work`, `omp:default`).
     pub exclude: Vec<String>,
+    /// How long one account's quota command may run, in seconds, before it is ended and the read
+    /// recorded as timed out. At least [`MIN_READ_SECS`]. `claude -p /usage` also reads this machine's
+    /// local sessions, so a heavy account under load is slow (58 s measured at load 77).
+    pub read_secs: u64,
+}
+
+/// The default of `accounts.read_secs`: three times the 58 s one heavy account took at load 77.
+pub const DEFAULT_READ_SECS: u64 = 180;
+
+/// The least `accounts.read_secs` is refused below: shorter than a command that starts a CLI and asks
+/// a server can answer on a loaded machine, so every read would time out.
+pub const MIN_READ_SECS: u64 = 30;
+
+impl Default for Accounts {
+    fn default() -> Self {
+        Self { exclude: Vec::new(), read_secs: DEFAULT_READ_SECS }
+    }
 }
 
 /// One harness's settings. Every harness takes the same keys.
@@ -450,11 +472,18 @@ pub struct Session {
     /// `env` through it on the host before each attempt and passes the result
     /// in, as direnv would. Empty: the caller's environment as it is.
     pub env_shell: Vec<String>,
+    /// How long one attempt to enter `env_shell` may take, in seconds, before it is stopped and
+    /// tried again. At least [`MIN_ENV_SHELL_ATTEMPT_SECS`].
+    pub env_shell_attempt_secs: u64,
     /// Variables set in every job's environment, over the caller's and the
     /// development environment's, under the harness's own (the account).
     /// For Rust projects `CARGO_INCREMENTAL = "0"` keeps `target/` small.
     pub env: BTreeMap<String, String>,
 }
+
+/// The shortest `session.env_shell_attempt_secs`: a shell is not entered in less, and a smaller
+/// value would fail every warm-up and hold every job for good.
+pub const MIN_ENV_SHELL_ATTEMPT_SECS: u64 = 30;
 
 impl Session {
     pub fn banned(&self, model: &str) -> Option<&str> {
@@ -472,6 +501,7 @@ impl Default for Session {
             branch_prefix: "relay/".into(),
             final_marker: "FINAL".into(),
             env_shell: Vec::new(),
+            env_shell_attempt_secs: 600,
             env: BTreeMap::new(),
             banned_models: std::collections::BTreeMap::new(),
             max_hours: 4.0,
@@ -753,7 +783,17 @@ impl Config {
         for key in &self.accounts.exclude {
             ensure!(key.contains(':'), "accounts.exclude entries are harness:label, not {key:?}");
         }
+        ensure!(
+            self.accounts.read_secs >= MIN_READ_SECS,
+            "accounts.read_secs must be at least {MIN_READ_SECS}: a quota read cannot finish sooner on a loaded machine"
+        );
         ensure!(self.session.max_hours > 0.0, "session.max_hours must be positive");
+        ensure!(
+            self.session.env_shell_attempt_secs >= MIN_ENV_SHELL_ATTEMPT_SECS,
+            "session.env_shell_attempt_secs is {}, under the {MIN_ENV_SHELL_ATTEMPT_SECS} s an attempt \
+             to enter the shell needs to get anywhere: raise it (a slow shell needs more, not less)",
+            self.session.env_shell_attempt_secs
+        );
         self.validate_policy()?;
         let h = &self.hooks;
         for (point, chain) in [("cap", &h.cap), ("ended", &h.ended), ("held", &h.held), ("disk", &h.disk)] {
@@ -771,6 +811,10 @@ impl Config {
         ensure!(
             h.seat_wait_minutes.is_finite() && h.seat_wait_minutes >= 0.0,
             "hooks.seat_wait_minutes must not be negative"
+        );
+        ensure!(
+            h.check_could_not_run_exit_codes.iter().all(|c| (1..=255).contains(c)),
+            "hooks.check_could_not_run_exit_codes are exit codes from 1 to 255 (0 is a pass)"
         );
         self.validate_disk()?;
         let deny = regex::Regex::new(&self.sandbox.env_deny).context("sandbox.env_deny")?;
@@ -1079,6 +1123,20 @@ fn find_upwards(start: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_quota_read_has_a_declared_limit_with_a_floor() {
+        let d = repo();
+        let parse = |secs: &str| Config::parse(&format!("name = \"x\"\n[accounts]\nread_secs = {secs}\n"), d.path());
+        assert_eq!(Config::parse("name = \"x\"", d.path()).unwrap().accounts.read_secs, DEFAULT_READ_SECS);
+        assert_eq!(parse("240").unwrap().accounts.read_secs, 240);
+        assert_eq!(parse("30").unwrap().accounts.read_secs, MIN_READ_SECS);
+        for bad in ["29", "0"] {
+            let err = parse(bad).unwrap_err().to_string();
+            assert!(err.contains("accounts.read_secs must be at least 30"), "{err}");
+        }
+        assert!(parse("-1").is_err() && parse("\"90\"").is_err());
+    }
+
+    #[test]
     fn a_model_belongs_to_the_family_its_provider_names() {
         let f = super::model_family;
         assert_eq!(f("claude-opus-5-5"), "anthropic");
@@ -1196,6 +1254,19 @@ mod tests {
         assert!(format!("{:#}", Config::parse(own, d.path()).unwrap_err()).contains("^SECRET_"));
         let kept = "name = \"x\"\n[session.env]\nGIT_AUTHOR_NAME = \"a\"\nPATH = \"/bin\"\n";
         assert_eq!(Config::parse(kept, d.path()).unwrap().session.env.len(), 2);
+    }
+
+    /// `session.env_shell_attempt_secs` defaults to the old fixed 600 s, is read from `[session]`, and a
+    /// value under 30 is refused at load with the reason.
+    #[test]
+    fn the_dev_shell_attempt_limit_is_read_and_a_value_under_30_is_refused() {
+        let d = repo();
+        assert_eq!(Config::parse("name = \"x\"\n", d.path()).unwrap().session.env_shell_attempt_secs, 600);
+        let set = |n: u64| format!("name = \"x\"\n[session]\nenv_shell_attempt_secs = {n}\n");
+        assert_eq!(Config::parse(&set(1800), d.path()).unwrap().session.env_shell_attempt_secs, 1800);
+        assert_eq!(Config::parse(&set(30), d.path()).unwrap().session.env_shell_attempt_secs, 30);
+        let e = format!("{:#}", Config::parse(&set(29), d.path()).unwrap_err());
+        assert!(e.contains("env_shell_attempt_secs is 29") && e.contains("30 s"), "{e}");
     }
 
     /// Review of #40: a missing helper is not fixed by `[harness.<id>] program` (that would replace

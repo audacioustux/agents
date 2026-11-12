@@ -500,7 +500,13 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
     let n = u32::try_from(job.checkpoints.len()).unwrap_or(u32::MAX).saturating_add(1);
     let from = checkpoint::base(dir, &job.checkpoints);
     let now = checkpoint::point(dir, &run.inbox.join("checkpoint.index"));
-    let progressed = checkpoint::progressed(&from, &now);
+    // A run resumed with a failed check's output that has changed nothing since that commit made no
+    // progress either, however much changed since the last checkpoint: the cap does not grow for it.
+    let failed_at = ctx.world()?.jobs().get(&job.name).and_then(|j| j.bars.last().cloned()).and_then(|b| {
+        (b.result == crate::bus::BarResult::Fail).then_some(b.commit).flatten().filter(|c| now.head.as_ref() == Some(c))
+    });
+    let stuck = failed_at.as_deref().is_some_and(|c| !checkpoint::progressed(&checkpoint::at_commit(dir, c), &now));
+    let progressed = checkpoint::progressed(&from, &now) && !stuck;
     let (mut req, _) = request(ctx, job, run, Point::Cap)?;
     req.next_cap_usd = cap;
     req.situation = format!("The run reached its spend cap of ${:.2} (checkpoint {n}).", job.budget_usd);
@@ -511,7 +517,11 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
     }
     let rule = || {
         (!progressed).then(|| {
-            (Action::Stop { why: String::new() }, "no new commit and no changed file since the last checkpoint".into())
+            let since = failed_at.as_deref().filter(|_| stuck).map_or_else(
+                || "the last checkpoint".to_owned(),
+                |c| format!("the acceptance check failed at {}", c.get(..12).unwrap_or(c)),
+            );
+            (Action::Stop { why: String::new() }, format!("no new commit and no changed file since {since}"))
         })
     };
     let handlers = decide::chain(&ctx.cfg, Point::Cap).unwrap_or_default();

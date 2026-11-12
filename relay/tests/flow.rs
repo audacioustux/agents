@@ -624,6 +624,33 @@ fn a_spend_cap_is_a_checkpoint_while_progress_is_real() {
     assert_eq!(wait_for(&env, "idle")["status"], "done");
 }
 
+#[test]
+fn a_run_resumed_with_a_failed_check_that_changes_nothing_does_not_grow_its_cap() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("checkpoint-stuck", false);
+    configure(
+        &env,
+        "budget_growth = 2.0\njob_ceiling_usd = 1.0\nchecker = { harness = \"claude\", budget_usd = 0.5 }\n",
+        "",
+    );
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 50, false);
+    // The first run commits, ends done past its cap and fails the check; the resumed one commits nothing
+    // and reaches its cap. Its branch is ahead of the fork, but not of the commit the check failed at.
+    std::fs::write(env.home.join(".claude.a/once"), "").unwrap();
+    let j = build(&env, "stuck", &["--check", RED_AT_TIP, "--budget", "0.015"]);
+    assert_eq!(j["status"], "failed", "{j}");
+    assert_eq!(j["budget_usd"], 0.015, "the cap did not grow: {j}");
+    let c = &j["checkpoints"][0];
+    assert_eq!((c["verdict"].as_str(), c["checker"].as_str()), (Some("stop"), None), "{j}");
+    let why = c["why"].as_str().unwrap_or_default();
+    assert!(why.starts_with("no new commit and no changed file since the acceptance check failed at "), "{why}");
+    let checks = std::fs::read_to_string(env.home.join(".claude.b/checks")).unwrap_or_default();
+    assert_eq!(checks.lines().count(), 0, "no model was asked");
+}
+
 /// The job's status, once it has been `want` (bounded, so a hang fails the test).
 fn until(env: &Env, name: &str, want: &str) {
     for _ in 0..300 {

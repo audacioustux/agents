@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bus::{
     self, Action, DecideEvent, DevShellEvent, DispatchEvent, Event, Fork, LandEvent, Meters, Offsets, Outcome, Point,
-    QueueEvent, QuotaEvent, SessionEvent, Stamped,
+    QueueEvent, QuotaEvent, ReadFailure, SessionEvent, Stamped,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +284,25 @@ impl Job {
     }
 }
 
+/// An account's reads that gave nothing, since its last good one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Failing {
+    /// Why the latest one did.
+    pub why: ReadFailure,
+    /// How many in a row, the latest included.
+    pub tries: u32,
+    /// Unix microseconds of the first.
+    pub since: u64,
+}
+
+impl Failing {
+    /// `timed out after 90 s (3 tries since Nov 12 18:08 +06)`.
+    pub fn describe(&self) -> String {
+        let tries = if self.tries == 1 { "1 try".to_owned() } else { format!("{} tries", self.tries) };
+        format!("{} ({tries} since {})", self.why.describe(), crate::accounts::fmt_time(crate::bus::secs(self.since)))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountState {
     pub enabled: bool,
@@ -297,6 +316,9 @@ pub struct AccountState {
     pub read_at: Option<u64>,
     /// Unix microseconds of the last attempt that read nothing.
     pub unreadable_at: Option<u64>,
+    /// Why the reads since the last good one gave nothing, and how many: gone when a reading works.
+    #[serde(default)]
+    pub failing: Option<Failing>,
     /// Unix seconds until which the account refuses sessions.
     pub limited_until: Option<i64>,
     /// The home's sign-in (`Identity::stamp`) when it was last read or found
@@ -318,6 +340,7 @@ impl Default for AccountState {
             meters: Meters::new(),
             read_at: None,
             unreadable_at: None,
+            failing: None,
             limited_until: None,
             sign_in: None,
             unsigned: false,
@@ -465,7 +488,7 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// fixed bus, so a fold that changes without a bump fails the tests.
 /// 13: `dispatched` records the model and provider; a job back in the queue has no account.
 /// 14: the development environment's warm-ups (`devshell`).
-const FOLD_VERSION: u32 = 14;
+const FOLD_VERSION: u32 = 15;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -535,6 +558,11 @@ pub fn merge_account(ours: &AccountState, theirs: &AccountState) -> AccountState
         meters,
         read_at,
         unreadable_at: ours.unreadable_at.max(theirs.unreadable_at),
+        // The later failure's account of itself, unless a reading came after it.
+        failing: (if theirs.unreadable_at > ours.unreadable_at { theirs } else { ours })
+            .failing
+            .clone()
+            .filter(|f| read_at.is_none_or(|r| f.since > r)),
         limited_until: ours.limited_until.max(theirs.limited_until),
         sign_in,
         unsigned: ours.unsigned,
@@ -1043,12 +1071,13 @@ impl World {
                 let a = self.account(account);
                 (a.enabled, a.signed_out, a.signed_at) = (*enabled, false, Some(t));
                 // Enabling is the owner saying it is signed in: read it now, not after a back-off.
-                a.unreadable_at = None;
+                (a.unreadable_at, a.failing) = (None, None);
             }
             QuotaEvent::Reading { account, meters, sign_in } => {
                 let a = self.account(account);
                 a.meters.clone_from(meters);
                 a.read_at = Some(t);
+                a.failing = None;
                 a.sign_in.clone_from(sign_in);
                 // A reading that works is a session that works.
                 if a.signed_out {
@@ -1059,10 +1088,18 @@ impl World {
                 let a = self.account(account);
                 (a.signed_out, a.signed_at) = (true, Some(t));
                 // Asked again after a reading's worth of time, not on every pass.
-                a.unreadable_at = Some(t);
+                (a.unreadable_at, a.failing) = (Some(t), None);
                 a.sign_in.clone_from(sign_in);
             }
-            QuotaEvent::Unreadable { account } => self.account(account).unreadable_at = Some(t),
+            QuotaEvent::Unreadable { account, why } => {
+                let a = self.account(account);
+                a.unreadable_at = Some(t);
+                a.failing = why.as_ref().map(|why| Failing {
+                    why: why.clone(),
+                    tries: a.failing.as_ref().map_or(1, |f| f.tries.saturating_add(1)),
+                    since: a.failing.as_ref().map_or(t, |f| f.since),
+                });
+            }
         }
     }
 
@@ -1436,7 +1473,8 @@ mod tests {
     /// new pair; never change a pair already recorded.
     #[test]
     fn the_fold_version_moves_with_the_fold() {
-        const PINNED: &[(u32, u64)] = &[(13, 0x1d75_bf1b_971c_dfd9), (14, 0x0599_7a27_1a95_7bbd)];
+        const PINNED: &[(u32, u64)] =
+            &[(13, 0x1d75_bf1b_971c_dfd9), (14, 0x0599_7a27_1a95_7bbd), (15, 0x5351_e6de_0d8d_bfd8)];
         let dispatched = |t, model: Option<&str>| {
             st(
                 t,

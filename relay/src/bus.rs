@@ -508,7 +508,69 @@ pub enum QuotaEvent {
     /// is not asked again until a reading would be stale.
     Unreadable {
         account: String,
+        /// Why it gave nothing. Absent on events written before relay said.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<ReadFailure>,
     },
+}
+
+/// Why a quota command gave no meters. Never holds raw output: a stderr tail is cut short and has
+/// anything shaped like an email address or a token taken out ([`ReadFailure::exited`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ReadFailure {
+    /// It was still running at its limit (`accounts.read_secs`) and was ended.
+    TimedOut { secs: u64 },
+    /// It ended on its own with a failure, or could not be started.
+    Exited {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<i32>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        stderr: String,
+    },
+    /// It ended well and printed no meter relay knows.
+    NoMeters,
+}
+
+impl ReadFailure {
+    /// The longest stderr tail kept, in characters.
+    pub const TAIL: usize = 160;
+
+    /// A failed exit with the end of its stderr: what is kept is the final non-empty line, cut to
+    /// the last [`Self::TAIL`] characters, with every word that looks like an email address or a
+    /// token (an `@`, or 24 or more letters and digits) replaced by `…`.
+    pub fn exited(code: Option<i32>, stderr: &str) -> Self {
+        let line = stderr.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+        let words: Vec<&str> =
+            line.split_whitespace()
+                .map(|w| {
+                    if w.contains('@') || w.chars().filter(char::is_ascii_alphanumeric).count() >= 24 {
+                        "…"
+                    } else {
+                        w
+                    }
+                })
+                .collect();
+        let text = words.join(" ");
+        let stderr = if text.chars().count() > Self::TAIL {
+            text.chars().skip(text.chars().count() - Self::TAIL).collect()
+        } else {
+            text
+        };
+        Self::Exited { code, stderr }
+    }
+
+    /// `timed out after 90 s`, `exited 1: <tail>`, `printed no meters`.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::TimedOut { secs } => format!("timed out after {secs} s"),
+            Self::Exited { code, stderr } => {
+                let code = code.map_or_else(|| "ended abnormally".to_owned(), |c| format!("exited {c}"));
+                if stderr.is_empty() { code } else { format!("{code}: {stderr}") }
+            }
+            Self::NoMeters => "printed no meters".into(),
+        }
+    }
 }
 
 /// A moment at which relay asks its hooks what to do.

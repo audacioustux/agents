@@ -242,10 +242,14 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_exit: Option<i32>,
         result: BarResult,
-        /// For `base-red`: the failing tests, all failing at the base commit too (empty when the
-        /// output names none to compare).
+        /// For `fail`: the failing tests the output names. For `base-red`: the failing tests, all
+        /// failing at the base commit too. Empty when the output names none to compare.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         failing: Vec<String>,
+        /// A `fail` at the same commit as the job's previous check, which failed the same way (the same
+        /// exit statuses and failing tests): the session made no progress between them.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_progress: bool,
     },
     /// A review was carried out: `job` judged `of`'s branch at `commit`.
     Reviewed {
@@ -341,6 +345,9 @@ impl Acceptance {
 /// A job that waits for this name is never started by a relay that does not know acceptance: it
 /// shows as waiting for a job that is gone. The fold drops it, so a relay that does know ignores it.
 pub const ACCEPTANCE_GATE: &str = "needs-relay-acceptance";
+
+/// Why a failed check that repeats the one before it is not resumed again.
+pub const NO_PROGRESS: &str = "no progress: same commit, same check failure";
 
 /// How an acceptance check came out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

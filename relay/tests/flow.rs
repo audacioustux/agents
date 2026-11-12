@@ -624,6 +624,33 @@ fn a_spend_cap_is_a_checkpoint_while_progress_is_real() {
     assert_eq!(wait_for(&env, "idle")["status"], "done");
 }
 
+#[test]
+fn a_run_resumed_with_a_failed_check_that_changes_nothing_does_not_grow_its_cap() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("checkpoint-stuck", false);
+    configure(
+        &env,
+        "budget_growth = 2.0\njob_ceiling_usd = 1.0\nchecker = { harness = \"claude\", budget_usd = 0.5 }\n",
+        "",
+    );
+    claude_account(&env.home, "a", 10, false);
+    claude_account(&env.home, "b", 50, false);
+    // The first run commits, ends done past its cap and fails the check; the resumed one commits nothing
+    // and reaches its cap. Its branch is ahead of the fork, but not of the commit the check failed at.
+    std::fs::write(env.home.join(".claude.a/once"), "").unwrap();
+    let j = build(&env, "stuck", &["--check", RED_AT_TIP, "--budget", "0.015"]);
+    assert_eq!(j["status"], "failed", "{j}");
+    assert_eq!(j["budget_usd"], 0.015, "the cap did not grow: {j}");
+    let c = &j["checkpoints"][0];
+    assert_eq!((c["verdict"].as_str(), c["checker"].as_str()), (Some("stop"), None), "{j}");
+    let why = c["why"].as_str().unwrap_or_default();
+    assert!(why.starts_with("no new commit and no changed file since the acceptance check failed at "), "{why}");
+    let checks = std::fs::read_to_string(env.home.join(".claude.b/checks")).unwrap_or_default();
+    assert_eq!(checks.lines().count(), 0, "no model was asked");
+}
+
 /// The job's status, once it has been `want` (bounded, so a hang fails the test).
 fn until(env: &Env, name: &str, want: &str) {
     for _ in 0..300 {
@@ -2404,6 +2431,37 @@ fn a_failed_check_resumes_the_session_with_its_output_until_it_passes() {
     assert!(reason.contains("acceptance check fail") || reason.contains("decisions have acted"), "{reason}");
     assert_eq!(decisions(&env, "stuck").len(), 3, "two resumes and the one that was refused");
     assert_eq!(j["bars"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn a_check_that_fails_the_same_way_at_the_same_commit_is_not_resumed_again() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("bar-stuck", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "[hooks]\nmax_decisions = 9\n");
+    claude_account(&env.home, "a", 10, false);
+    // The session commits once, and then, resumed with the failing output, commits nothing: the check
+    // fails again at the same commit, the same way. That is handed on after the second fail, not the ninth.
+    std::fs::write(env.home.join(".claude.a/once"), "").unwrap();
+    let j = build(&env, "stuck", &["--check", RED_AT_TIP]);
+    assert_eq!(j["status"], "failed", "{j}");
+    let bars = j["bars"].as_array().unwrap();
+    assert_eq!(bars.len(), 2, "{j}");
+    assert_eq!(bars[0]["commit"], bars[1]["commit"], "nothing was committed in between");
+    assert_eq!((bars[0].get("no_progress"), &bars[1]["no_progress"]), (None, &true.into()), "{j}");
+    let reason = j["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("no progress: same commit, same check failure"), "{reason}");
+    // The rule resumed once, and then deferred with its reason; no handler is left, so the run stands red.
+    assert_eq!(acts(&steps(&env, "stuck")), ["resume", "defer"]);
+    let ds = decisions(&env, "stuck");
+    assert_eq!(ds[1]["steps"][0]["why"], "no progress: same commit, same check failure", "{:?}", ds[1]);
+    assert!(board(&env).contains("no progress: same commit, same check failure"), "{}", board(&env));
+    assert!(
+        result(&env, "stuck").contains("(no progress: same commit, same check failure)"),
+        "{}",
+        result(&env, "stuck")
+    );
 }
 
 #[test]

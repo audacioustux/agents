@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use anyhow::Result;
 
 use super::{Ended, Ran, bar, port, request, review};
-use crate::bus::{Action, BarResult, Outcome, Point, SessionEvent};
+use crate::bus::{Action, BarResult, NO_PROGRESS, Outcome, Point, SessionEvent};
 use crate::ctx::Ctx;
 use crate::harness::Home;
 use crate::systems::checkpoint;
@@ -44,7 +44,8 @@ fn never_done_red(ended: Ended, check: Option<&CheckRun>) -> Ended {
     match (ended.0, check) {
         (Outcome::Done, Some(c)) if c.result != BarResult::Pass => {
             let more = ended.1.map_or(String::new(), |r| format!("; {r}"));
-            (Outcome::Failed, Some(format!("acceptance check {} (exit {}){more}", c.result.as_str(), c.exit)))
+            let stalled = if c.no_progress { format!(", {NO_PROGRESS}") } else { String::new() };
+            (Outcome::Failed, Some(format!("acceptance check {} (exit {}){stalled}{more}", c.result.as_str(), c.exit)))
         }
         _ => ended,
     }
@@ -58,6 +59,12 @@ fn ask(ctx: &Ctx, job: &Job, run: &Ran<'_>, ended: &Ended, check: Option<&CheckR
     if let Some(dir) = run.dir {
         let now = checkpoint::point(dir, &run.inbox.join("checkpoint.index"));
         req.evidence = checkpoint::evidence(dir, &checkpoint::base(dir, &[]), &now);
+    }
+    if check.is_some_and(|c| c.no_progress) {
+        req.situation.push_str(
+            " Its acceptance check failed at the same commit as its previous check, the same way: the session \
+             committed nothing between them, so resuming it again shows the check nothing new.",
+        );
     }
     req.check = check.cloned();
     req.reviewing = run.reviewing.cloned();
@@ -169,8 +176,9 @@ pub(super) struct EndRule<'a> {
     pub escalate: Option<(String, u32, u32)>,
 }
 
-/// The `rule` handler when a run ends: a failed acceptance check resumes the session with its output
-/// (and a check that could not run, proves nothing or fails at the base too, stops the job); a review's verdict is taken
+/// The `rule` handler when a run ends: a failed acceptance check resumes the session with its output,
+/// unless it repeats the check before it at the same commit, which it defers (a check that could
+/// not run, proves nothing or fails at the base too, stops the job); a review's verdict is taken
 /// from its report; a clean done is accepted; a first silence resumes the same session; enough failed
 /// ends requeue the job under the profile it escalates to. Anything else is deferred.
 pub(super) fn ended_rule(r: &EndRule<'_>) -> Option<(Action, String)> {
@@ -195,6 +203,8 @@ fn done_rule(r: &EndRule<'_>) -> Option<(Action, String)> {
     if let Some(c) = r.check {
         match c.result {
             BarResult::Pass => {}
+            // Nothing was committed since the same failure: another resume would check the same code.
+            BarResult::Fail if c.no_progress => return Some((Action::Defer, NO_PROGRESS.into())),
             BarResult::Fail => {
                 let why = format!("the acceptance check failed (exit {}); resumed with its output", c.exit);
                 return Some((Action::Resume { message: check_message(c), budget: None }, why));
@@ -299,6 +309,7 @@ mod tests {
             exit: 1,
             base_exit: None,
             failing: vec!["x".into()],
+            no_progress: false,
             tail: "test x ... FAILED".into(),
         }
     }
@@ -318,6 +329,29 @@ mod tests {
             "{message}"
         );
         assert_eq!(with_check(&ran(BarResult::Pass)), Some(Action::Accept), "green and reported done");
+    }
+
+    #[test]
+    fn a_failed_bar_that_repeats_the_last_one_is_handed_on_not_resumed() {
+        let stuck = CheckRun { no_progress: true, ..ran(BarResult::Fail) };
+        let r = EndRule {
+            outcome: Outcome::Done,
+            final_done: true,
+            silent: false,
+            follow_ups: 0,
+            check: Some(&stuck),
+            answer: "",
+            marker: "FINAL",
+            reviewing: false,
+            escalate: None,
+        };
+        assert_eq!(ended_rule(&r), Some((Action::Defer, NO_PROGRESS.to_owned())));
+        let (outcome, why) = never_done_red((Outcome::Done, None), Some(&stuck));
+        assert_eq!(outcome, Outcome::Failed);
+        assert_eq!(
+            why.as_deref(),
+            Some("acceptance check fail (exit 1), no progress: same commit, same check failure")
+        );
     }
 
     #[test]

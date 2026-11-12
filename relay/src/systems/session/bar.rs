@@ -25,7 +25,7 @@ use crate::hostdir::{self, HostDir};
 use crate::sandbox::Mounts;
 use crate::systems::checkpoint;
 use crate::systems::decide::CheckRun;
-use crate::world::Job;
+use crate::world::{Bar, Job};
 
 /// How long the tail of a check's output may be.
 const TAIL: usize = 4096;
@@ -80,6 +80,8 @@ pub(super) fn run(
         None => broke("the clone has no commit to check"),
     };
     let red_first = matches!(job.acceptance, crate::bus::Acceptance::CheckRedFirst(_));
+    // The check before this one, as the record holds it: this one is compared with it.
+    let before = ctx.world()?.jobs().get(&job.name).and_then(|j| j.bars.last().cloned());
     let (mut base_exit, mut text, mut failing) = (None, head.text.clone(), Vec::new());
     let result = match head.said {
         Said::Broke => BarResult::CheckCouldNotRun,
@@ -121,6 +123,11 @@ pub(super) fn run(
             }
         }
     };
+    if result == BarResult::Fail {
+        failing = head.failing.clone().unwrap_or_default();
+    }
+    let now = Failure { commit: tip.as_deref(), result, exit: head.code, base_exit, failing: &failing };
+    let no_progress = before.as_ref().is_some_and(|b| now.repeats(b));
     let tail = checkpoint::bounded(&tail_of(text.trim_end(), TAIL), TAIL + 64);
     let event = SessionEvent::BarChecked {
         job: job.name.clone(),
@@ -130,9 +137,46 @@ pub(super) fn run(
         base_exit,
         result,
         failing: failing.clone(),
+        no_progress,
     };
     port(ctx, job).emit(event)?;
-    Ok(CheckRun { command, commit: tip, result, exit: head.code, base_exit, failing, tail })
+    Ok(CheckRun { command, commit: tip, result, exit: head.code, base_exit, failing, no_progress, tail })
+}
+
+/// A check's failure, as far as two runs of it are compared.
+struct Failure<'a> {
+    commit: Option<&'a str>,
+    result: BarResult,
+    exit: i32,
+    base_exit: Option<i32>,
+    failing: &'a [String],
+}
+
+impl Failure<'_> {
+    /// Whether this check failed at the same commit as `before` did, and the same way: the same exit
+    /// statuses (at the tip, and at the base where it ran there) and the same failing tests, whatever
+    /// order they were named in. The output itself is not compared: it carries timings. The check runs
+    /// on the committed tip, so at the same commit the session changed nothing it judges, and a fail
+    /// that repeats says nothing new. A different fail at the same commit (another test, another exit)
+    /// is a check that does not always say the same of the same code: that is new, and is told.
+    ///
+    /// A run that names no failing test (its output could not be read, or the failure is not a test's,
+    /// such as clippy's) says nothing about tests either way, so where either run names none the exit
+    /// statuses alone decide: a wrong "same" costs one hand-over, a wrong "different" another cold build.
+    fn repeats(&self, before: &Bar) -> bool {
+        let same = |a: &[String], b: &[String]| {
+            a.is_empty()
+                || b.is_empty()
+                || (a.len() == b.len() && a.iter().all(|t| b.contains(t)) && b.iter().all(|t| a.contains(t)))
+        };
+        self.result == BarResult::Fail
+            && before.result == BarResult::Fail
+            && self.commit.is_some()
+            && self.commit == before.commit.as_deref()
+            && self.exit == before.exit
+            && self.base_exit == before.base_exit
+            && same(self.failing, &before.failing)
+    }
 }
 
 /// Whether a check that failed at the tip and at the base, naming the failing tests `tip` and `base`,
@@ -431,6 +475,37 @@ mod tests {
         assert_eq!(base_red(Some(&both), Some(&red1)), None, "a new failing test is the job's");
         assert_eq!(base_red(Some(&[]), Some(&[])), Some(vec![]), "nothing to compare: the base fails too");
         assert_eq!(base_red(Some(&[]), Some(&red1)), None, "the tip fails before the tests the base fails");
+    }
+
+    #[test]
+    fn a_fail_repeats_the_one_before_only_at_the_same_commit_the_same_way() {
+        let before = |commit: &str, failing: &[&str]| Bar {
+            commit: Some(commit.into()),
+            result: BarResult::Fail,
+            exit: 101,
+            base_exit: Some(0),
+            failing: failing.iter().map(|&t| t.to_owned()).collect(),
+            no_progress: false,
+            tail: String::new(),
+        };
+        let two = ["t: a".to_owned(), "t: b".to_owned()];
+        let now = Failure { commit: Some("c1"), result: BarResult::Fail, exit: 101, base_exit: Some(0), failing: &two };
+        assert!(now.repeats(&before("c1", &["t: b", "t: a"])), "the same tests, in any order");
+        assert!(!now.repeats(&before("c0", &["t: a", "t: b"])), "a new commit is progress");
+        assert!(!now.repeats(&before("c1", &["t: a"])), "another failing test at the same commit is new");
+        assert!(!Failure { exit: 1, ..now }.repeats(&before("c1", &["t: a", "t: b"])), "another exit status");
+        assert!(!Failure { base_exit: Some(1), ..now }.repeats(&before("c1", &["t: a", "t: b"])), "another base");
+        let none = Failure { failing: &[], ..now };
+        assert!(none.repeats(&before("c1", &[])), "neither names a test: the exit statuses decide");
+        assert!(none.repeats(&before("c1", &["t: a"])), "only one names tests: the exit statuses decide");
+        assert!(now.repeats(&before("c1", &[])), "the earlier run named none: the exit statuses decide");
+        assert!(
+            !Failure { result: BarResult::BaseRed, ..now }.repeats(&before("c1", &["t: a", "t: b"])),
+            "only a fail"
+        );
+        let passed = Bar { result: BarResult::Pass, ..before("c1", &["t: a", "t: b"]) };
+        assert!(!now.repeats(&passed), "after a pass, a fail is news");
+        assert!(!Failure { commit: None, ..now }.repeats(&Bar { commit: None, ..before("c1", &[]) }), "no commit");
     }
 
     #[test]

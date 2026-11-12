@@ -80,6 +80,12 @@ pub fn base(dir: &SessionRepo, earlier: &[Check]) -> Point {
     Point { head, tree }
 }
 
+/// A commit as a clone would stand at it with nothing changed: the commit and its tree.
+pub fn at_commit(dir: &SessionRepo, commit: &str) -> Point {
+    let tree = git(dir, &["rev-parse", "--verify", "--quiet", &format!("{commit}^{{tree}}")], None);
+    Point { head: Some(commit.to_owned()), tree }
+}
+
 /// Whether anything was committed or changed between `from` and `now`.
 /// Unknown is not the same as nothing.
 pub fn progressed(from: &Point, now: &Point) -> bool {

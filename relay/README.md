@@ -485,7 +485,9 @@ handlers as untrusted.
   [escalation](#escalation) only once the job itself ends failed.
 - **No progress:** a fail at the same commit as the job's previous check, which failed
   the same way (the same exit statuses, at the tip and at the base, and the same failing
-  tests, read as for base-red; not the output, which carries timings), is not resumed
+  tests, read as for base-red, where both runs name some; where either names none, its output
+  unread or its failure not a test's, the exit statuses alone decide; not the output, which
+  carries timings), is not resumed
   again. The check runs on the committed tip, so a session that committed nothing since
   has nothing new for it to judge, whatever it changed in its working tree. `rule` defers
   with `no progress: same commit, same check failure`, and the rest of the `ended` chain

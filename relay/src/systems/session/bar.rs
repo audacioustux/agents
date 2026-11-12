@@ -159,9 +159,15 @@ impl Failure<'_> {
     /// on the committed tip, so at the same commit the session changed nothing it judges, and a fail
     /// that repeats says nothing new. A different fail at the same commit (another test, another exit)
     /// is a check that does not always say the same of the same code: that is new, and is told.
+    ///
+    /// A run that names no failing test (its output could not be read, or the failure is not a test's,
+    /// such as clippy's) says nothing about tests either way, so where either run names none the exit
+    /// statuses alone decide: a wrong "same" costs one hand-over, a wrong "different" another cold build.
     fn repeats(&self, before: &Bar) -> bool {
         let same = |a: &[String], b: &[String]| {
-            a.len() == b.len() && a.iter().all(|t| b.contains(t)) && b.iter().all(|t| a.contains(t))
+            a.is_empty()
+                || b.is_empty()
+                || (a.len() == b.len() && a.iter().all(|t| b.contains(t)) && b.iter().all(|t| a.contains(t)))
         };
         self.result == BarResult::Fail
             && before.result == BarResult::Fail
@@ -491,6 +497,8 @@ mod tests {
         assert!(!Failure { base_exit: Some(1), ..now }.repeats(&before("c1", &["t: a", "t: b"])), "another base");
         let none = Failure { failing: &[], ..now };
         assert!(none.repeats(&before("c1", &[])), "neither names a test: the exit statuses decide");
+        assert!(none.repeats(&before("c1", &["t: a"])), "only one names tests: the exit statuses decide");
+        assert!(now.repeats(&before("c1", &[])), "the earlier run named none: the exit statuses decide");
         assert!(
             !Failure { result: BarResult::BaseRed, ..now }.repeats(&before("c1", &["t: a", "t: b"])),
             "only a fail"

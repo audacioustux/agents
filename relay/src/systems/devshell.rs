@@ -151,13 +151,15 @@ impl Recorded {
 }
 
 /// The paths a recorded environment stands on, of those `exists` says are there: every absolute
-/// `PATH` directory, and every store path (`/nix/store/<name>`, `/gnu/store/<name>`) any value names,
-/// alone or in a `:` or space separated list. A path that was not there when it was recorded (a
+/// `PATH` directory (split on `:` alone, so a directory may have spaces in it), and every store path
+/// (`/nix/store/<name>`, `/gnu/store/<name>`) any value names, alone or in a `:` or space separated
+/// list (Nix's `buildInputs` are spaced; a store path never has a space). A path that was not there when it was recorded (a
 /// shell's temporary directory, the output a `nix develop` shell would build) is not one it stands on.
 fn keeps(env: &[(String, String)], exists: impl Fn(&Path) -> bool) -> Vec<String> {
     let mut out = std::collections::BTreeSet::new();
     for (k, v) in env {
-        for part in v.split([':', ' ']).filter(|p| p.starts_with('/')) {
+        let parts: Vec<&str> = if k == "PATH" { v.split(':').collect() } else { v.split([':', ' ']).collect() };
+        for part in parts.into_iter().filter(|p| p.starts_with('/')) {
             let store = ["/nix/store/", "/gnu/store/"].iter().find_map(|s| {
                 let name = part.strip_prefix(s)?.split('/').next().filter(|n| !n.is_empty())?;
                 Some(format!("{s}{name}"))
@@ -611,7 +613,7 @@ pub(crate) mod tests {
     #[test]
     fn an_environment_stands_on_its_path_and_the_store_paths_it_names_that_exist() {
         let env = [
-            ("PATH", "/nix/store/aaa-cargo/bin:/home/u/.local/bin:relative:/gone/bin"),
+            ("PATH", "/nix/store/aaa-cargo/bin:/home/u/.local/bin:relative:/gone/bin:/opt/tool chain/bin"),
             ("buildInputs", "/nix/store/bbb-openssl-3 /nix/store/ccc-zlib"),
             ("LIBCLANG_PATH", "/nix/store/ddd-clang/lib"),
             ("out", "/nix/store/eee-shell"),
@@ -629,8 +631,10 @@ pub(crate) mod tests {
                 "/nix/store/bbb-openssl-3",
                 "/nix/store/ccc-zlib",
                 "/nix/store/ddd-clang",
+                "/opt/tool chain/bin",
             ],
-            "store roots, PATH directories; not what was never there, not plain paths of other variables"
+            "store roots, PATH directories (whole, spaces and all); not what was never there, not plain paths of \
+             other variables"
         );
     }
 

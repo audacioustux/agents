@@ -381,7 +381,8 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   its account, and two decisions at once take different accounts or one waits. A seat is
   free when the account has room under `limits.per_account` (counting every
   project's sessions) and a quota reading that is fresh and above the floor; the
-  worker's own account serves when no other does. At `cap` and `ended` the
+  worker's own account serves when no other does. A worker at `cap` or `ended` holds no seat
+  while it is asked about; one at `disk` still runs, so it keeps its seat. At `cap` and `ended` the
   handler waits up to `hooks.seat_wait_minutes` for a seat (taking a new quota
   reading where one is old), then defers with a reason that names that bound;
   at `held` and `disk` it does not wait, since neither can: a held job is asked
@@ -455,7 +456,8 @@ push or delete: those stay with you.
 
 Every decision is on the bus: `decision-requested {id, job, point}`, `seated
 {id, account, model, provider}` and `unseated {id}` around an `agent:` handler's
-session (its seat counts only while the process that asked lives), `parked
+session (its seat counts until `unseated`, even if the job is cleaned away meanwhile, and only
+while the process that asked lives; a booking for a decision already cleaned away is refused), `parked
 {id, until}` while it waits for the orchestrator, `answered {id, action, why}`
 from `decide answer` (heard only before `until`), and one `decided {id,
 handler, action, why, cost_usd, refused}` per handler asked, written by the

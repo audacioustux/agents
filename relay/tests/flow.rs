@@ -2185,6 +2185,121 @@ fn a_running_job_over_its_disk_ceiling_is_stopped_and_can_be_resumed() {
     assert_eq!(wait_for(&env, "grows")["status"], "done");
 }
 
+/// Sets the disk floor and the margin above it in the project's `[limits]`, replacing the test's own.
+fn set_floor(env: &Env, floor_gb: &str, margin_gb: &str) {
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    let kept: Vec<&str> = conf
+        .lines()
+        .filter(|l| !l.starts_with("min_free_disk_gb") && !l.starts_with("disk_resume_margin_gb"))
+        .collect();
+    let conf = kept.join("\n").replacen(
+        "[limits]",
+        &format!("[limits]\nmin_free_disk_gb = {floor_gb}\ndisk_resume_margin_gb = {margin_gb}"),
+        1,
+    );
+    std::fs::write(env.repo.join("relay.toml"), format!("{conf}\n")).unwrap();
+}
+
+/// An event on the bus, which wakes a dispatcher sleeping until its next look at free disk: it reads the edited
+/// config then. A read-only job, so that the floor does not hold it back.
+fn nudge(env: &Env) {
+    ok(&relay(env, &["queue", "add", "nudge", "--text", "Look.", "--readonly"]), "queue");
+}
+
+/// The job once `done` says so (polled, bounded: a hang fails the test).
+fn poll_job(env: &Env, name: &str, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    for _ in 0..300 {
+        let j = job(env, name);
+        if done(&j) {
+            return j;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("{name} never got there: {}", job(env, name));
+}
+
+/// A read-only job (exempt from admission, so it starts under any floor) that the floor stops: held.
+/// The floor is set to more free disk than any machine has, so the first measurement crosses it.
+fn held_by_the_floor(env: &Env, name: &str) -> serde_json::Value {
+    set_floor(env, "1000000000", "0");
+    claude_account(&env.home, "a", 10, false);
+    std::fs::write(env.home.join(".claude.a/hold"), "").unwrap();
+    ok(&relay(env, &["queue", "add", name, "--text", "Look around.", "--readonly"]), "queue");
+    let j = poll_job(env, name, |j| j["status"] == "stopped");
+    assert_eq!(j["held"], true, "stopped by the floor, so held: {j}");
+    let why = j["reason"].as_str().unwrap();
+    assert!(why.starts_with("disk: ") && why.contains(" free, under "), "{why}");
+    j
+}
+
+#[test]
+fn the_disk_floor_holds_a_job_and_the_dispatcher_resumes_it_once() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("floor-held", false);
+    held_by_the_floor(&env, "scan");
+    let board = String::from_utf8_lossy(&relay(&env, &["view", "status"]).stdout).into_owned();
+    assert!(
+        board.contains("held: disk: ") && board.contains("resumes at "),
+        "the board says why and until when: {board}"
+    );
+
+    // Space is back over the floor and its margin (the floor is now 1 GB): nobody resumes it by hand.
+    std::fs::remove_file(env.home.join(".claude.a/hold")).unwrap();
+    set_floor(&env, "1", "0");
+    nudge(&env);
+    let j = poll_job(&env, "scan", |j| j["status"] == "done");
+    assert_eq!(j["held"], serde_json::Value::Null, "{j}");
+    let told = prompts(&env, "a");
+    assert_eq!(told.matches("disk floor").count(), 1, "told once, that the floor paused it: {told}");
+    assert!(told.contains("Nothing in your work caused it"), "{told}");
+    assert_eq!(j["attempts"], 2, "resumed once: {j}");
+}
+
+#[test]
+fn a_job_a_person_stopped_while_held_is_not_resumed_when_space_returns() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("floor-person", false);
+    held_by_the_floor(&env, "scan");
+    ok(&relay(&env, &["queue", "stop", "scan"]), "stop a held job");
+    let j = job(&env, "scan");
+    assert_eq!((j["status"].as_str(), j["held"].clone()), (Some("stopped"), serde_json::Value::Null), "{j}");
+    assert_eq!(j["reason"], "stopped by request", "{j}");
+
+    std::fs::remove_file(env.home.join(".claude.a/hold")).unwrap();
+    set_floor(&env, "1", "0");
+    nudge(&env);
+    assert_eq!(poll_job(&env, "nudge", |j| j["status"] == "done")["status"], "done", "the dispatcher is up");
+    let j = job(&env, "scan");
+    assert_eq!((j["status"].as_str(), j["attempts"].clone()), (Some("stopped"), 1.into()), "never resumed: {j}");
+}
+
+#[test]
+fn a_queued_job_waits_for_the_floor_and_its_margin() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("floor-admission", false);
+    set_floor(&env, "1000000000", "3");
+    claude_account(&env.home, "a", 10, false);
+    ok(&relay(&env, &["queue", "add", "build", "--text", "Make a change."]), "queue");
+    for _ in 0..50 {
+        let board = String::from_utf8_lossy(&relay(&env, &["view", "status"]).stdout).into_owned();
+        if board.contains("free disk below 1000000003 GB") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let board = String::from_utf8_lossy(&relay(&env, &["view", "status"]).stdout).into_owned();
+    assert!(board.contains("free disk below 1000000003 GB"), "the floor plus its margin: {board}");
+    assert_eq!(job(&env, "build")["status"], "queued");
+    set_floor(&env, "1", "0");
+    assert_eq!(wait_for(&env, "build")["status"], "done");
+}
+
 #[test]
 fn a_disk_hook_may_let_a_job_go_on() {
     if !have_bwrap() {

@@ -279,9 +279,10 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
     }
     *spend = (report.cost_usd, report.turns);
-    if disk.is_some() {
-        // Stopped, not failed: the clone and the session are kept for a resume after cleanup.
-        return Ok((Outcome::Stopped, disk));
+    if let Some(DiskStop { why, floor }) = disk {
+        // Stopped, not failed: the clone and the session are kept for a resume. The floor's stop is
+        // held, which the dispatcher resumes once the space is back; a clone over its ceiling waits for a person.
+        return Ok((if floor { Outcome::Held } else { Outcome::Stopped }, Some(why)));
     }
     let ran = Ran {
         report: &report,
@@ -954,8 +955,8 @@ enum Heard {
     Line(std::io::Result<String>),
     End,
     Disk(u64),
-    /// `Some(reason)` stops the job; `None` lets it go on.
-    DiskDecided(Result<Option<String>>),
+    /// `Some(stop)` stops the job; `None` lets it go on.
+    DiskDecided(Result<Option<DiskStop>>),
 }
 
 /// What a measured clone asks of the runner. Deciding is not among them: a
@@ -963,9 +964,9 @@ enum Heard {
 /// thread of its own while the drive loop goes on enforcing every limit.
 enum DiskStep {
     Go,
-    Stop(String),
-    /// Ask the `disk` chain this request, with the reason that stands if every handler defers.
-    Ask(Box<Request>, Vec<decide::Handler>, String),
+    Stop(DiskStop),
+    /// Ask the `disk` chain this request, with the stop that stands if every handler defers.
+    Ask(Box<Request>, Vec<decide::Handler>, DiskStop),
 }
 
 /// The longest one measurement of a clone may take.
@@ -973,11 +974,24 @@ const DISK_WALK: Duration = Duration::from_secs(120);
 /// After a `disk` decision says `wait`, the least time before it is asked again.
 const DISK_REASK: Duration = Duration::from_mins(60);
 
+/// Why a job is stopped for its disk, and whether it is the floor (`limits.min_free_disk_gb`) that did it:
+/// that one is held and resumed when space is back, where a clone over its ceiling stays stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskStop {
+    pub why: String,
+    pub floor: bool,
+}
+
 /// Why a clone of `bytes` should stop its job, when it should: it is over
 /// `limits.job_disk_gb`, or the disk has `free_gb` left, under `limits.min_free_disk_gb`
 /// while this is the largest clone running (`largest`), since stopping a small one
 /// would not help and stopping every one would be worse than the full disk.
-pub fn disk_reason(limits: &crate::config::Limits, bytes: u64, free_gb: Option<f64>, largest: bool) -> Option<String> {
+pub fn disk_reason(
+    limits: &crate::config::Limits,
+    bytes: u64,
+    free_gb: Option<f64>,
+    largest: bool,
+) -> Option<DiskStop> {
     let gb = |g: f64| {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         os::size_str((g * 1e9) as u64)
@@ -985,10 +999,11 @@ pub fn disk_reason(limits: &crate::config::Limits, bytes: u64, free_gb: Option<f
     #[allow(clippy::cast_precision_loss)]
     let held = bytes as f64 / 1e9;
     if limits.job_disk_gb > 0.0 && held > limits.job_disk_gb {
-        return Some(format!("disk: clone {} over {}", os::size_str(bytes), gb(limits.job_disk_gb)));
+        let why = format!("disk: clone {} over {}", os::size_str(bytes), gb(limits.job_disk_gb));
+        return Some(DiskStop { why, floor: false });
     }
     let free = free_gb.filter(|&f| largest && limits.min_free_disk_gb > 0.0 && f < limits.min_free_disk_gb)?;
-    Some(format!("disk: {} free, under {}", gb(free), gb(limits.min_free_disk_gb)))
+    Some(DiskStop { why: format!("disk: {} free, under {}", gb(free), gb(limits.min_free_disk_gb)), floor: true })
 }
 
 /// A measured clone: records its size, and when it is a reason to stop, says
@@ -1006,31 +1021,32 @@ fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: Option<Instant>, askin
         .filter(|o| o.name != job.name && o.status.has_runner())
         .all(|o| o.disk_bytes.unwrap_or(0) <= bytes);
     let free = os::free_disk_gb(&ctx.clones);
-    let Some(why) = disk_reason(&ctx.cfg.limits, bytes, free, largest) else { return Ok(DiskStep::Go) };
-    let Some(handlers) = decide::chain(&ctx.cfg, Point::Disk) else { return Ok(DiskStep::Stop(why)) };
+    let Some(stop) = disk_reason(&ctx.cfg.limits, bytes, free, largest) else { return Ok(DiskStep::Go) };
+    let Some(handlers) = decide::chain(&ctx.cfg, Point::Disk) else { return Ok(DiskStep::Stop(stop)) };
     let mut req = Request::new(job, Point::Disk);
     req.brief = std::fs::read_to_string(ctx.job_file(&job.name, "prompt.md")).unwrap_or_default();
     req.situation = format!(
-        "{why}. The job is running. Stopping it keeps its clone and session, so it can be resumed after cleanup."
+        "{}. The job is running. Stopping it keeps its clone and session, so it can be resumed after cleanup.",
+        stop.why
     );
     req.spent_usd = job.cost_usd;
     req.earlier = decide::earlier(&world, job);
-    Ok(DiskStep::Ask(Box::new(req), handlers, why))
+    Ok(DiskStep::Ask(Box::new(req), handlers, stop))
 }
 
-/// Runs the `disk` chain for as long as `wanted` holds: `Some(why)` stops the job, `None` (`wait`) lets it go on.
+/// Runs the `disk` chain for as long as `wanted` holds: `Some(stop)` stops the job, `None` (`wait`) lets it go on.
 fn decide_disk(
     ctx: &Ctx,
     job: &Job,
     req: &Request,
     handlers: &[decide::Handler],
-    why: String,
+    stop: DiskStop,
     wanted: &(dyn Fn() -> bool + Sync),
-) -> Result<Option<String>> {
-    let fallback = Action::Stop { why: why.clone() };
+) -> Result<Option<DiskStop>> {
+    let fallback = Action::Stop { why: stop.why.clone() };
     let d = decide::decide_while(ctx, job, req, handlers, &|| None, fallback, wanted)?;
     // A decision the job has moved past stops nothing: the run it was asked for is over.
-    Ok(d.carry(ctx, |_, action, _| Ok((action != Action::Wait).then_some(why)))?.flatten())
+    Ok(d.carry(ctx, |_, action, _| Ok((action != Action::Wait).then_some(stop)))?.flatten())
 }
 
 /// Withdraws an outstanding decision when dropped, however the drive loop ends.
@@ -1139,7 +1155,7 @@ fn drive(
     stdin: Option<&str>,
     mut reader: Box<dyn Reader>,
     live: &dyn Fn() -> bool,
-) -> Result<(Report, Ending, Option<String>)> {
+) -> Result<(Report, Ending, Option<DiskStop>)> {
     let port = port(ctx, job);
     let mut log = Ctx::append_private(&ctx.job_file(&job.name, run.log))?;
     let mut child = start(ctx, job, run, cmd, stdin)?;
@@ -1196,29 +1212,29 @@ fn drive(
                 }
                 Ok(Heard::Disk(bytes)) => match on_disk(ctx, job, bytes, quiet_until, asking)? {
                     DiskStep::Go => {}
-                    DiskStep::Stop(why) => {
-                        disk = Some(why);
+                    DiskStep::Stop(stop) => {
+                        disk = Some(stop);
                         // bwrap's --die-with-parent and pid namespace take everything inside with it.
                         child.kill();
                         break;
                     }
-                    DiskStep::Ask(req, handlers, why) => {
+                    DiskStep::Ask(req, handlers, stop) => {
                         asking = true;
                         let (answers, wanted) = (answers.clone(), &wanted);
                         scope.spawn(move || {
                             let still = || wanted.load(Ordering::Relaxed);
                             let _ =
-                                answers.send(Heard::DiskDecided(decide_disk(ctx, job, &req, &handlers, why, &still)));
+                                answers.send(Heard::DiskDecided(decide_disk(ctx, job, &req, &handlers, stop, &still)));
                         });
                     }
                 },
                 Ok(Heard::DiskDecided(answer)) => {
                     asking = false;
-                    let Some(why) = answer? else {
+                    let Some(stop) = answer? else {
                         quiet_until = Some(Instant::now() + DISK_REASK);
                         continue;
                     };
-                    disk = Some(why);
+                    disk = Some(stop);
                     child.kill();
                     break;
                 }
@@ -1360,21 +1376,23 @@ fn checkpoint_rev(dir: &Path, rev: &str) -> Option<String> {
 
 #[cfg(test)]
 mod disk_tests {
-    use super::disk_reason;
+    use super::{DiskStop, disk_reason};
     use crate::config::Limits;
 
     #[test]
     fn a_clone_over_the_ceiling_or_a_full_disk_names_its_reason() {
         let l = Limits { job_disk_gb: 40.0, min_free_disk_gb: 20.0, ..Limits::default() };
         let gb = |g: u64| g * 1_000_000_000;
-        assert_eq!(disk_reason(&l, gb(52), Some(500.0), true).as_deref(), Some("disk: clone 52G over 40G"));
+        let reason = |l: &Limits, bytes, free, largest| disk_reason(l, bytes, free, largest);
+        let stop = |why: &str, floor| Some(DiskStop { why: why.into(), floor });
+        assert_eq!(reason(&l, gb(52), Some(500.0), true), stop("disk: clone 52G over 40G", false));
         assert_eq!(disk_reason(&l, gb(40), Some(500.0), true), None, "at the ceiling is not over it");
-        assert_eq!(disk_reason(&l, gb(12), Some(8.0), true).as_deref(), Some("disk: 8G free, under 20G"));
+        assert_eq!(reason(&l, gb(12), Some(8.0), true), stop("disk: 8G free, under 20G", true));
         assert_eq!(disk_reason(&l, gb(12), Some(8.0), false), None, "only the largest clone answers for a full disk");
         assert_eq!(disk_reason(&l, gb(12), None, true), None, "unmeasured free space is not a reason");
         assert_eq!(
-            disk_reason(&l, gb(52), Some(8.0), true).as_deref(),
-            Some("disk: clone 52G over 40G"),
+            reason(&l, gb(52), Some(8.0), true),
+            stop("disk: clone 52G over 40G", false),
             "the job's own size comes first"
         );
         let off = Limits { job_disk_gb: 0.0, min_free_disk_gb: 0.0, ..l };

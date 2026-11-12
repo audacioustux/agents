@@ -241,6 +241,10 @@ pub struct Limits {
     /// job reaches the `disk` decision point.
     #[serde(alias = "min_free_gb")]
     pub min_free_disk_gb: f64,
+    /// Free disk must be this many GB above `min_free_disk_gb` before a job the floor held resumes and
+    /// before a queued job starts, so a disk hovering at the floor does not flap. It moves neither the
+    /// floor nor what stops a running job.
+    pub disk_resume_margin_gb: f64,
     /// A running build job whose clone passes this many GB reaches the `disk` decision point.
     pub job_disk_gb: f64,
     /// How often a running job's clone is measured, in minutes.
@@ -360,6 +364,7 @@ impl Default for Limits {
             silent_minutes: 30,
             max_load: None,
             min_free_disk_gb: 10.0,
+            disk_resume_margin_gb: 3.0,
             job_disk_gb: 40.0,
             disk_sample_minutes: 3.0,
             max_retries: 1,
@@ -872,6 +877,10 @@ impl Config {
     fn validate_disk(&self) -> Result<()> {
         let (l, g) = (&self.limits, &self.gc);
         ensure!(l.job_disk_gb.is_finite() && l.job_disk_gb >= 0.0, "limits.job_disk_gb must not be negative");
+        ensure!(
+            l.disk_resume_margin_gb.is_finite() && l.disk_resume_margin_gb >= 0.0,
+            "limits.disk_resume_margin_gb must not be negative"
+        );
         ensure!(positive(l.disk_sample_minutes), "limits.disk_sample_minutes must be a positive number");
         for (key, v) in [
             ("outputs_after_hours", g.outputs_after_hours),
@@ -1344,6 +1353,7 @@ mod tests {
         assert_eq!((cfg.gc.outputs_after_hours, cfg.gc.clones_after_days, cfg.gc.waiting_retain_days), (6.0, 7.0, 7.0));
         assert_eq!((cfg.gc.logs_gzip_after_days, cfg.gc.interval_minutes), (3.0, 60.0));
         assert_eq!((cfg.limits.job_disk_gb, cfg.limits.min_free_disk_gb), (40.0, 10.0));
+        assert_eq!(cfg.limits.disk_resume_margin_gb, 3.0);
         assert!(cfg.session.env.is_empty(), "no variable is hard-coded");
         let cfg = Config::parse(
             "name = \"d\"\n[limits]\nmin_free_gb = 20\n[session.env]\nCARGO_INCREMENTAL = \"0\"",
@@ -1360,6 +1370,7 @@ mod tests {
             "[gc]\nclones_after_days = -1",
             "[gc]\npass_seconds = 0",
             "[limits]\njob_disk_gb = -5",
+            "[limits]\ndisk_resume_margin_gb = -1",
             "[session.env]\n\"A-B\" = \"1\"",
         ] {
             assert!(Config::parse(&format!("name = \"demo\"\n{bad}"), d.path()).is_err(), "{bad}");

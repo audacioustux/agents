@@ -64,8 +64,10 @@ pub fn run(ctx: &Ctx, Cmd::Warm: Cmd) -> Result<()> {
     ctx.wake_dispatch()
 }
 
-/// The key the environment is recorded for: the shell command and the repository's files that
-/// define it (`DEFINED_BY`). `None` when the project names no `session.env_shell`.
+/// The key the environment is recorded for: everything that changes what a warm-up captures. The
+/// shell command, `session.env` (the environment it is entered from), `sandbox.env_deny` (what is
+/// left out of the record) and the repository's files that define it (`DEFINED_BY`). `None` when
+/// the project names no `session.env_shell`.
 pub fn key(cfg: &Config) -> Option<String> {
     use sha2::{Digest, Sha256};
     if cfg.session.env_shell.is_empty() {
@@ -76,6 +78,18 @@ pub fn key(cfg: &Config) -> Option<String> {
         h.update(part.as_bytes());
         h.update([0]);
     }
+    // Lengths before each part, so no two settings hash alike by moving a boundary.
+    let mut part = |bytes: &[u8]| {
+        h.update((bytes.len() as u64).to_le_bytes());
+        h.update(bytes);
+    };
+    part(b"session.env");
+    for (k, v) in &cfg.session.env {
+        part(k.as_bytes());
+        part(v.as_bytes());
+    }
+    part(b"sandbox.env_deny");
+    part(cfg.sandbox.env_deny.as_bytes());
     for name in DEFINED_BY {
         h.update(name.as_bytes());
         match std::fs::read(cfg.repo.join(name)) {
@@ -497,6 +511,25 @@ mod tests {
         let mut none = ctx.cfg.clone();
         none.session.env_shell.clear();
         assert_eq!(key(&none), None);
+    }
+
+    /// Review of #54: what the shell is entered from (`session.env`) and what is left out of the record
+    /// (`sandbox.env_deny`) change what a warm-up captures, so each is in the key.
+    #[test]
+    fn the_environment_it_is_entered_from_and_the_filter_are_in_the_key() {
+        let d = Dir::new();
+        let ctx = project(&d, &["nix", "develop", "-c"]);
+        let base = key(&ctx.cfg).unwrap();
+        let mut env = ctx.cfg.clone();
+        env.session.env.insert("NIX_CONFIG".into(), "substituters = https://cache.example".into());
+        let with_env = key(&env).unwrap();
+        assert_ne!(with_env, base, "session.env is in the key");
+        env.session.env.insert("NIX_CONFIG".into(), "substituters = https://other.example".into());
+        assert_ne!(key(&env).unwrap(), with_env, "and its values");
+        let mut deny = ctx.cfg.clone();
+        deny.sandbox.env_deny.push_str("|^DATABASE_URL$");
+        assert_ne!(key(&deny).unwrap(), base, "sandbox.env_deny is in the key");
+        assert_eq!(key(&ctx.cfg).unwrap(), base, "the same settings, the same key");
     }
 
     #[test]

@@ -62,12 +62,6 @@ impl Gauge {
         }
     }
 
-    /// How far past its floor it is (or its whole window, where no floor is known): the
-    /// closest to its floor is the greatest, negative while there is room.
-    pub fn past_floor(&self) -> f64 {
-        self.used - self.floor.unwrap_or(1.0)
-    }
-
     /// The bar alone, `cells` wide: `███▍░░░░░░│░`.
     pub fn bar(&self, cells: usize) -> String {
         // The cell the floor falls in.
@@ -84,6 +78,12 @@ impl Gauge {
     /// that may be piped, where no bold shows.
     pub fn text(&self, cells: usize) -> String {
         format!("{}{}", self.bar(cells), self.tail(self.governing))
+    }
+
+    /// The tail alone, for a column too narrow for any bar: ` 31%* 5d4h`, the percent right-aligned.
+    pub fn numbers(&self) -> String {
+        let tail = self.tail(self.governing);
+        tail.strip_prefix(' ').unwrap_or(&tail).trim_end().to_owned()
     }
 
     /// The gauge in `width` columns, its bar shrunk first (to [`MIN_BAR`]) so the whole tail
@@ -244,13 +244,5 @@ mod tests {
         let names = ["five_hour", "seven_day", "seven_day_overage_included", "openai-codex/5 hours"];
         let words = ["5 hours", "7 days", "seven day overage included", "openai-codex/5 hours"];
         assert_eq!(names.map(heading), words);
-    }
-
-    #[test]
-    fn the_closest_to_its_floor_is_the_most_past_it() {
-        let (near_reset, far) = (gauge(0.95, Some(0.98)), gauge(0.9, Some(0.9)));
-        assert!(far.past_floor() > near_reset.past_floor(), "at its floor, past one three points off");
-        assert!(near_reset.past_floor() > gauge(0.85, Some(0.9)).past_floor(), "three points off, past five");
-        assert!((gauge(0.5, None).past_floor() + 0.5).abs() < 1e-9, "machine-wide, against the whole window");
     }
 }

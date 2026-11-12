@@ -528,12 +528,12 @@ mod tests {
     /// them now; a reading that says keeps what it says.
     #[test]
     fn an_old_readings_meters_are_named_once_as_they_fold() {
-        let old = r#"{"account":"x","meters":{"seven_day":{"utilization":0.3},"five_hour":{"utilization":0.1},"monthly":{"utilization":0.0},"openai-codex/7 days":{"utilization":0.2},"google-antigravity/Gemini (Weekly)":{"utilization":0.1},"requests":{"utilization":0.5}}}"#;
         #[derive(serde::Deserialize)]
         struct Reading {
             #[serde(deserialize_with = "deserialize_meters")]
             meters: Meters,
         }
+        let old = r#"{"account":"x","meters":{"seven_day":{"utilization":0.3},"five_hour":{"utilization":0.1},"monthly":{"utilization":0.0},"openai-codex/7 days":{"utilization":0.2},"google-antigravity/Gemini (Weekly)":{"utilization":0.1},"requests":{"utilization":0.5}}}"#;
         let m = serde_json::from_str::<Reading>(old).unwrap().meters;
         let said = |n: &str| (m[n].window, m[n].provider.as_deref(), m[n].scope.as_deref());
         assert_eq!(said("seven_day"), (Window::Week, None, None));

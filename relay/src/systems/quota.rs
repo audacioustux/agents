@@ -2,7 +2,7 @@
 //! owner's switches. Emits: account-enabled, reading. Readings come from each
 //! harness's quota command (no model call) and from what sessions stream.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
@@ -14,7 +14,7 @@ use crate::bus::{QuotaEvent, ReadFailure, now_micros, secs};
 use crate::config::{Config, Limits};
 use crate::ctx::Ctx;
 use crate::harness::report::zone_of;
-use crate::harness::{Home, Identity, Meters, SignIn};
+use crate::harness::{Home, Identity, Meter, Meters, SignIn, Window};
 use crate::os::Role;
 use crate::sandbox;
 use crate::systems::dispatch::{Room, may_use, model_for};
@@ -446,17 +446,17 @@ fn refusal_cell(r: &accounts::Refusal, st: Option<&AccountState>, now: u64) -> S
     }
 }
 
-/// One row of the accounts board: an account with the meter that decides, another meter of the
-/// account above, another model one of its jobs asks for, or a harness whose program is not found.
+/// One row of the accounts board: an account, or one of omp's providers, with its meters each in
+/// its window's column; a `└` sub-row for a meter of one model or group of its own; another model
+/// one of its jobs asks for; or a harness whose program is not found.
 #[derive(Debug, Clone, Default)]
 pub struct Shown {
-    /// `▸ claude:a` on the account the next start would take, else `  claude:a`; a model's
-    /// sub-row's is `    for <model>`, and a meter's is blank.
+    /// `▸ claude:a` on the account the next start would take, else `  claude:a`; `  omp:a ·
+    /// openai-codex` for a provider; `    └ Fable` for a scope, `    for <model>` for a model.
     pub account: String,
     pub state: String,
-    /// The row's meter in words (`7 days`, `openai-codex/5 hours`), and its gauge.
-    pub meter: String,
-    pub gauge: Option<Gauge>,
+    /// Its meters, each under its window's column ([`AccountsView::windows`]).
+    pub gauges: BTreeMap<Window, Gauge>,
     /// Room left per day, as dispatch ranks it: `12%/d`.
     pub room: String,
     pub running: String,
@@ -464,40 +464,81 @@ pub struct Shown {
     pub ready: bool,
     /// A sub-row, which leaves blank what its account's row says.
     pub sub: bool,
+    /// A row of a whole allowance (an account, or one of its providers): a window it has no meter
+    /// of says `—`, where a sub-row leaves it blank.
+    pub whole: bool,
 }
 
 impl Shown {
-    /// Its cells under [`AccountsView::HEADINGS`], its gauge written by `gauge`.
-    fn cells(&self, gauge: &impl Fn(&Gauge) -> String) -> Vec<String> {
-        let shown = self.gauge.as_ref().map_or_else(String::new, gauge);
-        let cells = [&self.account, &self.state, &self.meter, &shown, &self.room, &self.running];
-        cells.into_iter().cloned().collect()
-    }
-
-    /// `main` showing the first of `meters`, then a sub-row for each of the others.
-    fn with_meters(main: Self, meters: Vec<(String, Gauge)>) -> Vec<Self> {
-        let mut meters = meters.into_iter().map(|(name, g)| (gauge::heading(&name), Some(g)));
-        let first = meters.next().map_or(main.clone(), |(meter, gauge)| Self { meter, gauge, ..main });
-        let others = meters.map(|(meter, gauge)| Self { meter, gauge, sub: true, ..Self::default() });
-        std::iter::once(first).chain(others).collect()
+    /// Its cells under [`AccountsView::headings`] for `windows`, each gauge written by `gauge`.
+    fn cells(&self, windows: &[Window], gauge: &impl Fn(&Gauge) -> String) -> Vec<String> {
+        let meter = |w: &Window| match self.gauges.get(w) {
+            Some(g) => gauge(g),
+            None if self.whole => "—".to_owned(),
+            None => String::new(),
+        };
+        std::iter::once(self.account.clone())
+            .chain(windows.iter().map(meter))
+            .chain([self.room.clone(), self.running.clone(), self.state.clone()])
+            .collect()
     }
 }
 
-/// The meters of an account whose state is `st` as gauges at `now`, each with its name, their
-/// floors by `limits` when a project's rules apply: the `deciding` one marked and first, then
-/// the others, the closest to its floor first.
-fn meters(
+/// The rows the meters of an account (`key`, whose state is `st`) make at `now`, their floors by
+/// `limits` when a project's rules apply, `deciding` marked: `main` with the whole allowance the
+/// one that decides is in (else the account's own), a `└` sub-row for each model or group with a
+/// meter of its own, then the same for each other provider. A second meter of one window in one
+/// row goes on a sub-row of its own, by its name, so no meter is left out.
+fn meter_rows(
+    main: &Shown,
+    key: &str,
     st: Option<&AccountState>,
     limits: Option<&Limits>,
     deciding: Option<&str>,
     now: u64,
-) -> Vec<(String, Gauge)> {
-    let gauge = |(name, m): (&String, &crate::harness::Meter)| {
-        (name.clone(), Gauge::new(m, limits, deciding == Some(name.as_str()), secs(now)))
-    };
-    let mut all: Vec<(String, Gauge)> = st.into_iter().flat_map(|s| s.meters.iter().map(gauge)).collect();
-    all.sort_by(|(_, a), (_, b)| b.governing.cmp(&a.governing).then(b.past_floor().total_cmp(&a.past_floor())));
-    all
+) -> Vec<Shown> {
+    let meters: Vec<(&String, &Meter)> = st.into_iter().flat_map(|s| &s.meters).collect();
+    let lead = deciding.and_then(|d| st?.meters.get(d)).and_then(|m| m.provider.clone());
+    let others: BTreeSet<Option<String>> =
+        meters.iter().map(|(_, m)| m.provider.clone()).filter(|p| *p != lead).collect();
+    let mut rows = Vec::new();
+    for provider in std::iter::once(lead.clone()).chain(others) {
+        let named = |cell: &str| provider.as_ref().map_or_else(|| cell.to_owned(), |p| format!("{cell} · {p}"));
+        let head = if provider == lead {
+            Shown { account: named(&main.account), ..main.clone() }
+        } else {
+            Shown { account: named(&format!("  {key}")), sub: true, whole: true, ..Shown::default() }
+        };
+        let mut group = vec![head];
+        let mut extra = Vec::new();
+        let mut mine: Vec<&(&String, &Meter)> = meters.iter().filter(|(_, m)| m.provider == provider).collect();
+        mine.sort_by(|(a, m), (b, n)| (&m.scope, m.window, a).cmp(&(&n.scope, n.window, b)));
+        for &&(name, m) in &mine {
+            let g = Gauge::new(m, limits, deciding == Some(name.as_str()), secs(now));
+            let row = match &m.scope {
+                None => 0,
+                Some(scope) => {
+                    let cell = format!("    └ {scope}");
+                    group.iter().position(|r| r.account == cell).unwrap_or_else(|| {
+                        group.push(Shown { account: cell, sub: true, ..Shown::default() });
+                        group.len() - 1
+                    })
+                }
+            };
+            match group[row].gauges.entry(m.window) {
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(g);
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    let gauges = BTreeMap::from([(m.window, g)]);
+                    extra.push(Shown { account: format!("    └ {name}"), gauges, sub: true, ..Shown::default() });
+                }
+            }
+        }
+        rows.extend(group);
+        rows.extend(extra);
+    }
+    rows
 }
 
 /// A `room/day` cell: `12%/d`, or `—` when the account's quota would not take the job.
@@ -548,8 +589,18 @@ impl AccountsView {
         }
     }
 
-    /// The columns' headings: the account, its state, a meter and its gauge, room/day, run.
-    pub const HEADINGS: [&str; 6] = ["", "state", "meter", "gauge", "room/day", "run"];
+    /// The windows its rows have meters of, shortest first: a column each.
+    pub fn windows(&self) -> Vec<Window> {
+        let all: BTreeSet<Window> = self.rows.iter().flat_map(|r| r.gauges.keys().copied()).collect();
+        all.into_iter().collect()
+    }
+
+    /// The columns' headings: the account, a column per window ([`Self::windows`]), room/day,
+    /// run, and its state last, the one cut first.
+    pub fn headings(&self) -> Vec<String> {
+        let windows = self.windows().into_iter().map(Window::label);
+        std::iter::once(String::new()).chain(windows).chain(["room/day", "run", "state"].map(String::from)).collect()
+    }
 
     /// Puts each account's email address beside it, read now from its home in `room`
     /// ([`crate::harness::Harness::email`]), when stdout is a terminal: the address is for the
@@ -587,29 +638,31 @@ impl AccountsView {
         self.rows.iter().map(|r| if r.sub { String::new() } else { email() }).collect()
     }
 
-    /// Each row's cells under [`AccountsView::HEADINGS`], each gauge written by `gauge`.
+    /// Each row's cells under [`AccountsView::headings`], each gauge written by `gauge`.
     pub fn cells(&self, gauge: impl Fn(&Gauge) -> String) -> Vec<Vec<String>> {
-        self.rows.iter().map(|r| r.cells(&gauge)).collect()
+        let windows = self.windows();
+        self.rows.iter().map(|r| r.cells(&windows, &gauge)).collect()
     }
 
-    /// The rows as aligned text under their headings, bars `bar` cells wide, each account's email
-    /// beside it. A column empty in every row is left out, its heading too.
+    /// The rows as aligned text under their headings, bars `bar` cells wide (none at 0: the
+    /// numbers alone), each account's email beside it. A column empty in every row is left out,
+    /// its heading too.
     pub fn table(&self, bar: usize) -> Vec<String> {
         self.table_with(bar, true)
     }
 
     /// As [`AccountsView::table`], the emails left out unless `emails`.
     fn table_with(&self, bar: usize, emails: bool) -> Vec<String> {
-        let mut body = self.cells(|g| g.text(bar));
-        let mut headings = Self::HEADINGS.to_vec();
+        let mut body = self.cells(|g| if bar == 0 { g.numbers() } else { g.text(bar) });
+        let mut headings = self.headings();
         if emails {
-            headings.insert(1, "email");
+            headings.insert(1, "email".to_owned());
             for (cells, email) in body.iter_mut().zip(self.emails()) {
                 cells.insert(1, email);
             }
         }
         let used = |c: usize| body.iter().any(|r| r.get(c).is_some_and(|s| !s.is_empty()));
-        let heads = headings.iter().enumerate().map(|(c, h)| if used(c) { (*h).to_owned() } else { String::new() });
+        let heads = headings.into_iter().enumerate().map(|(c, h)| if used(c) { h } else { String::new() });
         crate::systems::view::table(&std::iter::once(heads.collect()).chain(body).collect::<Vec<_>>())
     }
 
@@ -620,22 +673,23 @@ impl AccountsView {
     }
 
     /// The text for a terminal `width` columns wide (piped, `None`: every line whole): the emails
-    /// give way, then the bars shrink, and what still does not fit, the head included, is cut.
+    /// give way, then the bars shrink, then they go and the numbers stay, and what still does not
+    /// fit, the head included, is cut, never wrapped.
     pub fn text_on(&self, width: Option<usize>) -> String {
         crate::systems::view::fit(&self.text_in(width), width)
     }
 
     /// The head and the table, indented, its bars as wide as `width` columns allow, down to
-    /// [`gauge::MIN_BAR`] cells: a narrow window leaves the emails out, then shrinks the bars,
-    /// before it cuts the lines.
+    /// [`gauge::MIN_BAR`] cells, else none: a narrow window leaves the emails out, then shrinks
+    /// the bars, then drops them, before it cuts the lines.
     pub fn text_in(&self, width: Option<usize>) -> String {
         let fits = |lines: &[String]| width.is_none_or(|w| lines.iter().all(|l| l.chars().count() + 2 <= w));
         let table = if self.rows.is_empty() {
             Vec::new()
         } else {
-            let shrunk = (gauge::MIN_BAR..=gauge::BAR).rev().map(|bar| self.table_with(bar, false));
+            let shrunk = (gauge::MIN_BAR..=gauge::BAR).rev().chain([0]).map(|bar| self.table_with(bar, false));
             let mut tables = std::iter::once(self.table(gauge::BAR)).chain(shrunk);
-            let narrowest = self.table_with(gauge::MIN_BAR, false);
+            let narrowest = self.table_with(0, false);
             tables.find(|t| fits(t)).unwrap_or(narrowest)
         };
         let lines = table.into_iter().map(|l| format!("  {l}"));
@@ -746,9 +800,10 @@ fn machine_wide(room: &Room, now: u64) -> AccountsView {
             account: account_cell(&row.account, false),
             state: state_cell(&row.state, row.same_as.as_ref()),
             running: row.running.to_string(),
+            whole: true,
             ..Shown::default()
         };
-        shown.extend(Shown::with_meters(main, meters(st, None, tightest, now)));
+        shown.extend(meter_rows(&main, &row.account, st, None, tightest, now));
         rows.push(row);
     }
     let mut names: Vec<&str> = found.iter().map(|a| a.harness).collect();
@@ -820,9 +875,10 @@ impl<'a> Judge<'a> {
             // Twins share their seats: a session on either is a session on both.
             running: room.running_on(&key).to_string(),
             ready: own.ready,
+            whole: true,
             ..Shown::default()
         };
-        let mut shown = Shown::with_meters(main, meters(st, Some(&cfg.limits), own.deciding.as_deref(), now));
+        let mut shown = meter_rows(&main, &key, st, Some(&cfg.limits), own.deciding.as_deref(), now);
         // A sub-row that says what its account's row says is left out.
         let differs = |j: &Judgment| (&j.state, &j.deciding) != (&own.state, &own.deciding);
         shown.extend(by_model.iter().filter(|(_, j)| differs(j)).map(|(m, j)| self.sub_row(m, j, st)));
@@ -848,16 +904,15 @@ impl<'a> Judge<'a> {
     /// The sub-row for `model` on an account whose state is `st`: its state, the meter that
     /// decides for it, and its room per day.
     fn sub_row(&self, model: &str, j: &Judgment, st: Option<&AccountState>) -> Shown {
-        let mut deciding = meters(st, Some(&self.cfg.limits), j.deciding.as_deref(), self.now).into_iter();
-        let (meter, gauge) = deciding
-            .next()
-            .filter(|(_, g)| g.governing)
-            .map_or_else(Default::default, |(name, g)| (gauge::heading(&name), Some(g)));
+        let deciding = j.deciding.as_deref().and_then(|d| st?.meters.get(d));
+        let gauges = deciding
+            .map(|m| (m.window, Gauge::new(m, Some(&self.cfg.limits), true, secs(self.now))))
+            .into_iter()
+            .collect();
         Shown {
             account: format!("    for {model}"),
             state: j.state.clone(),
-            meter,
-            gauge,
+            gauges,
             room: room_cell(j.score),
             ready: j.ready,
             sub: true,
@@ -985,13 +1040,13 @@ mod tests {
         let jobs = [queued("a", None), queued("b", Some("minimax-code/MiniMax-M3.1-Flash"))];
         let v = view_of(&cfg, &[omp()], &world(&jobs), &[]);
         let table = v.table(gauge::BAR);
-        assert_eq!(table.len(), 3, "a heading, the account and its other meter: {table:#?}");
-        assert!(table[0].trim_start().starts_with("state  meter  "), "{}", table[0]);
-        let deciding = "▸ omp:default  ready  minimax-code/General 7 Day  ▌░░░░░░░░░│░   4%*";
-        assert!(table[1].starts_with(deciding) && table[1].ends_with("14%/d     0"), "{}", table[1]);
+        assert_eq!(table.len(), 3, "a heading, the provider its model draws on, the other one: {table:#?}");
+        assert!(table[0].trim_start().starts_with("5 hours  ") && table[0].contains("  7 days  "), "{}", table[0]);
+        let deciding = "▸ omp:default · minimax-code  —  ";
+        assert!(table[1].starts_with(deciding) && table[1].contains("▌░░░░░░░░░│░   4%*"), "{}", table[1]);
+        assert!(table[1].ends_with("14%/d     0    ready"), "{}", table[1]);
         let other = &table[2];
-        assert!(other.starts_with(' ') && other.contains("openai-codex/5 hours"), "{other}");
-        assert!(other.ends_with("██████████│█ 100%  1h"), "{other}");
+        assert!(other.starts_with("  omp:default · openai-codex  ██████████│█ 100%  1h "), "{other}");
         assert_eq!(ready(&v), [true, false]);
         assert!(v.json["accounts"][0].get("byModel").is_none(), "{}", v.json);
     }
@@ -1002,8 +1057,8 @@ mod tests {
         let theirs = world(&[queued("a", Some("openai-codex/gpt-6.1-sol")), queued("b", None)]);
         let v = view_of(&cfg, &[omp()], &world(&[]), &[&theirs]);
         let cells = cells(&v);
-        assert_eq!(cells.len(), 3, "the account, its other meter, the other model: {cells:?}");
-        assert_eq!((cells[2][0].as_str(), cells[2][1].as_str()), ("    for openai-codex/gpt-6.1-sol", "at floor"));
+        assert_eq!(cells.len(), 3, "the account, its other provider, the other model: {cells:?}");
+        assert_eq!((cells[2][0].as_str(), cells[2][5].as_str()), ("    for openai-codex/gpt-6.1-sol", "at floor"));
         assert_eq!(ready(&v), [true, false, false]);
     }
 
@@ -1024,10 +1079,10 @@ mod tests {
         let v = view_of(&cfg, &[omp()], &world(&jobs), &[]);
         let cells = cells(&v);
         let (minimax, codex) = ("▌░░░░░░░░░│░   4%*      ", "██████████│█ 100%* 1h   ");
-        let account = ["  omp:default", "ready", "minimax-code/General 7 Day", minimax, "14%/d", "0"];
+        let account = ["  omp:default · minimax-code", "—", minimax, "14%/d", "0", "ready"];
         assert_eq!(cells[0], account, "the codex jobs are held, so nothing is picked");
-        assert_eq!(cells[1], ["", "", "openai-codex/5 hours", "██████████│█ 100%  1h   ", "", ""]);
-        assert_eq!(cells[2], ["    for openai-codex/gpt-6.1-sol", "at floor", "openai-codex/5 hours", codex, "—", ""]);
+        assert_eq!(cells[1], ["  omp:default · openai-codex", "██████████│█ 100%  1h   ", "—", "", "", ""]);
+        assert_eq!(cells[2], ["    for openai-codex/gpt-6.1-sol", codex, "", "—", "", "at floor"]);
         assert_eq!(ready(&v), [true, false, false]);
         assert!(v.head.ends_with("next pick: none"), "{}", v.head);
         let by_model = &v.json["accounts"][0]["byModel"];
@@ -1058,8 +1113,9 @@ mod tests {
         let v = view_of(&cfg, &found, &w, &[]);
         let table = v.text();
         let (first, third) = (&v.json["accounts"][0]["identity"], &v.json["accounts"][2]);
-        assert!(table.contains("claude:a  ready") && first["plan"] == "Ultra", "who it is, in --json: {}", v.json);
-        assert!(table.contains("claude:b  ready, same sign-in as claude:a"), "{table}");
+        let line = |key: &str| table.lines().skip(1).find(|l| l.contains(key)).unwrap_or_default();
+        assert!(line("claude:a").ends_with("  ready") && first["plan"] == "Ultra", "who it is, in --json: {}", v.json);
+        assert!(line("claude:b").ends_with("  ready, same sign-in as claude:a"), "{table}");
         assert!(table.contains("signed out since "), "{table}");
         assert_eq!(v.json["accounts"][1]["sameAs"], "claude:a");
         assert!(third.get("sameAs").is_none());
@@ -1104,8 +1160,10 @@ mod tests {
         let table = v.table(gauge::BAR);
         let line = |key: &str| table.iter().find(|l| l.contains(&format!("{key} "))).unwrap().clone();
         assert!(table[0].trim_start().starts_with("email  "), "{}", table[0]);
-        assert!(line("claude:study").contains("claude:study  ada@fixture.invalid  "), "{table:#?}");
-        assert!(line("claude:work").contains("claude:work   grace.long.name@fixture.invalid  "), "{table:#?}");
+        let column = |l: &str, word: &str| l.find(word).map(|b| l[..b].chars().count());
+        let (study, work) = (line("claude:study"), line("claude:work"));
+        assert_eq!(column(&study, "ada@"), column(&table[0], "email"), "{table:#?}");
+        assert_eq!(column(&work, "grace.long.name@fixture.invalid  "), column(&table[0], "email"), "{table:#?}");
         assert!(!line("claude:out").contains('@') && !line("omp:default").contains('@'), "{table:#?}");
         let lines = |t: Vec<String>| std::iter::once(v.head.clone()).chain(t.into_iter().map(|l| format!("  {l}")));
         let wide = v.text_in(Some(200));
@@ -1154,7 +1212,7 @@ mod tests {
         assert_eq!(v.json["accounts"][0]["state"], "busy (1 of 1 seat on minimax-code)", "{}", v.json);
         assert_eq!(v.json["accounts"][0]["running"], 1);
         assert_eq!(ready(&v), [false, false], "the dispatcher would start nothing there on this model");
-        assert_eq!(cells(&v)[0][4..], ["14%/d", "1"], "its quota has room for when the seat frees");
+        assert_eq!(cells(&v)[0][3..5], ["14%/d", "1"], "its quota has room for when the seat frees");
         // The same session on another project's bus fills the same seat.
         let theirs = world(&[Job {
             runner: Some((std::process::id(), crate::os::start_time(std::process::id()).unwrap())),
@@ -1204,11 +1262,11 @@ mod tests {
         let (w, found) = claude_world(&[("a", a), ("b", &[("seven_day", 0.31, 124)])], NOW - 1, &[]);
         let v = view_of(&cfg, &found, &w, &[]);
         let cells = cells(&v);
-        assert_eq!(cells[0][..4], ["▸ claude:a", "ready", "5 hours", "█▏░░░░░░░░│░   9%* 1h   "]);
-        assert_eq!(cells[1], ["", "", "7 days", "▋░░░░░░░░░│░   5%  2d   ", "", ""], "a sub-row");
-        assert_eq!(cells[2][..4], ["  claude:b", "ready", "7 days", "███▊░░░░░░│░  31%* 5d4h "]);
-        assert_eq!(cells.len(), 3, "a window an account lacks is no row: {cells:?}");
-        assert!(v.text().lines().nth(1).unwrap().trim_start().starts_with("state  meter  "), "{}", v.text());
+        let a = ["▸ claude:a", "█▏░░░░░░░░│░   9%* 1h   ", "▋░░░░░░░░░│░   5%  2d   ", "48%/d", "0", "ready"];
+        assert_eq!(cells[0], a, "each window in its column, the one that decides marked");
+        assert_eq!(cells[1][..3], ["  claude:b", "—", "███▊░░░░░░│░  31%* 5d4h "], "a window it lacks says so");
+        assert_eq!(cells.len(), 2, "a row per account: {cells:?}");
+        assert!(v.text().lines().nth(1).unwrap().trim_start().starts_with("5 hours  "), "{}", v.text());
     }
 
     #[test]
@@ -1216,9 +1274,12 @@ mod tests {
         let (_d, cfg) = claude_cfg("[limits]\nfloor_near_reset = { within_hours = 12, floor = 0.98 }\n");
         let (w, found) = claude_world(&[("a", &[("five_hour", 0.5, 2), ("seven_day", 0.5, 48)])], NOW - 1, &[]);
         let v = view_of(&cfg, &found, &w, &[]);
-        let gauge = |meter: &str| v.rows.iter().find(|r| r.meter == meter).and_then(|r| r.gauge.clone()).unwrap();
-        let mark = |meter: &str| gauge(meter).bar(12).chars().position(|c| c == '│');
-        assert_eq!((mark("5 hours"), mark("7 days")), (Some(11), Some(10)), "98% two hours from its reset, else 90%");
+        let mark = |w: Window| v.rows[0].gauges[&w].bar(12).chars().position(|c| c == '│');
+        assert_eq!(
+            (mark(Window::FiveHours), mark(Window::Week)),
+            (Some(11), Some(10)),
+            "98% two hours from its reset, else 90%"
+        );
         assert!(v.head.contains("floor 90% (98% in the last 12h before a reset)"), "{}", v.head);
     }
 
@@ -1234,7 +1295,7 @@ mod tests {
         assert_eq!(picked, "claude:b", "room that a reset would take first");
         let marked: Vec<&str> = v.rows.iter().filter(|r| r.account.starts_with('▸')).map(|r| &r.account[4..]).collect();
         assert_eq!(marked, [picked.as_str()]);
-        assert_eq!(cells(&v).iter().map(|r| r[4].as_str()).collect::<Vec<_>>(), ["13%/d", "50%/d", "—"]);
+        assert_eq!(cells(&v).iter().map(|r| r[2].as_str()).collect::<Vec<_>>(), ["13%/d", "50%/d", "—"]);
         assert!(v.head.ends_with("next pick ▸ claude:b"), "{}", v.head);
         assert_eq!(v.json["next"], "claude:b");
         assert!((v.json["accounts"][1]["score"].as_f64().unwrap() - 0.5).abs() < 1e-9, "{}", v.json);
@@ -1259,9 +1320,9 @@ mod tests {
         let (w, found) = claude_world(&[("a", &[("seven_day", 0.81, 41)])], NOW - 3 * 3600 * 1_000_000, &[running]);
         let v = view_of(&cfg, &found, &w, &[]);
         let row = &cells(&v)[0];
-        assert!(row[1].ends_with("stale (read 3h ago)"), "{row:?}");
-        assert_eq!(row[2..4], ["7 days", "█████████▊│░  81%* 1d17h"], "its last reading still shows");
-        assert_eq!(row[4..], ["—", "1"]);
+        assert!(row[4].ends_with("stale (read 3h ago)"), "{row:?}");
+        assert_eq!(row[1], "█████████▊│░  81%* 1d17h", "its last reading still shows");
+        assert_eq!(row[2..4], ["—", "1"]);
     }
 
     /// The meters this machine's harnesses really report: omp's per provider, claude's with an
@@ -1299,27 +1360,53 @@ mod tests {
         (w, vec![tj_home, omp(), puku_home])
     }
 
-    /// One row per account with the meter that decides, then a sub-row per other meter, the
-    /// closest to its floor first: as wide as the longest meter name, not one column per name.
+    /// The owner's ask of 2026-11-12: a column per window, `5 hours | 7 days | month`, so one
+    /// window reads down across every account. A row per account, and per provider for omp; a
+    /// meter of one model's own on a `└` sub-row in the same columns; `—` where a row has no
+    /// such window.
     #[test]
-    fn each_meter_is_a_row_of_its_account_the_deciding_one_first() {
+    fn each_window_is_a_column_aligned_across_the_accounts() {
         let (_d, cfg) = cfg("openai-codex/gpt-6-luna");
-        let (w, found) = real_meters();
+        let (mut w, mut found) = real_meters();
+        let study = claude("studyac17");
+        let reading = [("seven_day", 0.28, 5 * 24 + 14), ("seven_day_fable", 0.11, 5 * 24 + 14)];
+        let mut st = AccountState { read_at: Some(NOW - 1), ..Default::default() };
+        for (name, used, hours) in reading {
+            st.meters.insert(name.into(), Meter::named(name, used, Some(secs(NOW) + hours * 3600)));
+        }
+        w.accounts.insert(study.key(), st);
+        found.insert(1, study);
         let v = view_of(&cfg, &found, &w, &[]);
         let table = v.table(gauge::BAR);
-        assert_eq!(table.len(), 1 + 3 + 6 + 2, "a heading, then every meter once: {table:#?}");
-        assert!(table[0].trim_start().starts_with("state  meter") && table[0].contains("gauge"), "{}", table[0]);
-        let meter_of = |line: &str, name: &str| line.contains(&format!("  {name}  "));
-        assert!(table[1].contains("claude:tj.pro") && meter_of(&table[1], "5 hours") && table[1].contains("44%*"));
-        assert!(meter_of(&table[2], "7 days") && meter_of(&table[3], "seven day overage included"), "{table:#?}");
-        assert!(table[4].contains("omp:default") && meter_of(&table[4], "openai-codex/7 days"), "{}", table[4]);
-        assert!(meter_of(&table[5], "google-antigravity/Claude & GPT (shared) (Weekly)"), "the fullest other next");
-        assert!(meter_of(&table[9], "openai-codex/5 hours"), "the emptiest last: {}", table[9]);
-        for sub in [2, 3, 5, 6, 7, 8, 9, 11] {
-            assert!(table[sub].starts_with("   ") && !table[sub].contains('*'), "{}", table[sub]);
+        let head = &table[0];
+        let at = |line: &str, word: &str| line.find(word).map(|b| line[..b].chars().count());
+        let (five, week, month) = (at(head, "5 hours"), at(head, "7 days"), at(head, "month"));
+        assert!(five < week && week < month, "shortest first: {head}");
+        let line = |name: &str| table.iter().find(|l| l.contains(name)).unwrap_or_else(|| panic!("{name}: {table:#?}"));
+        // Where a column starts, every row has its cell: a gauge, or `—`.
+        let cell = |l: &str, col: Option<usize>| l.chars().nth(col.unwrap()).unwrap_or(' ');
+        for name in ["claude:tj.pro ", "claude:studyac17", "omp:default · openai-codex", "puku:p"] {
+            for col in [five, week, month] {
+                assert!(cell(line(name), col) != ' ', "{name} at {col:?}: {table:#?}");
+            }
         }
-        let widest = table.iter().map(|l| l.chars().count()).max().unwrap();
-        assert!(widest < 120, "{widest}: {table:#?}");
+        assert_eq!(cell(line("claude:studyac17"), five), '—', "no 5-hour meter: {table:#?}");
+        assert_eq!(cell(line("claude:tj.pro "), month), '—');
+        assert!(line("claude:studyac17").contains("28%*"), "the all-models week decides: {table:#?}");
+        let fable = line("└ Fable");
+        assert!(cell(fable, week) != ' ' && fable.contains("11% ") && !fable.contains('*'), "{table:#?}");
+        assert_eq!((cell(fable, five), cell(fable, month)), (' ', ' '), "a sub-row says only its own");
+        let gemini = line("└ Gemini");
+        assert!(cell(gemini, week) != ' ' && gemini.contains("10%"), "{table:#?}");
+        assert!(line("omp:default · minimax-code").contains("5%"), "{table:#?}");
+        assert!(line("puku:p").contains("31%"), "the month: {table:#?}");
+        assert!(table.iter().all(|l| !l.contains("seven day") && !l.contains("General")), "{table:#?}");
+        // `--json` says the same of each meter, beside what it said before.
+        let fable = &v.json["accounts"][1]["meters"]["seven_day_fable"];
+        assert_eq!((fable["window"].as_str(), fable["scope"].as_str()), (Some("week"), Some("Fable")), "{}", v.json);
+        assert!(fable["utilization"].is_f64() && fable["resetsAt"].is_i64());
+        let gemini = &v.json["accounts"][2]["meters"]["google-antigravity/Gemini (Weekly)"];
+        assert_eq!((gemini["provider"].as_str(), gemini["scope"].as_str()), (Some("google-antigravity"), Some("Gemini")));
     }
 
     #[test]
@@ -1329,8 +1416,29 @@ mod tests {
         let v = view_of(&cfg, &found, &w, &[]);
         let widest = |t: &str| t.lines().skip(1).map(|l| l.chars().count()).max().unwrap();
         let wide = widest(&v.text());
-        assert_eq!(widest(&v.text_in(Some(wide - 6))), wide - 6, "the bars six cells shorter");
-        assert_eq!(widest(&v.text_in(Some(10))), wide - 7, "no bar under five cells; the rest is cut");
+        assert_eq!(widest(&v.text_in(Some(wide - 6))), wide - 6, "each bar three cells shorter");
+        assert_eq!(widest(&v.text_in(Some(wide - 14))), wide - 14, "each at five cells, the fewest");
+        let bare = v.text_in(Some(wide - 15));
+        assert!(!bare.contains('░') && !bare.contains('│') && bare.contains("50%* 2d"), "the numbers alone: {bare}");
+        assert!(widest(&bare) <= wide - 15, "{bare}");
+        assert_eq!(v.text_in(Some(10)), v.text_in(Some(widest(&bare) + 2)), "no narrower; the rest is cut");
+    }
+
+    /// The owner's ask: at 100 columns the gauges shrink first; below that they go and the numbers
+    /// stay; a row is never wrapped.
+    #[test]
+    fn at_a_hundred_columns_the_gauges_shrink_then_give_way_to_the_numbers() {
+        let (_d, cfg) = cfg("openai-codex/gpt-6-luna");
+        let (w, found) = real_meters();
+        let v = view_of(&cfg, &found, &w, &[]);
+        let at = |w: usize| v.text_on(Some(w));
+        assert!(at(140).contains("█████▎░░░░│░  44%* 10m"), "{}", at(140));
+        let hundred = at(100);
+        assert!(hundred.lines().all(|l| l.chars().count() <= 100), "{hundred}");
+        assert!(hundred.contains(" 44%* 10m") && !hundred.contains("█████▎░░░░│░  44%*"), "shrunk or gone: {hundred}");
+        let eighty = at(80);
+        assert!(!eighty.contains('░') && eighty.contains("44%* 10m"), "the numbers alone: {eighty}");
+        assert!(eighty.lines().all(|l| l.chars().count() <= 80), "cut, never wrapped: {eighty}");
     }
 
     /// A request for an account already pending adds nothing; the drainer takes them all at once.
@@ -1355,8 +1463,12 @@ mod tests {
         let (_d, cfg) = cfg("openai-codex/gpt-6.1-sol");
         let v = view_of(&cfg, &[omp()], &world(&[]), &[]);
         let cells = cells(&v);
-        assert_eq!(cells[0][1], "at floor");
-        assert_eq!(cells[0][2..4], ["openai-codex/5 hours", "██████████│█ 100%* 1h   "], "the meter that decides");
+        assert_eq!(cells[0][5], "at floor");
+        assert_eq!(
+            cells[0][..2],
+            ["  omp:default · openai-codex", "██████████│█ 100%* 1h   "],
+            "the meter that decides"
+        );
     }
 
     /// A project whose claude quota command is `script` (run by `sh`), read as home `a`, with

@@ -11,6 +11,7 @@ use super::draw::draw;
 use super::pane::Step;
 use super::ui::{Action, Id, Ui, View};
 use crate::config::{Config, tempdir};
+use crate::harness::Window;
 use crate::systems::dispatch::Room;
 use crate::systems::quota::gauge::Gauge;
 use crate::systems::quota::{AccountsView, Shown};
@@ -80,9 +81,9 @@ fn accounts(n: usize) -> AccountsView {
     let row = |i: usize| Shown {
         account: format!("  claude:a{i}"),
         state: "ready".into(),
-        meter: "7 days".into(),
-        gauge: Some(Gauge { used: 0.29, floor: Some(0.9), left: Some(86_400), governing: true }),
+        gauges: [(Window::Week, Gauge { used: 0.29, floor: Some(0.9), left: Some(86_400), governing: true })].into(),
         ready: true,
+        whole: true,
         ..Shown::default()
     };
     AccountsView {
@@ -165,7 +166,7 @@ fn the_board_fits_80x24_and_120x40_with_headings_keys_and_a_zoned_clock() {
             assert!(keys.contains(hint), "{w}x{h}: {hint} missing from {keys}");
         }
         assert!(fr.iter().any(|l| l.contains("claude:a1")), "the accounts");
-        assert_eq!(b.accounts[0][4], "-", "an empty cell says so");
+        assert_eq!(b.accounts[0][2], "-", "an empty cell says so");
         // The model column follows `as`; the short form shows in the row, and the harness that ran
         // (claude) narrows a job with an account, while one without shows both.
         let heading = fr[1].find("as ").expect("as");
@@ -522,31 +523,30 @@ fn the_pagers_stderr_is_the_boards() {
     super::run_pager(&check, "text").unwrap();
 }
 
-/// Two accounts: one picked next with one meter, room on it; one stale with two, over its floor on
-/// the one that decides and near it on the other, a sub-row.
+/// Two accounts: one picked next with a week's meter, room on it; one stale with a week's and a
+/// five hours', over its floor on the one that decides and near it on the other.
 fn gauged() -> AccountsView {
-    let g = |used, left, governing| Some(Gauge { used, floor: Some(0.9), left: Some(left), governing });
+    let g = |used, left, governing| Gauge { used, floor: Some(0.9), left: Some(left), governing };
     let rows = vec![
         Shown {
             account: "▸ claude:ifty".into(),
             state: "ready".into(),
-            meter: "7 days".into(),
-            gauge: g(0.28, 149 * 3600, true),
+            gauges: [(Window::Week, g(0.28, 149 * 3600, true))].into(),
             room: "12%/d".into(),
             running: "1".into(),
             ready: true,
             sub: false,
+            whole: true,
         },
         Shown {
             account: "  claude:tj".into(),
             state: "stale (read 3h ago)".into(),
-            meter: "7 days".into(),
-            gauge: g(0.95, 41 * 3600, true),
+            gauges: [(Window::Week, g(0.95, 41 * 3600, true)), (Window::FiveHours, g(0.85, 57 * 60, false))].into(),
             room: "—".into(),
             running: "0".into(),
+            whole: true,
             ..Shown::default()
         },
-        Shown { meter: "5 hours".into(), gauge: g(0.85, 57 * 60, false), sub: true, ..Shown::default() },
     ];
     AccountsView {
         json: serde_json::Value::Null,
@@ -555,31 +555,31 @@ fn gauged() -> AccountsView {
     }
 }
 
-/// The accounts pane draws each meter as a gauge: a bar with `│` at its floor, green with room,
-/// yellow within ten points of the floor, red at it, the meter that decides in bold.
+/// The accounts pane draws each meter as a gauge in its window's column: a bar with `│` at its
+/// floor, green with room, yellow within ten points of the floor, red at it, the meter that
+/// decides in bold.
 #[test]
 fn the_accounts_pane_draws_gauges() {
     use ratatui::style::{Color, Modifier};
     let (fr, buf) = accounts_pane(&gauged(), 120);
     let top = usize::from(row_of(&fr, "next pick"));
-    let pane: Vec<&str> = fr[top..top + 6].iter().map(String::as_str).collect();
+    let pane: Vec<&str> = fr[top..top + 5].iter().map(String::as_str).collect();
     assert_eq!(
         pane,
         [
             "┌ accounts on claude · floor 90% · 1 session(s) each · next pick ▸ claude:ifty ────────────────────────────────────────┐",
-            "│account        state                meter    gauge                     room/day  run                                  │",
-            "│▸ claude:ifty  ready                7 days   ███▍░░░░░░│░  28%  6d5h   12%/d     1                                    │",
-            "│  claude:tj    stale (read 3h ago)  7 days   ██████████│▍  95%  1d17h  —         0                                    │",
-            "│                                    5 hours  ██████████│░  85%  57m                                                   │",
+            "│account        5 hours                   7 days                    room/day  run  state                               │",
+            "│▸ claude:ifty  —                         ███▍░░░░░░│░  28%  6d5h   12%/d     1    ready                               │",
+            "│  claude:tj    ██████████│░  85%  57m    ██████████│▍  95%  1d17h  —         0    stale (read 3h ago)                 │",
             "└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘",
         ]
     );
-    // The first `│` on a line is the pane's border; the next, the gauge's floor mark.
-    let mark = |y: usize| {
-        let x = fr[y].char_indices().filter(|(_, c)| *c == '│').nth(1).map(|(i, _)| fr[y][..i].chars().count());
+    // The first `│` on a line is the pane's border; the next ones, the gauges' floor marks.
+    let mark = |y: usize, n: usize| {
+        let x = fr[y].char_indices().filter(|(_, c)| *c == '│').nth(n).map(|(i, _)| fr[y][..i].chars().count());
         &buf[(u16::try_from(x.unwrap()).unwrap(), u16::try_from(y).unwrap())]
     };
-    let (ifty, tj, tj_5h) = (mark(top + 2), mark(top + 3), mark(top + 4));
+    let (ifty, tj_5h, tj) = (mark(top + 2, 1), mark(top + 3, 1), mark(top + 3, 2));
     assert_eq!(ifty.fg, Color::Green, "28%: room");
     assert_eq!(tj_5h.fg, Color::Yellow, "85%: within ten points of the floor");
     assert_eq!(tj.fg, Color::Red, "95%: over it");
@@ -599,38 +599,45 @@ fn accounts_pane(v: &AccountsView, w: u16) -> (Vec<String>, ratatui::buffer::Buf
     (fr, buf)
 }
 
-/// How many cells the bar takes after `name` on `row`.
-fn bar_after(row: &str, name: &str) -> usize {
-    let after = &row[row.rfind(name).unwrap_or_else(|| panic!("{name}: {row}")) + name.len()..];
-    after.trim_start().chars().take_while(|c| !c.is_whitespace()).count()
+/// How many cells each bar on `row` takes, left to right.
+fn bars(row: &str) -> Vec<usize> {
+    let bar = |c: char| "█▏▎▍▌▋▊▉░".contains(c);
+    let inner = row.trim_matches('│');
+    let mut out = Vec::new();
+    let mut run = 0;
+    for c in inner.chars() {
+        if bar(c) || (c == '│' && run > 0) {
+            run += 1;
+        } else if run > 0 {
+            out.push(run);
+            run = 0;
+        }
+    }
+    out
 }
 
-/// A long account name and a busy state beside a meter's: the bar gives way, down to five cells,
-/// before the account's or the meter's name is cut.
+/// A long account name and a busy state beside its meters: the bars give way, down to five
+/// cells, before the account's name is cut; the state, last, is cut before either.
 #[test]
 fn the_bars_give_way_before_a_name_is_cut() {
-    let with = |account: &str, meter: &str| {
+    let with = |account: &str| {
         let mut v = gauged();
-        (v.rows[0].account, v.rows[0].state, v.rows[0].meter) =
-            (account.into(), "busy (1 of 1 seat)".into(), meter.into());
+        (v.rows[1].account, v.rows[1].state) = (account.into(), "busy (1 of 1 seat)".into());
         v
     };
-    let whole = |w: u16, account: &str, meter: &str| {
-        let (fr, _) = accounts_pane(&with(account, meter), w);
-        let row = fr[usize::from(row_of(&fr, account))].clone();
-        assert!(
-            row.contains(&format!("│{account}  busy (1 of 1 seat)   {meter}  ")) && !row.contains('…'),
-            "{w}: {row}"
-        );
-        bar_after(&row, meter)
+    let shown = |w: u16, account: &str| {
+        let (fr, _) = accounts_pane(&with(account), w);
+        fr[usize::from(row_of(&fr, &account[..12]))].clone()
     };
-    let gemini = "google-antigravity/Gemini (Weekly)";
-    assert_eq!(whole(120, "▸ claude:tangim.thepenguins", gemini), 8, "four cells given up, no name cut");
-    assert_eq!(whole(100, "▸ claude:tangim.penguins", "openai-codex/7 days"), 6, "at 100 columns too");
-    // Where a name must be cut, the bar is already at its shortest.
-    let (fr, _) = accounts_pane(&with("▸ claude:tangim.thepenguins", gemini), 100);
-    let row = &fr[usize::from(row_of(&fr, "claude:tangim"))];
-    assert_eq!(bar_after(row, "…"), 5, "a name cut, its bar at five cells: {row}");
+    let name = "  claude:tangim.thepenguins";
+    let row = shown(120, name);
+    assert!(row.contains(&format!("│{name}  ")) && row.contains("busy (1 of 1 seat)"), "{row}");
+    assert_eq!(bars(&row), [12, 12], "room for all: {row}");
+    let row = shown(100, name);
+    assert!(row.contains(&format!("│{name}  ")), "the name whole: {row}");
+    assert!(bars(&row).iter().all(|&b| (5..12).contains(&b)), "the bars gave way: {row}");
+    let row = shown(70, name);
+    assert!(bars(&row).iter().all(|&b| b == 5), "a name cut only once its bars are at five cells: {row}");
 }
 
 /// The owner's ask of 2026-11-11: each account's email beside its name; when room runs short the
@@ -648,16 +655,16 @@ fn an_accounts_email_shows_beside_it_and_gives_way_first() {
         (head, fr[usize::from(row_of(&fr, "claude:ifty  "))].clone(), fr[usize::from(row_of(&fr, "claude:tj"))].clone())
     };
     let (head, ifty, tj) = row(120);
-    assert!(head.starts_with("│account        email                 state"), "{head}");
-    assert!(ifty.starts_with("│▸ claude:ifty  ifty@fixture.invalid  ready  "), "{ifty}");
-    assert!(tj.starts_with("│  claude:tj                          stale (read 3h ago)  "), "nothing shown: {tj}");
-    assert_eq!(bar_after(&ifty, "7 days"), 12, "{ifty}");
+    assert!(head.starts_with("│account        email                 5 hours"), "{head}");
+    assert!(ifty.starts_with("│▸ claude:ifty  ifty@fixture.invalid  —  "), "{ifty}");
+    assert!(tj.starts_with("│  claude:tj                          ███"), "nothing shown: {tj}");
+    assert_eq!(bars(&ifty), [12], "{ifty}");
     let (_, ifty, _) = row(100);
-    assert!(ifty.contains("ifty@fixture.i…  ready"), "the email gives way first: {ifty}");
-    assert_eq!(bar_after(&ifty, "7 days"), 12, "the gauge whole: {ifty}");
+    assert!(ifty.contains("ifty@") && ifty.contains("…  —"), "the email gives way first: {ifty}");
+    assert_eq!(bars(&ifty), [12], "the gauge whole: {ifty}");
     let (_, ifty, _) = row(80);
-    assert!(ifty.starts_with("│▸ claude:ifty  …  ready  "), "{ifty}");
-    assert!(bar_after(&ifty, "7 days") < 12, "then the gauge: {ifty}");
+    assert!(ifty.starts_with("│▸ claude:ifty  …  —  "), "{ifty}");
+    assert!(bars(&ifty)[0] < 12, "then the gauge: {ifty}");
 }
 
 /// Machine state with one project's bus, for the chart: readings are appended to it as they land.

@@ -2407,6 +2407,37 @@ fn a_failed_check_resumes_the_session_with_its_output_until_it_passes() {
 }
 
 #[test]
+fn a_check_that_fails_the_same_way_at_the_same_commit_is_not_resumed_again() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("bar-stuck", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "[hooks]\nmax_decisions = 9\n");
+    claude_account(&env.home, "a", 10, false);
+    // The session commits once, and then, resumed with the failing output, commits nothing: the check
+    // fails again at the same commit, the same way. That is handed on after the second fail, not the ninth.
+    std::fs::write(env.home.join(".claude.a/once"), "").unwrap();
+    let j = build(&env, "stuck", &["--check", RED_AT_TIP]);
+    assert_eq!(j["status"], "failed", "{j}");
+    let bars = j["bars"].as_array().unwrap();
+    assert_eq!(bars.len(), 2, "{j}");
+    assert_eq!(bars[0]["commit"], bars[1]["commit"], "nothing was committed in between");
+    assert_eq!((bars[0].get("no_progress"), &bars[1]["no_progress"]), (None, &true.into()), "{j}");
+    let reason = j["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("no progress: same commit, same check failure"), "{reason}");
+    // The rule resumed once, and then deferred with its reason; no handler is left, so the run stands red.
+    assert_eq!(acts(&steps(&env, "stuck")), ["resume", "defer"]);
+    let ds = decisions(&env, "stuck");
+    assert_eq!(ds[1]["steps"][0]["why"], "no progress: same commit, same check failure", "{:?}", ds[1]);
+    assert!(board(&env).contains("no progress: same commit, same check failure"), "{}", board(&env));
+    assert!(
+        result(&env, "stuck").contains("(no progress: same commit, same check failure)"),
+        "{}",
+        result(&env, "stuck")
+    );
+}
+
+#[test]
 fn a_check_judges_the_committed_tip_in_the_sandbox_without_the_account() {
     if !have_bwrap() {
         return;

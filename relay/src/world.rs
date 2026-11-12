@@ -178,21 +178,29 @@ pub struct Bar {
     pub result: bus::BarResult,
     pub exit: i32,
     pub base_exit: Option<i32>,
-    /// For `base-red`: the failing tests, all failing at the base commit too.
+    /// For `fail`: the failing tests its output names. For `base-red`: the failing tests, all failing
+    /// at the base commit too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failing: Vec<String>,
+    /// A `fail` at the same commit as the check before it, failing the same way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_progress: bool,
     /// The output tail; kept for the latest run only.
     pub tail: String,
 }
 
 impl Bar {
-    /// Its result, with the failing tests a `base-red` names: `base-red: a::one, a::two`.
+    /// Its result, with the failing tests it names (`base-red: a::one, a::two`) and whether it repeats
+    /// the check before it (`fail: a::one (no progress: same commit, same check failure)`).
     pub fn summary(&self) -> String {
-        if self.failing.is_empty() {
-            self.result.as_str().to_owned()
-        } else {
-            format!("{}: {}", self.result.as_str(), self.failing.join(", "))
+        let mut s = self.result.as_str().to_owned();
+        if !self.failing.is_empty() {
+            s = format!("{s}: {}", self.failing.join(", "));
         }
+        if self.no_progress {
+            s = format!("{s} ({})", bus::NO_PROGRESS);
+        }
+        s
     }
 }
 
@@ -1121,7 +1129,7 @@ impl World {
     /// The acceptance checks and reviews a job went through.
     fn apply_judgement(&mut self, e: &SessionEvent) {
         match e {
-            SessionEvent::BarChecked { job, commit, exit, tail, base_exit, result, failing } => {
+            SessionEvent::BarChecked { job, commit, exit, tail, base_exit, result, failing, no_progress } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.bars.iter_mut().for_each(|b| b.tail.clear());
                     j.bars.push(Bar {
@@ -1130,6 +1138,7 @@ impl World {
                         exit: *exit,
                         base_exit: *base_exit,
                         failing: failing.clone(),
+                        no_progress: *no_progress,
                         tail: tail.clone(),
                     });
                 }

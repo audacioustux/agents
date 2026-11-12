@@ -18,6 +18,7 @@
 #   rereview  the verdict (accept|reject) of a review that relay resumed after its reject (default accept)
 #   cargo    appended to with every session's CARGO_INCREMENTAL (`unset` when it has none)
 #   env      the session's whole environment, sorted, written by a brief containing [env]
+#   once     only the first session turn there commits (it writes once.done); later ones, resumes too, commit nothing
 # A brief containing [idle] makes no commit; one containing [status-done] reports status: done;
 # [verdict-accept] and [verdict-reject] also give a review's verdict; [wake] writes the report in a wake-up turn; [uncommitted] leaves a changed tracked
 # file and an untracked one behind after its commit; [filter] leaves a clean filter in the clone's own configuration
@@ -112,10 +113,11 @@ esac
 printf '%s\n--\n' "$prompt" >>"$acct/prompts"
 case "$prompt" in *"[env]"*) env | sort >"$acct/env" ;; esac
 case "$prompt" in *"[idle]"*) ;; *)
-if [ -w . ] && [ -e .git ]; then
+if [ -w . ] && [ -e .git ] && [ ! -f "$acct/once.done" ]; then
   echo "work $sid $turns" >relay-output.txt
   git add relay-output.txt
   git commit -q -m "stub work"
+  if [ -f "$acct/once" ]; then : >"$acct/once.done"; fi
 fi ;;
 esac
 case "$prompt" in *"[uncommitted]"*)

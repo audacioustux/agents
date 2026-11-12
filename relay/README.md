@@ -1091,9 +1091,16 @@ what was recorded:
   The shell runs supervised and holds the lock too (as its stdin), so a warm-up killed midway
   leaves none running: its shell is ended with it, and no new one starts until all of it has;
   `relay devshell warm` by hand does the same, now, and exits 4 while another runs.
-- **The key** is the shell command and the repository's `flake.nix`, `flake.lock`, `shell.nix`,
-  `default.nix`, `devenv.nix`, `devenv.lock`, `devbox.json` and `devbox.lock`. When any of them
-  changes, the record no longer counts and the next job waits for a new warm-up.
+- **The key** is the shell command, `[session] env` (what the shell is entered from),
+  `sandbox.env_deny` (what is left out of the record) and the repository's `flake.nix`, `flake.lock`,
+  `shell.nix`, `default.nix`, `devenv.nix`, `devenv.lock`, `devbox.json` and `devbox.lock`. When any
+  of them changes, the record no longer counts and the next job waits for a new warm-up.
+- **Still whole.** The record also lists the paths the environment stands on, of those that existed
+  when it was taken: every `PATH` directory, and every store path (`/nix/store/<name>`,
+  `/gnu/store/<name>`) any of its variables names. Before the record admits a job, or `relay devshell
+  warm` calls it `warm`, each is looked at (a stat); while one is gone, as after `nix-store --gc`
+  collected it, the board says `dev shell needs warming again: /nix/store/…-cargo-1.99 is gone` and a
+  warm-up enters it again, under the same key.
 - **Held, not failed.** Until the record holds the current key, every job (read-only ones too,
   since a brief may run the shell's tools) stays queued with the reason on the board:
   `dev shell warming (12m)`, or `dev shell not warmed yet` for the moment before one starts. A
@@ -1110,6 +1117,20 @@ what was recorded:
   jobs stay held until one attempt finishes. One step that cannot finish in 600 s at all (a single
   download that slow) never does: enter the shell by hand once (`nix develop -c true`), and the next
   attempt is quick.
+
+**Keeping it through a garbage collection.** The record is a list of variables, not a Nix GC root,
+so `nix-store --gc` may collect what it names, and the next job then waits for a warm-up that
+fetches or builds it again. To keep it, give `nix develop` a profile, which is a GC root:
+
+```toml
+[session]
+env_shell = ["nix", "develop", "--profile", "/home/me/.local/state/nix/devshells/myproject", "-c"]
+```
+
+relay does not add it itself: `session.env_shell` can be any command (`devenv shell`, `devbox run`,
+`mise exec --`), and only `nix develop` takes `--profile`; a root it made would pin store paths you
+did not ask it to, and a GC is how you free them. The check above keeps a collected environment from
+being used either way; the root only saves the warm-up after it.
 
 A job started on a recorded environment keeps it for its whole run: each attempt reads the
 record once, when it starts, and its session and both runs of its acceptance check (at the tip and

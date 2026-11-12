@@ -108,12 +108,50 @@ pub fn key(cfg: &Config) -> Option<String> {
     }))
 }
 
-/// What a warm-up recorded: the environment's variables, after `sandbox.env_deny`, and the key
-/// it was entered for. Kept in the project's state directory, which only its owner can read.
+/// What a warm-up recorded: the environment's variables, after `sandbox.env_deny`, the key it was
+/// entered for, and the paths it stands on. Kept in the project's state directory, which only its
+/// owner can read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recorded {
     pub key: String,
     pub env: Vec<(String, String)>,
+    /// The paths the environment named that existed when it was recorded ([`keeps`]): while one is
+    /// gone (a Nix garbage collection took its store path) the record is not whole, and is not used.
+    #[serde(default)]
+    pub keeps: Vec<String>,
+}
+
+impl Recorded {
+    /// The first path the environment stands on that is gone, if any: a stat each.
+    pub fn missing(&self) -> Option<&str> {
+        self.keeps.iter().map(String::as_str).find(|p| !Path::new(p).exists())
+    }
+}
+
+/// The paths a recorded environment stands on, of those `exists` says are there: every absolute
+/// `PATH` directory, and every store path (`/nix/store/<name>`, `/gnu/store/<name>`) any value names,
+/// alone or in a `:` or space separated list. A path that was not there when it was recorded (a
+/// shell's temporary directory, the output a `nix develop` shell would build) is not one it stands on.
+fn keeps(env: &[(String, String)], exists: impl Fn(&Path) -> bool) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for (k, v) in env {
+        for part in v.split([':', ' ']).filter(|p| p.starts_with('/')) {
+            let store = ["/nix/store/", "/gnu/store/"].iter().find_map(|s| {
+                let name = part.strip_prefix(s)?.split('/').next().filter(|n| !n.is_empty())?;
+                Some(format!("{s}{name}"))
+            });
+            match store {
+                Some(root) => {
+                    out.insert(root);
+                }
+                None if k == "PATH" => {
+                    out.insert(part.to_owned());
+                }
+                None => {}
+            }
+        }
+    }
+    out.into_iter().filter(|p| exists(Path::new(p))).collect()
 }
 
 fn recorded_file(ctx: &Ctx) -> PathBuf {
@@ -154,10 +192,11 @@ pub type Env = Vec<(OsString, Option<OsString>)>;
 /// The environment one attempt runs on, read once when it starts and given to its session and to
 /// both runs of its acceptance check, so a warm-up for a new key during the run changes none of
 /// them. Empty when the project names no development environment; `None` when the one recorded is
-/// not for the current key (or none is), and the attempt must wait for its warm-up.
+/// not for the current key (or none is), or no longer whole ([`Recorded::missing`]), and the
+/// attempt must wait for its warm-up.
 pub fn snapshot(ctx: &Ctx) -> Option<Env> {
     let Some(key) = key(&ctx.cfg) else { return Some(Vec::new()) };
-    let r = recorded(ctx).filter(|r| r.key == key)?;
+    let r = recorded(ctx).filter(|r| r.key == key && r.missing().is_none())?;
     // Filtered again: what a session gets is judged by the setting it runs under.
     let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
     Some(r.env.into_iter().filter(|(k, _)| !deny.is_match(k)).map(|(k, v)| (k.into(), Some(v.into()))).collect())
@@ -169,6 +208,8 @@ pub fn snapshot(ctx: &Ctx) -> Option<Env> {
 pub struct Gate {
     key: String,
     ready: bool,
+    /// A path the record for this key stands on that is gone: it must be entered again.
+    gone: Option<String>,
     state: Option<DevShell>,
 }
 
@@ -177,9 +218,11 @@ impl Gate {
     /// development environment.
     pub fn of(ctx: &Ctx, world: &World) -> Option<Self> {
         let key = key(&ctx.cfg)?;
-        let ready = recorded(ctx).is_some_and(|r| r.key == key);
+        let record = recorded(ctx).filter(|r| r.key == key);
+        let gone = record.as_ref().and_then(|r| r.missing().map(str::to_owned));
+        let ready = record.is_some() && gone.is_none();
         let state = world.devshell.clone().filter(|s| s.key == key);
-        Some(Self { key, ready, state })
+        Some(Self { key, ready, gone, state })
     }
 
     /// When the next warm-up may start after the latest failed one: at once after a timeout,
@@ -199,7 +242,13 @@ impl Gate {
         if self.ready {
             return None;
         }
-        let not_yet = || Hold { why: "dev shell not warmed yet".into(), until: None };
+        let not_yet = || {
+            let why = match &self.gone {
+                Some(path) => format!("dev shell needs warming again: {path} is gone"),
+                None => "dev shell not warmed yet".into(),
+            };
+            Hold { why, until: None }
+        };
         let Some(s) = &self.state else { return Some(not_yet()) };
         if let Some(since) = s.warming_since {
             let mut why = format!("dev shell warming ({})", crate::systems::view::ago(now_us, since));
@@ -262,7 +311,8 @@ pub(crate) fn warm(ctx: &Ctx) -> Result<String> {
     let Some(role) = Role::try_take(&lock_file(ctx))? else {
         fail!(Conflict, "a warm-up of the development environment is already running")
     };
-    if recorded(ctx).is_some_and(|r| r.key == key) {
+    // Recorded for this key and still whole; a record whose paths were collected is entered again.
+    if recorded(ctx).is_some_and(|r| r.key == key && r.missing().is_none()) {
         return Ok("warm".into());
     }
     let shell = &ctx.cfg.session.env_shell;
@@ -276,7 +326,8 @@ pub(crate) fn warm(ctx: &Ctx) -> Result<String> {
     let lock = role.share()?;
     match enter(&ctx.relay_env(), lock, shell, &deny, &ctx.cfg.repo, &stderr_file(ctx), ATTEMPT_SECS) {
         Ok(env) => {
-            record(ctx, &Recorded { key: key.clone(), env })?;
+            let keeps = keeps(&env, Path::exists);
+            record(ctx, &Recorded { key: key.clone(), env, keeps })?;
             port.emit(DevShellEvent::Warmed { key })?;
             Ok("entered".into())
         }
@@ -499,6 +550,66 @@ pub(crate) mod tests {
         assert_eq!(entries(&d), 1, "no second entry beside the first");
         assert!(attempt.join().unwrap().is_ok());
         assert_eq!(settled(&ctx), "entered", "a replacement may run once the attempt has ended");
+    }
+
+    /// Review of #54 (second round): the record does not keep its store paths alive, so after a garbage
+    /// collection the same key would admit jobs whose tools are gone. A record whose paths are gone is
+    /// not used, and is entered again.
+    #[test]
+    fn a_recorded_environment_whose_path_directory_vanished_is_entered_again() {
+        let d = Dir::new();
+        let tools = d.path().join("store/abc-tools/bin");
+        let shell = d.path().join("shell");
+        let text = format!(
+            "#!/bin/sh\necho entered >> '{}'\nmkdir -p '{}'\nexport PATH='{}':\"$PATH\"\nexec \"$@\"\n",
+            d.path().join("entries").display(),
+            tools.display(),
+            tools.display()
+        );
+        std::fs::write(&shell, text).unwrap();
+        std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let ctx = project(&d, &[&shell.display().to_string()]);
+        assert_eq!(settled(&ctx), "entered");
+        let r = recorded(&ctx).unwrap();
+        assert!(r.keeps.contains(&tools.display().to_string()), "{:?}", r.keeps);
+        assert!(snapshot(&ctx).is_some());
+        // Collected: the key is the same, the tools are not there.
+        std::fs::remove_dir_all(d.path().join("store")).unwrap();
+        assert!(snapshot(&ctx).is_none(), "no attempt starts on it");
+        let gate = Gate::of(&ctx, &world(&ctx)).unwrap();
+        let hold = gate.hold(now_micros()).unwrap();
+        assert_eq!(hold.why, format!("dev shell needs warming again: {} is gone", tools.display()));
+        assert!(gate.due(now_micros()), "a warm-up is started for it");
+        assert_eq!(settled(&ctx), "entered", "`warm` enters it again rather than say it is warm");
+        assert_eq!(entries(&d), 2);
+        assert!(snapshot(&ctx).is_some(), "whole again");
+        assert_eq!(Gate::of(&ctx, &world(&ctx)).unwrap().hold(now_micros()), None);
+    }
+
+    #[test]
+    fn an_environment_stands_on_its_path_and_the_store_paths_it_names_that_exist() {
+        let env = [
+            ("PATH", "/nix/store/aaa-cargo/bin:/home/u/.local/bin:relative:/gone/bin"),
+            ("buildInputs", "/nix/store/bbb-openssl-3 /nix/store/ccc-zlib"),
+            ("LIBCLANG_PATH", "/nix/store/ddd-clang/lib"),
+            ("out", "/nix/store/eee-shell"),
+            ("HOME", "/home/u"),
+            ("GUIX_ENVIRONMENT", "/gnu/store/fff-profile"),
+        ]
+        .map(|(k, v)| (k.to_owned(), v.to_owned()));
+        let there = |p: &Path| !matches!(p.to_str(), Some("/gone/bin" | "/nix/store/eee-shell"));
+        assert_eq!(
+            keeps(&env, there),
+            [
+                "/gnu/store/fff-profile",
+                "/home/u/.local/bin",
+                "/nix/store/aaa-cargo",
+                "/nix/store/bbb-openssl-3",
+                "/nix/store/ccc-zlib",
+                "/nix/store/ddd-clang",
+            ],
+            "store roots, PATH directories; not what was never there, not plain paths of other variables"
+        );
     }
 
     /// Review of #54 (second round): GNU `timeout` used to put the shell in a group of its own, so a hook's

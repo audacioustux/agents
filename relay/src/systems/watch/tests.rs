@@ -5,14 +5,16 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+use super::ChartSpec;
 use super::board::Board;
 use super::draw::draw;
 use super::pane::Step;
-use super::ui::{Action, Id, Ui};
+use super::ui::{Action, Id, Ui, View};
 use crate::config::{Config, tempdir};
 use crate::systems::dispatch::Room;
 use crate::systems::quota::gauge::Gauge;
 use crate::systems::quota::{AccountsView, Shown};
+use crate::systems::view::machine::Scope;
 use crate::systems::view::machine::{Machine, Project};
 use crate::world::{Decision, Job, Status, World};
 
@@ -656,4 +658,157 @@ fn an_accounts_email_shows_beside_it_and_gives_way_first() {
     let (_, ifty, _) = row(80);
     assert!(ifty.starts_with("│▸ claude:ifty  …  ready  "), "{ifty}");
     assert!(bar_after(&ifty, "7 days") < 12, "then the gauge: {ifty}");
+}
+
+/// Machine state with one project's bus, for the chart: readings are appended to it as they land.
+struct Buses {
+    dir: tempdir::Dir,
+    cfg: Config,
+}
+
+impl Buses {
+    fn new() -> Self {
+        let dir = tempdir::Dir::new();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let cfg = Config::parse("name = \"demo\"\n", dir.path()).unwrap();
+        std::fs::create_dir_all(dir.path().join("state/demo/bus")).unwrap();
+        Self { dir, cfg }
+    }
+
+    fn root(&self) -> std::path::PathBuf {
+        self.dir.path().join("state")
+    }
+
+    /// A quota reading of `account`'s 7-day and 5-hour meters, landing on the bus now.
+    fn read(&self, account: &str, week: f64, five: f64) {
+        use std::io::Write as _;
+        let meter = |u| crate::harness::Meter { utilization: u, resets_at: Some(1_800_500_000) };
+        let meters: crate::harness::Meters =
+            [("seven_day".to_owned(), meter(week)), ("five_hour".to_owned(), meter(five))].into();
+        let event = crate::bus::QuotaEvent::Reading { account: account.into(), meters, sign_in: Some("s".into()) };
+        let mut v = serde_json::to_value(event).unwrap();
+        v["t"] = crate::bus::now_micros().into();
+        let path = self.root().join("demo/bus").join(crate::bus::system_file("quota"));
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        writeln!(f, "{v}").unwrap();
+    }
+
+    /// The chart as the watch folds it outside a project, drawn on a 120x40 window.
+    fn shown(&self, ui: &mut Ui) -> Vec<String> {
+        let root = self.root();
+        let scope = Scope { cfg: &self.cfg, home: None, root: &root };
+        super::refold(scope, ui, crate::bus::now_micros());
+        frame(&Board::default(), ui, 120, 40)
+    }
+}
+
+fn charting(spec: ChartSpec) -> Ui {
+    let mut ui = Ui::new(false, true, false);
+    (ui.usage, ui.view) = (spec, View::Usage);
+    ui
+}
+
+#[test]
+fn u_switches_to_the_chart_and_back_and_the_chart_answers_to_few_keys() {
+    let f = two_jobs();
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    let fr = frame(&b, &mut ui, 120, 40);
+    assert!(fr.last().unwrap().contains("p all projects  u chart"), "{}", fr.last().unwrap());
+    assert_eq!(ui.action(&key(KeyCode::Char('u'))), Some(Action::Chart));
+    let ctrl_u = Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    assert_eq!(ui.action(&ctrl_u), Some(Action::Step(Step::Pages(-1))), "Ctrl-U is still a page");
+    ui.apply(Action::Chart, &b);
+    assert_eq!(ui.view, View::Usage);
+    let fr = frame(&b, &mut ui, 120, 40);
+    assert!(!fr.iter().any(|l| l.contains("Build the thing")), "the board is gone: {fr:#?}");
+    assert!(fr.last().unwrap().contains("u board"), "{}", fr.last().unwrap());
+    for k in ['a', 'p', 'j'] {
+        assert_eq!(ui.action(&key(KeyCode::Char(k))), None, "{k} acts on the board");
+    }
+    assert_eq!(ui.action(&key(KeyCode::Char('q'))), Some(Action::Quit));
+    assert_eq!(ui.action(&key(KeyCode::Char('?'))), Some(Action::Help));
+    // The key line is clickable.
+    let x = fr.last().unwrap().find("u board").unwrap();
+    let x = u16::try_from(fr.last().unwrap()[..x].chars().count()).unwrap();
+    assert_eq!(ui.action(&mouse(MouseEventKind::Down(MouseButton::Left), x, 39)), Some(Action::Chart));
+    assert_eq!(ui.action(&key(KeyCode::Char('u'))), Some(Action::Chart));
+    ui.apply(Action::Chart, &b);
+    let fr = frame(&b, &mut ui, 120, 40);
+    assert!(fr[0].contains("demo · 1 running"), "back on the board: {}", fr[0]);
+}
+
+#[test]
+fn a_reading_landing_while_the_chart_is_shown_is_in_the_next_draw() {
+    let bus = Buses::new();
+    bus.read("claude:a", 0.30, 0.1);
+    let mut ui = charting(ChartSpec::default());
+    let fr = frame(&Board::default(), &mut ui, 120, 40);
+    assert!(fr.iter().any(|l| l.contains("reading the quota history")), "before the first fold: {fr:#?}");
+    let fr = bus.shown(&mut ui);
+    assert!(fr[0].contains("quota since") && fr[0].contains("7-day meters"), "{}", fr[0]);
+    assert!(fr.iter().any(|l| l.contains("claude:a 7 days") && l.contains("30% at the last reading")), "{fr:#?}");
+    assert!(fr.iter().any(|l| l.contains("1 reading(s)")), "{fr:#?}");
+    bus.read("claude:a", 0.55, 0.2);
+    let fr = bus.shown(&mut ui);
+    assert!(fr.iter().any(|l| l.contains("55% at the last reading") && l.contains("2 reading(s)")), "{fr:#?}");
+    bus.read("omp:w", 0.10, 0.2);
+    let fr = bus.shown(&mut ui);
+    assert!(fr.iter().any(|l| l.contains("omp:w 7 days")), "a new account joins: {fr:#?}");
+    assert!(ui.error.is_none());
+}
+
+#[test]
+fn the_filters_of_view_usage_watch_apply() {
+    let bus = Buses::new();
+    bus.read("claude:a", 0.30, 0.11);
+    bus.read("omp:w", 0.40, 0.22);
+    let spec = |f: crate::systems::view::usage::Filter| ChartSpec { filter: f, ..ChartSpec::default() };
+    let filter = crate::systems::view::usage::Filter::default;
+    let fr = bus
+        .shown(&mut charting(spec(crate::systems::view::usage::Filter { accounts: vec!["omp:w".into()], ..filter() })));
+    assert!(fr.iter().any(|l| l.contains("omp:w 7 days")), "{fr:#?}");
+    assert!(!fr.iter().any(|l| l.contains("claude:a")), "--account: {fr:#?}");
+    let fr = bus.shown(&mut charting(spec(crate::systems::view::usage::Filter {
+        harnesses: vec!["claude".into()],
+        ..filter()
+    })));
+    assert!(fr.iter().any(|l| l.contains("claude:a 7 days")) && !fr.iter().any(|l| l.contains("omp:w")), "--harness");
+    let fr = bus.shown(&mut charting(spec(crate::systems::view::usage::Filter {
+        meter: Some("five_hour".into()),
+        ..filter()
+    })));
+    assert!(fr[0].contains("meter five_hour"), "{}", fr[0]);
+    assert!(fr.iter().any(|l| l.contains("claude:a 5 hours") && l.contains("11% at the last reading")), "--meter");
+    // `--since`: a window that ends before the readings landed shows none.
+    let mut ui = charting(ChartSpec { window: 1, ..ChartSpec::default() });
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let fr = bus.shown(&mut ui);
+    assert!(fr.iter().any(|l| l.contains("no readings")), "--since: {fr:#?}");
+}
+
+#[test]
+fn the_help_lists_u() {
+    let f = two_jobs();
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    ui.apply(Action::Help, &b);
+    let fr = frame(&b, &mut ui, 120, 40);
+    assert!(fr.iter().any(|l| l.contains("the quota chart, or the job board")), "{fr:#?}");
+}
+
+#[test]
+fn the_chart_fits_a_small_window_and_reads_nothing_it_cannot_write() {
+    let bus = Buses::new();
+    bus.read("claude:a", 0.30, 0.1);
+    let before = std::fs::read_dir(bus.dir.path()).unwrap().count();
+    let mut ui = charting(ChartSpec::default());
+    bus.shown(&mut ui);
+    for (w, h) in [(80, 24), (40, 12), (20, 5)] {
+        let fr = frame(&Board::default(), &mut ui, w, h);
+        assert_eq!(fr.len(), usize::from(h));
+    }
+    assert_eq!(std::fs::read_dir(bus.dir.path()).unwrap().count(), before, "nothing written");
 }

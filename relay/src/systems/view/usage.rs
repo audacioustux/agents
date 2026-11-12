@@ -20,6 +20,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::bus::{Stamped, now_micros};
 use crate::config::Limits;
 use crate::systems::quota::gauge;
+use crate::systems::watch::ChartSpec;
 use crate::world::World;
 
 use super::machine::Scope;
@@ -132,6 +133,13 @@ impl History {
         h
     }
 
+    /// What the chart leaves out, if anything: the bare labels.
+    pub fn left_out(&self) -> Option<String> {
+        let names = self.bare.iter().cloned().collect::<Vec<_>>().join(", ");
+        (!self.bare.is_empty())
+            .then(|| format!("left out: readings under a bare label, which names no harness ({names})"))
+    }
+
     /// Each series, as (account, meter, readings).
     fn each(&self) -> impl Iterator<Item = (&str, &str, &[Point])> {
         self.series.iter().flat_map(|(a, ms)| ms.iter().map(move |(m, p)| (a.as_str(), m.as_str(), p.as_slice())))
@@ -171,7 +179,7 @@ const PALETTE: [Color; 12] = [
     Color::Red,
 ];
 /// The chart's rows, its axes and labels included: the heading and legend are lines of their own.
-const CHART_ROWS: u16 = 18;
+pub const CHART_ROWS: u16 = 18;
 
 /// What names each series on the chart and in its legend, in turn: one character, so it takes
 /// one cell beside the series' last point, and needs no colour to be read. Past the last, `*`.
@@ -345,6 +353,24 @@ impl Usage<'_> {
         series.chain(floors).collect()
     }
 
+    /// The heading, wrapped to `width` when it is known.
+    pub fn heading_lines(&self, width: Option<usize>) -> Vec<String> {
+        wrap("", &self.heading(), width)
+    }
+
+    /// The legend wrapped to `width` when it is known, never cut: a block per series and floor,
+    /// each starting with spaces where its sample goes.
+    pub fn legend_lines(&self, width: Option<usize>) -> Vec<Legend> {
+        self.legend()
+            .into_iter()
+            .map(|(sample, color, words)| {
+                let sample_width = sample.width();
+                let lines = wrap(&" ".repeat(sample_width), &words, width.map(|w| w.max(sample_width + 1)));
+                Legend { sample, color, sample_width, lines }
+            })
+            .collect()
+    }
+
     /// The whole view as text: the heading, the chart `width` columns wide (100 where no width is
     /// known), then the legend. Heading and legend are lines of their own, wrapped to `width` when
     /// it is known, never cut; with `colour`, each sample in its series' colour.
@@ -353,18 +379,28 @@ impl Usage<'_> {
         let area = Rect::new(0, 0, u16::try_from(cols).unwrap_or(u16::MAX), CHART_ROWS);
         let mut buf = Buffer::empty(area);
         self.draw(area, &mut buf);
-        let mut lines = wrap("", &self.heading(), width);
+        let mut lines = self.heading_lines(width);
         lines.push(text(&buf, colour));
-        for (sample, color, words) in self.legend() {
-            let shown = if colour { format!("\x1b[{}m{sample}\x1b[39m", sgr(color)) } else { sample.clone() };
-            let mut wrapped = wrap(&" ".repeat(sample.width()), &words, width.map(|w| w.max(sample.width() + 1)));
-            if let Some(first) = wrapped.first_mut() {
-                first.replace_range(..sample.width(), &shown);
+        for mut l in self.legend_lines(width) {
+            let shown = if colour { format!("\x1b[{}m{}\x1b[39m", sgr(l.color), l.sample) } else { l.sample.clone() };
+            if let Some(first) = l.lines.first_mut() {
+                first.replace_range(..l.sample_width, &shown);
             }
-            lines.extend(wrapped);
+            lines.extend(l.lines);
         }
         lines.join("\n")
     }
+}
+
+/// One legend entry, wrapped.
+#[derive(Debug)]
+pub struct Legend {
+    /// Its id and a sample of its colour.
+    pub sample: String,
+    pub color: Color,
+    pub sample_width: usize,
+    /// Its words in lines, the first beginning with `sample_width` spaces where the sample goes.
+    pub lines: Vec<String>,
 }
 
 /// Where ratatui's `Chart` plots in `area` with these axis labels (its own layout, which it does
@@ -475,7 +511,7 @@ fn sgr(c: Color) -> u8 {
 /// The buses a chart reads: every project's on this machine, in a project or outside one (accounts
 /// are the machine's, so a reading is wherever it happened to be taken), with each that cannot be
 /// read named. Inside a project the chart is then limited to its accounts ([`Within`]).
-fn buses(scope: Scope<'_>) -> Result<(Vec<Vec<Stamped>>, Vec<String>)> {
+pub fn buses(scope: Scope<'_>) -> Result<(Vec<Vec<Stamped>>, Vec<String>)> {
     let (mut read, mut unreadable) = (Vec::new(), Vec::new());
     let mut dirs = crate::ctx::try_project_dirs(scope.root)?;
     dirs.sort();
@@ -491,13 +527,20 @@ fn buses(scope: Scope<'_>) -> Result<(Vec<Vec<Stamped>>, Vec<String>)> {
     Ok((read, unreadable))
 }
 
-pub fn run(scope: Scope<'_>, json: bool, mut filter: Filter, since: &str) -> Result<()> {
+/// Charts the readings once; with `watch`, opens the watch on the chart instead.
+pub fn run(scope: Scope<'_>, json: bool, mut filter: Filter, since: &str, watch: bool) -> Result<()> {
     if let Some(a) = filter.accounts.iter().find(|a| !a.contains(':')) {
         fail!(Usage, "--account {a}: an account is harness:label");
     }
     let Some(window) = super::stats::parse_duration(since) else {
         fail!(Usage, "--since {since}: a duration such as 30m, 12h, 7d or 2w");
     };
+    if watch {
+        if json {
+            fail!(Usage, "--watch draws a terminal UI; --json prints the readings once: use one");
+        }
+        return crate::systems::watch::run(scope, false, scope.home.is_none(), Some(ChartSpec { filter, window }));
+    }
     let now = now_micros();
     filter.since = now.saturating_sub(window);
     filter.within = scope.home.map(|ctx| Within::of(&ctx.cfg));
@@ -520,9 +563,8 @@ pub fn run(scope: Scope<'_>, json: bool, mut filter: Filter, since: &str) -> Res
     } else {
         out!("{}", usage.print(size.map(|(cols, _)| cols), size.is_some()));
     }
-    if !history.bare.is_empty() {
-        let names = history.bare.iter().cloned().collect::<Vec<_>>().join(", ");
-        out!("left out: readings under a bare label, which names no harness ({names})");
+    if let Some(left_out) = history.left_out() {
+        out!("{left_out}");
     }
     for u in unreadable {
         out!("unreadable: {u}");

@@ -2,7 +2,7 @@
 
 pub mod machine;
 mod stats;
-mod usage;
+pub mod usage;
 
 use std::time::Duration;
 
@@ -69,6 +69,9 @@ pub enum Cmd {
         /// How far back (`12h`, `7d`, `2w`).
         #[arg(long, default_value = "7d")]
         since: String,
+        /// Live: open `view watch` on the chart, refolded as readings land (`u` for the job board, `q` quits).
+        #[arg(long)]
+        watch: bool,
     },
 }
 
@@ -83,12 +86,16 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     let scope = Scope { cfg: &ctx.cfg, home: Some(ctx), root: &ctx.state_root };
     match cmd {
         Cmd::Status { all, everywhere } => status(scope, ctx.json, all, everywhere),
-        Cmd::Watch { all, everywhere } => crate::systems::watch::run(scope, all, everywhere),
+        Cmd::Watch { all, everywhere } => crate::systems::watch::run(scope, all, everywhere, None),
         Cmd::Result { name, wait } => result(ctx, &name, wait),
         Cmd::Stats { since } => stats::run(ctx, since.as_deref()),
-        Cmd::Usage { meter, accounts, harnesses, since } => {
-            usage::run(scope, ctx.json, usage::Filter { meter, accounts, harnesses, ..Default::default() }, &since)
-        }
+        Cmd::Usage { meter, accounts, harnesses, since, watch } => usage::run(
+            scope,
+            ctx.json,
+            usage::Filter { meter, accounts, harnesses, ..Default::default() },
+            &since,
+            watch,
+        ),
         Cmd::Events => {
             for e in ctx.events()? {
                 out!("{}", e.to_json());
@@ -115,15 +122,15 @@ pub fn outside(json: bool, cmd: &Cmd) -> Result<()> {
     let scope = Scope { cfg: &cfg, home: None, root: &root };
     match cmd {
         Cmd::Status { all, .. } => status(scope, json, *all, true),
-        Cmd::Watch { all, .. } => crate::systems::watch::run(scope, *all, true),
-        Cmd::Usage { meter, accounts, harnesses, since } => {
+        Cmd::Watch { all, .. } => crate::systems::watch::run(scope, *all, true, None),
+        Cmd::Usage { meter, accounts, harnesses, since, watch } => {
             let filter = usage::Filter {
                 meter: meter.clone(),
                 accounts: accounts.clone(),
                 harnesses: harnesses.clone(),
                 ..Default::default()
             };
-            usage::run(scope, json, filter, since)
+            usage::run(scope, json, filter, since, *watch)
         }
         _ => unreachable!("only the boards and the usage chart run outside a project"),
     }

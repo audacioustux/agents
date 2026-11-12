@@ -9,6 +9,7 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Margin, Position, Rect};
 
 use super::board::{Board, Entry, Key};
+use super::chart::{Chart, Spec};
 use super::pane::{Pane, Step, Tone, markdown};
 use crate::world::Status;
 
@@ -31,6 +32,8 @@ pub enum Action {
     Quit,
     ToggleAll,
     ToggleEverywhere,
+    /// Switch between the job board and the quota chart.
+    Chart,
     Help,
     /// The selected job's pane in `$PAGER`.
     Open,
@@ -42,6 +45,15 @@ pub enum Action {
     /// Scroll the pane under the pointer by rows.
     Wheel(Id, isize),
     Select(usize),
+}
+
+/// What the window shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// The jobs, decisions and accounts.
+    Board,
+    /// The quota chart.
+    Usage,
 }
 
 /// Which jobs the board lists.
@@ -60,6 +72,11 @@ pub struct Ui {
     /// Whether `p` may change `everywhere`: outside a project there is only every project.
     pub can_toggle: bool,
     pub help: bool,
+    pub view: View,
+    /// Which readings the chart shows.
+    pub usage: Spec,
+    /// The chart as of its last fold, once it has been shown.
+    pub chart: Option<Chart>,
     pub focus: Id,
     /// The selected job, followed by its name as rows move.
     pub selected: Option<Key>,
@@ -81,6 +98,9 @@ impl Ui {
             shown: Shown { all, everywhere: everywhere || !can_toggle },
             can_toggle,
             help: false,
+            view: View::Board,
+            usage: Spec::default(),
+            chart: None,
             focus: Id::Jobs,
             selected: None,
             index: 0,
@@ -157,11 +177,18 @@ impl Ui {
                 self.focus = order[usize::try_from(next).unwrap_or(0)];
             }
             Action::Help => self.help = !self.help,
+            Action::Chart => self.view = if self.view == View::Board { View::Usage } else { View::Board },
             Action::Quit | Action::ToggleAll | Action::ToggleEverywhere | Action::Open => {}
         }
     }
 
+    /// What `e` asks for. The chart answers only to what it shows: quit, help and the way back.
     pub fn action(&self, e: &Event) -> Option<Action> {
+        let a = self.raw_action(e)?;
+        (self.view == View::Board || matches!(a, Action::Quit | Action::Help | Action::Chart)).then_some(a)
+    }
+
+    fn raw_action(&self, e: &Event) -> Option<Action> {
         match e {
             Event::Key(k) if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(Action::Quit)
@@ -291,6 +318,7 @@ fn key(k: &KeyEvent) -> Option<Action> {
         KeyCode::Enter => Action::Open,
         KeyCode::Char('a') => Action::ToggleAll,
         KeyCode::Char('p') => Action::ToggleEverywhere,
+        KeyCode::Char('u') => Action::Chart,
         KeyCode::Char('?') => Action::Help,
         _ => return None,
     })

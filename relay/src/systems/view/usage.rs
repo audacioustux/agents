@@ -552,6 +552,25 @@ mod tests {
     }
 
     #[test]
+    fn every_weekly_window_a_harness_reports_shows_by_default() {
+        let b = [vec![reading(
+            NOW - H,
+            "omp:w",
+            &[
+                ("google-antigravity/Gemini (Weekly)", 0.1, 1),
+                ("minimax-code/General 7 Day", 0.04, 1),
+                ("minimax-code/General 5 Hour", 0.05, 1),
+                ("openai-codex/7 days", 0.19, 1),
+            ],
+        )]];
+        let h = History::fold(b.iter().map(Vec::as_slice), &week());
+        assert_eq!(
+            h.series["omp:w"].keys().collect::<Vec<_>>(),
+            ["google-antigravity/Gemini (Weekly)", "minimax-code/General 7 Day", "openai-codex/7 days"]
+        );
+    }
+
+    #[test]
     fn a_meter_account_and_harness_can_be_picked() {
         let h = fold(&Filter { meter: Some("5 hours".into()), ..week() });
         assert_eq!(h.series.keys().collect::<Vec<_>>(), ["claude:a"], "a meter by its heading");

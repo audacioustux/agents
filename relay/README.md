@@ -635,10 +635,12 @@ a very narrow one none.
   it writes nothing, and starts no reading. In a project, its bus; outside one,
   every project's on this machine. An account read by several projects is one
   line, its readings merged by time, one seen on two buses kept once.
-- **Which meter.** By default each account's 7-day meter, the one `view status`
-  calls `7 days` (`seven_day`, `openai-codex/7 days`); `--meter NAME` picks
-  another, by its name or as the board shows it (`five_hour` or `5 hours`). A
-  reading without that meter adds no point.
+- **Which meter.** By default each account's weekly meters: those whose name, as
+  `view status` shows it, says a 7-day or weekly window (`7 days`,
+  `openai-codex/7 days`, `minimax-code/General 7 Day`, `google-antigravity/Gemini
+  (Weekly)`), one line each; `--meter NAME` picks another, by its name or as the
+  board shows it (`five_hour` or `5 hours`). A reading without that meter adds no
+  point.
 - **Which accounts and when.** `--account harness:label` (repeatable) and
   `--harness` (repeatable) narrow it; `--since` (`12h`, `7d`, `2w`; default `7d`)
   is the window.

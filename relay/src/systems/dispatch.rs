@@ -397,7 +397,8 @@ pub fn place_session(
 /// machine's seat lock, as a dispatch books a job's: `record` writes the booking to the bus before the
 /// lock is let go, so every dispatcher (and every other decision) that plans next counts it. A
 /// booking the fold did not take, since the decision is no longer on record (its job was cleaned
-/// away meanwhile), is an error: the session must not start.
+/// away meanwhile), is an error: the session must not start. The lock is never waited for: held by
+/// another, it is [`Booking::Busy`], for the caller's wait to try again within its own bound.
 pub fn book_session(
     ctx: &Ctx,
     id: &str,
@@ -406,16 +407,15 @@ pub fn book_session(
     model: Option<&str>,
     since: u64,
     record: impl FnOnce(&Start) -> Result<()>,
-) -> Result<Result<(Start, Home), Hold>> {
-    let _seats = Role::take(&ctx.state_root.join("seats.lock"))?;
+) -> Result<Booking> {
+    let Some(_seats) = Role::try_take(&ctx.state_root.join("seats.lock"))? else { return Ok(Booking::Busy) };
     let world = ctx.world()?;
     let neighbours = ctx.neighbours();
     let others: Vec<&World> = neighbours.iter().collect();
     // A decision's session is read-only: free disk does not hold it, nor does the dev shell.
     let mut room = Room::new(&ctx.cfg, &world, &others, true);
-    let start = match place_session(&ctx.cfg, &mut room, worker, harness, model, since, now_micros()) {
-        Ok(start) => start,
-        Err(hold) => return Ok(Err(hold)),
+    let Ok(start) = place_session(&ctx.cfg, &mut room, worker, harness, model, since, now_micros()) else {
+        return Ok(Booking::Held);
     };
     let Some(home) = room.found().iter().find(|h| h.key() == start.account).cloned() else {
         anyhow::bail!("{} was chosen but is not found", start.account);
@@ -424,7 +424,18 @@ pub fn book_session(
     if !ctx.world()?.seated(id) {
         anyhow::bail!("decision {id} is no longer on record, so its seat was not booked");
     }
-    Ok(Ok((start, home)))
+    Ok(Booking::Booked(home))
+}
+
+/// What a try at booking a decision's seat came to ([`book_session`]).
+#[derive(Debug)]
+pub enum Booking {
+    /// Booked and recorded: the home of the account it is on.
+    Booked(Home),
+    /// No account takes the session now.
+    Held,
+    /// The machine's seat lock is held by another planner for now.
+    Busy,
 }
 
 /// The queued jobs, oldest first: the order [`plan`] judges them in.
@@ -935,6 +946,7 @@ mod tests {
                 account: start.account.clone(),
                 model: start.model.clone(),
                 provider: start.provider.clone(),
+                lock: None,
             };
             apply(w, seated);
             Ok(start)
@@ -1064,6 +1076,7 @@ mod tests {
             account: "claude:b".into(),
             model: None,
             provider: String::new(),
+            lock: None,
         };
         let forgotten = Stamped { t: NOW_US, event: Event::Land(LandEvent::Forgotten { job: "q".into() }), from: None };
         let on_b = |w: &World| Room::of(found_ab(), w.accounts.clone(), w, &[], true).running_on("claude:b");
@@ -1081,6 +1094,59 @@ mod tests {
         decide_event(&mut w, NOW_US, seated("q-held-2"));
         assert!(!w.seated("q-held-2"), "a booking for a decision no longer on record");
         assert_eq!(on_b(&w), 0);
+    }
+
+    /// Copilot on PR #63, third pass, finding 1: a booking waited on the machine's seat lock for as
+    /// long as another holder kept it, where nothing checks the wait's bound or a withdrawal. It
+    /// returns at once instead, for the wait loop to try again.
+    #[test]
+    fn booking_a_decisions_seat_never_waits_on_a_busy_seat_lock() {
+        let d = crate::config::tempdir::Dir::new();
+        let root = d.path().to_owned();
+        std::fs::create_dir_all(root.join("repo/.git")).unwrap();
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        let _held = Role::take(&root.join("state/seats.lock")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let cfg = Config::parse("name = \"t\"\n", &root.join("repo")).unwrap();
+            let ctx = Ctx::unclaimed(cfg, root.join("repo/relay.toml"), root.join("state"), root.join("data"));
+            let booked = book_session(&ctx, "d", &Job::default(), "claude", None, 0, |_| Ok(()));
+            let _ = tx.send(matches!(booked, Ok(Booking::Busy)));
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true), "a busy seat lock is a hold, at once");
+    }
+
+    /// Copilot on PR #63, third pass, finding 2: the booker of a decision's seat (its waiter) can die
+    /// while its session's process tree still runs, until the supervisor sees and ends it. The seat
+    /// counts while anything holds its lock (the tree inherits it), not only while the booker lives.
+    #[test]
+    fn a_seat_counts_while_its_lock_is_held_past_its_bookers_death() {
+        use crate::bus::{DecideEvent, Point};
+        let (d, _cfg, mut w) = one_seat_each();
+        let lock = d.path().join("seat.lock");
+        let dead = Some((std::process::id(), 1));
+        let asked = DecideEvent::DecisionRequested {
+            id: "q-held-1".into(),
+            job: "q".into(),
+            point: Point::Held,
+            created: 100,
+            attempt: 0,
+            waiter: dead,
+        };
+        decide_event(&mut w, NOW_US, asked);
+        let tree = crate::os::SeatHold::take(&lock).unwrap();
+        let seated = DecideEvent::Seated {
+            id: "q-held-1".into(),
+            account: "claude:b".into(),
+            model: None,
+            provider: String::new(),
+            lock: Some(lock.clone()),
+        };
+        decide_event(&mut w, NOW_US, seated);
+        let on_b = |w: &World| Room::of(found_ab(), w.accounts.clone(), w, &[], true).running_on("claude:b");
+        assert_eq!(on_b(&w), 1, "its booker is gone, but its session's tree still holds the lock");
+        drop(tree);
+        assert_eq!(on_b(&w), 0, "nothing holds it: the tree has ended");
     }
 
     fn found_ab() -> Vec<Home> {

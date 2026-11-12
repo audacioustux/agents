@@ -653,6 +653,10 @@ pub enum DecideEvent {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         provider: String,
+        /// The seat's lock file: held (shared) by the booker, and by the session's whole supervised
+        /// process tree, which inherits it. The seat counts while anyone holds it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lock: Option<PathBuf>,
     },
     /// That session has ended, and its seat is free.
     Unseated { id: String },

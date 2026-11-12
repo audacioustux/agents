@@ -453,14 +453,22 @@ pub struct SessionSeat {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub provider: String,
     pub waiter: Option<(u32, u64)>,
+    /// Its lock file, held while its booker or any process of its session's tree lives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock: Option<std::path::PathBuf>,
 }
 
 impl SessionSeat {
-    /// The seat it holds while its process lives: one that died without a word (killed, crashed)
-    /// holds nothing, since nobody is left to give it back.
+    /// The seat it holds while its session may run: while anything holds its lock (its booker, or
+    /// the session's supervised tree, which outlives a booker killed outright until the supervisor
+    /// sees and ends it), or, booked before seats had locks, while its booker lives. One whose
+    /// every holder died without a word holds nothing, since nobody is left to give it back.
     pub fn held(&self) -> Option<(&str, crate::accounts::Draws)> {
-        let (pid, started) = self.waiter?;
-        if !crate::os::same_process(pid, started) {
+        let live = match &self.lock {
+            Some(lock) => crate::os::seat_held(lock),
+            None => self.waiter.is_some_and(|(pid, started)| crate::os::same_process(pid, started)),
+        };
+        if !live {
             return None;
         }
         let harness = self.account.split_once(':').map_or(self.account.as_str(), |(h, _)| h);
@@ -1312,10 +1320,11 @@ impl World {
             // A booking for a decision no longer on record (its job cleaned away) is not one: its
             // booker sees that (`seated`) and stops. Once made, it stands until `unseated`, whatever
             // becomes of the decision, since its session runs until its handler hears and stops.
-            DecideEvent::Seated { id, account, model, provider } => {
+            DecideEvent::Seated { id, account, model, provider, lock } => {
                 if let Some(d) = self.decisions.get(id) {
-                    let (account, model, provider) = (account.clone(), model.clone(), provider.clone());
-                    self.seats.insert(id.clone(), SessionSeat { account, model, provider, waiter: d.waiter });
+                    let (account, model, provider, lock) =
+                        (account.clone(), model.clone(), provider.clone(), lock.clone());
+                    self.seats.insert(id.clone(), SessionSeat { account, model, provider, waiter: d.waiter, lock });
                 }
             }
             DecideEvent::Unseated { id } => {
@@ -1556,6 +1565,7 @@ mod tests {
                     account: "omp:w".into(),
                     model: Some("minimax-code/M3".into()),
                     provider: "minimax-code".into(),
+                    lock: None,
                 }),
             ),
         ];

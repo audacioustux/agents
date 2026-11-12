@@ -755,16 +755,22 @@ fn ask_agent(ctx: &Ctx, job: &Job, a: &Agent, req: &Request, live: &dyn Fn() -> 
     }
 }
 
-/// Records that decision `id`'s `agent:` session took the seat `start` (`Some`), or that it has ended
-/// and given its seat back (`None`). The fold counts the seat in between, as it counts a job's run.
-pub fn record_seat(ctx: &Ctx, id: &str, start: Option<&crate::systems::dispatch::Start>) -> Result<()> {
+/// Records that decision `id`'s `agent:` session took the seat `start` held by the lock file `lock`
+/// (`Some`), or that it has ended and given its seat back (`None`). The fold counts the seat in
+/// between, as it counts a job's run, while the lock is held.
+pub fn record_seat(
+    ctx: &Ctx,
+    id: &str,
+    start: Option<(&crate::systems::dispatch::Start, &std::path::Path)>,
+) -> Result<()> {
     let port = ctx.port(&Source(()));
     port.emit(match start {
-        Some(s) => DecideEvent::Seated {
+        Some((s, lock)) => DecideEvent::Seated {
             id: id.to_owned(),
             account: s.account.clone(),
             model: s.model.clone(),
             provider: s.provider.clone(),
+            lock: Some(lock.to_owned()),
         },
         None => DecideEvent::Unseated { id: id.to_owned() },
     })

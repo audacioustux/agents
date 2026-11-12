@@ -610,11 +610,13 @@ pub fn consult(
     live: &dyn Fn() -> bool,
 ) -> (Option<String>, f64, Result<String, String>) {
     let wait = if patient { ctx.cfg.hooks.seat_wait_minutes } else { 0.0 };
-    let home = match await_seat(ctx, job, agent, id, wait, live) {
+    // In place before any booking, so whatever goes wrong once one is recorded gives it back.
+    let mut seat = Booking { ctx, id, hold: None, booked: false };
+    let home = match await_seat(ctx, job, agent, &mut seat, wait, live) {
         Ok(home) => home,
         Err(why) => return (None, 0.0, Err(why)),
     };
-    let _seat = Seated { ctx, id };
+    let hold = seat.hold.as_ref().map(|(_, path)| path.clone());
     let run = || -> Result<(Report, Ending)> {
         let harness = harness_of(&home);
         let conf = ctx.cfg.harness(harness.id());
@@ -655,7 +657,7 @@ pub fn consult(
             cwd: &ctx.cfg.repo,
             account: true,
         };
-        let mut cmd = supervised_command(ctx, &inv, &mounts)?;
+        let mut cmd = build(ctx, &inv, &mounts, |p| crate::supervised::holding(p, hold.as_deref()))?;
         let run = Run {
             session_id: None,
             budget_usd: agent.budget_usd,
@@ -681,19 +683,47 @@ pub fn consult(
 
 /// How often a wait for a seat looks again.
 const SEAT_POLL: Duration = Duration::from_secs(2);
+/// How long past its own bound a wait for a seat tries again while the machine's seat lock is busy.
+const SEAT_LOCK_GRACE: Duration = Duration::from_secs(10);
+/// How often it tries then.
+const SEAT_LOCK_POLL: Duration = Duration::from_millis(50);
 /// The least between two quota readings a wait for a seat asks for.
 const SEAT_REREAD: Duration = Duration::from_secs(30);
 
 /// A decision's seat, booked on the bus: given back when dropped, however the session went.
-struct Seated<'a> {
+/// The seat's lock is held by this process from before the booking is recorded, and by the session's
+/// supervisor and its whole tree (`relay supervise --hold`): the seat counts while any of them lives.
+struct Booking<'a> {
     ctx: &'a Ctx,
     id: &'a str,
+    /// The hold on the seat's lock, and its path, once one was taken.
+    hold: Option<(os::SeatHold, PathBuf)>,
+    /// Whether a booking may have been recorded.
+    booked: bool,
 }
 
-impl Drop for Seated<'_> {
+impl Booking<'_> {
+    /// Takes a fresh lock for the seat `start` and records the booking on the bus.
+    fn book(&mut self, start: &dispatch::Start) -> Result<()> {
+        let dir = self.ctx.state_root.join("seats");
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let path = dir.join(format!("{}.lock", uuid::Uuid::now_v7()));
+        self.hold = Some((os::SeatHold::take(&path)?, path.clone()));
+        self.booked = true;
+        decide::record_seat(self.ctx, self.id, Some((start, &path)))
+    }
+}
+
+impl Drop for Booking<'_> {
     fn drop(&mut self) {
-        if let Err(e) = decide::record_seat(self.ctx, self.id, None) {
+        if self.booked
+            && let Err(e) = decide::record_seat(self.ctx, self.id, None)
+        {
             eprintln!("{} decision {}: its seat was not given back: {e:#}", crate::os::stamp(), self.id);
+        }
+        if let Some((hold, path)) = self.hold.take() {
+            drop(hold);
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -708,7 +738,7 @@ fn await_seat(
     ctx: &Ctx,
     job: &Job,
     agent: &decide::Agent,
-    id: &str,
+    seat: &mut Booking<'_>,
     minutes: f64,
     live: &dyn Fn() -> bool,
 ) -> Result<Home, String> {
@@ -718,10 +748,20 @@ fn await_seat(
     let since = if wait.is_zero() { now_micros().saturating_sub(dispatch::READING_WAIT_MICROS) } else { now_micros() };
     let mut asked: Option<Instant> = None;
     loop {
-        let record = |s: &dispatch::Start| decide::record_seat(ctx, id, Some(s));
+        let id = seat.id;
+        let record = |s: &dispatch::Start| seat.book(s);
         match dispatch::book_session(ctx, id, job, &agent.harness, agent.model.as_deref(), since, record) {
-            Ok(Ok((_, home))) => return Ok(home),
-            Ok(Err(_)) => {}
+            Ok(dispatch::Booking::Booked(home)) => return Ok(home),
+            // Another planner has the machine's seats a moment: try again soon, still within the
+            // wait's bound and its withdrawal, and a wait that cannot be had gets a moment's grace.
+            Ok(dispatch::Booking::Busy) if started.elapsed() < wait + SEAT_LOCK_GRACE => {
+                if !live() {
+                    return Err(format!("agent:{} was withdrawn while it waited for a seat", agent.label));
+                }
+                std::thread::sleep(SEAT_LOCK_POLL);
+                continue;
+            }
+            Ok(dispatch::Booking::Held | dispatch::Booking::Busy) => {}
             Err(e) => return Err(format!("agent:{} found no seat: {e:#}", agent.label)),
         }
         if asked.is_none_or(|t| t.elapsed() >= SEAT_REREAD)

@@ -34,12 +34,23 @@ const SUPERVISOR_LOOK: Duration = Duration::from_millis(25);
 /// In unit tests it is `program` alone, leading its group as the supervisor would: they exercise
 /// the runner's side, which needs no relay executable. The supervisor itself is the real binary's,
 /// and tested as that (`tests/supervise.rs`, and end to end in `tests/flow.rs`).
-#[cfg_attr(test, allow(clippy::unnecessary_wraps, reason = "only the real supervisor can fail to be found"))]
 pub fn command(program: impl AsRef<OsStr>) -> io::Result<Command> {
+    holding(program, None)
+}
+
+/// As [`command`], with the supervisor holding the seat lock `hold` (`--hold`), shared, in a way its
+/// child and everything it starts inherit: the lock is held until that whole tree has ended.
+#[cfg_attr(test, allow(clippy::unnecessary_wraps, reason = "only the real supervisor can fail to be found"))]
+#[cfg_attr(test, allow(unused_variables, reason = "no supervisor in unit tests"))]
+pub fn holding(program: impl AsRef<OsStr>, hold: Option<&std::path::Path>) -> io::Result<Command> {
     #[cfg(not(test))]
     {
         let mut c = Command::new(crate::os::own_binary()?);
-        c.args(["supervise", "--parent", &std::process::id().to_string(), "--"]).arg(program);
+        c.args(["supervise", "--parent", &std::process::id().to_string()]);
+        if let Some(path) = hold {
+            c.arg("--hold").arg(path);
+        }
+        c.arg("--").arg(program);
         Ok(c)
     }
     #[cfg(test)]
@@ -131,7 +142,11 @@ impl Drop for Supervised {
 ///
 /// It polls its parent rather than relying on `PR_SET_PDEATHSIG`, which fires when the *thread* that
 /// started it ends, and would need a handler to clean up after.
-pub fn supervise(runner: u32, argv: &[OsString]) -> ExitCode {
+///
+/// With `hold`, it takes a shared hold on that seat lock before anything else, opened so that `argv`
+/// and all it starts inherit it ([`crate::os::SeatHold::inheritable`]): the seat stays taken until
+/// the last process of the tree has ended, even in the moments after its runner died.
+pub fn supervise(runner: u32, hold: Option<&std::path::Path>, argv: &[OsString]) -> ExitCode {
     let me = rustix::process::getpid();
     if rustix::process::getpgrp() != me && rustix::process::setpgid(None, None).is_err() {
         // Never signal a group it does not lead: it could be the runner's, or a shell's.
@@ -144,6 +159,13 @@ pub fn supervise(runner: u32, argv: &[OsString]) -> ExitCode {
             end_group();
         }
     }
+    let _hold = match hold.map(crate::os::SeatHold::inheritable).transpose() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("relay supervise: holding the seat: {e:#}");
+            return ExitCode::from(127);
+        }
+    };
     let runner_gone = || rustix::process::getppid().map(|p| p.as_raw_nonzero().get().cast_unsigned()) != Some(runner);
     if runner_gone() {
         end_group();

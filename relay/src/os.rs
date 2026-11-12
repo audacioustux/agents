@@ -55,6 +55,37 @@ impl Role {
     }
 }
 
+/// A shared hold on a seat's lock file ([`seat_held`]): the booker of a session that is no job's own
+/// run takes one before it records the seat, and the session's supervisor another that its whole
+/// process tree inherits ([`SeatHold::inheritable`]), so the seat stays taken until the last of them
+/// has ended, however the booker ends.
+#[derive(Debug)]
+pub struct SeatHold(#[allow(dead_code)] File);
+
+impl SeatHold {
+    /// Creates `path` if need be and holds it, shared (waiting out a [`seat_held`] look's moment).
+    pub fn take(path: &Path) -> Result<Self> {
+        let f = Role::open(path)?;
+        flock(&f, FlockOperation::LockShared).context("flock")?;
+        Ok(Self(f))
+    }
+
+    /// The same hold on `path`, which must exist, opened without close-on-exec: every child of the
+    /// holder inherits it, and everything they start, so it lasts until that whole tree has ended.
+    pub fn inheritable(path: &Path) -> Result<OwnedFd> {
+        let fd = rustix::fs::open(path, rustix::fs::OFlags::RDWR, rustix::fs::Mode::empty())
+            .with_context(|| format!("opening {}", path.display()))?;
+        flock(&fd, FlockOperation::LockShared).context("flock")?;
+        Ok(fd)
+    }
+}
+
+/// Whether a live process holds the seat lock `path` ([`SeatHold`]). A missing file is held by nobody.
+pub fn seat_held(path: &Path) -> bool {
+    let Ok(f) = File::options().read(true).write(true).open(path) else { return false };
+    matches!(flock(&f, FlockOperation::NonBlockingLockExclusive), Err(rustix::io::Errno::WOULDBLOCK))
+}
+
 /// Rings when files in a directory are written or created.
 #[derive(Debug)]
 pub struct Doorbell(OwnedFd);

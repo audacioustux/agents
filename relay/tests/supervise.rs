@@ -172,3 +172,39 @@ fn a_terminated_supervisor_ends_its_group() {
     assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(9), "{status}");
     assert!(eventually(|| gone(&grandchild)), "the grandchild went with the group");
 }
+
+/// Whether a live process holds the lock `path` (exclusive or shared).
+fn lock_held(path: &Path) -> bool {
+    let f = std::fs::File::options().read(true).write(true).open(path).unwrap();
+    matches!(
+        rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive),
+        Err(rustix::io::Errno::WOULDBLOCK)
+    )
+}
+
+/// Copilot on PR #63, third pass, finding 2: a decision's seat must stay taken until its session's
+/// whole tree has stopped, not only while its runner lives. `--hold` gives the supervisor a shared
+/// hold on the seat's lock that its child inherits (and all it starts), so the lock is held until
+/// the last of them has ended.
+#[test]
+fn a_held_seat_lock_lasts_as_long_as_the_supervised_tree() {
+    let d = Dir::new("hold");
+    let (lock, pid) = (d.join("seat.lock"), d.join("pid"));
+    std::fs::write(&lock, "").unwrap();
+    let script = format!("echo $$ > {}; exec sleep 30", pid.display());
+    let mut sup = Command::new(RELAY)
+        .args(["supervise", "--parent", &std::process::id().to_string(), "--hold"])
+        .arg(&lock)
+        .args(["--", "sh", "-c", &script])
+        .spawn()
+        .unwrap();
+    let child = read_pid(&pid);
+    let fds = std::fs::read_dir(format!("/proc/{child}/fd")).unwrap();
+    let inherited = fds.filter_map(Result::ok).any(|e| std::fs::read_link(e.path()).is_ok_and(|l| l == lock));
+    assert!(inherited, "the supervised child holds the seat's lock itself");
+    assert!(lock_held(&lock));
+    assert!(Command::new("kill").args(["-TERM", &sup.id().to_string()]).status().unwrap().success());
+    sup.wait().unwrap();
+    assert!(eventually(|| gone(&child)));
+    assert!(eventually(|| !lock_held(&lock)), "the tree has ended, and its hold with it");
+}

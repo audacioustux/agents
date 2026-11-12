@@ -681,8 +681,10 @@ one that resets soonest first, so the top row is the one to act on.
   drop it is.
 - **Pace.** How fast the meter is filling, in percent of the window per day: the
   rise across the readings of the last 24 hours, counted from the last reset
-  in them (a fall in the level is one). Under two readings, or readings less than an
-  hour apart, there is no pace (`—`).
+  in them. A reset is the meter's own statement: its reset time moving on by more
+  than an hour. A level that dips a point between readings, or a reset time that
+  shifts by a minute, is jitter and starts nothing; a pace never goes below `+0%/d`.
+  Under two readings, or readings less than an hour apart, there is no pace (`—`).
 - **Outlook.** The level at the reset if the pace holds, from the last reading, and
   the floor in force then (`floor_near_reset` as the reset nears). Where it reaches
   the floor first: `full in 1h at this pace` (`full now` when it is there), full

@@ -57,17 +57,28 @@ pub fn spark(levels: &[Option<f64>]) -> String {
 }
 
 /// How fast the meter fills, as a fraction of its window per day, from the readings in the last
-/// [`PACE_WINDOW`] since its last reset (a fall in the level is one). `None` when fewer than two
-/// readings remain, or they span under [`MIN_SPAN`].
+/// [`PACE_WINDOW`] since its last reset ([`is_reset`]). A level that only jitters down is idle, not
+/// negative. `None` when fewer than two readings remain, or they span under [`MIN_SPAN`].
 pub fn pace(points: &[Point], now: u64) -> Option<f64> {
     let recent: Vec<&Point> = points.iter().filter(|p| p.t >= now.saturating_sub(PACE_WINDOW)).collect();
-    let from = recent.windows(2).rposition(|w| w[1].utilization < w[0].utilization).map_or(0, |i| i + 1);
+    let from = recent.windows(2).rposition(|w| is_reset(w[0], w[1])).map_or(0, |i| i + 1);
     let run = &recent[from..];
     let (first, last) = (run.first()?, run.last()?);
     let span = last.t.checked_sub(first.t).filter(|s| *s >= MIN_SPAN)?;
     #[allow(clippy::cast_precision_loss, reason = "microseconds of a window fit an f64 exactly enough")]
     let days = span as f64 / 1e6 / DAY_S;
-    Some((last.utilization - first.utilization) / days)
+    Some(((last.utilization - first.utilization) / days).max(0.0))
+}
+
+/// How far a meter's reset time must move on between two readings for a new window to have begun:
+/// the time jitters by about a minute between readings of one window.
+const RESET_MOVE_S: i64 = 3600;
+
+/// Whether `next` is of a new window: the meter's own reset time moved forward by more than
+/// [`RESET_MOVE_S`]. The provider says so; a level that fell a point does not (it jitters), and
+/// a reading without a reset time says nothing.
+fn is_reset(prev: &Point, next: &Point) -> bool {
+    matches!((prev.resets_at, next.resets_at), (Some(a), Some(b)) if b - a > RESET_MOVE_S)
 }
 
 /// What the pace comes to before the reset.
@@ -437,11 +448,46 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_inside_the_pace_window_starts_it_again() {
-        // 80% to 100%, a reset, then 0% to 6% in six hours: the pace is the 6, not the fall.
-        let at = pace(&[p(20, 0.80), p(14, 1.0), p(6, 0.0), p(0, 0.06)], NOW).unwrap();
+    fn a_reset_is_the_meters_reset_time_moving_on_not_the_level_falling() {
+        let week = NOW_S + 86_400;
+        let next = week + 7 * 86_400;
+        // 80% to 100%, the meter's window moves a week on, then 0% to 6% in six hours:
+        // the pace is the 6, not the fall.
+        let reading = |h, u, r| reset(r, p(h, u));
+        let at = pace(
+            &[reading(20, 0.80, week), reading(14, 1.0, week), reading(6, 0.0, next), reading(0, 0.06, next)],
+            NOW,
+        )
+        .unwrap();
         assert!((at - 0.24).abs() < 1e-9, "{at}");
-        assert_eq!(pace(&[p(10, 0.9), p(0, 0.01)], NOW), None, "one reading since the reset says nothing");
+        assert_eq!(
+            pace(&[reading(10, 0.9, week), reading(0, 0.01, next)], NOW),
+            None,
+            "one reading since it says nothing"
+        );
+    }
+
+    /// Real readings jitter: the level by a point (0.69, 0.68, 0.69) and the reset time by a minute
+    /// (1794754740, 1794754800). Neither is a reset, so the window keeps its first reading.
+    #[test]
+    fn a_point_of_jitter_in_the_level_or_a_minute_in_the_reset_time_is_not_a_reset() {
+        let r = 1_794_754_740;
+        let reading = |h, u, r| reset(r, p(h, u));
+        let jittery = [
+            reading(23, 0.60, r),
+            reading(20, 0.69, r + 60),
+            reading(16, 0.68, r),
+            reading(12, 0.69, r + 60),
+            reading(8, 0.68, r),
+            reading(4, 0.69, r + 60),
+            reading(0, 0.72, r),
+        ];
+        let at = pace(&jittery, NOW).expect("a pace, not a restart at every fall");
+        let want = 0.12 / (23.0 / 24.0);
+        assert!((at - want).abs() < 1e-9, "{at} for {want}");
+        // A level that only ever jitters is idle, not falling.
+        let flat = [reading(10, 0.69, r), reading(5, 0.68, r + 60), reading(0, 0.68, r)];
+        assert_eq!(pace(&flat, NOW), Some(0.0));
     }
 
     #[test]

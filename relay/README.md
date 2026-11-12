@@ -145,6 +145,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it, judged as the dispatcher judges it (a full account is `busy`, not `ready`); `show` starts a reading of each stale account and says `refreshing`. A fresh reading (one under way anywhere on the machine is waited for); switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout), noting when no review has accepted its tip / delete its clone and records |
 | `relay land gc [--dry-run]` | Remove what finished jobs no longer need: build outputs, old clones, old logs ([disk](#disk)) |
+| `relay devshell warm` | Enter `session.env_shell` now and record it for the sessions; the dispatcher does this itself ([the development environment](#the-development-environment)) |
 | `relay probe [--account H:L]` | Sandbox self-test for one account of each harness, with controls |
 | `relay ask AGENT MODE ...` | One-shot read-only call, outside the queue ([the skill](../.agents/skills/relay/SKILL.md)) |
 
@@ -214,7 +215,8 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   (which only its own config can judge) is left out; its dependencies still show.
 - **Why a job waits.** A queued job's row and pane say what holds it, judged as the
   dispatcher judges it: what it waits for, else its profile's limit (not once a
-  `held` decision forced it past), free disk, or every account's cause
+  `held` decision forced it past), free disk, the [development environment](#the-development-environment)
+  while it warms (`dev shell warming (12m)`), or every account's cause
   (`no account has room (claude:a busy (1 of 1 seat); claude:b reading is stale)`).
   A retried or requeued job has no account until its next start, so its account
   column says `-` and its model column lists every harness it may run on.
@@ -468,8 +470,8 @@ handlers as untrusted.
   limits), under `hooks.command_timeout_seconds` (raise it for a long suite), but
   with the session's clone and **its account out of sight**: the check cannot read
   or change the sign-in the session used. A development environment
-  (`session.env_shell`) is entered from the project's repository, not from files the
-  session could have edited.
+  (`session.env_shell`) is the one its warm-up recorded from the project's repository, not
+  from files the session could have edited.
 - **Pass:** the run may be accepted. **A run whose check did not pass is never
   `done`**, whoever decided: after the chain has answered, relay ends it `failed` with
   the check's result as the reason. That is the one enforcement; it is also told: an
@@ -1068,11 +1070,47 @@ so narrow `sandbox.env_deny` if a job really needs one. A
 project whose toolchain comes from a development environment that cannot
 start inside the sandbox (single-user Nix locks its store, which is
 read-only there) names it in `session.env_shell`, such as
-`["nix", "develop", "-c"]`: relay enters it on the host before each attempt,
-as direnv would, passes its variables in through the same filter, and tells
-the session its tools are already loaded. Signing
+`["nix", "develop", "-c"]`: relay enters it on the host, as direnv would, passes
+its variables in through the same filter, and tells the session its tools are
+already loaded ([the development environment](#the-development-environment)). Signing
 keys are hidden, so git inside is told not to sign (`commit.gpgsign` and
 `tag.gpgsign` off); sign commits when you land them.
+
+### The development environment
+
+Entering `session.env_shell` belongs to the project, not to a job: on a cold Nix store it can
+take hours, and sessions that each entered it would race to build the same shell and fail
+at their time limit. So relay enters it **once**, and every session and acceptance check reads
+what was recorded:
+
+- **One warm-up.** When a queued job is free to start and the environment is not recorded
+  for the current key, the dispatcher starts `relay devshell warm`. It enters the shell in your
+  repository (never a clone a session could have edited) and records its variables, after
+  `sandbox.env_deny`, in `devshell.json` in the project's state directory, which only you can read.
+  It holds a lock (`devshell.lock`), so at most one runs per project however many jobs wait;
+  `relay devshell warm` by hand does the same, now, and exits 4 while another runs.
+- **The key** is the shell command and the repository's `flake.nix`, `flake.lock`, `shell.nix`,
+  `default.nix`, `devenv.nix`, `devenv.lock`, `devbox.json` and `devbox.lock`. When any of them
+  changes, the record no longer counts and the next job waits for a new warm-up.
+- **Held, not failed.** Until the record holds the current key, every job (read-only ones too,
+  since a brief may run the shell's tools) stays queued with the reason on the board:
+  `dev shell warming (12m)`, or `dev shell not warmed yet` for the moment before one starts. A
+  job started just before the key changed goes back to the queue and waits with the rest.
+- **A failed warm-up** is on the board with why and the last line of its stderr, `dev shell
+  failed: exited 1 (attempt 2, retry 14:05 +06): error: unable to download ...`; the whole
+  stderr of the latest attempt is in `devshell.stderr` beside the record, its end in `view status
+  --json` (`devshell`) and on the bus (`warm-failed`). It is tried again after a minute, then
+  after twice as long each time, up to 15 minutes; fix the cause and run `relay devshell warm`
+  to try at once. The jobs wait meanwhile and are never failed for it.
+- **The 600 s limit** bounds one attempt, not a job. A warm-up that takes longer is stopped
+  there and tried again at once, and what Nix fetched stays in its store, so each attempt goes
+  further; the board says `dev shell warming (2h); attempt 12 stopped at 600 s, going on`, and the
+  jobs stay held until one attempt finishes. One step that cannot finish in 600 s at all (a single
+  download that slow) never does: enter the shell by hand once (`nix develop -c true`), and the next
+  attempt is quick.
+
+A job started on a recorded environment keeps it for its whole run; a warm-up for a new key
+changes only the jobs that start after it.
 
 The session also gets its own PID namespace, so nothing it starts outlives it.
 With the sandbox as the boundary, the session runs without approval prompts. Without it
@@ -1123,8 +1161,9 @@ own process, and owns one output port:
   lifting, a meter resetting, a reading going stale), with a 5-minute
   backstop, and exits after a minute with nothing to do: nothing queued that can
   start, and no job held by a runner, running or checking.
-- **Single roles:** the dispatcher (one per project) and the quota reader (one per
-  machine, since accounts are the machine's) each hold a `flock`, which the kernel
+- **Single roles:** the dispatcher and the development environment's warm-up (one each
+  per project) and the quota reader (one per machine, since accounts are the machine's)
+  each hold a `flock`, which the kernel
   releases if the holder dies.
 
 | System | Responsibility | Emits |
@@ -1135,6 +1174,7 @@ own process, and owns one output port:
 | decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); takes the orchestrator's answers | decision-requested, parked, decided |
 | quota | account readings and switches | reading, unreadable, signed-out, account-enabled |
 | land | brings branches back; cleans up, and gc | forgotten, collected |
+| devshell | enters the project's development environment once, under a lock, and records it for every session | warming, warmed, warm-failed |
 | view, probe | read-only (`view stats` folds the bus; it writes nothing). Showing the accounts may start a quota reading, which quota writes | — |
 
 A runner is identified by its pid together with its start time, so a reused

@@ -57,12 +57,14 @@ pub fn spark(levels: &[Option<f64>]) -> String {
 }
 
 /// How fast the meter fills, as a fraction of its window per day, from the readings in the last
-/// [`PACE_WINDOW`] since its last reset ([`is_reset`]). A level that only jitters down is idle, not
+/// [`PACE_WINDOW`] since its last reset ([`new_window`]). A level that only jitters down is idle, not
 /// negative. `None` when fewer than two readings remain, or they span under [`MIN_SPAN`].
 pub fn pace(points: &[Point], now: u64) -> Option<f64> {
-    let recent: Vec<&Point> = points.iter().filter(|p| p.t >= now.saturating_sub(PACE_WINDOW)).collect();
-    let from = new_window(&recent);
-    let run = &recent[from..];
+    // The last reset is looked for in every reading, for the reading that holds the old reset time
+    // may be older than the window; only the readings of the window after it make the pace.
+    let all: Vec<&Point> = points.iter().collect();
+    let cutoff = now.saturating_sub(PACE_WINDOW);
+    let run: Vec<&Point> = all[new_window(&all)..].iter().copied().filter(|p| p.t >= cutoff).collect();
     let (first, last) = (run.first()?, run.last()?);
     let span = last.t.checked_sub(first.t).filter(|s| *s >= MIN_SPAN)?;
     #[allow(clippy::cast_precision_loss, reason = "microseconds of a window fit an f64 exactly enough")]
@@ -504,6 +506,22 @@ mod tests {
         // Unknown throughout: nothing says it rolled over, and the fall is not a negative pace.
         let blind = [at(3, 0.9, None), at(2, 0.1, None), at(0, 0.3, None)];
         assert!(pace(&blind, NOW).unwrap() >= 0.0);
+    }
+
+    /// The rollover may lie before the pace window: the reading that holds the old reset time can be
+    /// older than a day, and the window must still see it.
+    #[test]
+    fn a_rollover_whose_old_reset_time_is_older_than_the_window_is_still_seen() {
+        let (week, next) = (NOW_S + 3600, NOW_S + 3600 + 7 * 86_400);
+        let at = |h, u, r: Option<i64>| Point { resets_at: r, ..p(h, u) };
+        let readings =
+            [at(25, 0.80, Some(week)), at(23, 0.90, None), at(20, 0.10, Some(next)), at(0, 0.30, Some(next))];
+        let got = pace(&readings, NOW).unwrap();
+        assert!((got - 0.24).abs() < 1e-9, "20 points in 20h is 24% a day, not +0%/d: {got}");
+        // Only the readings in the last day count towards it, as before.
+        let early =
+            [at(30, 0.1, Some(next)), at(25, 0.8, Some(next)), at(20, 0.82, Some(next)), at(0, 0.94, Some(next))];
+        assert!((pace(&early, NOW).unwrap() - 0.144).abs() < 1e-9);
     }
 
     /// Real readings jitter: the level by a point (0.69, 0.68, 0.69) and the reset time by a minute

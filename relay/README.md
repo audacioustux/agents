@@ -138,10 +138,10 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one. A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends and its runner has exited (it may re-review or wake the dispatcher after the end), and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |
-| `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)) |
+| `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)); `u` swaps it for the quota chart ([usage](#usage)) |
 | `relay view events` | The merged event log |
 | `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |
-| `relay view usage [--meter NAME] [--account H:L] [--harness H] [--since DURATION]` | Each account's quota over time as a chart in the terminal, the floors drawn across it ([usage](#usage)); inside a project, its accounts from every project's readings; outside one, every account |
+| `relay view usage [--meter NAME] [--account H:L] [--harness H] [--since DURATION] [--watch]` | Each account's quota over time as a chart in the terminal, the floors drawn across it ([usage](#usage)); inside a project, its accounts from every project's readings; outside one, every account. `--watch` opens `view watch` on the chart, redrawn as readings land |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it, judged as the dispatcher judges it (a full account is `busy`, not `ready`); `show` starts a reading of each stale account and says `refreshing`. A fresh reading (one under way anywhere on the machine is waited for); switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout), noting when no review has accepted its tip / delete its clone and records |
 | `relay land gc [--dry-run]` | Remove what finished jobs no longer need: build outputs, old clones, old logs ([disk](#disk)) |
@@ -253,6 +253,12 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   says `refreshing claude:a, …` until it lands. `view status --json` does too, with the
   accounts in a top-level `refreshing` list beside the folded state (absent when none). The machine-wide pane outside every
   project starts none: a reading is taken by a project's rules.
+- **The quota chart.** `u` swaps the board for the chart of [`view usage`](#usage), drawn
+  by the same code, and `u` again brings the board back. It refolds as quota readings
+  land on any project's bus, for the same accounts `view usage` charts (inside a project
+  its own; outside one, every account). While it shows, only `q`, `?` and `u` do anything,
+  and it reads the buses and nothing else: no reading is started (the board's accounts pane
+  does that), and nothing is written. `relay view usage --watch` opens on the chart.
 - **What stays put.** The selection follows a job by name as rows move; a failed
   read keeps the last good board with the cause in red in the title, and the next
   read retries; columns are a fixed set (project when every project shows, job, state,
@@ -688,6 +694,10 @@ a very narrow one none.
 - **Which accounts and when.** `--account harness:label` (repeatable) and
   `--harness` (repeatable) narrow it; `--since` (`12h`, `7d`, `2w`; default `7d`)
   is the window.
+- **Live.** `--watch` opens [`view watch`](#the-board) on the chart with the same
+  `--meter`, `--account`, `--harness` and `--since`; it is redrawn as readings land,
+  `u` switches to the job board and back, `q` quits. It cannot be combined with `--json`.
+  Without `--watch`, the chart prints once as before.
 - **Piped**, it is plain text with no colour. `--json` gives the readings instead:
   `accounts.<account>.<meter>` is a list of `{t, utilization, resets_at}` (`t` in
   bus microseconds, `resets_at` in unix seconds, `utilization` a fraction), with

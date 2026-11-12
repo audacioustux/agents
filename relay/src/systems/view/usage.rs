@@ -220,6 +220,23 @@ impl Usage<'_> {
             .collect()
     }
 
+    /// The axes' labels in `width` columns: the time at the start, middle and end of the window,
+    /// fewer and shorter as the chart narrows, and none at all when it is very narrow, so the
+    /// chart keeps room to draw in.
+    fn labels(&self, width: u16) -> (Vec<String>, Vec<&'static str>) {
+        let (since, now) = (self.filter.since, self.now);
+        let x = match width {
+            60.. => {
+                vec![self.time(since, FMT), self.time(since.midpoint(now), FMT), self.time(now, &format!("{FMT} %Z"))]
+            }
+            40..60 => vec![self.time(since, FMT), self.time(now, &format!("{FMT} %Z"))],
+            24..40 => vec![self.time(since, "%b %-d"), self.time(now, "%b %-d")],
+            _ => Vec::new(),
+        };
+        let y = if width >= 16 { vec!["0%", "50%", "100%"] } else { Vec::new() };
+        (x, y)
+    }
+
     /// The chart alone (its axes, floors and series), filling `area`.
     pub fn draw(&self, area: Rect, buf: &mut Buffer) {
         let (x0, x1) = (x(self.filter.since), x(self.now).max(x(self.filter.since) + 1.0));
@@ -241,15 +258,11 @@ impl Usage<'_> {
                 .style(Style::new().fg(d.color))
                 .data(&d.data)
         }));
-        let mut labels = vec![self.time(self.filter.since, FMT)];
-        if area.width >= 60 {
-            labels.push(self.time(u64::midpoint(self.filter.since, self.now), FMT));
-        }
-        labels.push(self.time(self.now, &format!("{FMT} %Z")));
+        let (x_labels, y_labels) = self.labels(area.width);
         Chart::new(datasets)
             .legend_position(None)
-            .x_axis(Axis::default().bounds([x0, x1]).labels(labels).style(DIM))
-            .y_axis(Axis::default().bounds([0.0, 100.0]).labels(["0%", "50%", "100%"]).style(DIM))
+            .x_axis(Axis::default().bounds([x0, x1]).labels(x_labels).style(DIM))
+            .y_axis(Axis::default().bounds([0.0, 100.0]).labels(y_labels).style(DIM))
             .render(area, buf);
     }
 
@@ -412,7 +425,7 @@ pub fn run(scope: Scope<'_>, json: bool, mut filter: Filter, since: &str) -> Res
     if history.series.is_empty() {
         out!("{}: no readings", usage.heading());
     } else {
-        out!("{}", usage.print(size.map(|(cols, _)| cols.max(40)), size.is_some()));
+        out!("{}", usage.print(size.map(|(cols, _)| cols), size.is_some()));
     }
     if !history.bare.is_empty() {
         let names = history.bare.iter().cloned().collect::<Vec<_>>().join(", ");
@@ -583,6 +596,20 @@ mod tests {
         let legend = text.lines().skip(1 + usize::from(CHART_ROWS)).collect::<Vec<_>>().join(" ");
         let squeezed = legend.split_whitespace().collect::<Vec<_>>().join(" ");
         assert_eq!(squeezed.matches("resets Jan 21 02:53, 1 reading(s)").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn a_narrow_terminal_gets_no_line_wider_than_itself() {
+        for width in [30, 12] {
+            let text = printed(&fold(&week()), Some(width));
+            assert!(text.lines().all(|l| l.width() <= width), "{width} columns:\n{text}");
+            assert!(text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)), "still a chart:\n{text}");
+            let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(words.contains("resets Jan 21"), "{text}");
+        }
+        let text = printed(&fold(&week()), Some(30));
+        assert!(text.lines().any(|l| l.starts_with("100%")), "the y axis kept at 30 columns:\n{text}");
+        assert!(text.lines().any(|l| l.starts_with("Jan 8") && l.ends_with("Jan 15")), "short dates:\n{text}");
     }
 
     #[test]

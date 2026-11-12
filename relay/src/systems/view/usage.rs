@@ -9,7 +9,7 @@ use anyhow::Result;
 use jiff::tz::TimeZone;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::Marker;
 use ratatui::widgets::{Axis, Chart, Dataset, GraphType, Widget};
 use serde::Serialize;
@@ -140,9 +140,14 @@ const PALETTE: [Color; 12] = [
 /// The chart's rows, its axes and labels included: the heading and legend are lines of their own.
 const CHART_ROWS: u16 = 18;
 
-/// One series as the chart draws it: its colour, its points (seconds, percent) and its legend.
+/// What names each series on the chart and in its legend, in turn: one character, so it takes
+/// one cell beside the series' last point, and needs no colour to be read. Past the last, `*`.
+const IDS: &str = "123456789abcdefghijklmnopqrstuvwxyz";
+
+/// One series as the chart draws it: its id and colour, its points (seconds, percent) and its legend.
 #[derive(Debug)]
 struct Drawn {
+    id: char,
     color: Color,
     data: Vec<(f64, f64)>,
     label: String,
@@ -212,6 +217,7 @@ impl Usage<'_> {
                     format!("  {:.0}% at the last reading{reset}, {} reading(s)", p.utilization * 100.0, points.len())
                 });
                 Drawn {
+                    id: IDS.chars().nth(i).unwrap_or('*'),
                     color: PALETTE[i % PALETTE.len()],
                     data: points.iter().map(|p| (x(p.t), (p.utilization * 100.0).clamp(0.0, 100.0))).collect(),
                     label: format!("{account} {}{last}", gauge::heading(meter)),
@@ -259,18 +265,46 @@ impl Usage<'_> {
                 .data(&d.data)
         }));
         let (x_labels, y_labels) = self.labels(area.width);
+        let graph = graph_area(area, &x_labels, &y_labels);
         Chart::new(datasets)
             .legend_position(None)
             .x_axis(Axis::default().bounds([x0, x1]).labels(x_labels).style(DIM))
             .y_axis(Axis::default().bounds([0.0, 100.0]).labels(y_labels).style(DIM))
             .render(area, buf);
+        if graph.is_empty() {
+            return;
+        }
+        // Each series' id beside its last point: just right of it where there is room, and where
+        // another id took that cell, the nearest free one above or below it, then to its left.
+        let mut taken = BTreeSet::new();
+        for d in &series {
+            let Some(&(px, py)) = d.data.last() else { continue };
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a share of the graph's cells, clamped to them"
+            )]
+            let cell = |share: f64, cells: u16| (share.clamp(0.0, 1.0) * f64::from(cells - 1)).round() as u16;
+            let col = graph.x + cell((px - x0) / (x1 - x0), graph.width);
+            let row = graph.y + cell(1.0 - py / 100.0, graph.height);
+            let col = if col + 1 < graph.right() { col + 1 } else { col };
+            let rows = (0..graph.height).flat_map(|k| [i32::from(row) - i32::from(k), i32::from(row) + i32::from(k)]);
+            let rows: Vec<u16> =
+                rows.filter_map(|r| u16::try_from(r).ok()).filter(|r| graph.y <= *r && *r < graph.bottom()).collect();
+            let free =
+                (graph.x..=col).rev().flat_map(|c| rows.iter().map(move |&r| (c, r))).find(|p| !taken.contains(p));
+            if let Some((c, r)) = free {
+                taken.insert((c, r));
+                buf[(c, r)].set_char(d.id).set_style(Style::new().fg(d.color).add_modifier(Modifier::BOLD));
+            }
+        }
     }
 
-    /// The legend: a line per series (its colour sample, account, meter, last reading and reset)
-    /// and per floor, each as (sample, its colour, words).
+    /// The legend: a line per series (its id as on the chart and a sample of its colour, then its
+    /// account, meter, last reading and reset) and per floor, each as (sample, its colour, words).
     fn legend(&self) -> Vec<(String, Color, String)> {
-        let series = self.series().into_iter().map(|d| ("━━ ".to_owned(), d.color, d.label));
-        let floors = self.floors().into_iter().map(|f| (format!("{0}{0} ", f.mark), Color::DarkGray, f.name));
+        let series = self.series().into_iter().map(|d| (format!("{} ━━ ", d.id), d.color, d.label));
+        let floors = self.floors().into_iter().map(|f| (format!("  {0}{0} ", f.mark), Color::DarkGray, f.name));
         series.chain(floors).collect()
     }
 
@@ -294,6 +328,29 @@ impl Usage<'_> {
         }
         lines.join("\n")
     }
+}
+
+/// Where ratatui's `Chart` plots in `area` with these axis labels (its own layout, which it does
+/// not expose): right of the y labels and axis, above the x axis and labels.
+fn graph_area(area: Rect, x_labels: &[String], y_labels: &[&str]) -> Rect {
+    if area.is_empty() {
+        return Rect::default();
+    }
+    let (has_x, has_y) = (!x_labels.is_empty(), !y_labels.is_empty());
+    let mut bottom = area.bottom() - 1;
+    for _ in 0..2 {
+        // The x labels' row, then the x axis's.
+        if has_x && bottom > area.top() {
+            bottom -= 1;
+        }
+    }
+    let first_x = x_labels.first().map_or(0, |l| l.width().saturating_sub(usize::from(has_y)));
+    let left_of_axis = y_labels.iter().map(|l| l.width()).max().unwrap_or(0).max(first_x);
+    let mut left = area.left() + u16::try_from(left_of_axis).unwrap_or(u16::MAX).min(area.width / 3);
+    if has_y && left + 1 < area.right() {
+        left += 1;
+    }
+    Rect::new(left, area.top(), area.right().saturating_sub(left), bottom - area.top() + 1)
 }
 
 /// `words` after `indent` on every line, wrapped at spaces to `width` display columns (a word wider
@@ -576,11 +633,11 @@ mod tests {
         assert_eq!(lines[0], "quota since Jan 8 08:00 UTC, 7-day meters", "{text}");
         assert_eq!(lines.len(), 1 + usize::from(CHART_ROWS) + 4, "{text}");
         let legend = &lines[lines.len() - 4..];
-        assert!(legend[0].starts_with("━━ claude:a 7 days  5% at the last reading, resets "), "{legend:?}");
-        assert!(legend[1].starts_with("━━ omp:w openai-codex/7 days  50% at the last reading"), "{legend:?}");
-        assert_eq!(legend[2..], ["┄┄ floor 50%", "╌╌ floor 98% in the last 24h before a reset"]);
+        assert!(legend[0].starts_with("1 ━━ claude:a 7 days  5% at the last reading, resets "), "{legend:?}");
+        assert!(legend[1].starts_with("2 ━━ omp:w openai-codex/7 days  50% at the last reading"), "{legend:?}");
+        assert_eq!(legend[2..], ["  ┄┄ floor 50%", "  ╌╌ floor 98% in the last 24h before a reset"]);
         let piped = printed(&fold(&week()), None);
-        assert!(piped.lines().any(|l| l.starts_with("━━ claude:a 7 days") && l.ends_with("3 reading(s)")), "{piped}");
+        assert!(piped.lines().any(|l| l.starts_with("1 ━━ claude:a 7 days") && l.ends_with("3 reading(s)")), "{piped}");
     }
 
     #[test]
@@ -610,6 +667,49 @@ mod tests {
         let text = printed(&fold(&week()), Some(30));
         assert!(text.lines().any(|l| l.starts_with("100%")), "the y axis kept at 30 columns:\n{text}");
         assert!(text.lines().any(|l| l.starts_with("Jan 8") && l.ends_with("Jan 15")), "short dates:\n{text}");
+    }
+
+    /// Where each of `ids` is drawn in the plot of `text` (right of the y axis): (row, column) each.
+    fn marked(text: &str, ids: &[char]) -> Vec<Vec<(usize, usize)>> {
+        let plot = |l: &str| l.split_once('│').map(|(_, plot)| plot.chars().collect::<Vec<_>>());
+        let rows: Vec<Vec<char>> = text.lines().filter_map(plot).collect();
+        ids.iter()
+            .map(|id| {
+                let at =
+                    rows.iter().enumerate().flat_map(|(r, row)| row.iter().enumerate().map(move |(c, ch)| (r, c, ch)));
+                at.filter(|(_, _, ch)| *ch == id).map(|(r, c, _)| (r, c)).collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plain_output_tells_two_accounts_at_the_same_value_apart() {
+        let week = 1_800_500_000;
+        let b = [vec![
+            reading(NOW - 30 * H, "claude:a", &[("seven_day", 0.2, week)]),
+            reading(NOW - 40 * H, "claude:b", &[("seven_day", 0.7, week)]),
+            reading(NOW - 3 * H, "claude:a", &[("seven_day", 0.6, week)]),
+            reading(NOW - 3 * H, "claude:b", &[("seven_day", 0.6, week)]),
+        ]];
+        let text = printed(&History::fold(b.iter().map(Vec::as_slice), &super::tests::week()), Some(100));
+        assert!(!text.contains('\x1b'), "{text}");
+        let at = marked(&text, &['1', '2']);
+        assert!(at.iter().all(|a| a.len() == 1), "each id once on the chart: {at:?}\n{text}");
+        let ((r1, c1), (r2, c2)) = (at[0][0], at[1][0]);
+        assert_ne!((r1, c1), (r2, c2), "{text}");
+        assert!(r1.abs_diff(r2) <= 1 && c1.abs_diff(c2) <= 1, "both beside the shared last point:\n{text}");
+        assert!(text.lines().any(|l| l.starts_with("1 ━━ claude:a 7 days  60%")), "{text}");
+        assert!(text.lines().any(|l| l.starts_with("2 ━━ claude:b 7 days  60%")), "{text}");
+    }
+
+    #[test]
+    fn an_id_is_drawn_beside_its_series_last_point() {
+        let text = printed(&fold(&week()), Some(100));
+        let at = marked(&text, &['1', '2']);
+        let rows = text.lines().filter(|l| l.contains('│')).count();
+        // claude:a ends at 5%, near the bottom; omp:w at 50%, half way up.
+        assert!(at[0].len() == 1 && at[0][0].0 + 2 >= rows, "{at:?}\n{text}");
+        assert!(at[1].len() == 1 && at[1][0].0.abs_diff(rows / 2) <= 1, "{at:?}\n{text}");
     }
 
     #[test]

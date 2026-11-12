@@ -228,6 +228,7 @@ pub(super) fn key_line(f: &mut Frame<'_>, area: Rect, ui: &Ui) -> Vec<(Rect, Act
     let mut keys = vec![("q", "quit", Action::Quit), ("?", "help", Action::Help)];
     if ui.view == View::Usage {
         keys.push(("u", "board", Action::Chart));
+        keys.push(("c", if ui.usage.chart { "rows" } else { "chart" }, Action::Trend));
     } else {
         keys.extend([
             ("↑", "", Action::Step(Step::Rows(-1))),
@@ -246,7 +247,7 @@ pub(super) fn key_line(f: &mut Frame<'_>, area: Rect, ui: &Ui) -> Vec<(Rect, Act
             ));
         }
         // Last, so a narrow window cuts it before the keys that were there first.
-        keys.push(("u", "chart", Action::Chart));
+        keys.push(("u", "quota", Action::Chart));
     }
     let (mut spans, mut hits, mut x) = (Vec::new(), Vec::new(), 0u16);
     for (key, label, action) in keys {
@@ -276,7 +277,8 @@ const HELP: &[&str] = &[
     "Enter                      the selected job in $PAGER",
     "a                          older jobs too, or recent ones only",
     "p                          every project, or this one",
-    "u                          the quota chart, or the job board (the chart: q ? u only)",
+    "u                          the quota rows, or the job board (the quota: q ? u c only)",
+    "c                          in the quota view, the line chart, or the rows",
     "?                          this help         q, Esc, ^C   quit",
     "",
     "The wheel scrolls the pane under it; a click selects a job or focuses a pane.",

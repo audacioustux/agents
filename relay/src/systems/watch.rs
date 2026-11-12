@@ -215,6 +215,7 @@ fn board_loop(
                 ui.apply(action, &board);
                 stale = true;
             }
+            Action::Trend => ui.apply(action, &board),
             Action::Open => {
                 if let Some(text) = ui.detail(&board).page.clone()
                     && let Err(e) = page(terminal, &text, handoff)

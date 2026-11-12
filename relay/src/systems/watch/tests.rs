@@ -715,7 +715,7 @@ fn u_switches_to_the_chart_and_back_and_the_chart_answers_to_few_keys() {
     let b = f.board(&ui, 1);
     ui.sync(&b);
     let fr = frame(&b, &mut ui, 120, 40);
-    assert!(fr.last().unwrap().contains("p all projects  u chart"), "{}", fr.last().unwrap());
+    assert!(fr.last().unwrap().contains("p all projects  u quota"), "{}", fr.last().unwrap());
     assert_eq!(ui.action(&key(KeyCode::Char('u'))), Some(Action::Chart));
     let ctrl_u = Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     assert_eq!(ui.action(&ctrl_u), Some(Action::Step(Step::Pages(-1))), "Ctrl-U is still a page");
@@ -729,6 +729,8 @@ fn u_switches_to_the_chart_and_back_and_the_chart_answers_to_few_keys() {
     }
     assert_eq!(ui.action(&key(KeyCode::Char('q'))), Some(Action::Quit));
     assert_eq!(ui.action(&key(KeyCode::Char('?'))), Some(Action::Help));
+    assert_eq!(ui.action(&key(KeyCode::Char('c'))), Some(Action::Trend), "the chart's key, here");
+    assert!(fr.last().unwrap().contains("c chart"), "{}", fr.last().unwrap());
     // The key line is clickable.
     let x = fr.last().unwrap().find("u board").unwrap();
     let x = u16::try_from(fr.last().unwrap()[..x].chars().count()).unwrap();
@@ -740,7 +742,7 @@ fn u_switches_to_the_chart_and_back_and_the_chart_answers_to_few_keys() {
 }
 
 #[test]
-fn a_reading_landing_while_the_chart_is_shown_is_in_the_next_draw() {
+fn a_reading_landing_while_the_quota_rows_are_shown_is_in_the_next_draw() {
     let bus = Buses::new();
     bus.read("claude:a", 0.30, 0.1);
     let mut ui = charting(ChartSpec::default());
@@ -748,15 +750,40 @@ fn a_reading_landing_while_the_chart_is_shown_is_in_the_next_draw() {
     assert!(fr.iter().any(|l| l.contains("reading the quota history")), "before the first fold: {fr:#?}");
     let fr = bus.shown(&mut ui);
     assert!(fr[0].contains("quota since") && fr[0].contains("7-day meters"), "{}", fr[0]);
-    assert!(fr.iter().any(|l| l.contains("claude:a 7 days") && l.contains("30% at the last reading")), "{fr:#?}");
-    assert!(fr.iter().any(|l| l.contains("1 reading(s)")), "{fr:#?}");
+    assert!(fr.iter().any(|l| l.starts_with("claude:a ") && l.contains(" 30%") && l.contains("resets")), "{fr:#?}");
     bus.read("claude:a", 0.55, 0.2);
     let fr = bus.shown(&mut ui);
-    assert!(fr.iter().any(|l| l.contains("55% at the last reading") && l.contains("2 reading(s)")), "{fr:#?}");
+    assert!(fr.iter().any(|l| l.starts_with("claude:a ") && l.contains(" 55%")), "{fr:#?}");
     bus.read("omp:w", 0.10, 0.2);
     let fr = bus.shown(&mut ui);
-    assert!(fr.iter().any(|l| l.contains("omp:w 7 days")), "a new account joins: {fr:#?}");
+    assert!(fr.iter().any(|l| l.starts_with("omp:w ")), "a new account joins: {fr:#?}");
     assert!(ui.error.is_none());
+}
+
+#[test]
+fn c_switches_the_quota_between_its_rows_and_the_line_chart() {
+    let bus = Buses::new();
+    bus.read("claude:a", 0.30, 0.1);
+    let mut ui = charting(ChartSpec::default());
+    let board = Board::default();
+    let fr = bus.shown(&mut ui);
+    assert!(!fr.iter().any(|l| l.contains("at the last reading")), "rows first: {fr:#?}");
+    assert!(fr.last().unwrap().contains("c chart"), "{}", fr.last().unwrap());
+    ui.apply(Action::Trend, &board);
+    let fr = frame(&board, &mut ui, 120, 40);
+    assert!(fr.iter().any(|l| l.contains("claude:a 7 days") && l.contains("30% at the last reading")), "{fr:#?}");
+    assert!(fr.last().unwrap().contains("c rows"), "{}", fr.last().unwrap());
+    ui.apply(Action::Trend, &board);
+    let fr = frame(&board, &mut ui, 120, 40);
+    assert!(!fr.iter().any(|l| l.contains("at the last reading")), "rows again: {fr:#?}");
+    // `view usage --watch --chart` opens on the chart; the job board has no such key.
+    let mut opened = charting(ChartSpec { chart: true, ..ChartSpec::default() });
+    let fr = bus.shown(&mut opened);
+    assert!(fr.iter().any(|l| l.contains("30% at the last reading")), "{fr:#?}");
+    let mut on_board = Ui::new(false, true, false);
+    assert_eq!(on_board.action(&key(KeyCode::Char('c'))), None);
+    on_board.apply(Action::Chart, &board);
+    assert_eq!(on_board.action(&key(KeyCode::Char('c'))), Some(Action::Trend));
 }
 
 #[test]
@@ -768,19 +795,19 @@ fn the_filters_of_view_usage_watch_apply() {
     let filter = crate::systems::view::usage::Filter::default;
     let fr = bus
         .shown(&mut charting(spec(crate::systems::view::usage::Filter { accounts: vec!["omp:w".into()], ..filter() })));
-    assert!(fr.iter().any(|l| l.contains("omp:w 7 days")), "{fr:#?}");
+    assert!(fr.iter().any(|l| l.starts_with("omp:w ")), "{fr:#?}");
     assert!(!fr.iter().any(|l| l.contains("claude:a")), "--account: {fr:#?}");
     let fr = bus.shown(&mut charting(spec(crate::systems::view::usage::Filter {
         harnesses: vec!["claude".into()],
         ..filter()
     })));
-    assert!(fr.iter().any(|l| l.contains("claude:a 7 days")) && !fr.iter().any(|l| l.contains("omp:w")), "--harness");
+    assert!(fr.iter().any(|l| l.starts_with("claude:a ")) && !fr.iter().any(|l| l.contains("omp:w")), "--harness");
     let fr = bus.shown(&mut charting(spec(crate::systems::view::usage::Filter {
         meter: Some("five_hour".into()),
         ..filter()
     })));
     assert!(fr[0].contains("meter five_hour"), "{}", fr[0]);
-    assert!(fr.iter().any(|l| l.contains("claude:a 5 hours") && l.contains("11% at the last reading")), "--meter");
+    assert!(fr.iter().any(|l| l.starts_with("claude:a 5 hours") && l.contains(" 11%")), "--meter");
     // `--since`: a window that ends before the readings landed shows none.
     let mut ui = charting(ChartSpec { window: 1, ..ChartSpec::default() });
     std::thread::sleep(std::time::Duration::from_millis(5));
@@ -796,7 +823,8 @@ fn the_help_lists_u() {
     ui.sync(&b);
     ui.apply(Action::Help, &b);
     let fr = frame(&b, &mut ui, 120, 40);
-    assert!(fr.iter().any(|l| l.contains("the quota chart, or the job board")), "{fr:#?}");
+    assert!(fr.iter().any(|l| l.contains("the quota rows, or the job board")), "{fr:#?}");
+    assert!(fr.iter().any(|l| l.contains("the line chart, or the rows")), "{fr:#?}");
 }
 
 #[test]
@@ -806,9 +834,12 @@ fn the_chart_fits_a_small_window_and_reads_nothing_it_cannot_write() {
     let before = std::fs::read_dir(bus.dir.path()).unwrap().count();
     let mut ui = charting(ChartSpec::default());
     bus.shown(&mut ui);
-    for (w, h) in [(80, 24), (40, 12), (20, 5)] {
-        let fr = frame(&Board::default(), &mut ui, w, h);
-        assert_eq!(fr.len(), usize::from(h));
+    for chart in [false, true] {
+        ui.usage.chart = chart;
+        for (w, h) in [(80, 24), (40, 12), (20, 5), (30, 2)] {
+            let fr = frame(&Board::default(), &mut ui, w, h);
+            assert_eq!(fr.len(), usize::from(h));
+        }
     }
     assert_eq!(std::fs::read_dir(bus.dir.path()).unwrap().count(), before, "nothing written");
 }

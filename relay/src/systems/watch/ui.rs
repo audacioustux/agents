@@ -32,8 +32,10 @@ pub enum Action {
     Quit,
     ToggleAll,
     ToggleEverywhere,
-    /// Switch between the job board and the quota chart.
+    /// Switch between the job board and the quota rows.
     Chart,
+    /// In the quota view, switch between the rows and the line chart.
+    Trend,
     Help,
     /// The selected job's pane in `$PAGER`.
     Open,
@@ -52,7 +54,7 @@ pub enum Action {
 pub enum View {
     /// The jobs, decisions and accounts.
     Board,
-    /// The quota chart.
+    /// The quota, as rows or (`c`) the line chart.
     Usage,
 }
 
@@ -178,14 +180,20 @@ impl Ui {
             }
             Action::Help => self.help = !self.help,
             Action::Chart => self.view = if self.view == View::Board { View::Usage } else { View::Board },
+            Action::Trend => self.usage.chart = !self.usage.chart,
             Action::Quit | Action::ToggleAll | Action::ToggleEverywhere | Action::Open => {}
         }
     }
 
-    /// What `e` asks for. The chart answers only to what it shows: quit, help and the way back.
+    /// What `e` asks for. The quota view answers only to what it shows: quit, help, the way back and
+    /// its chart; the board does not take the chart's key.
     pub fn action(&self, e: &Event) -> Option<Action> {
         let a = self.raw_action(e)?;
-        (self.view == View::Board || matches!(a, Action::Quit | Action::Help | Action::Chart)).then_some(a)
+        let ok = match self.view {
+            View::Board => a != Action::Trend,
+            View::Usage => matches!(a, Action::Quit | Action::Help | Action::Chart | Action::Trend),
+        };
+        ok.then_some(a)
     }
 
     fn raw_action(&self, e: &Event) -> Option<Action> {
@@ -319,6 +327,7 @@ fn key(k: &KeyEvent) -> Option<Action> {
         KeyCode::Char('a') => Action::ToggleAll,
         KeyCode::Char('p') => Action::ToggleEverywhere,
         KeyCode::Char('u') => Action::Chart,
+        KeyCode::Char('c') => Action::Trend,
         KeyCode::Char('?') => Action::Help,
         _ => return None,
     })

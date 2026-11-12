@@ -1006,6 +1006,13 @@ in a row failed and since when. The board's state cell, `quota show --json` (`re
 queued job's reason say it instead of `stale` or `usage unreadable`: `reading timed out after 180 s
 (3 tries since Nov 12 18:08 +06)`. Any good reading ends it, however it came (the quota command, a session's rate events, another project's or a twin home's reading); a failure after it starts a count of its own. The stderr tail has terminal controls replaced. An account is used only when:
 
+A reset time is read against the meter's own window (5 hours, a week, a month): it counts when
+it lies in the hour before the reading (the CLI keeps printing a reset that just passed for a
+while, and it stays as printed: the meter is resetting now) and up to a window ahead. A time
+outside that range, such as `resets 7pm` read at 8:30pm for a 5-hour meter, is no reset time
+rather than a guess tomorrow or a year out. A stored reset further ahead than its meter's window
+is read as no reset time too, so an older reading on the bus no longer shows `resets 365d`.
+
 - it has a reading, and not a stale one (unread or stale is not the same as
   having room; a job waits while a fresh one is taken);
 - the meters that govern the job's model are below `limits.floor` (omp meters

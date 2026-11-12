@@ -718,7 +718,9 @@ impl Buses {
     /// A quota reading of `account`'s 7-day and 5-hour meters, landing on the bus now.
     fn read(&self, account: &str, week: f64, five: f64) {
         use std::io::Write as _;
-        let meter = |name: &str, u| (name.to_owned(), crate::harness::Meter::named(name, u, Some(1_800_500_000)));
+        // A reset within both windows: the fold takes none further ahead than its meter's.
+        let reset = i64::try_from(crate::bus::now_micros() / 1_000_000).unwrap() + 3 * 3600;
+        let meter = |name: &str, u| (name.to_owned(), crate::harness::Meter::named(name, u, Some(reset)));
         let meters: crate::harness::Meters = [meter("seven_day", week), meter("five_hour", five)].into();
         let event = crate::bus::QuotaEvent::Reading { account: account.into(), meters, sign_in: Some("s".into()) };
         let mut v = serde_json::to_value(event).unwrap();

@@ -181,16 +181,19 @@ impl Account for ClaudeAccount {
         for line in clean.lines() {
             let Some(c) = LINE.captures(line.trim()) else { continue };
             let used: f64 = c[3].parse().unwrap_or(0.0);
-            let resets_at = c.get(4).and_then(|r| parse_reset_in(&format!("resets {}", r.as_str()), now_s, local));
-            let (name, meter) = match c.get(2).map(|m| m.as_str().trim()) {
-                None => ("five_hour".to_owned(), Meter::new(Window::FiveHours, used / 100.0, resets_at)),
-                Some("all models") => ("seven_day".to_owned(), Meter::new(Window::Week, used / 100.0, resets_at)),
+            let (name, mut meter) = match c.get(2).map(|m| m.as_str().trim()) {
+                None => ("five_hour".to_owned(), Meter::new(Window::FiveHours, used / 100.0, None)),
+                Some("all models") => ("seven_day".to_owned(), Meter::new(Window::Week, used / 100.0, None)),
                 Some(what) => {
                     let name = format!("seven_day_{}", what.to_ascii_lowercase().replace(' ', "_"));
-                    let meter = Meter { utilization: used / 100.0, resets_at, ..window_of(&name) };
+                    let meter = Meter { utilization: used / 100.0, resets_at: None, ..window_of(&name) };
                     (name, meter)
                 }
             };
+            // A reset is read against its meter's window (`report::reset_in_range`), never rolled a year on.
+            meter.resets_at = c
+                .get(4)
+                .and_then(|r| parse_reset_in(&format!("resets {}", r.as_str()), now_s, local, Some(meter.window)));
             out.insert(name, meter);
         }
         out
@@ -759,6 +762,25 @@ mod tests {
         r.choose("FINAL");
         let ok = Ending { exit_ok: true, ..Ending::default() };
         assert!(matches!(verdict(&r, ok, "FINAL", false, 0), Verdict::Limited { .. }), "{r:?}");
+    }
+
+    /// 2026-11-13, on the real bus: `claude:tj.pro`'s five-hour reset read 1794513540 at 1794513435, and
+    /// `/usage` still printed it 53 s after it passed, which read as a year out ("resets 365d").
+    #[test]
+    fn a_reset_a_minute_old_is_not_rolled_a_year_forward() {
+        let tz = TimeZone::get("Asia/Dhaka").unwrap(); // 2026-11-13 01:59 +06
+        let text = |at: &str| {
+            format!(
+                "Current session: 100% used · resets {at}\nCurrent week (all models): 9% used · resets Nov 13, 1:59am\n"
+            )
+        };
+        let m = Claude.parse_quota(&text("1:59am"), 1_794_513_435, &tz);
+        assert_eq!(m["five_hour"].resets_at, Some(1_794_513_540));
+        let m = Claude.parse_quota(&text("1:59am"), 1_794_513_593, &tz);
+        assert_eq!(m["five_hour"].resets_at, Some(1_794_513_540), "kept as it is, not 1826049540 or tomorrow");
+        assert_eq!(m["seven_day"].resets_at, Some(1_794_513_540), "a dated week reset a minute past");
+        let m = Claude.parse_quota("Current session: 5% used · resets Nov 20, 1:59am\n", 1_794_513_593, &tz);
+        assert_eq!(m["five_hour"].resets_at, None, "further out than its window is no reset time");
     }
 
     #[test]

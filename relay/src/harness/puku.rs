@@ -24,6 +24,7 @@ use jiff::tz::TimeZone;
 use serde_json::Value;
 
 use crate::harness::claude::{Account, ClaudeCode, digest};
+use crate::harness::report::reset_in_range;
 use crate::harness::{Home, Identity, Invocation, Meter, Meters, SignIn, Window, read_json};
 
 #[allow(non_upper_case_globals)]
@@ -115,7 +116,7 @@ fn last_object(text: &str) -> Option<Value> {
 
 /// `{"limit": 100, "used": 25, "resetsAt": "2026-11-09T05:00:00Z"}`. A window
 /// with no limit says nothing about room, so it is not a meter.
-fn window(w: &Value, window: Window) -> Option<Meter> {
+fn window(w: &Value, window: Window, now_s: i64) -> Option<Meter> {
     let limit = w.get("limit").and_then(Value::as_f64).filter(|l| *l > 0.0)?;
     let used = w.get("used").and_then(Value::as_f64)?;
     let resets_at = match w.get("resetsAt") {
@@ -123,6 +124,8 @@ fn window(w: &Value, window: Window) -> Option<Meter> {
         Some(Value::Number(n)) => n.as_i64().map(|n| if n > 100_000_000_000 { n / 1000 } else { n }),
         _ => None,
     };
+    // A time out of the window's range is no reset time ([`reset_in_range`]).
+    let resets_at = resets_at.and_then(|r| reset_in_range(r, now_s, window));
     Some(Meter::new(window, used / limit, resets_at))
 }
 
@@ -184,7 +187,7 @@ impl Account for PukuSession {
 
     /// `quotas.chat` of the subscription: `windows` `fiveHour`, `weekly` and
     /// `monthly`, or, with none, the request count `used_req` of `req_limit`.
-    fn parse_quota(&self, text: &str, _now_s: i64, _local: &TimeZone) -> Meters {
+    fn parse_quota(&self, text: &str, now_s: i64, _local: &TimeZone) -> Meters {
         let mut out = Meters::new();
         let Some(chat) = last_object(text).and_then(|v| v.get("chat").cloned()) else { return out };
         let windows = [
@@ -193,7 +196,7 @@ impl Account for PukuSession {
             ("monthly", "monthly", Window::Month),
         ];
         for (key, name, length) in windows {
-            if let Some(m) = chat.pointer(&format!("/windows/{key}")).and_then(|w| window(w, length)) {
+            if let Some(m) = chat.pointer(&format!("/windows/{key}")).and_then(|w| window(w, length, now_s)) {
                 out.insert(name.into(), m);
             }
         }
@@ -334,10 +337,17 @@ mod tests {
     #[test]
     fn usage_is_the_chat_quota() {
         let reply = r#"{"chat":{"used_req":10,"req_limit":1000,"windows":{"fiveHour":{"limit":200,"used":50,"resetsAt":"2026-11-09T05:00:00Z"},"weekly":{"limit":1000,"used":900,"resetsAt":"2026-11-12T00:00:00.000Z"},"monthly":{"limit":0,"used":0,"resetsAt":"2026-12-01T00:00:00Z"}}}}"#;
-        let m = Puku.parse_quota(&format!("noise\n{reply}\n"), 0, &TimeZone::UTC);
+        let now = 1_794_200_400 - 3 * 3600;
+        let m = Puku.parse_quota(&format!("noise\n{reply}\n"), now, &TimeZone::UTC);
         assert_eq!(m.keys().collect::<Vec<_>>(), ["five_hour", "seven_day"], "a window with no limit is no meter");
         assert!((m["five_hour"].utilization - 0.25).abs() < 1e-9 && (m["seven_day"].utilization - 0.9).abs() < 1e-9);
         assert_eq!(m["five_hour"].resets_at, Some(1_794_200_400));
+        // Read a day later, the five-hour reset is long past and the week's is in range: only a time
+        // out of its window's range is no reset time.
+        let later = Puku.parse_quota(&format!("{reply}\n"), now + 86_400, &TimeZone::UTC);
+        assert_eq!((later["five_hour"].resets_at, later["seven_day"].resets_at.is_some()), (None, true));
+        // Read at the epoch, the week's reset is years out.
+        assert_eq!(Puku.parse_quota(reply, 0, &TimeZone::UTC)["seven_day"].resets_at, None);
         assert_eq!(Puku.meters_for(Some("puku-ai-2.8"), &m).unwrap().len(), 2, "one allowance, whatever the model");
         let counts = Puku.parse_quota(r#"{"chat":{"used_req":250,"req_limit":1000}}"#, 0, &TimeZone::UTC);
         assert!((counts["requests"].utilization - 0.25).abs() < 1e-9 && counts["requests"].resets_at.is_none());

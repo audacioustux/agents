@@ -228,10 +228,13 @@ impl Harness for Omp {
             }
             let (Some(p), Some(w)) = (&provider, WINDOW.captures(line)) else { continue };
             let used: f64 = w[2].parse().unwrap_or(0.0);
+            let shape = window_of(&w[1]).provider(p.as_str());
             let meter = Meter {
                 utilization: used / 100.0,
-                resets_at: w.get(3).map(|r| now_s + duration_seconds(r.as_str())),
-                ..window_of(&w[1]).provider(p.as_str())
+                resets_at: w.get(3).and_then(|r| {
+                    crate::harness::report::reset_in_range(now_s + duration_seconds(r.as_str()), now_s, shape.window)
+                }),
+                ..shape
             };
             // Several accounts under one provider: the fullest one speaks for it.
             let slot = out.entry(format!("{p}/{}", w[1].trim())).or_default();
@@ -365,6 +368,12 @@ Openai Codex — 1 account\n  ● someone · plan: plus\n      ● 5 hours  ░�
         assert_eq!(m.len(), 2);
         assert!((m["openai-codex/7 days"].utilization - 0.21).abs() < 1e-9);
         assert_eq!(m["openai-codex/5 hours"].resets_at, Some(1_000 + 4 * 3600 + 59 * 60));
+        let far = "Openai Codex — 1 account\n  ● 5 hours  ░░░░  0.0% used · resets in 6d1h\n";
+        assert_eq!(
+            Omp.parse_quota(far, 1_000, &TimeZone::UTC)["openai-codex/5 hours"].resets_at,
+            None,
+            "past its window"
+        );
         assert_eq!(Omp.meters_for(Some("openai-codex/gpt-5.2"), &m).unwrap().len(), 2);
         assert!(Omp.meters_for(Some("anthropic/claude-opus"), &m).unwrap_err().0.contains("not starting blind"));
         assert!(Omp.meters_for(Some("opus"), &m).is_err(), "an unqualified model cannot be metered");

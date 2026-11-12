@@ -438,8 +438,14 @@ fn a_reset_with_no_zone_is_read_in_the_quota_commands_zone() {
     // UTC+6, whatever the caller's zone is.
     configure(&env, "", "[session.env]\nTZ = \"Etc/GMT-6\"\n");
     claude_account(&env.home, "solo", 40, false);
-    let usage =
-        "Current week (all models): 40% used · resets Jan 1, 12am (UTC)\nCurrent session: 61% used · resets 3pm\n";
+    // A five-hour reset must lie within five hours: the o'clock one to two hours ahead, in UTC+6.
+    let zone = jiff::tz::TimeZone::get("Etc/GMT-6").unwrap();
+    let ahead = jiff::Timestamp::now().checked_add(jiff::SignedDuration::from_hours(2)).unwrap().to_zoned(zone);
+    let (hour, pm) = (ahead.hour() % 12, ahead.hour() >= 12);
+    let at = format!("{}{}", if hour == 0 { 12 } else { hour }, if pm { "pm" } else { "am" });
+    let usage = format!(
+        "Current week (all models): 40% used · resets Jan 1, 12am (UTC)\nCurrent session: 61% used · resets {at}\n"
+    );
     std::fs::write(env.home.join(".claude.solo/usage"), usage).unwrap();
     let in_utc = |args: &[&str]| relay_cmd(&env, Command::new(env!("CARGO_BIN_EXE_relay")).args(args).env("TZ", "UTC"));
     ok(&in_utc(&["quota", "refresh"]), "refresh");
@@ -447,8 +453,8 @@ fn a_reset_with_no_zone_is_read_in_the_quota_commands_zone() {
     let account = &shown["accounts"][0];
     let read_s = account["readAt"].as_i64().expect("read") / 1_000_000;
     let reset = account["meters"]["five_hour"]["resetsAt"].as_i64().expect("a reset time");
-    assert!(reset > read_s && reset <= read_s + 86_400, "the next 3pm: {account}");
-    assert_eq!((reset + 6 * 3600) % 86_400, 15 * 3600, "3pm at UTC+6: {account}");
+    assert!(reset > read_s && reset <= read_s + 2 * 3600, "the next {at}: {account}");
+    assert_eq!((reset + 6 * 3600) % 86_400, i64::from(ahead.hour()) * 3600, "{at} at UTC+6: {account}");
 }
 
 /// Audit finding 16: a reading is taken when the accounts are shown, with no job waiting and no

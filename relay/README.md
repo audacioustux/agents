@@ -625,8 +625,11 @@ its runs' alone.
 terminal's width so it stays in scrollback: one line per account, time across
 (in your local zone), utilization 0–100 % up. A reset is a drop. The policy's
 `floor` is drawn across it (`┄`), and the `floor_near_reset` one (`╌`) when the
-policy sets it, so the room left is the gap; under the chart, each line's
-account and meter with its last reading and when that meter resets.
+policy sets it, so the room left is the gap. Each line ends in its id (`1`, `2`,
+..., then `a`, `b`, ...), which needs no colour; under the chart, each id's
+account and meter with its last reading and when that meter resets, wrapped to
+the terminal's width, never cut. A narrow terminal gets shorter time labels, and
+a very narrow one none.
 
 - **What it reads.** The readings already on the bus (`quota` `reading` events):
   it writes nothing, and starts no reading. In a project, its bus; outside one,

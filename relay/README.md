@@ -141,7 +141,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)) |
 | `relay view events` | The merged event log |
 | `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |
-| `relay view usage [--meter NAME] [--account H:L] [--harness H] [--since DURATION]` | Each account's quota over time as a chart in the terminal, the floors drawn across it ([usage](#usage)); outside a project, every project's |
+| `relay view usage [--meter NAME] [--account H:L] [--harness H] [--since DURATION]` | Each account's quota over time as a chart in the terminal, the floors drawn across it ([usage](#usage)); inside a project, its accounts from every project's readings; outside one, every account |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it, judged as the dispatcher judges it (a full account is `busy`, not `ready`); `show` starts a reading of each stale account and says `refreshing`. A fresh reading (one under way anywhere on the machine is waited for); switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout), noting when no review has accepted its tip / delete its clone and records |
 | `relay land gc [--dry-run]` | Remove what finished jobs no longer need: build outputs, old clones, old logs ([disk](#disk)) |
@@ -652,9 +652,17 @@ a very narrow one none.
 
 - **What it reads.** The readings already on the bus, as the project's fold takes
   them in: a quota command's (`quota` `reading` events) and a live session's
-  (`session` `rate` events). It writes nothing, and starts no reading. In a project, its bus; outside one,
-  every project's on this machine. An account read by several projects is one
-  line, its readings merged by time, one seen on two buses kept once.
+  (`session` `rate` events). It writes nothing (a harness's program it finds on `PATH` is used, not recorded
+  in `programs.json`), and starts no reading. Every
+  project's bus on this machine is read, in a project or outside one: an account
+  is the machine's, so where a reading happened to be taken says nothing about
+  whose it is. An account read by several projects is one line, its readings
+  merged by time, one seen on two buses kept once.
+- **Whose accounts.** Outside a project, every account. Inside one, only those it
+  can dispatch to: the accounts its dispatcher considers, so its enabled
+  harnesses' accounts without `accounts.exclude`'s. The heading says so
+  (`tickify's accounts, quota since ...`). A project that rarely dispatches
+  still charts its accounts, from the readings other projects took of them.
 - **Which meter.** By default each account's weekly meters: those whose name, as
   `view status` shows it, says a 7-day or weekly window (`7 days`,
   `openai-codex/7 days`, `minimax-code/General 7 Day`, `google-antigravity/Gemini

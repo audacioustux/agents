@@ -87,7 +87,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Result { name, wait } => result(ctx, &name, wait),
         Cmd::Stats { since } => stats::run(ctx, since.as_deref()),
         Cmd::Usage { meter, accounts, harnesses, since } => {
-            usage::run(scope, ctx.json, usage::Filter { meter, accounts, harnesses, since: 0 }, &since)
+            usage::run(scope, ctx.json, usage::Filter { meter, accounts, harnesses, ..Default::default() }, &since)
         }
         Cmd::Events => {
             for e in ctx.events()? {
@@ -121,7 +121,7 @@ pub fn outside(json: bool, cmd: &Cmd) -> Result<()> {
                 meter: meter.clone(),
                 accounts: accounts.clone(),
                 harnesses: harnesses.clone(),
-                since: 0,
+                ..Default::default()
             };
             usage::run(scope, json, filter, since)
         }

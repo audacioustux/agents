@@ -36,6 +36,31 @@ pub struct Filter {
     pub harnesses: Vec<String>,
     /// Readings from this bus time on (microseconds).
     pub since: u64,
+    /// Inside a project, the accounts it can dispatch to; every account when outside one.
+    pub within: Option<Within>,
+}
+
+/// The accounts one project can dispatch to: what a chart inside it is limited to.
+#[derive(Debug, Clone, Default)]
+pub struct Within {
+    /// The project's name, for the heading.
+    pub project: String,
+    /// The accounts (`harness:label`) its dispatcher considers ([`crate::accounts::discover`]).
+    pub accounts: std::collections::BTreeSet<String>,
+}
+
+impl Within {
+    /// The accounts `cfg`'s project can dispatch to: its enabled harnesses' accounts, minus
+    /// `accounts.exclude`, found by the code its dispatcher runs, but writing nothing.
+    pub fn of(cfg: &crate::config::Config) -> Self {
+        Self {
+            project: cfg.name.clone(),
+            accounts: crate::accounts::discover_in(crate::host::Mode::ReadOnly, cfg)
+                .iter()
+                .map(crate::harness::Home::key)
+                .collect(),
+        }
+    }
 }
 
 impl Filter {
@@ -48,7 +73,8 @@ impl Filter {
 
     fn account(&self, key: &str) -> bool {
         let harness = key.split(':').next().unwrap_or(key);
-        (self.accounts.is_empty() || self.accounts.iter().any(|a| a == key))
+        self.within.as_ref().is_none_or(|w| w.accounts.contains(key))
+            && (self.accounts.is_empty() || self.accounts.iter().any(|a| a == key))
             && (self.harnesses.is_empty() || self.harnesses.iter().any(|h| h == harness))
     }
 }
@@ -198,7 +224,11 @@ impl Usage<'_> {
 
     fn heading(&self) -> String {
         let meter = self.filter.meter.as_deref().map_or_else(|| "7-day meters".to_owned(), |m| format!("meter {m}"));
-        format!("quota since {}, {meter}", self.time(self.filter.since, "%b %-d %H:%M %Z"))
+        let since = self.time(self.filter.since, "%b %-d %H:%M %Z");
+        match &self.filter.within {
+            Some(w) => format!("{}'s accounts, quota since {since}, {meter}", w.project),
+            None => format!("quota since {since}, {meter}"),
+        }
     }
 
     fn floors(&self) -> Vec<Floor> {
@@ -442,12 +472,10 @@ fn sgr(c: Color) -> u8 {
     }
 }
 
-/// The buses a chart reads: the project's, in one; every project's on this machine outside one,
-/// with each that cannot be read named.
+/// The buses a chart reads: every project's on this machine, in a project or outside one (accounts
+/// are the machine's, so a reading is wherever it happened to be taken), with each that cannot be
+/// read named. Inside a project the chart is then limited to its accounts ([`Within`]).
 fn buses(scope: Scope<'_>) -> Result<(Vec<Vec<Stamped>>, Vec<String>)> {
-    if let Some(ctx) = scope.home {
-        return Ok((vec![ctx.events()?], Vec::new()));
-    }
     let (mut read, mut unreadable) = (Vec::new(), Vec::new());
     let mut dirs = crate::ctx::try_project_dirs(scope.root)?;
     dirs.sort();
@@ -472,6 +500,7 @@ pub fn run(scope: Scope<'_>, json: bool, mut filter: Filter, since: &str) -> Res
     };
     let now = now_micros();
     filter.since = now.saturating_sub(window);
+    filter.within = scope.home.map(|ctx| Within::of(&ctx.cfg));
     let (read, unreadable) = buses(scope)?;
     let history = History::fold(read.iter().map(Vec::as_slice), &filter);
     let limits = &scope.cfg.limits;
@@ -553,6 +582,92 @@ mod tests {
     fn fold(f: &Filter) -> History {
         let b = buses();
         History::fold(b.iter().map(Vec::as_slice), f)
+    }
+
+    /// A project named `name` under `root`'s state, its bus holding `readings` (account, 7-day utilization).
+    fn project(root: &std::path::Path, name: &str, readings: &[(&str, f64)]) -> crate::ctx::Ctx {
+        let repo = root.join("repos").join(name);
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let cfg = crate::config::Config::parse(&format!("name = \"{name}\"\n"), &repo).unwrap();
+        let ctx = crate::ctx::Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        std::fs::create_dir_all(&ctx.bus).unwrap();
+        let mut lines = String::new();
+        for &(account, u) in readings {
+            let (meters, sign_in) = (meters(&[("seven_day", u, 1_800_500_000)]), Some("s".into()));
+            let mut v = serde_json::to_value(QuotaEvent::Reading { account: account.into(), meters, sign_in }).unwrap();
+            v["t"] = now_micros().into();
+            {
+                use std::fmt::Write as _;
+                writeln!(lines, "{v}").unwrap();
+            }
+        }
+        std::fs::write(ctx.bus.join(crate::bus::system_file("quota")), lines).unwrap();
+        ctx
+    }
+
+    /// The accounts a chart inside `ctx` would show, the project allowed `usable` of them.
+    fn charted(ctx: &crate::ctx::Ctx, usable: &[&str]) -> Vec<String> {
+        let scope = Scope { cfg: &ctx.cfg, home: Some(ctx), root: &ctx.state_root };
+        let (read, unreadable) = super::buses(scope).unwrap();
+        assert!(unreadable.is_empty(), "{unreadable:?}");
+        let within =
+            Within { project: ctx.cfg.name.clone(), accounts: usable.iter().map(|a| (*a).to_owned()).collect() };
+        let filter = Filter { within: Some(within), ..Filter::default() };
+        History::fold(read.iter().map(Vec::as_slice), &filter).series.into_keys().collect()
+    }
+
+    #[test]
+    fn a_project_with_no_readings_of_its_own_charts_its_account_from_another_projects_bus() {
+        let d = crate::config::tempdir::Dir::new();
+        let _grid = project(d.path(), "grid", &[("claude:tj.pro", 0.4), ("omp:w", 0.2), ("claude:other", 0.9)]);
+        let quiet = project(d.path(), "quiet", &[]);
+        assert_eq!(quiet.events().unwrap().len(), 0);
+        assert_eq!(charted(&quiet, &["claude:tj.pro", "omp:w"]), ["claude:tj.pro", "omp:w"]);
+    }
+
+    #[test]
+    fn an_account_the_project_cannot_use_is_not_charted_wherever_it_was_read() {
+        let d = crate::config::tempdir::Dir::new();
+        let _grid = project(d.path(), "grid", &[("claude:tj.pro", 0.4), ("claude:other", 0.9)]);
+        let own = project(d.path(), "own", &[("claude:other", 0.5)]);
+        assert_eq!(charted(&own, &["claude:tj.pro"]), ["claude:tj.pro"]);
+        assert_eq!(charted(&own, &[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn outside_a_project_every_account_is_charted_and_the_heading_says_no_project() {
+        let d = crate::config::tempdir::Dir::new();
+        let grid = project(d.path(), "grid", &[("claude:tj.pro", 0.4), ("claude:other", 0.9)]);
+        let cfg = grid.cfg.clone();
+        let scope = Scope { cfg: &cfg, home: None, root: &grid.state_root };
+        let (read, _) = super::buses(scope).unwrap();
+        let h = History::fold(read.iter().map(Vec::as_slice), &Filter::default());
+        assert_eq!(h.series.keys().collect::<Vec<_>>(), ["claude:other", "claude:tj.pro"]);
+        let (limits, tz) = (limits(), TimeZone::UTC);
+        let usage = |filter: &Filter| Usage { history: &h, limits: &limits, filter, now: NOW, tz: &tz }.heading();
+        assert_eq!(usage(&week()), "quota since Jan 8 08:00 UTC, 7-day meters");
+        let inside = Filter { within: Some(Within { project: "tickify".into(), ..Within::default() }), ..week() };
+        assert_eq!(usage(&inside), "tickify's accounts, quota since Jan 8 08:00 UTC, 7-day meters");
+    }
+
+    /// `view usage` promises to write nothing: a program found on `PATH` but not in the record
+    /// (`sh` stands for the claude harness here) is used for the account set, and not recorded.
+    #[test]
+    fn the_accounts_of_a_project_are_found_without_recording_any_program() {
+        let d = crate::config::tempdir::Dir::new();
+        let state = d.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(d.path().join(".git")).unwrap();
+        let mut cfg =
+            crate::config::Config::parse("name = \"t\"\n[harness.claude]\nprogram = \"sh\"\n", d.path()).unwrap();
+        cfg.programs = Some(crate::host::record_in(&state));
+        let record = crate::host::record_in(&state);
+        Within::of(&cfg);
+        assert!(!record.exists(), "the record was written");
+        assert!(!record.with_extension("lock").exists(), "the lock was taken");
+        // The control: the dispatcher's own path records what it finds, so the setup is a real case.
+        crate::accounts::discover(&cfg);
+        assert!(record.exists(), "the dispatcher records what PATH finds");
     }
 
     #[test]

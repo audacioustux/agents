@@ -453,11 +453,13 @@ fn enter(
 /// Whether an attempt that ended with `status` after `elapsed` was stopped at its `limit` (seconds):
 /// `timeout` exits 124 when the shell ends on its TERM; one that ignores the TERM is killed 5 s
 /// later, and `timeout` dies by that SIGKILL itself, seen as the signal or, through a supervisor
-/// that reports a signal as 128 + its number, as 137.
+/// that reports a signal as 128 + its number, as 137. Only once the limit has passed: the shell can
+/// exit 124 itself (a nested `timeout`), or be killed by something else, before it, and that is a
+/// failure like any other.
 fn timed_out(status: std::process::ExitStatus, elapsed: std::time::Duration, limit: u64) -> bool {
     use std::os::unix::process::ExitStatusExt as _;
-    let killed = status.signal() == Some(9) || status.code() == Some(137);
-    status.code() == Some(124) || killed && elapsed.as_secs() >= limit
+    let stopped = status.code() == Some(124) || status.signal() == Some(9) || status.code() == Some(137);
+    stopped && elapsed >= std::time::Duration::from_secs(limit)
 }
 
 fn tail_of(mut f: std::fs::File, max: u64) -> String {
@@ -666,6 +668,18 @@ pub(crate) mod tests {
         assert!(started.elapsed().as_secs() < 10, "stopped at its limit: {:?}", started.elapsed());
     }
 
+    /// Review of #54 (third round): an early 124 is the shell's own exit, retried after a back-off, not
+    /// at once as a warm-up that ran out of time is.
+    #[test]
+    fn a_shell_that_exits_124_early_has_failed() {
+        let d = Dir::new();
+        let (deny, err) = (regex::Regex::new("TOKEN").unwrap(), d.path().join("stderr"));
+        let relay = RelayEnv::of([("PATH", "/usr/bin:/bin")]);
+        let nested = strings(&["sh", "-c", "exit 124", "s"]);
+        let f = enter(&relay, Stdio::null(), &nested, &deny, Path::new("/"), &err, 30).unwrap_err();
+        assert_eq!((f.why.as_str(), f.timed_out), ("exited 124", false));
+    }
+
     /// Review of #54: a shell that ignores the TERM gets `timeout` killed by SIGKILL, with no exit
     /// code. After the limit that is a timeout (retried at once), not a failure to back off from.
     #[test]
@@ -675,7 +689,11 @@ pub(crate) mod tests {
         use std::time::Duration;
         let (code, signal) = (|c: i32| ExitStatus::from_raw(c << 8), ExitStatus::from_raw);
         let (late, early) = (Duration::from_secs(605), Duration::from_secs(3));
-        assert!(timed_out(code(124), early, 600), "timeout's own exit: whenever it says so");
+        assert!(timed_out(code(124), late, 600), "timeout's own exit, at the limit");
+        assert!(
+            !timed_out(code(124), early, 600),
+            "the shell's own 124 before the limit (a nested timeout) is a failure"
+        );
         assert!(timed_out(signal(9), late, 600), "killed by SIGKILL after the limit");
         assert!(timed_out(code(137), late, 600), "the same, reported through a supervisor");
         assert!(!timed_out(signal(9), early, 600), "killed before the limit: something else killed it");

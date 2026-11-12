@@ -10,8 +10,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::bus::{
-    self, Action, DecideEvent, DispatchEvent, Event, Fork, LandEvent, Meters, Offsets, Outcome, Point, QueueEvent,
-    QuotaEvent, SessionEvent, Stamped,
+    self, Action, DecideEvent, DevShellEvent, DispatchEvent, Event, Fork, LandEvent, Meters, Offsets, Outcome, Point,
+    QueueEvent, QuotaEvent, SessionEvent, Stamped,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,9 +329,40 @@ pub struct World {
     /// Decisions by id, while their job is kept.
     #[serde(default)]
     pub decisions: BTreeMap<String, Decision>,
+    /// The project's development environment (`session.env_shell`): its latest warm-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devshell: Option<DevShell>,
     /// What every job waits for, worked out once for this state of `jobs` and shared by every query.
     #[serde(skip)]
     deps: Deps,
+}
+
+/// What the bus says of the project's development environment, for the key it was last warmed for.
+/// Whether it is ready is what is recorded on disk (`systems::devshell::Gate`); this says how the
+/// warm-ups went, for the held reason and the retry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevShell {
+    pub key: String,
+    /// When the warm-up under way began: its first attempt since the last one that ended for good.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warming_since: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<u64>,
+    /// The attempts for this key that did not start it, since it last did.
+    #[serde(default)]
+    pub failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<WarmFailure>,
+}
+
+/// The latest attempt that did not start the development environment.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WarmFailure {
+    pub at: u64,
+    pub why: String,
+    /// The end of its stderr.
+    pub tail: String,
+    pub timed_out: bool,
 }
 
 /// The dependency analysis of one state of a world's jobs, built on the first query after a change
@@ -425,7 +456,8 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// `tests::the_fold_version_moves_with_the_fold` pins it to what the fold makes of a
 /// fixed bus, so a fold that changes without a bump fails the tests.
 /// 13: `dispatched` records the model and provider; a job back in the queue has no account.
-const FOLD_VERSION: u32 = 13;
+/// 14: the development environment's warm-ups (`devshell`).
+const FOLD_VERSION: u32 = 14;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -797,6 +829,7 @@ impl World {
             Event::Session(_) => {}
             Event::Quota(e) => self.apply_quota(s.t, e),
             Event::Decide(e) => self.apply_decide(s.t, e),
+            Event::DevShell(e) => self.apply_devshell(s.t, e),
             Event::Land(LandEvent::Forgotten { job }) => {
                 self.decisions.retain(|_, d| d.job != *job);
                 // A job cleaned away after it finished has been waited for.
@@ -962,6 +995,35 @@ impl World {
                         (Status::Failed, Some("session runner died without reporting".into()))
                     };
                     j.ended_at = Some(t);
+                }
+            }
+        }
+    }
+
+    /// A warm-up for another key than the one on record starts that key's record afresh.
+    fn apply_devshell(&mut self, t: u64, e: &DevShellEvent) {
+        let key = match e {
+            DevShellEvent::Warming { key, .. }
+            | DevShellEvent::Warmed { key }
+            | DevShellEvent::WarmFailed { key, .. } => key,
+        };
+        let d = self.devshell.get_or_insert_with(DevShell::default);
+        if d.key != *key {
+            *d = DevShell { key: key.clone(), ..DevShell::default() };
+        }
+        match e {
+            DevShellEvent::Warming { .. } => {
+                d.warming_since.get_or_insert(t);
+            }
+            DevShellEvent::Warmed { .. } => {
+                (d.ready_at, d.warming_since, d.failures, d.failed) = (Some(t), None, 0, None);
+            }
+            DevShellEvent::WarmFailed { why, tail, timed_out, .. } => {
+                d.failures += 1;
+                d.failed = Some(WarmFailure { at: t, why: why.clone(), tail: tail.clone(), timed_out: *timed_out });
+                // A timed-out attempt is one step of a warm-up that goes on; anything else ends it.
+                if !timed_out {
+                    d.warming_since = None;
                 }
             }
         }
@@ -1365,7 +1427,7 @@ mod tests {
     /// new pair; never change a pair already recorded.
     #[test]
     fn the_fold_version_moves_with_the_fold() {
-        const PINNED: &[(u32, u64)] = &[(13, 0x1d75_bf1b_971c_dfd9)];
+        const PINNED: &[(u32, u64)] = &[(13, 0x1d75_bf1b_971c_dfd9), (14, 0x0599_7a27_1a95_7bbd)];
         let dispatched = |t, model: Option<&str>| {
             st(
                 t,
@@ -1403,6 +1465,16 @@ mod tests {
             st(7, ended("a", Outcome::Failed)),
             st(8, resumed),
             st(9, reading),
+            st(10, Event::DevShell(DevShellEvent::Warming { key: "k".into(), shell: "nix develop -c".into() })),
+            st(
+                11,
+                Event::DevShell(DevShellEvent::WarmFailed {
+                    key: "k".into(),
+                    why: "exited 1".into(),
+                    tail: "error".into(),
+                    timed_out: false,
+                }),
+            ),
         ];
         let digest = fnv(serde_json::to_string(&World::fold(&events)).unwrap().as_bytes());
         let (version, pinned) = *PINNED.last().unwrap();

@@ -384,10 +384,26 @@ fn tail_of(mut f: std::fs::File, max: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::bus::{Event, Stamped};
     use crate::config::tempdir::Dir;
+
+    /// [`warm`], once no other test's child still holds a copy of this test's lock. Tests run in
+    /// threads of one process, and a child another thread is starting holds a copy of every
+    /// descriptor between its fork and its exec, the lock's too, for long enough to be seen. A warm-up
+    /// of its own never meets one: the warmer starts nothing else meanwhile.
+    pub(crate) fn settled(ctx: &Ctx) -> String {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match warm(ctx) {
+                Err(e) if e.to_string().contains("already running") && std::time::Instant::now() < until => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                said => return said.unwrap(),
+            }
+        }
+    }
 
     fn strings(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
@@ -442,7 +458,7 @@ mod tests {
         let relay: Vec<String> = cmd.get_envs().filter_map(|(k, _)| k.to_str().map(str::to_owned)).collect();
         let theirs: Vec<&String> = callers.iter().filter(|k| !relay.contains(k)).collect();
         assert!(!theirs.is_empty(), "the test process has variables of its own (cargo's, at least)");
-        assert_eq!(warm(&ctx).unwrap(), "entered");
+        assert_eq!(settled(&ctx), "entered");
         let recorded = recorded(&ctx).unwrap();
         // What the shell sets itself, and the script's own export.
         let own = ["PWD", "OLDPWD", "SHLVL", "_", "DEV_TOOL"];
@@ -472,7 +488,7 @@ mod tests {
         assert!(e.to_string().contains("already running"), "{e:#}");
         assert_eq!(entries(&d), 1, "no second entry beside the first");
         assert!(attempt.join().unwrap().is_ok());
-        assert!(Role::try_take(&lock_file(&ctx)).unwrap().is_some(), "free once the attempt has ended");
+        assert_eq!(settled(&ctx), "entered", "a replacement may run once the attempt has ended");
     }
 
     /// Review of #54: a shell that ignores the TERM gets `timeout` killed by SIGKILL, with no exit
@@ -551,7 +567,7 @@ mod tests {
         assert_eq!(gate.hold(now_micros()), None);
         assert!(!gate.due(now_micros()));
         assert!(snapshot(&ctx).is_some());
-        assert_eq!(warm(&ctx).unwrap(), "warm", "already recorded: not entered again");
+        assert_eq!(settled(&ctx), "warm", "already recorded: not entered again");
         assert_eq!(entries(&d), 1);
         // Every session reads the record; the secret-looking variable is not in it.
         let env = snapshot(&ctx).unwrap();
@@ -566,7 +582,7 @@ mod tests {
     fn a_failing_shell_holds_jobs_with_its_reason_and_backs_off() {
         let d = Dir::new();
         let ctx = project(&d, &[&script(&d, 0, false)]);
-        assert_eq!(warm(&ctx).unwrap(), "failed: exited 1");
+        assert_eq!(settled(&ctx), "failed: exited 1");
         assert!(snapshot(&ctx).is_none());
         let w = world(&ctx);
         let gate = Gate::of(&ctx, &w).unwrap();
@@ -577,7 +593,7 @@ mod tests {
         assert_eq!(hold.until, Some(at + FIRST_BACKOFF_US));
         assert!(!gate.due(at + FIRST_BACKOFF_US - 1), "backing off");
         assert!(gate.due(at + FIRST_BACKOFF_US));
-        warm(&ctx).unwrap();
+        settled(&ctx);
         let w = world(&ctx);
         let gate = Gate::of(&ctx, &w).unwrap();
         let at = w.devshell.as_ref().unwrap().failed.as_ref().unwrap().at;
@@ -591,7 +607,7 @@ mod tests {
         let d = Dir::new();
         let ctx = project(&d, &[&script(&d, 0, true)]);
         let before = key(&ctx.cfg).unwrap();
-        assert_eq!(warm(&ctx).unwrap(), "entered");
+        assert_eq!(settled(&ctx), "entered");
         assert!(snapshot(&ctx).is_some());
         std::fs::write(ctx.cfg.repo.join("flake.lock"), "{\"nodes\":{}}").unwrap();
         let after = key(&ctx.cfg).unwrap();
@@ -604,7 +620,7 @@ mod tests {
             "the old key's record is not this one's"
         );
         assert!(gate.due(now_micros()));
-        assert_eq!(warm(&ctx).unwrap(), "entered");
+        assert_eq!(settled(&ctx), "entered");
         assert_eq!(entries(&d), 2, "entered again");
         assert!(snapshot(&ctx).is_some());
         // The shell command is in the key too.

@@ -365,7 +365,7 @@ mod tests {
         std::fs::create_dir_all(&ctx.bus).unwrap();
         let warm = |toolchain: &str| {
             std::fs::write(&tool, toolchain).unwrap();
-            assert_eq!(crate::systems::devshell::warm(&ctx).unwrap(), "entered");
+            assert_eq!(crate::systems::devshell::tests::settled(&ctx), "entered");
         };
         let tool_in = |env: &[(OsString, Option<OsString>)]| {
             env.iter().rev().find(|(k, _)| k == "DEV_TOOL").and_then(|(_, v)| v.clone())

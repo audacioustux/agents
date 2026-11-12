@@ -621,6 +621,7 @@ pub fn room_for(rules: Rules<'_>, world: &World, others: &[&World]) -> Room {
     match rules {
         Rules::Project(ctx) => {
             Room::new(&ctx.cfg, world, others, crate::systems::dispatch::disk_ok(&ctx.cfg.limits, &ctx.clones))
+                .with_dev_shell(crate::systems::devshell::Gate::of(ctx, world))
         }
         Rules::MachineWide => Room::machine_wide(world, others),
     }

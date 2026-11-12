@@ -120,46 +120,14 @@ fn workspace_note(ctx: &Ctx, job: &Job) -> String {
     }
 }
 
-/// The project's development environment, entered on the host in `dir`
-/// through `shell` (`session.env_shell`), minus names `deny` matches.
-fn dev_env(shell: &[String], deny: &regex::Regex, dir: &Path) -> Result<Vec<(OsString, Option<OsString>)>> {
-    use std::os::unix::ffi::OsStrExt;
-    // A marker first, so whatever the environment's own hooks print is not taken for variables.
-    const MARK: &str = "\0relay-env\0";
-    let Some((program, prefix)) = shell.split_first() else { return Ok(Vec::new()) };
-    let out = Command::new("timeout")
-        .arg("600")
-        .arg(program)
-        .args(prefix)
-        .args(["sh", "-c", &format!("printf '{}'; env -0", MARK.replace('\0', "\\0"))])
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .with_context(|| format!("entering the development environment ({program})"))?;
-    let at = out.stdout.windows(MARK.len()).position(|w| w == MARK.as_bytes());
-    let Some(at) = at.filter(|_| out.status.success()) else {
-        bail!("the development environment ({}) did not start", shell.join(" "));
-    };
-    Ok(out.stdout[at + MARK.len()..]
-        .split(|&b| b == 0)
-        .filter_map(|kv| {
-            let eq = kv.iter().position(|&b| b == b'=')?;
-            let (k, v) = (std::ffi::OsStr::from_bytes(&kv[..eq]), std::ffi::OsStr::from_bytes(&kv[eq + 1..]));
-            (!deny.is_match(&k.to_string_lossy())).then(|| (k.to_owned(), Some(v.to_owned())))
-        })
-        .collect())
-}
-
 /// The job's environment, in layers: the project's development environment
-/// (`session.env_shell`) underneath, `session.env` over it, and the harness's
+/// (`session.env_shell`, as its one warm-up recorded it: see [`crate::systems::devshell`]) underneath, `session.env` over it, and the harness's
 /// own variables (the account) over both. Both of the job's layers pass `sandbox.env_deny`, as
 /// [`crate::sandbox::session_env`]'s base does: only the harness's own variables may name what it
 /// denies (`CLAUDE_CONFIG_DIR`). A `session.env` entry it names is refused at load; one that got past
 /// that would still be dropped here.
-fn layer_env(ctx: &Ctx, inv: &mut Invocation, cwd: &Path) -> Result<()> {
+fn layer_env(ctx: &Ctx, inv: &mut Invocation, dev: &[(OsString, Option<OsString>)]) {
     let deny = regex::Regex::new(&ctx.cfg.sandbox.env_deny).expect("validated at load");
-    let dev = dev_env(&ctx.cfg.session.env_shell, &deny, cwd)?;
     let session_env = ctx
         .cfg
         .session
@@ -167,8 +135,7 @@ fn layer_env(ctx: &Ctx, inv: &mut Invocation, cwd: &Path) -> Result<()> {
         .iter()
         .filter(|(k, _)| !deny.is_match(k))
         .map(|(k, v)| (OsString::from(k), Some(OsString::from(v))));
-    inv.env = dev.into_iter().chain(session_env).chain(std::mem::take(&mut inv.env)).collect();
-    Ok(())
+    inv.env = dev.iter().cloned().chain(session_env).chain(std::mem::take(&mut inv.env)).collect();
 }
 
 /// Where an attempt runs: the account, its harness, and the model the job uses on it.
@@ -218,13 +185,19 @@ macro_rules! go {
 
 /// One attempt: take the seat and the workspace, launch the session, drive it, and judge what it did.
 fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
+    // Dispatch starts no job before the development environment is warm; one that changed since
+    // goes back to wait for its warm-up, never entering the shell itself. What is read here is the
+    // environment of the whole attempt: its session and both runs of its check.
+    let Some(dev) = crate::systems::devshell::snapshot(ctx) else {
+        return Ok((Outcome::Retry, Some("the development environment changed; waiting for it to warm again".into())));
+    };
     let found = accounts::discover(&ctx.cfg);
     let seat = go!(seat(ctx, job, &found));
     let work = go!(workspace(ctx, job)?);
     if let Some(failed) = forkable(job, &found, seat.home, &work.cwd) {
         return Ok(failed);
     }
-    let mut launch = go!(launch(ctx, job, &seat, &work, &found)?);
+    let mut launch = go!(launch(ctx, job, &seat, &work, &found, &dev)?);
     // An earlier attempt's answer must not pass for this one's.
     let _ = std::fs::remove_file(ctx.job_file(&job.name, "result.md"));
     let run = Run {
@@ -255,6 +228,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         brief: &launch.brief,
         reviewing: launch.reviewing.as_ref(),
         model: seat.model.as_deref(),
+        dev: &dev,
     };
     // A review's answer is not enough: it needs its report and the verdict in it.
     let v = match verdict(&report, ending, marker, job.readonly() && ran.reviewing.is_none(), now_s()) {
@@ -341,7 +315,14 @@ fn workspace(ctx: &Ctx, job: &Job) -> Result<Step<Workspace>> {
 }
 
 /// Chooses the session (new, resumed or forked), records that it started, and builds its command.
-fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home]) -> Result<Step<Launch>> {
+fn launch(
+    ctx: &Ctx,
+    job: &Job,
+    seat: &Seat<'_>,
+    work: &Workspace,
+    found: &[Home],
+    dev: &[(OsString, Option<OsString>)],
+) -> Result<Step<Launch>> {
     let fork = job.fork.as_ref().filter(|f| job.session_id.as_deref().is_none_or(|s| s == f.session_id));
     let resumed = if fork.is_some() { None } else { resumable(job, found, seat.home, &work.scratch) };
     let session_id =
@@ -382,7 +363,7 @@ fn launch(ctx: &Ctx, job: &Job, seat: &Seat<'_>, work: &Workspace, found: &[Home
         Ok(i) => i,
         Err(refusal) => return Ok(ControlFlow::Break((Outcome::Failed, Some(refusal)))),
     };
-    layer_env(ctx, &mut inv, &work.cwd)?;
+    layer_env(ctx, &mut inv, dev);
     inv.write_files(&work.inbox).context("writing the prompt file")?;
     let mounts = Mounts {
         home: seat.home,
@@ -458,6 +439,8 @@ struct Ran<'a> {
     reviewing: Option<&'a Reviewing>,
     /// The model the run used.
     model: Option<&'a str>,
+    /// The development environment the attempt runs on, read once when it started: its checks get it too.
+    dev: &'a [(OsString, Option<OsString>)],
 }
 
 /// The request at `point`, with the brief, the earlier decisions and what was spent.
@@ -1327,26 +1310,6 @@ mod base_tests {
 }
 
 #[cfg(test)]
-mod dev_env_tests {
-    #[test]
-    fn the_environment_is_read_after_the_marker_and_filtered() {
-        // A "shell" that prints a banner, sets variables, then runs the command it is given.
-        let shell: Vec<String> =
-            ["sh", "-c", "echo welcome; export DEV_TOOL=/nix/store/x API_TOKEN=s3cret; exec \"$@\"", "shell"]
-                .map(String::from)
-                .to_vec();
-        let deny = regex::Regex::new("TOKEN").unwrap();
-        let env = super::dev_env(&shell, &deny, std::path::Path::new("/")).unwrap();
-        let get = |k: &str| env.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.clone());
-        assert_eq!(get("DEV_TOOL").as_deref(), Some(std::ffi::OsStr::new("/nix/store/x")));
-        assert_eq!(get("API_TOKEN"), None, "secret-named variables stay out");
-        assert!(env.iter().all(|(k, _)| !k.to_string_lossy().contains("welcome")), "the banner is not a variable");
-        assert!(super::dev_env(&["false".to_owned()], &deny, std::path::Path::new("/")).is_err());
-        assert_eq!(super::dev_env(&[], &deny, std::path::Path::new("/")).unwrap(), Vec::new());
-    }
-}
-
-#[cfg(test)]
 mod env_tests {
     use std::ffi::OsString;
 
@@ -1354,6 +1317,41 @@ mod env_tests {
     use crate::config::{Config, tempdir::Dir};
     use crate::ctx::Ctx;
     use crate::harness::Invocation;
+
+    /// Review of #54 (third round): the warm-up stands in the repository, so its record held `PWD` there,
+    /// and the session got it back after `session_env` dropped it: a build session in its clone was told it
+    /// stood in the original tree. The record leaves out every variable `session_env` drops.
+    #[test]
+    fn the_recorded_environment_says_nothing_of_where_the_warm_up_stood() {
+        let d = Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let shell = d.path().join("shell");
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\ncd /tmp && cd \"$OLDPWD\"\nexport TMPDIR=/tmp/nix-shell.x DEV_TOOL=y\nexec \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let mut cfg = Config::parse("name = \"t\"\n", &repo).unwrap();
+        cfg.session.env_shell = vec![shell.display().to_string()];
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        std::fs::create_dir_all(&ctx.bus).unwrap();
+        assert_eq!(crate::systems::devshell::tests::settled(&ctx), "entered");
+        let recorded = crate::systems::devshell::recorded(&ctx).unwrap();
+        assert!(recorded.env.iter().any(|(k, _)| k == "DEV_TOOL"));
+        for name in crate::sandbox::WHERE_IT_STANDS {
+            assert!(recorded.env.iter().all(|(k, _)| k != name), "{name} is not recorded: {:?}", recorded.env);
+        }
+        let mut inv = Invocation::new("claude");
+        layer_env(&ctx, &mut inv, &crate::systems::devshell::snapshot(&ctx).unwrap());
+        let env = crate::sandbox::session_env(&ctx, &inv);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string_lossy().into_owned());
+        assert_eq!(get("PWD"), None, "not the repository");
+        assert_eq!(get("OLDPWD"), None);
+        assert_eq!(get("TMPDIR"), None, "the sandbox sets its own /tmp");
+        assert_eq!(get("DEV_TOOL").as_deref(), Some("y"));
+    }
 
     /// Review of #40: `[session.env]` entries that `sandbox.env_deny` names never reach a worker. They
     /// are refused at load; this checks the environment a session is built with (the job's layers, then
@@ -1371,7 +1369,7 @@ mod env_tests {
         let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
         let mut inv = Invocation::new("puku-cli");
         inv.env.push(("PUKU_CONFIG_DIR".into(), Some("/h/.puku-cli".into())));
-        layer_env(&ctx, &mut inv, &repo).unwrap();
+        layer_env(&ctx, &mut inv, &[]);
         let env: Vec<(OsString, OsString)> = crate::sandbox::session_env(&ctx, &inv);
         let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string_lossy().into_owned());
         for denied in ["PUKU_WORKER_URL", "CLAUDE_CODE_X", "NPM_TOKEN"] {

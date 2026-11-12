@@ -195,7 +195,9 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     // the seats their sessions hold, count here too. Their jobs stay theirs.
     let neighbours = ctx.neighbours();
     let others: Vec<&World> = neighbours.iter().collect();
-    let mut room = Room::new(&ctx.cfg, &world, &others, disk_ok(&ctx.cfg.limits, &ctx.clones));
+    let dev_shell = crate::systems::devshell::Gate::of(ctx, &world);
+    let mut room =
+        Room::new(&ctx.cfg, &world, &others, disk_ok(&ctx.cfg.limits, &ctx.clones)).with_dev_shell(dev_shell.clone());
     crate::systems::quota::start_refresh(ctx, &room, &world, true)?;
     let mut held = Held::default();
     for Start { job, account, model, provider } in plan(&ctx.cfg, &mut room, &world, now_micros(), &mut held) {
@@ -211,6 +213,10 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
             runner_started: started,
         })?;
         drop(gate);
+    }
+    // One warm-up of the development environment for every job it holds, never one per job.
+    if let Err(e) = crate::systems::devshell::tend(ctx, &world, dev_shell.as_ref()) {
+        eprintln!("{} the dev shell's warm-up did not start: {e:#}", crate::os::stamp());
     }
     let held_due = ask_held(ctx, &world, &held)?;
     // A job blocked on a dependency that ended badly waits for the operator, not for the dispatcher;

@@ -36,10 +36,18 @@ impl Role {
         Ok(Self(f))
     }
 
+    /// A copy of the role for one child to inherit as its stdin (an empty file, read as at its end).
+    /// The role is then held until that child, and everything that inherits its stdin, has ended,
+    /// even past this process: a role whose work runs in a process tree is that tree's.
+    pub fn share(&self) -> Result<std::process::Stdio> {
+        Ok(self.0.try_clone().context("sharing a role")?.into())
+    }
+
     fn open(path: &Path) -> Result<File> {
         File::options()
             .create(true)
             .truncate(false)
+            .read(true)
             .write(true)
             .mode(0o600)
             .open(path)

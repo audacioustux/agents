@@ -16,6 +16,7 @@ use crate::harness::Home;
 use crate::world::{AccountState, Job, World};
 
 use super::{kept, may_use, model_for, profile_hold};
+use crate::systems::devshell::Gate;
 
 /// How long a job waits for a reading under way before it starts on an account read already: from
 /// when the reading went stale or the job was queued, whichever is later.
@@ -36,6 +37,8 @@ pub struct Room {
     starts: BTreeMap<String, Vec<u64>>,
     /// Whether free disk allows a build job to start.
     disk_ok: bool,
+    /// The project's development environment, when it names one: no job starts until it is warm.
+    dev_shell: Option<Gate>,
 }
 
 /// Why an account takes no session: every cause, so a busy account at its floor says both.
@@ -111,6 +114,13 @@ impl Room {
             *room.running.entry(p.to_owned()).or_default() += 1;
         }
         room
+    }
+
+    /// The room with the project's development environment as `gate` judges it ([`Gate::of`]).
+    #[must_use]
+    pub fn with_dev_shell(mut self, gate: Option<Gate>) -> Self {
+        self.dev_shell = gate;
+        self
     }
 
     /// Every account found, in discovery order.
@@ -221,7 +231,7 @@ impl Room {
 
     /// Why `j`, queued and waiting for no other job, does not start at `now_us` by `cfg`'s rules:
     /// its profile's limits (unless a decision forced it past them), free disk for a build job,
-    /// or no account it may use that [`Room::admit`]s it on its model there. `None` when it would
+    /// the project's development environment not yet warm (read-only jobs need it too), or no account it may use that [`Room::admit`]s it on its model there. `None` when it would
     /// start, the project's own `max_running` and load aside. Pure: it reads only the room.
     pub fn hold(&self, cfg: &Config, j: &Job, now_us: u64) -> Option<Hold> {
         self.judge(cfg, j, now_us).err()
@@ -239,6 +249,9 @@ impl Room {
         }
         if !j.readonly() && !self.disk_ok {
             return Err(Hold { why: format!("free disk below {} GB", cfg.limits.min_free_disk_gb), until: None });
+        }
+        if let Some(hold) = self.dev_shell.as_ref().and_then(|g| g.hold(now_us)) {
+            return Err(hold);
         }
         // Every account of every harness the job allows, judged the same way: on the meters its
         // harness says govern the job's model there.

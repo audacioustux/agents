@@ -29,7 +29,7 @@ pub(super) fn at_end(ctx: &Ctx, job: &Job, home: &Home, run: &Ran<'_>, ended: En
     }
     // The bar, before anyone judges: every handler hears of it.
     let check = match (ended.0, run.dir, job.check()) {
-        (Outcome::Done, Some(dir), Some(_)) => Some(bar::run(ctx, job, home, dir, run.base, run.inbox)?),
+        (Outcome::Done, Some(dir), Some(_)) => Some(bar::run(ctx, job, home, dir, run.base, run.inbox, run.dev)?),
         _ => None,
     };
     let req = ask(ctx, job, run, &ended, check.as_ref())?;

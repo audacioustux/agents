@@ -684,6 +684,27 @@ pub enum LandEvent {
     },
 }
 
+/// The project's development environment (`session.env_shell`), entered once on the host for every
+/// session. `key` names what it was entered for: the shell command and the files that define it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum DevShellEvent {
+    /// A warm-up started: `shell` is being entered in the repository.
+    Warming { key: String, shell: String },
+    /// It started, and its variables are recorded for the sessions.
+    Warmed { key: String },
+    /// It did not start: `why` (`exited 1`, `timed out after 600 s`) and the end of its stderr.
+    WarmFailed {
+        key: String,
+        why: String,
+        #[serde(default)]
+        tail: String,
+        /// Stopped at its time limit, not failed: the next attempt goes on at once.
+        #[serde(default)]
+        timed_out: bool,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Queue(QueueEvent),
@@ -692,6 +713,7 @@ pub enum Event {
     Quota(QuotaEvent),
     Land(LandEvent),
     Decide(DecideEvent),
+    DevShell(DevShellEvent),
 }
 
 /// Ties an event enum to the system that owns it and its file.
@@ -724,6 +746,7 @@ owned!(SessionEvent, "session", Session, crate::systems::session::Source);
 owned!(QuotaEvent, "quota", Quota, crate::systems::quota::Source);
 owned!(LandEvent, "land", Land, crate::systems::land::Source);
 owned!(DecideEvent, "decide", Decide, crate::systems::decide::Source);
+owned!(DevShellEvent, "devshell", DevShell, crate::systems::devshell::Source);
 
 /// The one file a whole-system port writes.
 pub fn system_file(system: &str) -> PathBuf {
@@ -811,6 +834,7 @@ impl Stamped {
             Event::Quota(e) => line(self.t, e),
             Event::Land(e) => line(self.t, e),
             Event::Decide(e) => line(self.t, e),
+            Event::DevShell(e) => line(self.t, e),
         }
     }
 }
@@ -908,12 +932,13 @@ pub fn read_all(bus: &Path) -> Result<Vec<Stamped>> {
 /// before, when only a full read from empty offsets makes sense.
 pub fn read_since(bus: &Path, offsets: &Offsets) -> Result<Option<(Vec<Stamped>, Offsets)>> {
     type Read = fn(&Path, Option<&Origin>, Mark, &mut Vec<Stamped>) -> Result<Option<Mark>>;
-    let systems: [(&str, Read); 6] = [
+    let systems: [(&str, Read); 7] = [
         ("queue", read_file::<QueueEvent>),
         ("dispatch", read_file::<DispatchEvent>),
         ("quota", read_file::<QuotaEvent>),
         ("land", read_file::<LandEvent>),
         ("decide", read_file::<DecideEvent>),
+        ("devshell", read_file::<DevShellEvent>),
         // Before sessions had a file per attempt, they shared one; read it as is.
         ("session", read_file::<SessionEvent>),
     ];

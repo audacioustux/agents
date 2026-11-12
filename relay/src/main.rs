@@ -77,6 +77,9 @@ enum System {
     /// Decisions at relay's hook points: list those waiting for the orchestrator, answer one.
     #[command(subcommand)]
     Decide(systems::decide::Cmd),
+    /// The project's development environment (`session.env_shell`), entered once for every session.
+    #[command(subcommand)]
+    Devshell(systems::devshell::Cmd),
     /// The job profiles: what `queue add --profile` fills in, each with its note.
     /// Outside a project, the owner's policy alone.
     Profiles,
@@ -134,6 +137,7 @@ fn run(config: Option<&std::path::Path>, json: bool, system: System) -> anyhow::
         System::View(c) => systems::view::run(&ctx, c),
         System::Land(c) => systems::land::run(&ctx, c),
         System::Decide(c) => systems::decide::run(&ctx, c),
+        System::Devshell(c) => systems::devshell::run(&ctx, c),
         System::Probe { account } => systems::probe::run(&ctx, account.as_deref()),
         System::Ask(_) | System::Supervise { .. } | System::Profiles | System::Config(_) => {
             unreachable!("runs without a project context")

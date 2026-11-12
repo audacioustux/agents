@@ -161,7 +161,9 @@ impl Room {
 
     /// Whether `home` takes a session on `model` now (`now_us`, bus time): a seat free under
     /// `limits.per_account` (per provider on omp), and its own state and quota fit
-    /// ([`accounts::fit`]). `Ok` is how good a fit it is.
+    /// ([`accounts::fit`]). `Ok` is how good a fit it is: its room per day shared among the
+    /// sessions on its seat and the new one, so a pass that books a start here ([`Room::take`])
+    /// judges the next job with it, and a burst spreads over accounts with like room.
     pub fn admit(&self, limits: &Limits, home: &Home, model: Option<&str>, now_us: u64) -> Result<f64, Refused> {
         let key = home.key();
         let draws = accounts::draws(model, "", home.harness);
@@ -172,7 +174,7 @@ impl Room {
             format!("busy ({taken} of {} seat{s}{on})", limits.per_account)
         });
         match (accounts::fit(home, self.accounts.get(&key), model, limits, now_us), busy) {
-            (Ok(score), None) => Ok(score),
+            (Ok(score), None) => Ok(share(score, taken)),
             (fit, busy) => Err(Refused { busy, fit: fit.err() }),
         }
     }
@@ -228,6 +230,12 @@ impl Room {
         }
         Start { job: j.name.clone(), account, model, provider }
     }
+}
+
+/// `score` shared among the `taken` sessions on its seat and one more.
+#[allow(clippy::cast_precision_loss, reason = "a handful of sessions")]
+fn share(score: f64, taken: usize) -> f64 {
+    score / (taken + 1) as f64
 }
 
 /// What `world` and `others` know of the accounts `found`, merged and settled against their files.

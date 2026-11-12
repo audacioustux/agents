@@ -380,7 +380,8 @@ pub fn model_for(cfg: &Config, job: &Job, harness: &str) -> Option<String> {
 
 /// Of the accounts that fit, the one a resumable session already ran on, so
 /// the provider's prompt cache still holds its transcript (moving it means
-/// re-reading all of it at full price); otherwise the best-scoring one.
+/// re-reading all of it at full price); otherwise the best-scoring one, its room shared among the
+/// sessions it runs ([`Room::admit`]).
 /// A fork that has no session of its own yet prefers the account of the session it forks.
 fn choose<'a>(job: &Job, fits: &[(&'a Home, f64)]) -> Option<&'a Home> {
     let fork = job.fork.as_ref().filter(|f| job.session_id.as_deref().is_none_or(|s| s == f.session_id));
@@ -753,6 +754,88 @@ mod tests {
             provider: "minimax-code".into(),
         };
         assert_eq!(starts, [want]);
+    }
+
+    /// A config whose seats and running limit leave a burst of 12 to the accounts' room.
+    fn burst_config() -> (crate::config::tempdir::Dir, Config) {
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let text = "name = \"demo\"\n[limits]\nmin_free_disk_gb = 0\nper_account = 16\nmax_running = 20\n";
+        let cfg = Config::parse(text, d.path()).unwrap();
+        (d, cfg)
+    }
+
+    /// Claude accounts, each `(label, utilization, hours to its reset)` read at `read_at`, and
+    /// `jobs` read-only jobs queued at `NOW_US`.
+    fn burst(accounts: &[(&str, f64, i64)], read_at: u64, jobs: usize) -> (World, Vec<Home>) {
+        let now_s = i64::try_from(NOW_US / 1_000_000).unwrap();
+        let mut world = World::default();
+        for &(label, utilization, hours) in accounts {
+            let meters = [("seven_day".to_owned(), Meter { utilization, resets_at: Some(now_s + hours * 3600) })];
+            let st = AccountState { read_at: Some(read_at), meters: meters.into(), ..Default::default() };
+            world.accounts.insert(format!("claude:{label}"), st);
+        }
+        for i in 0..jobs {
+            let j = Job {
+                name: format!("j{i:02}"),
+                status: Status::Queued,
+                kind: crate::bus::Kind::Read,
+                created_at: i as u64,
+                queued_at: NOW_US,
+                ..Job::default()
+            };
+            world.jobs_mut().insert(j.name.clone(), j);
+        }
+        (world, accounts.iter().map(|(label, ..)| home("claude", label)).collect())
+    }
+
+    /// How many of `starts` each account took.
+    fn spread(starts: &[(String, String)]) -> BTreeMap<String, usize> {
+        let mut n = BTreeMap::new();
+        for (_, account) in starts {
+            *n.entry(account.clone()).or_default() += 1;
+        }
+        n
+    }
+
+    /// The incident of 2026-11-12: twelve jobs queued at once all went to one account, since its
+    /// score did not change as the pass booked sessions on it. Shared among its sessions, it does.
+    #[test]
+    fn a_burst_spreads_over_accounts_with_like_room() {
+        let (_d, cfg) = burst_config();
+        let (world, found) = burst(&[("a", 0.30, 72), ("b", 0.32, 72), ("c", 0.31, 72)], NOW_US - 1, 12);
+        let (starts, held) = plan_among(&cfg, &world, &[], &found);
+        assert_eq!(starts.len(), 12, "{:?}", held.0);
+        let n = spread(&starts);
+        assert!(n.values().all(|&k| (3..=5).contains(&k)) && n.len() == 3, "{n:?}");
+    }
+
+    /// Room that a reset soon would take away still goes first, and gets the larger share.
+    #[test]
+    fn an_account_resetting_soon_with_more_room_takes_more_of_a_burst() {
+        let (_d, cfg) = burst_config();
+        // a: 50% left a day before its reset; b and c: 70% left with six days to go.
+        let (world, found) = burst(&[("a", 0.5, 24), ("b", 0.3, 144), ("c", 0.3, 144)], NOW_US - 1, 12);
+        let (starts, _) = plan_among(&cfg, &world, &[], &found);
+        let n = spread(&starts);
+        assert_eq!(starts[0].1, "claude:a", "the first start");
+        assert!(n["claude:a"] > n["claude:b"] + n["claude:c"], "{n:?}");
+        assert!(n["claude:b"] >= 1 && n["claude:c"] >= 1, "{n:?}");
+    }
+
+    /// A job that resumes a session stays on its transcript's account, however the burst spreads.
+    #[test]
+    fn a_resumed_job_in_a_burst_stays_on_its_transcripts_account() {
+        let (_d, cfg) = burst_config();
+        let (mut world, found) = burst(&[("a", 0.5, 24), ("b", 0.3, 144), ("c", 0.3, 144)], NOW_US - 1, 12);
+        for name in ["j00", "j05", "j11"] {
+            let j = world.jobs_mut().get_mut(name).unwrap();
+            (j.session_id, j.transcript_account) = (Some(format!("s-{name}")), Some("claude:c".into()));
+        }
+        let (starts, _) = plan_among(&cfg, &world, &[], &found);
+        for name in ["j00", "j05", "j11"] {
+            assert!(starts.contains(&(name.to_owned(), "claude:c".to_owned())), "{name}: {starts:?}");
+        }
     }
 
     #[test]

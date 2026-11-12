@@ -11,11 +11,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::symbols::Marker;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Axis, Chart, Dataset, GraphType, Paragraph, Widget};
+use ratatui::widgets::{Axis, Chart, Dataset, GraphType, Widget};
 use serde::Serialize;
 use serde_json::json;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::bus::{Event, QuotaEvent, Stamped, now_micros};
 use crate::config::Limits;
@@ -138,7 +137,7 @@ const PALETTE: [Color; 12] = [
     Color::LightBlue,
     Color::Red,
 ];
-/// The chart's rows, its axes and labels included.
+/// The chart's rows, its axes and labels included: the heading and legend are lines of their own.
 const CHART_ROWS: u16 = 18;
 
 /// One series as the chart draws it: its colour, its points (seconds, percent) and its legend.
@@ -148,6 +147,24 @@ struct Drawn {
     data: Vec<(f64, f64)>,
     label: String,
 }
+
+/// A floor drawn across the chart: its legend, its mark and its level (a fraction).
+#[derive(Debug)]
+struct Floor {
+    name: String,
+    mark: char,
+    level: f64,
+}
+
+/// Bus time (microseconds) as the chart's x: seconds.
+#[allow(clippy::cast_precision_loss, reason = "bus time in seconds fits an f64 exactly")]
+fn x(us: u64) -> f64 {
+    (us / 1_000_000) as f64
+}
+
+/// The time format of the x labels and the legend.
+const FMT: &str = "%b %-d %H:%M";
+const DIM: Style = Style::new().fg(Color::DarkGray);
 
 /// What one chart draws: `history` from `since` to `now` (bus time), its times in `tz`, the floors by `limits`.
 #[derive(Debug)]
@@ -160,12 +177,6 @@ pub struct Usage<'a> {
 }
 
 impl Usage<'_> {
-    /// The rows it takes: a heading, the chart, then one legend line per series and per floor.
-    pub fn height(&self) -> u16 {
-        let lines = self.history.each().count() + 1 + usize::from(self.limits.floor_near_reset.is_some());
-        1 + CHART_ROWS + u16::try_from(lines).unwrap_or(u16::MAX - CHART_ROWS - 1)
-    }
-
     fn time(&self, us: u64, fmt: &str) -> String {
         i64::try_from(us)
             .ok()
@@ -178,29 +189,25 @@ impl Usage<'_> {
         format!("quota since {}, {meter}", self.time(self.filter.since, "%b %-d %H:%M %Z"))
     }
 
-    pub fn draw(&self, area: Rect, buf: &mut Buffer) {
-        #[allow(clippy::cast_precision_loss, reason = "bus time in seconds fits an f64 exactly")]
-        let x = |us: u64| (us / 1_000_000) as f64;
-        let (x0, x1) = (x(self.filter.since), x(self.now).max(x(self.filter.since) + 1.0));
-        let floor = |f: f64| vec![(x0, f * 100.0), (x1, f * 100.0)];
-        let floors: Vec<(String, Vec<(f64, f64)>)> =
-            std::iter::once((format!("floor {:.0}%", self.limits.floor * 100.0), floor(self.limits.floor)))
-                .chain(self.limits.floor_near_reset.map(|n| {
-                    (
-                        format!("floor {:.0}% in the last {}h before a reset", n.floor * 100.0, n.within_hours),
-                        floor(n.floor),
-                    )
-                }))
-                .collect();
-        let fmt = "%b %-d %H:%M";
-        let series: Vec<Drawn> = self
-            .history
+    fn floors(&self) -> Vec<Floor> {
+        let l = self.limits;
+        let floor = Floor { name: format!("floor {:.0}%", l.floor * 100.0), mark: '┄', level: l.floor };
+        let near = l.floor_near_reset.map(|n| Floor {
+            name: format!("floor {:.0}% in the last {}h before a reset", n.floor * 100.0, n.within_hours),
+            mark: '╌',
+            level: n.floor,
+        });
+        std::iter::once(floor).chain(near).collect()
+    }
+
+    fn series(&self) -> Vec<Drawn> {
+        self.history
             .each()
             .enumerate()
             .map(|(i, (account, meter, points))| {
                 let last = points.last().map_or_else(String::new, |p| {
                     let reset = p.resets_at.map_or_else(String::new, |r| {
-                        format!(", resets {}", self.time(u64::try_from(r).unwrap_or(0) * 1_000_000, fmt))
+                        format!(", resets {}", self.time(u64::try_from(r).unwrap_or(0) * 1_000_000, FMT))
                     });
                     format!("  {:.0}% at the last reading{reset}, {} reading(s)", p.utilization * 100.0, points.len())
                 });
@@ -210,20 +217,22 @@ impl Usage<'_> {
                     label: format!("{account} {}{last}", gauge::heading(meter)),
                 }
             })
+            .collect()
+    }
+
+    /// The chart alone (its axes, floors and series), filling `area`.
+    pub fn draw(&self, area: Rect, buf: &mut Buffer) {
+        let (x0, x1) = (x(self.filter.since), x(self.now).max(x(self.filter.since) + 1.0));
+        let floors: Vec<(Marker, Vec<(f64, f64)>)> = self
+            .floors()
+            .iter()
+            .map(|f| (Marker::Custom(f.mark), vec![(x0, f.level * 100.0), (x1, f.level * 100.0)]))
             .collect();
-
-        let mut rows = area;
-        Paragraph::new(self.heading()).render(Rect { height: 1, ..rows }, buf);
-        rows.y += 1;
-        rows.height = rows.height.saturating_sub(1);
-
+        let series = self.series();
         // The floors first, so an account's line is drawn over them.
-        let dim = Style::new().fg(Color::DarkGray);
-        let floor_marks = [Marker::Custom('┄'), Marker::Custom('╌')];
         let mut datasets: Vec<Dataset<'_>> = floors
             .iter()
-            .zip(floor_marks)
-            .map(|((_, d), mark)| Dataset::default().marker(mark).graph_type(GraphType::Line).style(dim).data(d))
+            .map(|(mark, d)| Dataset::default().marker(*mark).graph_type(GraphType::Line).style(DIM).data(d))
             .collect();
         datasets.extend(series.iter().map(|d| {
             Dataset::default()
@@ -232,28 +241,72 @@ impl Usage<'_> {
                 .style(Style::new().fg(d.color))
                 .data(&d.data)
         }));
-        let mut labels = vec![self.time(self.filter.since, fmt)];
+        let mut labels = vec![self.time(self.filter.since, FMT)];
         if area.width >= 60 {
-            labels.push(self.time(u64::midpoint(self.filter.since, self.now), fmt));
+            labels.push(self.time(u64::midpoint(self.filter.since, self.now), FMT));
         }
-        labels.push(self.time(self.now, &format!("{fmt} %Z")));
-        let chart = Chart::new(datasets)
+        labels.push(self.time(self.now, &format!("{FMT} %Z")));
+        Chart::new(datasets)
             .legend_position(None)
-            .x_axis(Axis::default().bounds([x0, x1]).labels(labels).style(dim))
-            .y_axis(Axis::default().bounds([0.0, 100.0]).labels(["0%", "50%", "100%"]).style(dim));
-        chart.render(Rect { height: CHART_ROWS.min(rows.height), ..rows }, buf);
-        rows.y += CHART_ROWS;
-        rows.height = rows.height.saturating_sub(CHART_ROWS);
-
-        let mut legend: Vec<Line<'_>> = series
-            .iter()
-            .map(|d| Line::from(vec![Span::styled("━━ ", Style::new().fg(d.color)), Span::raw(d.label.as_str())]))
-            .collect();
-        legend.extend(floors.iter().zip(['┄', '╌']).map(|((name, _), mark)| {
-            Line::from(vec![Span::styled(format!("{mark}{mark} "), dim), Span::raw(name.clone())])
-        }));
-        Paragraph::new(legend).render(rows, buf);
+            .x_axis(Axis::default().bounds([x0, x1]).labels(labels).style(DIM))
+            .y_axis(Axis::default().bounds([0.0, 100.0]).labels(["0%", "50%", "100%"]).style(DIM))
+            .render(area, buf);
     }
+
+    /// The legend: a line per series (its colour sample, account, meter, last reading and reset)
+    /// and per floor, each as (sample, its colour, words).
+    fn legend(&self) -> Vec<(String, Color, String)> {
+        let series = self.series().into_iter().map(|d| ("━━ ".to_owned(), d.color, d.label));
+        let floors = self.floors().into_iter().map(|f| (format!("{0}{0} ", f.mark), Color::DarkGray, f.name));
+        series.chain(floors).collect()
+    }
+
+    /// The whole view as text: the heading, the chart `width` columns wide (100 where no width is
+    /// known), then the legend. Heading and legend are lines of their own, wrapped to `width` when
+    /// it is known, never cut; with `colour`, each sample in its series' colour.
+    pub fn print(&self, width: Option<usize>, colour: bool) -> String {
+        let cols = width.unwrap_or(100);
+        let area = Rect::new(0, 0, u16::try_from(cols).unwrap_or(u16::MAX), CHART_ROWS);
+        let mut buf = Buffer::empty(area);
+        self.draw(area, &mut buf);
+        let mut lines = wrap("", &self.heading(), width);
+        lines.push(text(&buf, colour));
+        for (sample, color, words) in self.legend() {
+            let shown = if colour { format!("\x1b[{}m{sample}\x1b[39m", sgr(color)) } else { sample.clone() };
+            let mut wrapped = wrap(&" ".repeat(sample.width()), &words, width.map(|w| w.max(sample.width() + 1)));
+            if let Some(first) = wrapped.first_mut() {
+                first.replace_range(..sample.width(), &shown);
+            }
+            lines.extend(wrapped);
+        }
+        lines.join("\n")
+    }
+}
+
+/// `words` after `indent` on every line, wrapped at spaces to `width` display columns (a word wider
+/// than a line is broken); one line when no width is given.
+fn wrap(indent: &str, words: &str, width: Option<usize>) -> Vec<String> {
+    let Some(width) = width else { return vec![format!("{indent}{words}")] };
+    let room = width.saturating_sub(indent.width()).max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in words.split(' ') {
+        let fits = line.is_empty() || line.width() + 1 + word.width() <= room;
+        if !fits {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        for c in word.chars() {
+            if line.width() + c.width().unwrap_or(0) > room {
+                lines.push(std::mem::take(&mut line));
+            }
+            line.push(c);
+        }
+    }
+    lines.push(line);
+    lines.into_iter().map(|l| format!("{indent}{}", l.trim_end())).collect()
 }
 
 /// `buf` as lines of text, trailing blanks dropped; with `colour`, each change of colour as an SGR escape.
@@ -354,16 +407,12 @@ pub fn run(scope: Scope<'_>, json: bool, mut filter: Filter, since: &str) -> Res
         return Ok(());
     }
     let size = crate::os::terminal_size();
-    let width = size.map_or(100, |(cols, _)| cols);
     let tz = TimeZone::system();
     let usage = Usage { history: &history, limits, filter: &filter, now, tz: &tz };
     if history.series.is_empty() {
         out!("{}: no readings", usage.heading());
     } else {
-        let area = Rect::new(0, 0, u16::try_from(width).unwrap_or(u16::MAX).max(40), usage.height());
-        let mut buf = Buffer::empty(area);
-        usage.draw(area, &mut buf);
-        out!("{}", text(&buf, size.is_some()));
+        out!("{}", usage.print(size.map(|(cols, _)| cols.max(40)), size.is_some()));
     }
     if !history.bare.is_empty() {
         let names = history.bare.iter().cloned().collect::<Vec<_>>().join(", ");
@@ -464,24 +513,31 @@ mod tests {
         assert!(!text.contains("sign_in") && !text.contains('@'), "meters only: {text}");
     }
 
-    #[test]
-    fn the_chart_has_its_axes_legend_and_floors() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        let limits = Limits {
+    fn limits() -> Limits {
+        Limits {
             floor: 0.5,
             floor_near_reset: Some(crate::config::NearReset { within_hours: 24.0, floor: 0.98 }),
             ..Limits::default()
-        };
-        let f = week();
+        }
+    }
+
+    /// The text `history` prints as in `width` columns, without colour.
+    fn printed(history: &History, width: Option<usize>) -> String {
+        let (f, limits, tz) = (week(), limits(), TimeZone::UTC);
+        Usage { history, limits: &limits, filter: &f, now: NOW, tz: &tz }.print(width, false)
+    }
+
+    #[test]
+    fn the_chart_has_its_axes_and_floors() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let (f, limits, tz) = (week(), limits(), TimeZone::UTC);
         let h = fold(&f);
-        let tz = TimeZone::UTC;
         let usage = Usage { history: &h, limits: &limits, filter: &f, now: NOW, tz: &tz };
-        let mut t = Terminal::new(TestBackend::new(100, usage.height())).unwrap();
+        let mut t = Terminal::new(TestBackend::new(100, CHART_ROWS)).unwrap();
         t.draw(|frame| usage.draw(frame.area(), frame.buffer_mut())).unwrap();
         let text = text(t.backend().buffer(), false);
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], "quota since Jan 8 08:00 UTC, 7-day meters", "{text}");
         assert!(lines.iter().any(|l| l.starts_with("100%")) && lines.iter().any(|l| l.starts_with("0%")), "{text}");
         let x = lines.iter().find(|l| l.contains("Jan 8 08:00") && l.contains("Jan 15 08:00 UTC")).expect(&text);
         assert!(x.contains("Jan 11 20:00"), "the middle of the window labelled: {x}");
@@ -497,11 +553,36 @@ mod tests {
         );
         assert!(lines.iter().any(|l| l.matches('╌').count() > 40), "the near-reset floor too:\n{text}");
         assert!(text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)), "the series in braille:\n{text}");
+        assert!(!text.contains('\x1b'), "plain text has no escapes");
+    }
+
+    #[test]
+    fn the_heading_and_legend_are_lines_of_their_own() {
+        let text = printed(&fold(&week()), Some(100));
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "quota since Jan 8 08:00 UTC, 7-day meters", "{text}");
+        assert_eq!(lines.len(), 1 + usize::from(CHART_ROWS) + 4, "{text}");
         let legend = &lines[lines.len() - 4..];
         assert!(legend[0].starts_with("━━ claude:a 7 days  5% at the last reading, resets "), "{legend:?}");
         assert!(legend[1].starts_with("━━ omp:w openai-codex/7 days  50% at the last reading"), "{legend:?}");
         assert_eq!(legend[2..], ["┄┄ floor 50%", "╌╌ floor 98% in the last 24h before a reset"]);
-        assert!(!text.contains('\x1b'), "plain text has no escapes");
+        let piped = printed(&fold(&week()), None);
+        assert!(piped.lines().any(|l| l.starts_with("━━ claude:a 7 days") && l.ends_with("3 reading(s)")), "{piped}");
+    }
+
+    #[test]
+    fn at_60_columns_every_legend_keeps_its_reset_time() {
+        let week = 1_800_500_000;
+        let b = [vec![
+            reading(NOW - 2 * H, "claude:a-rather-long-account-label", &[("seven_day", 0.4, week)]),
+            reading(NOW - H, "omp:another-long-label", &[("openai-codex/7 days", 0.6, week)]),
+        ]];
+        let text = printed(&History::fold(b.iter().map(Vec::as_slice), &super::tests::week()), Some(60));
+        assert!(text.lines().all(|l| l.width() <= 60), "{text}");
+        // A legend wrapped onto more lines is still one: its words in order, its reset time whole.
+        let legend = text.lines().skip(1 + usize::from(CHART_ROWS)).collect::<Vec<_>>().join(" ");
+        let squeezed = legend.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(squeezed.matches("resets Jan 21 02:53, 1 reading(s)").count(), 2, "{text}");
     }
 
     #[test]

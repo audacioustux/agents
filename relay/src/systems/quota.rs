@@ -737,7 +737,7 @@ fn machine_wide(room: &Room, now: u64) -> AccountsView {
             state,
             meters: st.map(|s| &s.meters),
             read_at: st.and_then(|s| s.read_at),
-            read_failure: st.and_then(|s| s.failing.as_ref()).map(crate::world::Failing::describe),
+            read_failure: st.and_then(AccountState::failure).map(|f| f.describe()),
             score: None,
             floor: Floor::default(),
             by_model: Vec::new(),
@@ -834,7 +834,7 @@ impl<'a> Judge<'a> {
             state: own.state,
             meters: st.map(|s| &s.meters),
             read_at: st.and_then(|s| s.read_at),
-            read_failure: st.and_then(|s| s.failing.as_ref()).map(crate::world::Failing::describe),
+            read_failure: st.and_then(AccountState::failure).map(|f| f.describe()),
             score: own.score,
             floor: own.floor,
             by_model: by_model
@@ -1441,6 +1441,23 @@ mod tests {
         let long = ReadFailure::exited(Some(1), &format!("{}\n", "word ".repeat(100)));
         let ReadFailure::Exited { stderr, .. } = long else { panic!() };
         assert!(stderr.chars().count() <= ReadFailure::TAIL, "{}", stderr.len());
+    }
+
+    /// Review of #64: a stderr tail is persisted and later printed to a terminal, so it holds no control
+    /// character, an escape or a one-character CSI (U+009B) included.
+    #[test]
+    fn a_stderr_tail_holds_no_terminal_control() {
+        for raw in ["error: \x1b[2Jrefused\n", "error: \u{9b}2Jrefused", "a\rb\x07c\x7fd"] {
+            let ReadFailure::Exited { stderr, .. } = ReadFailure::exited(Some(1), raw) else { panic!() };
+            assert!(!stderr.chars().any(char::is_control), "{raw:?} -> {stderr:?}");
+        }
+        let ReadFailure::Exited { stderr, .. } = ReadFailure::exited(Some(1), "error: \x1b[2Jrefused") else {
+            panic!()
+        };
+        assert_eq!(stderr, "error: [2Jrefused");
+        // An event that carries one (written by hand, or by another build) is still printed clean.
+        let hand = ReadFailure::Exited { code: Some(1), stderr: "x\x1b[2Jy".into() };
+        assert!(!hand.describe().chars().any(char::is_control), "{:?}", hand.describe());
     }
 
     #[test]

@@ -131,7 +131,7 @@ pub fn settle(world: &mut World, found: &[Home]) {
         if let SignIn::As(id) = &current
             && a.sign_in.as_ref().is_some_and(|s| *s != id.stamp)
         {
-            (a.read_at, a.unreadable_at, a.signed_out) = (None, None, false);
+            (a.read_at, a.unreadable_at, a.signed_out, a.failing) = (None, None, false, None);
         }
     }
     for (twin, first) in twins(found) {
@@ -262,7 +262,7 @@ impl Refusal {
 
 /// Why the reads since the last good one gave nothing, in words, when they did not.
 fn failing(state: Option<&AccountState>) -> Option<String> {
-    state?.failing.as_ref().map(crate::world::Failing::describe)
+    state?.failure().map(|f| f.describe())
 }
 
 /// The account's own state, before any job is considered.
@@ -457,10 +457,19 @@ mod tests {
         w.accounts.insert("claude:c".into(), out);
         settle(&mut w, &found);
         assert!(w.accounts["claude:c"].signed_out, "the sign-in is the one it was found signed out under");
+        // A reading that works on a twin ends what a failed read of this home said.
+        let failed = crate::world::Failing { why: crate::bus::ReadFailure::NoMeters, tries: 2, since: 1, last: 4 };
+        w.accounts.get_mut("claude:b").unwrap().failing = Some(failed.clone());
+        w.accounts.get_mut("claude:b").unwrap().read_at = Some(3);
+        settle(&mut w, &found);
+        assert_eq!(w.accounts["claude:b"].failure(), None, "claude:a was read at 5, after the failure at 4");
+        // A new sign-in is a new account: nothing said about the old one stands.
+        w.accounts.get_mut("claude:c").unwrap().failing = Some(failed);
         let again = signed_in(d.path(), "c", Some((three, "Pro")));
         settle(&mut w, &[again]);
         let c = &w.accounts["claude:c"];
         assert!(!c.signed_out && c.read_at.is_none(), "a new sign-in is read again and no longer taken for lapsed");
+        assert!(c.failing.is_none(), "and a failed read of the old sign-in says nothing of it");
     }
 
     #[test]

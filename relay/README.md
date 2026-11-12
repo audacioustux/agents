@@ -925,7 +925,7 @@ under load (58 s at load average 77). A read that gives nothing records why (`un
 email address or a token taken out; no raw output is kept), or `printed no meters`, with how many reads
 in a row failed and since when. The board's state cell, `quota show --json` (`readFailure`) and a
 queued job's reason say it instead of `stale` or `usage unreadable`: `reading timed out after 180 s
-(3 tries since Nov 12 18:08 +06)`. A reading that works clears it. An account is used only when:
+(3 tries since Nov 12 18:08 +06)`. Any good reading ends it, however it came (the quota command, a session's rate events, another project's or a twin home's reading); a failure after it starts a count of its own. The stderr tail has terminal controls replaced. An account is used only when:
 
 - it has a reading, and not a stale one (unread or stale is not the same as
   having room; a job waits while a fresh one is taken);

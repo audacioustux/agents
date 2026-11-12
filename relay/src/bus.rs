@@ -541,6 +541,8 @@ impl ReadFailure {
     /// token (an `@`, or 24 or more letters and digits) replaced by `…`.
     pub fn exited(code: Option<i32>, stderr: &str) -> Self {
         let line = stderr.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+        // No terminal control survives: the tail is persisted and printed on the board.
+        let line = crate::harness::printable(line);
         let words: Vec<&str> =
             line.split_whitespace()
                 .map(|w| {
@@ -566,6 +568,8 @@ impl ReadFailure {
             Self::TimedOut { secs } => format!("timed out after {secs} s"),
             Self::Exited { code, stderr } => {
                 let code = code.map_or_else(|| "ended abnormally".to_owned(), |c| format!("exited {c}"));
+                // Printed clean even when the event came from elsewhere.
+                let stderr = crate::harness::printable(stderr);
                 if stderr.is_empty() { code } else { format!("{code}: {stderr}") }
             }
             Self::NoMeters => "printed no meters".into(),

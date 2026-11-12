@@ -293,9 +293,32 @@ pub struct Failing {
     pub tries: u32,
     /// Unix microseconds of the first.
     pub since: u64,
+    /// Unix microseconds of the latest: the streak ends at a good reading after it.
+    #[serde(default)]
+    pub last: u64,
+}
+
+impl AccountState {
+    /// The failed reads since the last good one, however it came (a quota command, a session's rate
+    /// events, a twin home's reading, another project's): the streak as it stands after `read_at`.
+    /// What every reader of `failing` asks, so a good reading needs no clearing on the path it came by.
+    pub fn failure(&self) -> Option<Failing> {
+        self.failing.as_ref().and_then(|f| f.after(self.read_at))
+    }
 }
 
 impl Failing {
+    /// The streak as it stands after a good reading at `read_at`: none when the last failure came
+    /// before it; when the reading came in the middle, the failures before it no longer count, and
+    /// only the latest is known to follow it, so it is one try, started then.
+    pub fn after(&self, read_at: Option<u64>) -> Option<Self> {
+        match read_at {
+            Some(r) if self.last <= r => None,
+            Some(r) if self.since <= r => Some(Self { tries: 1, since: self.last, ..self.clone() }),
+            _ => Some(self.clone()),
+        }
+    }
+
     /// `timed out after 90 s (3 tries since Nov 12 18:08 +06)`.
     pub fn describe(&self) -> String {
         let tries = if self.tries == 1 { "1 try".to_owned() } else { format!("{} tries", self.tries) };
@@ -488,7 +511,7 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// fixed bus, so a fold that changes without a bump fails the tests.
 /// 13: `dispatched` records the model and provider; a job back in the queue has no account.
 /// 14: the development environment's warm-ups (`devshell`).
-const FOLD_VERSION: u32 = 15;
+const FOLD_VERSION: u32 = 16;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -558,11 +581,12 @@ pub fn merge_account(ours: &AccountState, theirs: &AccountState) -> AccountState
         meters,
         read_at,
         unreadable_at: ours.unreadable_at.max(theirs.unreadable_at),
-        // The later failure's account of itself, unless a reading came after it.
-        failing: (if theirs.unreadable_at > ours.unreadable_at { theirs } else { ours })
-            .failing
-            .clone()
-            .filter(|f| read_at.is_none_or(|r| f.since > r)),
+        // The later failed attempt's account of itself, as the merged reading leaves it.
+        failing: match (&ours.failing, &theirs.failing) {
+            (Some(o), Some(t)) if t.last > o.last => Some(t),
+            (o, t) => o.as_ref().or(t.as_ref()),
+        }
+        .and_then(|f| f.after(read_at)),
         limited_until: ours.limited_until.max(theirs.limited_until),
         sign_in,
         unsigned: ours.unsigned,
@@ -1094,10 +1118,13 @@ impl World {
             QuotaEvent::Unreadable { account, why } => {
                 let a = self.account(account);
                 a.unreadable_at = Some(t);
+                // A streak goes on from the failure before it, unless a reading came between.
+                let before = a.failure();
                 a.failing = why.as_ref().map(|why| Failing {
                     why: why.clone(),
-                    tries: a.failing.as_ref().map_or(1, |f| f.tries.saturating_add(1)),
-                    since: a.failing.as_ref().map_or(t, |f| f.since),
+                    tries: before.as_ref().map_or(1, |f| f.tries.saturating_add(1)),
+                    since: before.as_ref().map_or(t, |f| f.since),
+                    last: t,
                 });
             }
         }
@@ -1473,8 +1500,12 @@ mod tests {
     /// new pair; never change a pair already recorded.
     #[test]
     fn the_fold_version_moves_with_the_fold() {
-        const PINNED: &[(u32, u64)] =
-            &[(13, 0x1d75_bf1b_971c_dfd9), (14, 0x0599_7a27_1a95_7bbd), (15, 0x5351_e6de_0d8d_bfd8)];
+        const PINNED: &[(u32, u64)] = &[
+            (13, 0x1d75_bf1b_971c_dfd9),
+            (14, 0x0599_7a27_1a95_7bbd),
+            (15, 0x5351_e6de_0d8d_bfd8),
+            (16, 0x5351_e6de_0d8d_bfd8),
+        ];
         let dispatched = |t, model: Option<&str>| {
             st(
                 t,
@@ -1777,6 +1808,22 @@ mod tests {
         assert_eq!(j.attempts, 1);
         assert!((j.cost_usd - 0.5).abs() < 1e-9);
         assert_eq!(w.accounts["x"].limited_until, Some(100));
+    }
+
+    /// Review of #64: every way an account gets a good reading ends what a failed one said, and a
+    /// failure after it starts a streak of its own.
+    #[test]
+    fn a_session_rate_ends_the_streak_of_failed_reads_too() {
+        let bad = |t| {
+            let why = Some(ReadFailure::TimedOut { secs: 180 });
+            st(t, Event::Quota(QuotaEvent::Unreadable { account: "x".into(), why }))
+        };
+        let rate = st(5, Event::Session(SessionEvent::Rate { account: "x".into(), meters: Meters::new() }));
+        let w = World::fold(&[bad(2), bad(3), rate.clone()]);
+        assert_eq!(w.accounts["x"].failure(), None, "a session that streamed the account's meters read it");
+        let w = World::fold(&[bad(2), bad(3), rate, bad(7)]);
+        let f = w.accounts["x"].failure().unwrap();
+        assert_eq!((f.tries, f.since), (1, 7), "the earlier failures are before the reading");
     }
 
     #[test]
@@ -2294,6 +2341,42 @@ mod tests {
             assert_eq!(merge_account(&at(Some(5)), &at(Some(9))).unreadable_at, Some(9));
             assert_eq!(merge_account(&at(Some(9)), &at(Some(5))).unreadable_at, Some(9));
             assert_eq!(merge_account(&at(None), &at(Some(5))).unreadable_at, Some(5));
+        }
+
+        /// Review of #64: A fails at 10 and 30, B reads fine at 20. The failure at 30 is after the reading,
+        /// so it stands, as one try (the one at 10 is before the reading and no longer counts).
+        #[test]
+        fn a_failure_after_the_other_projects_reading_keeps_its_reason_and_restarts_the_streak() {
+            let timed_out = ReadFailure::TimedOut { secs: 180 };
+            let a = World::fold(&[
+                super::st(
+                    10,
+                    Event::Quota(QuotaEvent::Unreadable { account: "x".into(), why: Some(timed_out.clone()) }),
+                ),
+                super::st(
+                    30,
+                    Event::Quota(QuotaEvent::Unreadable { account: "x".into(), why: Some(timed_out.clone()) }),
+                ),
+            ]);
+            let b = World::fold(&[super::st(
+                20,
+                Event::Quota(QuotaEvent::Reading { account: "x".into(), meters: Meters::new(), sign_in: None }),
+            )]);
+            for merged in
+                [merge_account(&a.accounts["x"], &b.accounts["x"]), merge_account(&b.accounts["x"], &a.accounts["x"])]
+            {
+                let f = merged.failure().expect("the failure at 30 is after the reading at 20");
+                assert_eq!((f.tries, f.since, f.last, &f.why), (1, 30, 30, &timed_out));
+            }
+            // A reading after the last failure ends the streak whichever project took it.
+            let late = World::fold(&[super::st(
+                40,
+                Event::Quota(QuotaEvent::Reading { account: "x".into(), meters: Meters::new(), sign_in: None }),
+            )]);
+            assert_eq!(merge_account(&a.accounts["x"], &late.accounts["x"]).failure(), None);
+            // No reading in between: the streak is as it was.
+            let f = merge_account(&a.accounts["x"], &AccountState::default()).failing.unwrap();
+            assert_eq!((f.tries, f.since, f.last), (2, 10, 30));
         }
 
         #[test]

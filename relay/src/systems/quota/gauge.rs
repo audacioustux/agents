@@ -134,6 +134,12 @@ pub fn heading(window: &str) -> String {
     }
 }
 
+/// Whether a meter is a 7-day window, as its [`heading`] says: claude's and puku's `seven_day`, or a
+/// provider's (`openai-codex/7 days`).
+pub fn weekly(window: &str) -> bool {
+    heading(window).rsplit('/').next() == Some("7 days")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

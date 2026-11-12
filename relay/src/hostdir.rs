@@ -252,7 +252,7 @@ mod tests {
         std::fs::write(stuck.join("f"), "x").unwrap();
         std::fs::write(work.join("tmp/.tmpAbC1/g"), "x").unwrap();
         for p in [&stuck, &work.join("tmp/.tmpAbC1")] {
-            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0)).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o0)).unwrap();
         }
         // A read-only one, too: listable, not writable.
         let ro = work.join("tmp/ro");
@@ -281,7 +281,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, tree.join("a/dir")).unwrap();
         std::os::unix::fs::symlink(outside.join("keep"), tree.join("file")).unwrap();
         std::os::unix::fs::symlink(d.path().join("missing"), tree.join("dangling")).unwrap();
-        std::fs::set_permissions(tree.join("a"), std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(tree.join("a"), std::fs::Permissions::from_mode(0o0)).unwrap();
         remove_tree(&tree).unwrap();
         assert!(!tree.exists());
         assert_eq!(mode(&outside), 0o751, "the target's mode is untouched");

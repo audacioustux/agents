@@ -56,9 +56,9 @@ impl Role {
 }
 
 /// A shared hold on a seat's lock file ([`seat_held`]): the booker of a session that is no job's own
-/// run takes one before it records the seat, and the session's supervisor another that its whole
-/// process tree inherits ([`SeatHold::inheritable`]), so the seat stays taken until the last of them
-/// has ended, however the booker ends.
+/// run takes one before it records the seat, and the session's supervisor another for its whole life,
+/// which ends only once every process of the session's tree has (`supervised::supervise`), so the
+/// seat stays taken until then, however the booker ends.
 #[derive(Debug)]
 pub struct SeatHold(#[allow(dead_code)] File);
 
@@ -68,15 +68,6 @@ impl SeatHold {
         let f = Role::open(path)?;
         flock(&f, FlockOperation::LockShared).context("flock")?;
         Ok(Self(f))
-    }
-
-    /// The same hold on `path`, which must exist, opened without close-on-exec: every child of the
-    /// holder inherits it, and everything they start, so it lasts until that whole tree has ended.
-    pub fn inheritable(path: &Path) -> Result<OwnedFd> {
-        let fd = rustix::fs::open(path, rustix::fs::OFlags::RDWR, rustix::fs::Mode::empty())
-            .with_context(|| format!("opening {}", path.display()))?;
-        flock(&fd, FlockOperation::LockShared).context("flock")?;
-        Ok(fd)
     }
 }
 
@@ -165,21 +156,34 @@ pub fn signal_if_same(pid: u32, started: u64, sig: Signal) -> Result<bool> {
     }
 }
 
-/// The live processes (not zombies) in process group `pgid` (field 5 of /proc/<pid>/stat).
-pub fn group_members(pgid: u32) -> Vec<u32> {
+/// The parent of `pid` while it lives (a zombie has none here).
+pub fn parent_of(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.get(stat.rfind(')')? + 2..)?;
+    let mut fields = after.split_whitespace();
+    // `after` starts at field 3 (state); field 4 is the parent.
+    if fields.next()? == "Z" {
+        return None;
+    }
+    fields.next()?.parse().ok()
+}
+
+/// Every live descendant of `root`, by the parents `/proc` gives now.
+pub fn descendants(root: u32) -> Vec<u32> {
     let Ok(entries) = std::fs::read_dir("/proc") else { return Vec::new() };
-    entries
+    let all: Vec<(u32, u32)> = entries
         .flatten()
-        .filter_map(|e| {
-            let pid = e.file_name().to_str()?.parse::<u32>().ok()?;
-            let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
-            let after = stat.get(stat.rfind(')')? + 2..)?;
-            let mut fields = after.split_whitespace();
-            // `after` starts at field 3 (state); field 5 is the process group.
-            let state = fields.next()?;
-            (state != "Z" && fields.nth(1)?.parse::<u32>().ok()? == pgid).then_some(pid)
-        })
-        .collect()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter_map(|pid| Some((pid, parent_of(pid)?)))
+        .collect();
+    let mut tree = vec![root];
+    let mut i = 0;
+    while let Some(&parent) = tree.get(i) {
+        tree.extend(all.iter().filter(|&&(_, pp)| pp == parent).map(|&(pid, _)| pid));
+        i += 1;
+    }
+    tree.remove(0);
+    tree
 }
 
 /// SIGKILL to a process group: a supervisor relay started as a group leader and has not reaped, with

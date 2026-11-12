@@ -710,7 +710,8 @@ const SEAT_REREAD: Duration = Duration::from_secs(30);
 
 /// A decision's seat, booked on the bus: given back when dropped, however the session went.
 /// The seat's lock is held by this process from before the booking is recorded, and by the session's
-/// supervisor and its whole tree (`relay supervise --hold`): the seat counts while any of them lives.
+/// supervisor (`relay supervise --hold`) until it has ended and reaped every process of the session's
+/// tree, sandbox and `setsid` orphans too: the seat counts while either holds it.
 struct Booking<'a> {
     ctx: &'a Ctx,
     id: &'a str,
@@ -739,9 +740,13 @@ impl Drop for Booking<'_> {
         {
             eprintln!("{} decision {}: its seat was not given back: {e:#}", crate::os::stamp(), self.id);
         }
+        // Its own hold only: the lock file goes only when nobody else holds it (a supervisor still
+        // ending its tree does, and a seat whose lock file is gone would look free).
         if let Some((hold, path)) = self.hold.take() {
             drop(hold);
-            let _ = std::fs::remove_file(path);
+            if let Ok(Some(_alone)) = os::Role::try_take(&path) {
+                let _ = std::fs::remove_file(&path);
+            }
         }
     }
 }

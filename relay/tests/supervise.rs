@@ -169,8 +169,8 @@ fn a_terminated_supervisor_ends_its_group() {
     let grandchild = read_pid(&pid);
     assert!(Command::new("kill").args(["-TERM", &child.id().to_string()]).status().unwrap().success());
     let status = child.wait().unwrap();
-    assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(9), "{status}");
-    assert!(eventually(|| gone(&grandchild)), "the grandchild went with the group");
+    assert_eq!(status.code(), Some(137), "it ended its tree and exited: {status}");
+    assert!(gone(&grandchild), "the grandchild was ended and reaped before it exited");
 }
 
 /// Whether a live process holds the lock `path` (exclusive or shared).
@@ -184,8 +184,8 @@ fn lock_held(path: &Path) -> bool {
 
 /// Copilot on PR #63, third pass, finding 2: a decision's seat must stay taken until its session's
 /// whole tree has stopped, not only while its runner lives. `--hold` gives the supervisor a shared
-/// hold on the seat's lock that its child inherits (and all it starts), so the lock is held until
-/// the last of them has ended.
+/// hold on the seat's lock for its whole life, which ends only after every process of the tree has
+/// (fourth pass: it is not handed down, which a sandbox would not keep, nor a process that closes it).
 #[test]
 fn a_held_seat_lock_lasts_as_long_as_the_supervised_tree() {
     let d = Dir::new("hold");
@@ -199,12 +199,81 @@ fn a_held_seat_lock_lasts_as_long_as_the_supervised_tree() {
         .spawn()
         .unwrap();
     let child = read_pid(&pid);
-    let fds = std::fs::read_dir(format!("/proc/{child}/fd")).unwrap();
-    let inherited = fds.filter_map(Result::ok).any(|e| std::fs::read_link(e.path()).is_ok_and(|l| l == lock));
-    assert!(inherited, "the supervised child holds the seat's lock itself");
-    assert!(lock_held(&lock));
+    assert!(lock_held(&lock), "held while the session runs");
     assert!(Command::new("kill").args(["-TERM", &sup.id().to_string()]).status().unwrap().success());
     sup.wait().unwrap();
-    assert!(eventually(|| gone(&child)));
-    assert!(eventually(|| !lock_held(&lock)), "the tree has ended, and its hold with it");
+    assert!(gone(&child), "the tree has ended");
+    assert!(!lock_held(&lock), "and its hold with it");
+}
+
+/// Copilot on PR #63, fourth pass, finding 2: a child that starts a grandchild in a session of its
+/// own (`setsid`) leaves the supervisor's group, so ending the group missed it, and the seat was
+/// given back while it ran. The supervisor is a subreaper: the orphan comes back to it, and it ends
+/// and reaps every descendant before it exits and lets go of the seat's lock.
+#[test]
+fn a_setsid_grandchild_holds_the_seat_until_it_has_ended_and_never_outlives_the_supervisor() {
+    let d = Dir::new("setsid");
+    let (lock, grandchild) = (d.join("seat.lock"), d.join("grandchild"));
+    std::fs::write(&lock, "").unwrap();
+    let script = format!("setsid sh -c 'echo $$ > {}; exec sleep 30' & sleep 1; exit 0", grandchild.display());
+    let mut sup = Command::new(RELAY)
+        .args(["supervise", "--parent", &std::process::id().to_string(), "--hold"])
+        .arg(&lock)
+        .args(["--", "sh", "-c", &script])
+        .spawn()
+        .unwrap();
+    let g = read_pid(&grandchild);
+    assert!(lock_held(&lock), "the seat is held while the session runs");
+    let status = sup.wait().unwrap();
+    assert!(gone(&g), "the setsid grandchild was ended before the supervisor exited ({status})");
+    assert!(!lock_held(&lock), "and only then was the seat let go");
+}
+
+/// Whether a live process has `arg` among its arguments.
+fn running_with_arg(arg: &str) -> bool {
+    std::fs::read_dir("/proc").unwrap().filter_map(Result::ok).any(|e| {
+        let name = e.file_name();
+        let Some(pid) = name.to_str().filter(|n| n.bytes().all(|b| b.is_ascii_digit())) else { return false };
+        let cmdline = std::fs::read(e.path().join("cmdline")).unwrap_or_default();
+        cmdline.split(|&b| b == 0).any(|a| a == arg.as_bytes()) && !gone(pid)
+    })
+}
+
+fn bwrap_works() -> bool {
+    Command::new("bwrap")
+        .args(["--ro-bind", "/", "/", "--unshare-pid", "true"])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Copilot on PR #63, fourth pass, finding 1: a sandboxed session's processes are bwrap's, in a pid
+/// namespace of their own; when its runner is killed, the seat must stay taken until the sandbox has
+/// exited, not only until the supervisor sees its runner gone.
+#[test]
+fn a_sandboxed_session_whose_runner_is_killed_holds_the_seat_until_the_sandbox_has_exited() {
+    if !bwrap_works() {
+        return;
+    }
+    let d = Dir::new("sandbox");
+    let lock = d.join("seat.lock");
+    std::fs::write(&lock, "").unwrap();
+    // A marker no other process on the machine has among its arguments.
+    let marker = format!("31.{}", std::process::id());
+    let sandbox = format!(
+        "bwrap --ro-bind / / --dev /dev --unshare-pid --die-with-parent --new-session sh -c 'sleep {marker} & wait'"
+    );
+    let runner = format!("{RELAY} supervise --parent $$ --hold {} -- {sandbox} & wait", lock.display());
+    let mut runner = Command::new("sh").args(["-c", &runner]).spawn().unwrap();
+    assert!(eventually(|| running_with_arg(&marker)), "the sandboxed session runs");
+    assert!(lock_held(&lock));
+    runner.kill().unwrap();
+    runner.wait().unwrap();
+    // Look as often as a dispatcher might: the moment the seat is free, nothing of the sandbox runs.
+    let start = Instant::now();
+    while lock_held(&lock) {
+        assert!(start.elapsed() < Duration::from_secs(10), "the seat is let go once the sandbox has ended");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!running_with_arg(&marker), "the seat was free while the sandbox still ran");
 }

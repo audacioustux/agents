@@ -631,8 +631,9 @@ account and meter with its last reading and when that meter resets, wrapped to
 the terminal's width, never cut. A narrow terminal gets shorter time labels, and
 a very narrow one none.
 
-- **What it reads.** The readings already on the bus (`quota` `reading` events):
-  it writes nothing, and starts no reading. In a project, its bus; outside one,
+- **What it reads.** The readings already on the bus, as the project's fold takes
+  them in: a quota command's (`quota` `reading` events) and a live session's
+  (`session` `rate` events). It writes nothing, and starts no reading. In a project, its bus; outside one,
   every project's on this machine. An account read by several projects is one
   line, its readings merged by time, one seen on two buses kept once.
 - **Which meter.** By default each account's weekly meters: those whose name, as

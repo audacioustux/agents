@@ -750,6 +750,20 @@ impl World {
         }
     }
 
+    /// The account and meters `s` read, when it is a reading this fold took in, just after
+    /// [`World::apply`] applied it: a quota command's reading, or a live session's rate (one from an
+    /// attempt that is not its job's current one is not taken in). The meters are the account's as
+    /// the fold now holds them.
+    pub(crate) fn meters_read<'s>(&self, s: &'s Stamped) -> Option<(&'s str, &Meters)> {
+        let (Event::Quota(QuotaEvent::Reading { account, .. }) | Event::Session(SessionEvent::Rate { account, .. })) =
+            &s.event
+        else {
+            return None;
+        };
+        let a = self.accounts.get(account).filter(|a| a.read_at == Some(s.t))?;
+        Some((account, &a.meters))
+    }
+
     pub fn fold(events: &[Stamped]) -> Self {
         let mut w = Self::default();
         for e in events {

@@ -1,6 +1,7 @@
 //! `relay view usage`: each account's quota over time, as a chart printed inline. A read-only fold
-//! over the readings already on the bus (`QuotaEvent::Reading`); it writes nothing and never starts a
-//! reading. Meters only: who an account is signed in as is never read here.
+//! over the readings already on the bus (a quota command's `QuotaEvent::Reading` and a live
+//! session's `SessionEvent::Rate`); it writes nothing and never starts a reading. Meters only: who
+//! an account is signed in as is never read here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -16,9 +17,10 @@ use serde::Serialize;
 use serde_json::json;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::bus::{Event, QuotaEvent, Stamped, now_micros};
+use crate::bus::{Stamped, now_micros};
 use crate::config::Limits;
 use crate::systems::quota::gauge;
+use crate::world::World;
 
 use super::machine::Scope;
 
@@ -72,22 +74,27 @@ pub struct History {
 }
 
 impl History {
-    /// The readings on `buses` that `f` lets through. The same account read by several projects is
-    /// one series, merged by time; a reading on two buses alike is kept once.
+    /// The readings on `buses` that `f` lets through: a quota command's, and a live session's
+    /// rate, each as the project's own fold takes it in ([`World::meters_read`]). The same account
+    /// read by several projects is one series, merged by time; a reading on two buses alike is kept once.
     pub fn fold<'a>(buses: impl IntoIterator<Item = &'a [Stamped]>, f: &Filter) -> Self {
         let mut h = Self::default();
-        for s in buses.into_iter().flatten().filter(|s| s.t >= f.since) {
-            let Event::Quota(QuotaEvent::Reading { account, meters, .. }) = &s.event else { continue };
-            if !account.contains(':') {
-                h.bare.insert(account.clone());
-                continue;
-            }
-            if !f.account(account) {
-                continue;
-            }
-            for (name, m) in meters.iter().filter(|(name, _)| f.meter(name)) {
-                let point = Point { t: s.t, utilization: m.utilization, resets_at: m.resets_at };
-                h.series.entry(account.clone()).or_default().entry(name.clone()).or_default().push(point);
+        for bus in buses {
+            let mut world = World::default();
+            for s in bus {
+                world.apply(s);
+                let Some((account, meters)) = world.meters_read(s).filter(|_| s.t >= f.since) else { continue };
+                if !account.contains(':') {
+                    h.bare.insert(account.to_owned());
+                    continue;
+                }
+                if !f.account(account) {
+                    continue;
+                }
+                for (name, m) in meters.iter().filter(|(name, _)| f.meter(name)) {
+                    let point = Point { t: s.t, utilization: m.utilization, resets_at: m.resets_at };
+                    h.series.entry(account.to_owned()).or_default().entry(name.clone()).or_default().push(point);
+                }
             }
         }
         for points in h.series.values_mut().flat_map(BTreeMap::values_mut) {
@@ -497,15 +504,25 @@ pub fn run(scope: Scope<'_>, json: bool, mut filter: Filter, since: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bus::{Event, QuotaEvent, SessionEvent};
     use crate::harness::{Meter, Meters};
 
     const H: u64 = 3600 * 1_000_000;
     const NOW: u64 = 1_800_000_000 * 1_000_000;
 
-    fn reading(t: u64, account: &str, meters: &[(&str, f64, i64)]) -> Stamped {
-        let meters: Meters =
-            meters.iter().map(|&(n, u, r)| (n.to_owned(), Meter { utilization: u, resets_at: Some(r) })).collect();
+    fn meters(meters: &[(&str, f64, i64)]) -> Meters {
+        meters.iter().map(|&(n, u, r)| (n.to_owned(), Meter { utilization: u, resets_at: Some(r) })).collect()
+    }
+
+    fn reading(t: u64, account: &str, m: &[(&str, f64, i64)]) -> Stamped {
+        let meters = meters(m);
         let event = Event::Quota(QuotaEvent::Reading { account: account.into(), meters, sign_in: Some("s".into()) });
+        Stamped { t, event, from: None }
+    }
+
+    /// A live session's rate, as a runner writes it.
+    fn rate(t: u64, account: &str, m: &[(&str, f64, i64)]) -> Stamped {
+        let event = Event::Session(SessionEvent::Rate { account: account.into(), meters: meters(m) });
         Stamped { t, event, from: None }
     }
 
@@ -549,6 +566,37 @@ mod tests {
         assert_eq!(w.len(), 2, "the reading without that meter adds no point");
         assert_eq!(h.bare.iter().collect::<Vec<_>>(), ["adventor"], "a bare label is left out, and named");
         assert!(!h.series.contains_key("adventor"));
+    }
+
+    #[test]
+    fn a_live_sessions_rates_are_readings_too() {
+        let resets = 1_800_500_000;
+        let only = [vec![
+            rate(NOW - 5 * H, "claude:a", &[("seven_day", 0.30, resets)]),
+            rate(NOW - 4 * H, "claude:a", &[("five_hour", 0.1, 1), ("seven_day", 0.35, resets)]),
+        ]];
+        let h = History::fold(only.iter().map(Vec::as_slice), &week());
+        let used: Vec<f64> = h.series["claude:a"]["seven_day"].iter().map(|p| p.utilization).collect();
+        assert_eq!(used, [0.30, 0.35], "a window with only live updates is charted");
+        let text = printed(&h, Some(100));
+        assert!(text.contains("1 ━━ claude:a 7 days  35% at the last reading"), "{text}");
+        // Mixed: the last value is the latest of either kind.
+        let mixed = [vec![
+            reading(NOW - 6 * H, "claude:a", &[("seven_day", 0.20, resets)]),
+            rate(NOW - 2 * H, "claude:a", &[("seven_day", 0.40, resets)]),
+        ]];
+        let h = History::fold(mixed.iter().map(Vec::as_slice), &week());
+        assert_eq!(h.series["claude:a"]["seven_day"].last().map(|p| p.utilization), Some(0.40));
+    }
+
+    /// A rate from an attempt that is not its job's current one: the world does not take it in, nor does the chart.
+    #[test]
+    fn a_rate_the_world_drops_is_not_charted() {
+        let stale = crate::bus::Origin { job: "gone".into(), attempt: 1, created: None };
+        let mut s = rate(NOW - H, "claude:a", &[("seven_day", 0.9, 1_800_500_000)]);
+        s.from = Some(stale);
+        let h = History::fold([std::slice::from_ref(&s)], &week());
+        assert!(h.series.is_empty(), "{:?}", h.series);
     }
 
     #[test]

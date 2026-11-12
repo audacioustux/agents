@@ -1096,6 +1096,8 @@ impl World {
                     j.disk_bytes = Some(*bytes);
                 }
             }
+            // Told in the log only: the job's state does not change.
+            SessionEvent::CleanupFailed { .. } => {}
             SessionEvent::Identified { job, session_id } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.session_id = Some(session_id.clone());

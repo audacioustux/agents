@@ -2554,6 +2554,23 @@ fn a_revert_control_needs_the_check_to_fail_for_real_at_the_base_commit() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
 
+#[test]
+fn a_directory_a_check_left_unreadable_does_not_block_the_next_check() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("bar-mode0", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+
+    // The tip run leaves a mode-0 directory with a file in it under its TMPDIR, as a test that never
+    // restored its tempdir does; the base run then needs the work directory cleared first.
+    let leave = "mkdir -p \"$TMPDIR/stuck/in\" && touch \"$TMPDIR/stuck/in/f\" && chmod 000 \"$TMPDIR/stuck/in\" \"$TMPDIR/stuck\"";
+    let j = build(&env, "stuck", &["--check", &format!("{leave}; test -f relay-output.txt"), "--check-red-first"]);
+    assert_eq!(j["status"], "done", "{j}");
+    assert_eq!((j["bars"][0]["result"].as_str(), j["bars"][0]["base_exit"].as_i64()), (Some("pass"), Some(1)), "{j}");
+}
+
 /// A check that prints `cargo test`'s failure summary for `tests` and exits as it does, 101.
 fn failing_suite(tests: &[&str]) -> String {
     let names = tests.iter().map(|t| format!("---- {t} stdout ----")).collect::<Vec<_>>().join("\\n");

@@ -82,6 +82,24 @@ fn port(ctx: &Ctx, job: &Job) -> crate::bus::Port<SessionEvent> {
     ctx.port(&Source { job: job.name.clone(), created: job.created_at, attempt: job.attempts })
 }
 
+/// Clears a directory relay made for the job's check, whatever modes a child process left in it
+/// ([`crate::hostdir::remove_tree`]). A failure is not ignored: it is logged on the job's events, with the
+/// path that failed.
+fn clear(ctx: &Ctx, job: &Job, path: &std::path::Path) {
+    let Err(e) = crate::hostdir::remove_tree(path) else { return };
+    let event = SessionEvent::CleanupFailed {
+        job: job.name.clone(),
+        path: path.display().to_string(),
+        error: format!("could not clear the check directory {}: {e}", path.display()),
+    };
+    if let Err(logged) = port(ctx, job).emit(event) {
+        eprintln!(
+            "relay: could not clear the check directory {}: {e} (and could not log it: {logged:#})",
+            path.display()
+        );
+    }
+}
+
 pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
     Ctx::wait_for_gate();
     pass_term_to_own_group()?;
@@ -662,7 +680,7 @@ pub fn consult(
         };
         let ran = drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader(), live)
             .map(|(report, ending, _)| (report, ending));
-        let _ = std::fs::remove_dir_all(&scratch);
+        clear(ctx, job, &scratch);
         ran
     };
     let (report, ending) = match run() {

@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
-use super::{Phase, command, layer_env, port};
+use super::{Phase, clear, command, layer_env, port};
 use crate::bus::{BarResult, SessionEvent};
 use crate::ctx::{Ctx, SessionRepo};
 use crate::harness::{Home, Invocation};
@@ -306,12 +306,16 @@ struct Place<'a> {
 /// Runs `command` on a clean checkout of `rev` from the clone `source`.
 fn at(ctx: &Ctx, home: &Home, command: &str, source: &SessionRepo, rev: &str, phase: Phase, place: &Place<'_>) -> Ran {
     let tree = place.work.join("tree");
-    let ran =
-        match hostdir::fresh_dir(place.work).map_err(anyhow::Error::from).and_then(|()| checkout(source, rev, &tree)) {
+    // What the last run left (a mode a test set, say) is cleared first; a directory that cannot be
+    // cleared is said so, and is not mistaken for a checkout that failed.
+    let ran = match hostdir::fresh_dir(place.work) {
+        Err(e) => broke(&format!("could not clear the check directory {}: {e}", place.work.display())),
+        Ok(()) => match checkout(source, rev, &tree) {
             Ok(()) => exec(ctx, home, command, &tree, phase, place),
             Err(e) => broke(&format!("could not check out {rev} for the check: {e:#}")),
-        };
-    let _ = std::fs::remove_dir_all(place.work);
+        },
+    };
+    clear(ctx, place.job, place.work);
     ran
 }
 

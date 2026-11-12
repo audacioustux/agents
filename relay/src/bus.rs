@@ -278,6 +278,14 @@ pub enum SessionEvent {
         job: String,
         bytes: u64,
     },
+    /// A directory relay made for the job's check (its working directory, or the scratch of a checking
+    /// agent) could not be cleared after the run, even with its modes put right: `path` is what failed.
+    /// The next check clears it first, and says so when it cannot.
+    CleanupFailed {
+        job: String,
+        path: String,
+        error: String,
+    },
 }
 
 /// What a job is, by what it may touch.
@@ -794,7 +802,8 @@ impl SessionEvent {
             | Self::BarChecked { job, .. }
             | Self::Reviewed { job, .. }
             | Self::Ended { job, .. }
-            | Self::Disk { job, .. } => Some(job),
+            | Self::Disk { job, .. }
+            | Self::CleanupFailed { job, .. } => Some(job),
             Self::Rate { .. } | Self::Limited { .. } | Self::SignedOut { .. } => None,
         }
     }

@@ -24,7 +24,7 @@ use crate::ctx::Ctx;
 use crate::harness::{Harness, Home};
 use crate::os::{self, Role};
 use crate::world::{AccountState, DAY_MICROS, Job, Status, Wait, World};
-pub use room::{Hold, Room, Start};
+pub use room::{Hold, READING_WAIT_MICROS, Room, Start};
 
 /// The longest sleep. Only a runner that dies without a word (one started by
 /// an earlier dispatcher, or killed outright) waits this long to be reaped.
@@ -336,21 +336,91 @@ fn plan(cfg: &Config, room: &mut Room, world: &World, now_us: u64, held: &mut He
             }
             continue;
         }
-        let home = match room.judge(cfg, j, now_us) {
-            Ok(fits) => choose(j, &fits).cloned(),
+        match place(cfg, room, j, None, now_us) {
+            Ok(Some(start)) => {
+                total += 1;
+                out.push(start);
+            }
+            Ok(None) => {}
             Err(Hold { why, until }) => {
                 held.0.push(format!("{}: {why}", j.name));
                 held.1 = [held.1, until].into_iter().flatten().min();
                 held.2.push(j.name.clone());
-                continue;
             }
-        };
-        if let Some(home) = home {
-            total += 1;
-            out.push(room.take(cfg, j, &home, now_us));
         }
     }
     out
+}
+
+/// The one choice of a seat, for a queued job and for a decision's session alike: `j` judged by
+/// `room.judge`, the account chosen by [`choose`] (away from `avoid` where another fits), and the
+/// start booked in `room` ([`Room::take`]) so whatever is judged next sees it.
+fn place(cfg: &Config, room: &mut Room, j: &Job, avoid: Option<&str>, now_us: u64) -> Result<Option<Start>, Hold> {
+    let fits = room.judge(cfg, j, now_us)?;
+    let Some(home) = choose(j, &fits, avoid).cloned() else { return Ok(None) };
+    Ok(Some(room.take(cfg, j, &home, now_us)))
+}
+
+/// What a decision's `agent:` session for `worker` is judged as: a read-only job on `harness` alone,
+/// on `model` there (the harness's configured one when `None`), of no profile, queued at `since`
+/// (bus time: when it began to wait for a seat, which bounds its wait for a reading as a job's).
+fn session_job(worker: &Job, harness: &str, model: Option<&str>, since: u64) -> Job {
+    Job {
+        name: format!("{}.check", worker.name),
+        kind: crate::bus::Kind::Read,
+        harnesses: vec![harness.to_owned()],
+        models: model.map(|m| [(harness.to_owned(), m.to_owned())].into()).unwrap_or_default(),
+        queued_at: since,
+        ..Job::default()
+    }
+}
+
+/// A seat in `room` for a decision's `agent:` session for `worker` ([`session_job`]), chosen as a
+/// queued job's is ([`place`]): the worker's own run's seat given back first, and another account
+/// than the worker's where one fits, so no worker grades itself; else the worker's own.
+pub fn place_session(
+    cfg: &Config,
+    room: &mut Room,
+    worker: &Job,
+    harness: &str,
+    model: Option<&str>,
+    since: u64,
+    now_us: u64,
+) -> Result<Start, Hold> {
+    room.free(worker);
+    let j = session_job(worker, harness, model, since);
+    place(cfg, room, &j, worker.account.as_deref(), now_us)?
+        .ok_or_else(|| Hold { why: format!("no {harness} account has room"), until: None })
+}
+
+/// Books a seat for a decision's `agent:` session for `worker` ([`place_session`]) under the
+/// machine's seat lock, as a dispatch books a job's: `record` writes the booking to the bus before the
+/// lock is let go, so every dispatcher (and every other decision) that plans next counts it. The
+/// worker's state is read from the fold under the lock; `worker` is the caller's copy of it.
+pub fn book_session(
+    ctx: &Ctx,
+    worker: &Job,
+    harness: &str,
+    model: Option<&str>,
+    since: u64,
+    record: impl FnOnce(&Start) -> Result<()>,
+) -> Result<Result<(Start, Home), Hold>> {
+    let _seats = Role::take(&ctx.state_root.join("seats.lock"))?;
+    let world = ctx.world()?;
+    let neighbours = ctx.neighbours();
+    let others: Vec<&World> = neighbours.iter().collect();
+    // A decision's session is read-only: free disk does not hold it, nor does the dev shell.
+    let mut room = Room::new(&ctx.cfg, &world, &others, true);
+    let worker = world.jobs().get(&worker.name).filter(|j| j.created_at == worker.created_at).unwrap_or(worker);
+    let start = match place_session(&ctx.cfg, &mut room, worker, harness, model, since, now_micros()) {
+        Ok(start) => start,
+        Err(hold) => return Ok(Err(hold)),
+    };
+    let Some(home) = room.found().iter().find(|h| h.key() == start.account).cloned() else {
+        anyhow::bail!("{} was chosen but is not found", start.account);
+    };
+    record(&start)?;
+    Ok(Ok((start, home)))
 }
 
 /// The queued jobs, oldest first: the order [`plan`] judges them in.
@@ -365,7 +435,7 @@ fn queue(world: &World) -> Vec<&Job> {
 /// queued, the account a job that asks for nothing would get. `None` when every queued job free
 /// of waits is held. The load average and `max_running` aside: they say when, not where.
 pub fn next_pick(cfg: &Config, room: &Room, world: &World, now_us: u64) -> Option<(Option<String>, String)> {
-    let pick = |j: &Job| room.judge(cfg, j, now_us).ok().and_then(|fits| choose(j, &fits).map(Home::key));
+    let pick = |j: &Job| room.judge(cfg, j, now_us).ok().and_then(|fits| choose(j, &fits, None).map(Home::key));
     let free: Vec<&Job> = queue(world).into_iter().filter(|j| world.waits(j).is_empty()).collect();
     if free.is_empty() {
         return pick(&Job::default()).map(|a| (None, a));
@@ -395,10 +465,13 @@ fn kept(job: &Job) -> Option<&str> {
 /// Of the accounts that fit, the one a resumable session already ran on ([`kept`]), so
 /// the provider's prompt cache still holds its transcript (moving it means
 /// re-reading all of it at full price); otherwise the best-scoring one, its room shared among the
-/// sessions it runs ([`Room::admit`]).
-fn choose<'a>(job: &Job, fits: &[(&'a Home, f64)]) -> Option<&'a Home> {
+/// sessions it runs ([`Room::admit`]). `avoid` is an account to take only when no other fits: a
+/// decision's session keeps off its worker's.
+fn choose<'a>(job: &Job, fits: &[(&'a Home, f64)], avoid: Option<&str>) -> Option<&'a Home> {
     let home = kept(job).and_then(|last| fits.iter().find(|(a, _)| a.key() == last));
-    home.or_else(|| fits.iter().max_by(|(_, x), (_, y)| x.total_cmp(y))).map(|&(a, _)| a)
+    let best = |fits: &mut dyn Iterator<Item = &(&'a Home, f64)>| fits.max_by(|(_, x), (_, y)| x.total_cmp(y)).copied();
+    let elsewhere = || best(&mut fits.iter().filter(|(a, _)| avoid.is_none_or(|w| a.key() != w)));
+    home.copied().or_else(elsewhere).or_else(|| best(&mut fits.iter())).map(|(a, _)| a)
 }
 
 #[cfg(test)]
@@ -472,12 +545,20 @@ mod tests {
         let (a, b) = (home("claude", "a"), home("claude", "b"));
         let fits = [(&a, 0.1), (&b, 0.9)];
         let key = |h: Option<&Home>| h.map(Home::key);
-        assert_eq!(key(choose(&job(None, None), &fits)), Some("claude:b".into()), "best score");
-        assert_eq!(key(choose(&job(Some("s"), Some("claude:a")), &fits)), Some("claude:a".into()), "its own");
-        assert_eq!(key(choose(&job(None, Some("claude:a")), &fits)), Some("claude:b".into()), "no session to keep");
+        assert_eq!(key(choose(&job(None, None), &fits, None)), Some("claude:b".into()), "best score");
+        assert_eq!(key(choose(&job(Some("s"), Some("claude:a")), &fits, None)), Some("claude:a".into()), "its own");
+        assert_eq!(
+            key(choose(&job(None, Some("claude:a")), &fits, None)),
+            Some("claude:b".into()),
+            "no session to keep"
+        );
         let only_b = [(&b, 0.9)];
-        assert_eq!(key(choose(&job(Some("s"), Some("claude:a")), &only_b)), Some("claude:b".into()), "a does not fit");
-        assert_eq!(choose(&job(Some("s"), Some("claude:a")), &[]).map(Home::key), None);
+        assert_eq!(
+            key(choose(&job(Some("s"), Some("claude:a")), &only_b, None)),
+            Some("claude:b".into()),
+            "a does not fit"
+        );
+        assert_eq!(choose(&job(Some("s"), Some("claude:a")), &[], None).map(Home::key), None);
     }
 
     #[test]
@@ -798,6 +879,109 @@ mod tests {
             world.jobs_mut().insert(j.name.clone(), j);
         }
         (world, accounts.iter().map(|(label, ..)| home("claude", label)).collect())
+    }
+
+    /// Bug of 2026-11-12 (`verify.md` of the pools review): with `per_account = 1` on accounts a and b,
+    /// job x on a ends and its decision frees a. Its `agent:` session went to b, chosen with no lock and
+    /// never recorded, and the dispatcher then started queued job q on b too: two sessions on b. A
+    /// decision's seat is now placed by the dispatcher's own choice and booked on the bus, so the fold
+    /// counts it: q takes a, and two decisions at once take different accounts or one waits.
+    #[test]
+    fn a_decisions_session_holds_its_seat_as_a_job_does() {
+        use crate::bus::{DecideEvent, Event, Point, Stamped};
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let cfg =
+            Config::parse("name = \"demo\"\n[limits]\nmin_free_disk_gb = 0\nper_account = 1\n", d.path()).unwrap();
+        let me = std::process::id();
+        let waiter = Some((me, os::start_time(me).unwrap()));
+        let apply =
+            |w: &mut World, e: DecideEvent| w.apply(&Stamped { t: NOW_US, event: Event::Decide(e), from: None });
+        let running = |w: &mut World, name: &str, account: &str| {
+            let j = Job {
+                name: name.into(),
+                status: Status::Running,
+                kind: crate::bus::Kind::Read,
+                account: Some(account.into()),
+                created_at: 100,
+                attempts: 1,
+                ..Job::default()
+            };
+            w.jobs_mut().insert(j.name.clone(), j);
+        };
+        // The run of `job` ends and asks: its seat is given back.
+        let ask = |w: &mut World, job: &str| {
+            let asked = DecideEvent::DecisionRequested {
+                id: format!("{job}-ended-1"),
+                job: job.into(),
+                point: Point::Ended,
+                created: 100,
+                attempt: 1,
+                waiter,
+            };
+            apply(w, asked);
+        };
+        // Its `agent:` session is placed and booked as a dispatch places and books a job.
+        let seat = |w: &mut World, job: &str| -> Result<Start, Hold> {
+            let worker = w.jobs()[job].clone();
+            let mut room = Room::of(found_ab(), w.accounts.clone(), w, &[], true);
+            let start = place_session(&cfg, &mut room, &worker, "claude", None, 0, NOW_US)?;
+            let seated = DecideEvent::Seated {
+                id: format!("{job}-ended-1"),
+                account: start.account.clone(),
+                model: start.model.clone(),
+                provider: start.provider.clone(),
+            };
+            apply(w, seated);
+            Ok(start)
+        };
+        let decide = |w: &mut World, job: &str| {
+            ask(w, job);
+            seat(w, job)
+        };
+        let sessions = |w: &World| {
+            let room = Room::of(found_ab(), w.accounts.clone(), w, &[], true);
+            ["claude:a", "claude:b"].map(|a| room.running_on(a))
+        };
+        let plan_q = |w: &World| plan_among(&cfg, w, &[], &found_ab()).0;
+
+        // One decision: its session keeps off its worker's account, and q takes the seat left.
+        let (mut w, _) = burst(&[("a", 0.3, 72), ("b", 0.3, 72)], NOW_US - 1, 1);
+        running(&mut w, "x", "claude:a");
+        assert_eq!(decide(&mut w, "x").map(|s| s.account), Ok("claude:b".into()), "not the worker's own account");
+        assert_eq!(sessions(&w), [0, 1], "the decision's session holds b; x's ended run holds nothing");
+        assert_eq!(plan_q(&w), [("j00".into(), "claude:a".into())], "q never joins the decision on b");
+        // Its seat is free once the session has ended.
+        apply(&mut w, DecideEvent::Unseated { id: "x-ended-1".into() });
+        assert_eq!(sessions(&w), [0, 0]);
+
+        // Two decisions at once: each takes the other's freed account, and q waits.
+        let (mut w, _) = burst(&[("a", 0.3, 72), ("b", 0.3, 72)], NOW_US - 1, 1);
+        running(&mut w, "x", "claude:a");
+        running(&mut w, "y", "claude:b");
+        ask(&mut w, "x");
+        ask(&mut w, "y");
+        assert_eq!(seat(&mut w, "x").map(|s| s.account), Ok("claude:b".into()));
+        assert_eq!(seat(&mut w, "y").map(|s| s.account), Ok("claude:a".into()), "b is the first decision's");
+        assert_eq!(sessions(&w), [1, 1], "never two sessions on one account");
+        let (starts, held) = plan_among(&cfg, &w, &[], &found_ab());
+        assert!(starts.is_empty(), "{starts:?}");
+        assert!(held.0.iter().any(|h| h.contains("busy (1 of 1 seat)")), "{held:?}");
+        // A third decision at once (q's, held) finds no seat: it waits, or, unable to, defers.
+        let mut room = Room::of(found_ab(), w.accounts.clone(), &w, &[], true);
+        let hold = place_session(&cfg, &mut room, &w.jobs()["j00"].clone(), "claude", None, 0, NOW_US).unwrap_err();
+        assert!(hold.why.contains("busy"), "{hold:?}");
+
+        // A seat whose session's process has died holds nothing: nobody is left to give it back.
+        let (mut w, _) = burst(&[("a", 0.3, 72), ("b", 0.3, 72)], NOW_US - 1, 1);
+        running(&mut w, "x", "claude:a");
+        decide(&mut w, "x").unwrap();
+        w.decisions.get_mut("x-ended-1").unwrap().waiter = Some((me, 1));
+        assert_eq!(sessions(&w), [0, 0]);
+    }
+
+    fn found_ab() -> Vec<Home> {
+        vec![home("claude", "a"), home("claude", "b")]
     }
 
     /// How many of `starts` each account took.

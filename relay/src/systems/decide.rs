@@ -1,7 +1,7 @@
 //! decide: relay's decision points. At a spend cap, when a run ends, when a
 //! queued job has been held for long and when a running job's disk runs out, relay asks a chain of handlers what to
 //! do, and carries out only an action from that point's closed set that
-//! passes policy. Emits: decision-requested, parked, decided.
+//! passes policy. Emits: decision-requested, seated, unseated, parked, decided.
 //!
 //! The chain runs in the process that reached the point: a job's session
 //! runner (`cap`, `ended`) or `decide held`, which dispatch starts. Each
@@ -748,11 +748,26 @@ fn waits_for_seat(point: Point) -> bool {
 
 fn ask_agent(ctx: &Ctx, job: &Job, a: &Agent, req: &Request, live: &dyn Fn() -> bool) -> Said {
     let (account, cost_usd, answer) =
-        crate::systems::session::consult(ctx, job, a, &prompt(req), waits_for_seat(req.point()), live);
+        crate::systems::session::consult(ctx, job, a, &prompt(req), &req.id, waits_for_seat(req.point()), live);
     match answer.and_then(|text| parse_answer(&text).ok_or_else(|| format!("agent:{} gave no action", a.label))) {
         Ok((action, why)) => Said { action, why, cost_usd, account },
         Err(why) => Said { cost_usd, account, ..Said::defer(why) },
     }
+}
+
+/// Records that decision `id`'s `agent:` session took the seat `start` (`Some`), or that it has ended
+/// and given its seat back (`None`). The fold counts the seat in between, as it counts a job's run.
+pub fn record_seat(ctx: &Ctx, id: &str, start: Option<&crate::systems::dispatch::Start>) -> Result<()> {
+    let port = ctx.port(&Source(()));
+    port.emit(match start {
+        Some(s) => DecideEvent::Seated {
+            id: id.to_owned(),
+            account: s.account.clone(),
+            model: s.model.clone(),
+            provider: s.provider.clone(),
+        },
+        None => DecideEvent::Unseated { id: id.to_owned() },
+    })
 }
 
 /// The most a `command:` handler may print.

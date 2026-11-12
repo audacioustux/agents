@@ -383,6 +383,10 @@ pub struct World {
     /// Decisions by id, while their job is kept.
     #[serde(default)]
     pub decisions: BTreeMap<String, Decision>,
+    /// The seats decisions' `agent:` sessions hold, by decision id, from `seated` until `unseated`:
+    /// kept apart from the decisions, which a job's cleanup forgets while its session may still run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub seats: BTreeMap<String, SessionSeat>,
     /// The project's development environment (`session.env_shell`): its latest warm-up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devshell: Option<DevShell>,
@@ -484,6 +488,40 @@ pub struct Decision {
     pub action: Option<Action>,
 }
 
+/// A seat a session that is no job's own run holds (a decision's `agent:` session), as its booking
+/// recorded it: the account, the model and provider it was judged on there, and the process that
+/// runs the session (its decision's waiter).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSeat {
+    pub account: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider: String,
+    pub waiter: Option<(u32, u64)>,
+    /// Its lock file, held while its booker or any process of its session's tree lives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock: Option<std::path::PathBuf>,
+}
+
+impl SessionSeat {
+    /// The seat it holds while its session may run: while anything holds its lock (its booker, or
+    /// the session's supervised tree, which outlives a booker killed outright until the supervisor
+    /// sees and ends it), or, booked before seats had locks, while its booker lives. One whose
+    /// every holder died without a word holds nothing, since nobody is left to give it back.
+    pub fn held(&self) -> Option<(&str, crate::accounts::Draws)> {
+        let live = match &self.lock {
+            Some(lock) => crate::os::seat_held(lock),
+            None => self.waiter.is_some_and(|(pid, started)| crate::os::same_process(pid, started)),
+        };
+        if !live {
+            return None;
+        }
+        let harness = self.account.split_once(':').map_or(self.account.as_str(), |(h, _)| h);
+        Some((&self.account, crate::accounts::draws(self.model.as_deref(), &self.provider, harness)))
+    }
+}
+
 /// One handler's answer to a decision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Step {
@@ -511,7 +549,11 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// fixed bus, so a fold that changes without a bump fails the tests.
 /// 13: `dispatched` records the model and provider; a job back in the queue has no account.
 /// 14: the development environment's warm-ups (`devshell`).
-const FOLD_VERSION: u32 = 16;
+/// 15: a quota read that fails records why (`failing`).
+/// 16: a failure streak stands only after the last good reading (`Failing::last`).
+/// 17: a decision's `agent:` session holds a seat (`seated`, `unseated`), kept apart from the
+/// decisions (`seats`) so a job's cleanup keeps it.
+const FOLD_VERSION: u32 = 17;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -789,6 +831,11 @@ impl World {
             (j.created_at, j.attempts) == (d.created, d.attempt)
                 && if d.point == Point::Held { j.status == Status::Queued } else { j.status.has_runner() }
         })
+    }
+
+    /// Whether decision `id`'s `agent:` session holds a seat on record.
+    pub fn seated(&self, id: &str) -> bool {
+        self.seats.contains_key(id)
     }
 
     /// Whether decision `id` is still on record and asks about its job as it is ([`World::asks_now`]).
@@ -1338,6 +1385,19 @@ impl World {
                     },
                 );
             }
+            // A booking for a decision no longer on record (its job cleaned away) is not one: its
+            // booker sees that (`seated`) and stops. Once made, it stands until `unseated`, whatever
+            // becomes of the decision, since its session runs until its handler hears and stops.
+            DecideEvent::Seated { id, account, model, provider, lock } => {
+                if let Some(d) = self.decisions.get(id) {
+                    let (account, model, provider, lock) =
+                        (account.clone(), model.clone(), provider.clone(), lock.clone());
+                    self.seats.insert(id.clone(), SessionSeat { account, model, provider, waiter: d.waiter, lock });
+                }
+            }
+            DecideEvent::Unseated { id } => {
+                self.seats.remove(id);
+            }
             DecideEvent::Parked { id, until } => {
                 if let Some(d) = self.decisions.get_mut(id).filter(|d| d.action.is_none()) {
                     d.parked_until = Some(*until);
@@ -1507,6 +1567,7 @@ mod tests {
             (14, 0x0599_7a27_1a95_7bbd),
             (15, 0x5351_e6de_0d8d_bfd8),
             (16, 0x5351_e6de_0d8d_bfd8),
+            (17, 0x2132_12e7_f06d_d32d),
         ];
         let dispatched = |t, model: Option<&str>| {
             st(
@@ -1553,6 +1614,27 @@ mod tests {
                     why: "exited 1".into(),
                     tail: "error".into(),
                     timed_out: false,
+                }),
+            ),
+            st(
+                12,
+                Event::Decide(DecideEvent::DecisionRequested {
+                    id: "d".into(),
+                    job: "a".into(),
+                    point: Point::Held,
+                    created: 1,
+                    attempt: 2,
+                    waiter: None,
+                }),
+            ),
+            st(
+                13,
+                Event::Decide(DecideEvent::Seated {
+                    id: "d".into(),
+                    account: "omp:w".into(),
+                    model: Some("minimax-code/M3".into()),
+                    provider: "minimax-code".into(),
+                    lock: None,
                 }),
             ),
         ];

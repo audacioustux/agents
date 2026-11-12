@@ -25,6 +25,9 @@ use rustix::process::{Pid, PidfdFlags, Signal};
 /// How often a supervised child is looked at.
 pub const LOOK: Duration = Duration::from_millis(100);
 
+/// How long a supervisor asked to stop has to end and reap its tree before its group is killed.
+const STOP_GRACE: Duration = Duration::from_secs(5);
+
 /// How often the supervisor looks at its child and its runner.
 const SUPERVISOR_LOOK: Duration = Duration::from_millis(25);
 
@@ -34,12 +37,23 @@ const SUPERVISOR_LOOK: Duration = Duration::from_millis(25);
 /// In unit tests it is `program` alone, leading its group as the supervisor would: they exercise
 /// the runner's side, which needs no relay executable. The supervisor itself is the real binary's,
 /// and tested as that (`tests/supervise.rs`, and end to end in `tests/flow.rs`).
-#[cfg_attr(test, allow(clippy::unnecessary_wraps, reason = "only the real supervisor can fail to be found"))]
 pub fn command(program: impl AsRef<OsStr>) -> io::Result<Command> {
+    holding(program, None)
+}
+
+/// As [`command`], with the supervisor holding the seat lock `hold` (`--hold`), shared, in a way its
+/// child and everything it starts inherit: the lock is held until that whole tree has ended.
+#[cfg_attr(test, allow(clippy::unnecessary_wraps, reason = "only the real supervisor can fail to be found"))]
+#[cfg_attr(test, allow(unused_variables, reason = "no supervisor in unit tests"))]
+pub fn holding(program: impl AsRef<OsStr>, hold: Option<&std::path::Path>) -> io::Result<Command> {
     #[cfg(not(test))]
     {
         let mut c = Command::new(crate::os::own_binary()?);
-        c.args(["supervise", "--parent", &std::process::id().to_string(), "--"]).arg(program);
+        c.args(["supervise", "--parent", &std::process::id().to_string()]);
+        if let Some(path) = hold {
+            c.arg("--hold").arg(path);
+        }
+        c.arg("--").arg(program);
         Ok(c)
     }
     #[cfg(test)]
@@ -67,10 +81,20 @@ impl Supervised {
         &mut self.child
     }
 
-    /// Kills its whole group and reaps it. The supervisor is not reaped until it has been, so the
-    /// group id is still its own when it is signalled.
+    /// Stops it and reaps it: asks the supervisor (TERM) to end and reap its whole tree, which is how
+    /// its seat outlives nothing of it ([`supervise`]), waits [`STOP_GRACE`] at most for that, and then
+    /// kills whatever is left in its group, the supervisor too. The supervisor is not reaped until
+    /// then, so the group id is still its own when it is signalled.
     pub fn kill(&mut self) {
         if self.exited.is_none() {
+            if let Some(pid) = i32::try_from(self.child.id()).ok().and_then(Pid::from_raw)
+                && rustix::process::kill_process(pid, Signal::TERM).is_ok()
+            {
+                let until = std::time::Instant::now() + STOP_GRACE;
+                while std::time::Instant::now() < until && !self.leader_ended().unwrap_or(true) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
             let _ = crate::os::kill_group(self.child.id());
             let _ = self.child.kill();
             #[allow(clippy::disallowed_methods, reason = "the supervisor reaps a child it has just killed")]
@@ -122,57 +146,119 @@ impl Drop for Supervised {
     }
 }
 
-/// `relay supervise --parent <runner> -- <argv>`: runs `argv` in this process's own group, which it
-/// leads, and ends the group with it:
-/// - `argv` exits: everything it left in the group is killed, and this exits as it did;
+/// `relay supervise --parent <runner> [--hold <lock>] -- <argv>`: runs `argv` in this process's own
+/// group, which it leads, and ends everything `argv` started with it:
+/// - `argv` exits: everything it left is ended, and this exits as it did;
 /// - the runner is gone (this process's parent is no longer `runner`, looked at before `argv` starts
 ///   and every [`SUPERVISOR_LOOK`], so a runner that dies at any moment is seen), or this is sent
-///   TERM, INT or HUP: the whole group is killed, this process with it.
+///   TERM, INT or HUP: everything is ended, and this exits 137.
+///
+/// It is a subreaper (`PR_SET_CHILD_SUBREAPER`): whatever its tree orphans comes back to it, a child
+/// that left its group with `setsid` or a sandbox's processes whose bwrap died, so it can end and reap
+/// every descendant ([`end_tree`]) before it exits, and nothing it started outlives it. With `hold`
+/// it holds that seat lock (shared, never inherited) for its whole life: a session's seat is taken
+/// until the last process of its tree has ended. Only a tree that will not empty (forking as fast as
+/// it is killed), or a signal that cannot be caught, takes its group and it at once.
 ///
 /// It polls its parent rather than relying on `PR_SET_PDEATHSIG`, which fires when the *thread* that
 /// started it ends, and would need a handler to clean up after.
-pub fn supervise(runner: u32, argv: &[OsString]) -> ExitCode {
+pub fn supervise(runner: u32, hold: Option<&std::path::Path>, argv: &[OsString]) -> ExitCode {
     let me = rustix::process::getpid();
     if rustix::process::getpgrp() != me && rustix::process::setpgid(None, None).is_err() {
         // Never signal a group it does not lead: it could be the runner's, or a shell's.
         eprintln!("relay supervise: cannot lead a process group of its own");
         return ExitCode::from(127);
     }
+    if rustix::process::set_child_subreaper(Some(me)).is_err() {
+        eprintln!("relay supervise: cannot be a subreaper");
+        return ExitCode::from(127);
+    }
     let told = Arc::new(AtomicBool::new(false));
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT, signal_hook::consts::SIGHUP] {
         if signal_hook::flag::register(sig, Arc::clone(&told)).is_err() {
-            end_group();
+            return ExitCode::from(127);
         }
     }
+    let _hold = match hold.map(crate::os::SeatHold::take).transpose() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("relay supervise: holding the seat: {e:#}");
+            return ExitCode::from(127);
+        }
+    };
     let runner_gone = || rustix::process::getppid().map(|p| p.as_raw_nonzero().get().cast_unsigned()) != Some(runner);
     if runner_gone() {
-        end_group();
+        return ExitCode::from(137);
     }
     let Some((program, args)) = argv.split_first() else {
         eprintln!("relay supervise: nothing to run");
         return ExitCode::from(127);
     };
-    let mut child = match Command::new(program).args(args).spawn() {
-        Ok(c) => c,
+    let main = match Command::new(program).args(args).spawn() {
+        // Reaped below with every other child, never through `Child`.
+        Ok(c) => c.id(),
         Err(e) => {
             eprintln!("relay supervise: starting {}: {e}", program.to_string_lossy());
             return ExitCode::from(127);
         }
     };
+    let mut status = None;
     loop {
         if runner_gone() || told.load(Ordering::Relaxed) {
-            end_group();
+            end_tree(me, main, &mut status);
+            return ExitCode::from(137);
         }
-        #[allow(clippy::disallowed_methods, reason = "the supervisor itself")]
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                kill_rest_of_group(me);
-                return exit_code(status);
+        reap(main, &mut status);
+        if let Some(st) = status {
+            end_tree(me, main, &mut status);
+            return exit_code(st);
+        }
+        std::thread::sleep(SUPERVISOR_LOOK);
+    }
+}
+
+/// Reaps every child that has ended (an orphan of the tree too), noting `main`'s status in `status`.
+/// Whether any child is left.
+fn reap(main: u32, status: &mut Option<rustix::process::WaitStatus>) -> bool {
+    use rustix::process::{WaitOptions, wait};
+    loop {
+        match wait(WaitOptions::NOHANG) {
+            Ok(Some((pid, st))) => {
+                if pid.as_raw_nonzero().get().cast_unsigned() == main {
+                    *status = Some(st);
+                }
             }
-            Ok(None) => std::thread::sleep(SUPERVISOR_LOOK),
-            Err(_) => end_group(),
+            Ok(None) => return true,
+            // ECHILD: none is left, nor (a subreaper's) any descendant.
+            Err(_) => return false,
         }
     }
+}
+
+/// Kills every descendant of `me` and reaps them all: when it returns, nothing `me` started runs.
+/// Each is signalled through a pidfd opened before checking it is still one of the tree (its parent
+/// is `me` or another of it), so a pid that was let go and reused is never signalled. A tree that
+/// will not empty is ended with the group, this process too.
+fn end_tree(me: Pid, main: u32, status: &mut Option<rustix::process::WaitStatus>) {
+    let root = me.as_raw_nonzero().get().cast_unsigned();
+    for _ in 0..1000 {
+        let tree = crate::os::descendants(root);
+        for &pid in &tree {
+            let Some(p) = i32::try_from(pid).ok().and_then(Pid::from_raw) else { continue };
+            match rustix::process::pidfd_open(p, PidfdFlags::empty()) {
+                Ok(fd) if crate::os::parent_of(pid).is_some_and(|pp| pp == root || tree.contains(&pp)) => {
+                    let _ = rustix::process::pidfd_send_signal(&fd, Signal::KILL);
+                }
+                Ok(_) | Err(rustix::io::Errno::SRCH) => {}
+                Err(_) => end_group(),
+            }
+        }
+        if !reap(main, status) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    end_group();
 }
 
 /// SIGKILL to this process's own group, which it leads: everything in it, this process too.
@@ -182,36 +268,9 @@ fn end_group() -> ! {
     std::process::exit(137)
 }
 
-/// Kills every other process in the group `me` leads, until none is left, and lives on to report
-/// how its child ended. Each is signalled through a pidfd opened before checking it is still in the
-/// group, so a pid that was let go and reused is never signalled. A group that will not empty (a
-/// process forking as fast as it is killed) is ended whole instead.
-fn kill_rest_of_group(me: Pid) {
-    let pgid = me.as_raw_nonzero().get().cast_unsigned();
-    for _ in 0..1000 {
-        let rest: Vec<u32> = crate::os::group_members(pgid).into_iter().filter(|&p| p != pgid).collect();
-        if rest.is_empty() {
-            return;
-        }
-        for pid in rest {
-            let Some(p) = i32::try_from(pid).ok().and_then(Pid::from_raw) else { continue };
-            match rustix::process::pidfd_open(p, PidfdFlags::empty()) {
-                Ok(fd) if rustix::process::getpgid(Some(p)).is_ok_and(|g| g == me) => {
-                    let _ = rustix::process::pidfd_send_signal(&fd, Signal::KILL);
-                }
-                Ok(_) | Err(rustix::io::Errno::SRCH) => {}
-                Err(_) => end_group(),
-            }
-        }
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    end_group();
-}
-
 /// The exit code that says how `status` ended: its own, or 128 and the signal that ended it.
-fn exit_code(status: ExitStatus) -> ExitCode {
-    use std::os::unix::process::ExitStatusExt as _;
-    let code = status.code().or_else(|| status.signal().map(|s| 128 + s)).unwrap_or(1);
+fn exit_code(status: rustix::process::WaitStatus) -> ExitCode {
+    let code = status.exit_status().or_else(|| status.terminating_signal().map(|s| 128 + s)).unwrap_or(1);
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 

@@ -28,7 +28,7 @@ use crate::sandbox::{self, Mounts};
 use crate::supervised::Supervised;
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request, Reviewing};
-use crate::systems::dispatch::Room;
+use crate::systems::dispatch::{self, Room};
 use crate::world::{Job, World};
 
 mod bar;
@@ -616,20 +616,25 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
 
 /// A read-only session for a decision on `agent`'s harness: the account it
 /// ran on, what it cost, and its answer or why there is none.
-/// With `patient` it first waits for a seat, up to `hooks.seat_wait_minutes`.
+/// With `patient` it first waits for a seat, up to `hooks.seat_wait_minutes`. Its seat is booked
+/// for decision `id` as a job's is, and given back once the session has ended.
 pub fn consult(
     ctx: &Ctx,
     job: &Job,
     agent: &decide::Agent,
     prompt: &str,
+    id: &str,
     patient: bool,
     live: &dyn Fn() -> bool,
 ) -> (Option<String>, f64, Result<String, String>) {
     let wait = if patient { ctx.cfg.hooks.seat_wait_minutes } else { 0.0 };
-    let home = match await_seat(ctx, job, agent, wait, live) {
+    // In place before any booking, so whatever goes wrong once one is recorded gives it back.
+    let mut seat = Booking { ctx, id, hold: None, booked: false };
+    let home = match await_seat(ctx, job, agent, &mut seat, wait, live) {
         Ok(home) => home,
         Err(why) => return (None, 0.0, Err(why)),
     };
+    let hold = seat.hold.as_ref().map(|(_, path)| path.clone());
     let run = || -> Result<(Report, Ending)> {
         let harness = harness_of(&home);
         let conf = ctx.cfg.harness(harness.id());
@@ -670,7 +675,7 @@ pub fn consult(
             cwd: &ctx.cfg.repo,
             account: true,
         };
-        let mut cmd = supervised_command(ctx, &inv, &mounts)?;
+        let mut cmd = build(ctx, &inv, &mounts, |p| crate::supervised::holding(p, hold.as_deref()))?;
         let run = Run {
             session_id: None,
             budget_usd: agent.budget_usd,
@@ -696,32 +701,99 @@ pub fn consult(
 
 /// How often a wait for a seat looks again.
 const SEAT_POLL: Duration = Duration::from_secs(2);
+/// How long past its own bound a wait for a seat tries again while the machine's seat lock is busy.
+const SEAT_LOCK_GRACE: Duration = Duration::from_secs(10);
+/// How often it tries then.
+const SEAT_LOCK_POLL: Duration = Duration::from_millis(50);
 /// The least between two quota readings a wait for a seat asks for.
 const SEAT_REREAD: Duration = Duration::from_secs(30);
 
-/// A seat for `agent`'s session: waits up to `minutes` for one to free, asking for a fresh quota
-/// reading of any account whose reading is old (dispatch only takes readings for queued jobs, and a
-/// checkpoint is not one). Nothing else is held meanwhile but the worker's own seat.
+/// A decision's seat, booked on the bus: given back when dropped, however the session went.
+/// The seat's lock is held by this process from before the booking is recorded, and by the session's
+/// supervisor (`relay supervise --hold`) until it has ended and reaped every process of the session's
+/// tree, sandbox and `setsid` orphans too: the seat counts while either holds it.
+struct Booking<'a> {
+    ctx: &'a Ctx,
+    id: &'a str,
+    /// The hold on the seat's lock, and its path, once one was taken.
+    hold: Option<(os::SeatHold, PathBuf)>,
+    /// Whether a booking may have been recorded.
+    booked: bool,
+}
+
+impl Booking<'_> {
+    /// Takes a fresh lock for the seat `start` and records the booking on the bus.
+    fn book(&mut self, start: &dispatch::Start) -> Result<()> {
+        let dir = self.ctx.state_root.join("seats");
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let path = dir.join(format!("{}.lock", uuid::Uuid::now_v7()));
+        self.hold = Some((os::SeatHold::take(&path)?, path.clone()));
+        self.booked = true;
+        decide::record_seat(self.ctx, self.id, Some((start, &path)))
+    }
+}
+
+impl Drop for Booking<'_> {
+    fn drop(&mut self) {
+        if self.booked
+            && let Err(e) = decide::record_seat(self.ctx, self.id, None)
+        {
+            eprintln!("{} decision {}: its seat was not given back: {e:#}", crate::os::stamp(), self.id);
+        }
+        // Its own hold only: the lock file goes only when nobody else holds it (a supervisor still
+        // ending its tree does, and a seat whose lock file is gone would look free).
+        if let Some((hold, path)) = self.hold.take() {
+            drop(hold);
+            if let Ok(Some(_alone)) = os::Role::try_take(&path) {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+/// A seat for `agent`'s session, booked for decision `id` by the dispatcher's own choice under the
+/// machine's seat lock ([`dispatch::book_session`]): another account than the worker's where one
+/// admits it, so no worker grades itself, else the worker's own. Waits up to `minutes` for one to
+/// free, asking for a fresh quota reading of any account of its harness whose reading is old
+/// (dispatch only takes readings for queued jobs, and a checkpoint is not one). Nothing else is
+/// held meanwhile but the worker's own seat.
 fn await_seat(
     ctx: &Ctx,
     job: &Job,
     agent: &decide::Agent,
+    seat: &mut Booking<'_>,
     minutes: f64,
     live: &dyn Fn() -> bool,
 ) -> Result<Home, String> {
     let wait = Duration::from_secs_f64(minutes.max(0.0) * 60.0);
     let started = Instant::now();
+    // A wait that cannot be had has had its turn at a reading under way already.
+    let since = if wait.is_zero() { now_micros().saturating_sub(dispatch::READING_WAIT_MICROS) } else { now_micros() };
     let mut asked: Option<Instant> = None;
     loop {
-        let (home, stale) = checker_home(ctx, job, &agent.harness, agent.model.as_deref());
-        if let Some(home) = home {
-            return Ok(home);
+        let id = seat.id;
+        let record = |s: &dispatch::Start| seat.book(s);
+        match dispatch::book_session(ctx, id, job, &agent.harness, agent.model.as_deref(), since, record) {
+            Ok(dispatch::Booking::Booked(home)) => return Ok(home),
+            // Another planner has the machine's seats a moment: try again soon, still within the
+            // wait's bound and its withdrawal, and a wait that cannot be had gets a moment's grace.
+            Ok(dispatch::Booking::Busy) if started.elapsed() < wait + SEAT_LOCK_GRACE => {
+                if !live() {
+                    return Err(format!("agent:{} was withdrawn while it waited for a seat", agent.label));
+                }
+                std::thread::sleep(SEAT_LOCK_POLL);
+                continue;
+            }
+            Ok(dispatch::Booking::Held | dispatch::Booking::Busy) => {}
+            Err(e) => return Err(format!("agent:{} found no seat: {e:#}", agent.label)),
         }
-        if stale && asked.is_none_or(|t| t.elapsed() >= SEAT_REREAD) {
-            asked = Some(Instant::now());
-            if let Ok(world) = ctx.world() {
-                let neighbours = ctx.neighbours();
-                let room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
+        if asked.is_none_or(|t| t.elapsed() >= SEAT_REREAD)
+            && let Ok(world) = ctx.world()
+        {
+            let neighbours = ctx.neighbours();
+            let room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
+            if stale(&room, &agent.harness) {
+                asked = Some(Instant::now());
                 let _ = crate::systems::quota::start_refresh(ctx, &room, &world, false);
             }
         }
@@ -741,29 +813,13 @@ fn await_seat(
     }
 }
 
-/// An account of `harness` that may take a session for `model`: another than the worker's where
-/// one admits it, so no worker grades itself, else the worker's own. Whether one admits it is the
-/// dispatcher's judgment ([`Room::admit`]): its quota, and a seat free under `limits.per_account`
-/// among every project's sessions, the worker's own run's seat given back first.
-/// Also whether some account of the harness has a quota reading that is old, so none can be trusted.
-fn checker_home(ctx: &Ctx, job: &Job, harness: &str, model: Option<&str>) -> (Option<Home>, bool) {
-    let model = model.map(str::to_owned).or_else(|| ctx.cfg.harness(harness).model);
-    let Ok(world) = ctx.world() else { return (None, false) };
+/// Whether some account of `harness` in `room` has a quota reading that is old, so none can be trusted.
+fn stale(room: &Room, harness: &str) -> bool {
     let now = now_micros();
-    let neighbours = ctx.neighbours();
-    let mut room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
-    if let Some(worker) = world.jobs().get(&job.name) {
-        room.free(worker);
-    }
-    let homes = || room.found().iter().filter(|h| h.harness == harness);
-    let stale = homes().any(|h| {
+    room.found().iter().filter(|h| h.harness == harness).any(|h| {
         let state = room.account(&h.key());
         !state.is_some_and(|s| s.unsigned) && accounts::due(harness_of(h), state, now)
-    });
-    let admits = |h: &&Home| room.admit(&ctx.cfg.limits, h, model.as_deref(), now).is_ok();
-    let worker = |h: &&Home| job.account.as_deref() == Some(h.key().as_str());
-    let home = homes().filter(admits).find(|h| !worker(h)).or_else(|| homes().filter(admits).find(worker));
-    (home.cloned(), stale)
+    })
 }
 
 /// The session to resume, when the job has one its history can follow here:

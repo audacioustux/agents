@@ -349,7 +349,8 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   and no changed file since the last checkpoint is `stop`. At `ended`, a done
   run whose FINAL says `status: done` is `accept`, and a run that went silent
   is resumed once in the same session. It also judges what a job declares: a
-  failed [acceptance check](#the-bar) is `resume`, a review's report gives its
+  failed [acceptance check](#the-bar) is `resume` (unless it repeats the last one
+  at the same commit: then it defers), a review's report gives its
   [verdict](#reviews), and enough failed ends [escalate](#escalation) the job.
   Otherwise it defers. A job that declares any of these has an `ended` chain
   of `["rule"]` when `hooks.ended` is unset, so it costs nothing to leave unset.
@@ -482,6 +483,18 @@ handlers as untrusted.
   `limits.job_ceiling_usd`; when a resume is refused the job ends `failed`, its reason
   naming the check. A fail is not a failed *end*, so it counts toward
   [escalation](#escalation) only once the job itself ends failed.
+- **No progress:** a fail at the same commit as the job's previous check, which failed
+  the same way (the same exit statuses, at the tip and at the base, and the same failing
+  tests, read as for base-red; not the output, which carries timings), is not resumed
+  again. The check runs on the committed tip, so a session that committed nothing since
+  has nothing new for it to judge, whatever it changed in its working tree. `rule` defers
+  with `no progress: same commit, same check failure`, and the rest of the `ended` chain
+  (the orchestrator, an agent or a command) decides; with none left the job ends
+  `failed`, its reason saying so. A different fail at the same commit (another test,
+  another exit) is a check that says different things of the same code, which is news, so
+  it is resumed as above; the next fail that repeats it is not. The record marks it
+  (`no_progress` under `bars`), and a resumed run that has changed nothing since that
+  commit does not grow its cap either ([checkpoints](#checkpoints)).
 - **Base-red:** a check that fails at the tip is run again at the job's base (the
   commit its branch started from, as the revert control does). If it fails there too,
   and every test failing at the tip fails at the base, the failure was there before
@@ -519,8 +532,10 @@ handlers as untrusted.
   is set: what such a job may spend is then bounded for sure, not only by
   `max_decisions`.
 
-`view status` shows the latest result (`check pass`, `check base-red: report::tests::reset`),
-`view result` the exit statuses and commit, and `--json` every run under `bars` (only the latest keeps its tail).
+`view status` shows the latest result (`check pass`, `check base-red: report::tests::reset`,
+`check fail: flow (no progress: same commit, same check failure)`), `view result` the exit
+statuses and commit, and `--json` every run under `bars`, with the failing tests a fail or a
+base-red names (only the latest keeps its tail).
 
 **Older relays.** A job that declares an acceptance carries a dependency on a job
 named `needs-relay-acceptance` that does not exist: a relay that does not know what a
@@ -979,8 +994,11 @@ last checkpoint (with the diff when it is small) and the worker's last message,
 and answers `continue`, `redirect` (with a correction the worker reads next) or
 `stop`. On `continue` or `redirect` the same session resumes with the cap
 times the growth; on `stop` the job is left `failed` for you. No new commit and
-no changed file since the last checkpoint is a `stop` that asks no model, and a
-next cap that would take the job past `job_ceiling_usd` always waits for you.
+no changed file since the last checkpoint is a `stop` that asks no model, and so
+is a clone that still stands exactly at the commit its acceptance check last
+failed at (a run resumed with that failure that changed nothing): however much
+the branch moved before that check, this run did not. A next cap that would take
+the job past `job_ceiling_usd` always waits for you.
 Read-only jobs, and any job without growth, stop at their cap as before.
 
 A checkpoint that needs a checker waits for one. If no account can take the

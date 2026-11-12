@@ -104,6 +104,13 @@ pub struct Job {
     pub turns: u32,
     pub reason: Option<String>,
     pub stop_requested: bool,
+    /// Stopped by the disk floor, not by a person: the dispatcher resumes it when free space is back
+    /// (`reason` says what it saw). A person's stop or resume clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
+    /// When the dispatcher last resumed it from that hold (bus time): the next held job waits for this run to settle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unheld_at: Option<u64>,
     /// Every checkpoint at a spend cap, oldest first.
     #[serde(default)]
     pub checkpoints: Vec<bus::Check>,
@@ -620,6 +627,8 @@ impl<'w> Walk<'w> {
             Some(d) if d.status == Status::Done => Edge::Done,
             Some(d) if d.status == Status::Queued => Edge::Queued(d),
             Some(d) if d.status.is_live() => Edge::Live(d.status.as_str()),
+            // The dispatcher resumes it when disk is back: its dependents wait for it as for a live job.
+            Some(d) if d.held => Edge::Live("held"),
             Some(d) if d.reason.as_deref() == Some("dequeued") => Edge::Blocked("dequeued"),
             Some(d) => Edge::Blocked(d.status.as_str()),
             None => Edge::Blocked("gone"),
@@ -758,7 +767,7 @@ impl World {
     /// queued and not blocked. The one test of "still moving": the dispatcher stays awake while any
     /// job moves, and a waiter for a job's end gives up on a live job that does not.
     pub fn moves_on_its_own(&self, job: &Job) -> bool {
-        job.status.has_runner() || job.status == Status::Queued && !self.blocked(job)
+        job.status.has_runner() || job.held || job.status == Status::Queued && !self.blocked(job)
     }
 
     /// The fold of the bus at `bus`, from the checkpoint at `file` when it is
@@ -917,6 +926,7 @@ impl World {
                     j.message = Some(message.clone());
                     j.reason = None;
                     j.stop_requested = false;
+                    j.held = false;
                     j.follow_ups = 0;
                     j.reruns = 0;
                     j.budget_usd = budget_usd.unwrap_or(j.budget_usd);
@@ -951,6 +961,10 @@ impl World {
             QueueEvent::StopRequested { job } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.stop_requested = true;
+                    // A person stopping a held job takes it out of the floor's hands: it stays stopped.
+                    if j.held {
+                        (j.held, j.reason) = (false, Some("stopped by request".into()));
+                    }
                 }
             }
         }
@@ -991,6 +1005,18 @@ impl World {
                     j.attempts += 1;
                     j.reason = None;
                     j.forced = false;
+                }
+            }
+            DispatchEvent::Unheld { job, message } => {
+                // A person who resumed or stopped it meanwhile was first: nothing is resumed twice.
+                if let Some(j) = self.jobs.get_mut(job).filter(|j| j.held && j.status == Status::Stopped) {
+                    j.requeue(t);
+                    j.unheld_at = Some(t);
+                    j.message = Some(message.clone());
+                    j.reason = None;
+                    j.held = false;
+                    j.follow_ups = 0;
+                    j.reruns = 0;
                 }
             }
             DispatchEvent::Reaped { job } => {
@@ -1141,10 +1167,12 @@ impl World {
                     }
                     j.reason.clone_from(reason);
                     j.ended_at = Some(t);
+                    // A person's stop, asked while the floor was stopping it, is the one that stands.
+                    j.held = *outcome == Outcome::Held && !j.stop_requested;
                     j.status = match outcome {
                         Outcome::Done => Status::Done,
                         Outcome::Failed => Status::Failed,
-                        Outcome::Stopped => Status::Stopped,
+                        Outcome::Stopped | Outcome::Held => Status::Stopped,
                         Outcome::Retry | Outcome::Rerun => Status::Queued,
                     };
                     if j.status == Status::Queued {
@@ -1779,6 +1807,134 @@ mod tests {
         evs.push(st(3, Event::Queue(QueueEvent::StopRequested { job: "a".into() })));
         evs.push(st(4, Event::Dispatch(DispatchEvent::Reaped { job: "a".into() })));
         assert_eq!(World::fold(&evs).jobs["a"].status, Status::Stopped);
+    }
+
+    fn dispatched(job: &str) -> Event {
+        Event::Dispatch(DispatchEvent::Dispatched {
+            job: job.into(),
+            account: "x".into(),
+            model: None,
+            provider: String::new(),
+            runner_pid: 9,
+            runner_started: 1,
+        })
+    }
+
+    fn ended_for(job: &str, outcome: Outcome, why: &str) -> Event {
+        Event::Session(SessionEvent::Ended {
+            job: job.into(),
+            outcome,
+            cost_usd: 0.0,
+            turns: 0,
+            reason: Some(why.into()),
+        })
+    }
+
+    fn unheld(job: &str) -> Event {
+        Event::Dispatch(DispatchEvent::Unheld { job: job.into(), message: "the disk floor paused you".into() })
+    }
+
+    #[test]
+    fn a_job_the_floor_stopped_is_held_and_resumed_once() {
+        let mut evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+        ];
+        let w = World::fold(&evs);
+        let j = &w.jobs["a"];
+        assert_eq!((j.status, j.held), (Status::Stopped, true));
+        assert_eq!(j.reason.as_deref(), Some("disk: 56G free, under 60G"));
+        assert!(w.moves_on_its_own(j), "the dispatcher resumes it: waiters keep waiting");
+
+        evs.push(st(4, unheld("a")));
+        let w = World::fold(&evs);
+        let j = &w.jobs["a"];
+        assert_eq!((j.status, j.held, j.unheld_at, j.queued_at), (Status::Queued, false, Some(4), 4));
+        assert_eq!((j.message.as_deref(), j.reason.as_deref()), (Some("the disk floor paused you"), None));
+
+        // A second one, once it has started again, resumes nothing: it is not held.
+        evs.extend([st(5, dispatched("a")), st(6, unheld("a"))]);
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.unheld_at), (Status::Running, Some(4)));
+    }
+
+    #[test]
+    fn a_stop_by_a_person_is_never_held_and_wins_over_the_floor() {
+        // A plain stop by a person.
+        let evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, Event::Queue(QueueEvent::StopRequested { job: "a".into() })),
+            st(4, Event::Dispatch(DispatchEvent::Reaped { job: "a".into() })),
+            st(5, unheld("a")),
+        ];
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.held), (Status::Stopped, false), "a person's stop is not resumed by the dispatcher");
+
+        // The floor and a person at once: the person's stop is the one that stands.
+        let evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, Event::Queue(QueueEvent::StopRequested { job: "a".into() })),
+            st(4, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+            st(5, unheld("a")),
+        ];
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.held), (Status::Stopped, false));
+
+        // A person stopping a job that is already held takes it from the floor.
+        let evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+            st(4, Event::Queue(QueueEvent::StopRequested { job: "a".into() })),
+            st(5, unheld("a")),
+        ];
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.held, j.reason.as_deref()), (Status::Stopped, false, Some("stopped by request")));
+
+        // A clone over its ceiling is stopped, not held.
+        let evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, ended_for("a", Outcome::Stopped, "disk: clone 52G over 40G")),
+            st(4, unheld("a")),
+        ];
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.held), (Status::Stopped, false));
+    }
+
+    #[test]
+    fn a_hand_resume_of_a_held_job_leaves_nothing_for_the_dispatcher() {
+        let resumed = Event::Queue(QueueEvent::Resumed {
+            job: "a".into(),
+            message: "mine".into(),
+            budget_usd: None,
+            models: BTreeMap::new(),
+        });
+        let evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+            st(4, resumed),
+            st(5, unheld("a")),
+        ];
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.held, j.unheld_at, j.message.as_deref()), (Status::Queued, false, None, Some("mine")));
+    }
+
+    #[test]
+    fn a_job_waiting_for_a_held_one_waits_and_is_not_blocked() {
+        let evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+            st(4, queued_after("b", &["a"])),
+        ];
+        let w = World::fold(&evs);
+        assert!(!w.blocked(&w.jobs["b"]), "the dispatcher will resume what it waits for");
+        assert!(w.moves_on_its_own(&w.jobs["b"]));
     }
 
     #[test]

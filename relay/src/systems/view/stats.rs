@@ -122,6 +122,12 @@ impl Fold {
                     j.account = Some(account.clone());
                 }
             }
+            Event::Dispatch(DispatchEvent::Unheld { job, .. }) => {
+                // Back in the queue by the dispatcher, not by a person's resume: it is not counted as one.
+                if let Some(j) = self.job(job).filter(|j| j.outcome == Some(Outcome::Held)) {
+                    (j.outcome, j.queued_since) = (None, Some(t));
+                }
+            }
             Event::Dispatch(DispatchEvent::Reaped { job }) => {
                 let stopped = before.jobs().get(job).is_some_and(|j| j.stop_requested);
                 if let Some(j) = self.job(job) {
@@ -258,7 +264,7 @@ impl Group {
         match j.outcome {
             Some(Outcome::Done) => self.jobs.done += 1,
             Some(Outcome::Failed) => self.jobs.failed += 1,
-            Some(Outcome::Stopped) => self.jobs.stopped += 1,
+            Some(Outcome::Stopped | Outcome::Held) => self.jobs.stopped += 1,
             _ => self.jobs.open += 1,
         }
         self.spend_usd += j.cost;

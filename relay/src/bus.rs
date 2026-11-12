@@ -143,6 +143,9 @@ pub enum DispatchEvent {
     },
     /// The runner is gone without an `ended` event.
     Reaped { job: String },
+    /// Free disk is back above the floor and its margin: the job the floor held goes back in the queue,
+    /// and its session is told `message`. Acts only on a job that is still held.
+    Unheld { job: String, message: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +154,8 @@ pub enum Outcome {
     Done,
     Failed,
     Stopped,
+    /// Stopped by the disk floor, kept to resume on its own when free space is back (`DispatchEvent::Unheld`).
+    Held,
     /// Back in the queue, for another account or a later attempt.
     Retry,
     /// Back in the queue after a death with no output; counted against `limits.max_retries`.

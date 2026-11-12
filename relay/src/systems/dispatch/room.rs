@@ -248,7 +248,11 @@ impl Room {
             }
         }
         if !j.readonly() && !self.disk_ok {
-            return Err(Hold { why: format!("free disk below {} GB", cfg.limits.min_free_disk_gb), until: None });
+            let (floor, need) = (cfg.limits.min_free_disk_gb, crate::systems::dispatch::resume_gb(&cfg.limits));
+            return Err(Hold {
+                why: format!("free disk below {need} GB (the {floor} GB floor and its margin)"),
+                until: None,
+            });
         }
         if let Some(hold) = self.dev_shell.as_ref().and_then(|g| g.hold(now_us)) {
             return Err(hold);

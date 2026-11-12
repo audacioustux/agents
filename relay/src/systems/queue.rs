@@ -203,7 +203,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             when(|s| s == Status::Queued)?;
             (QueueEvent::Dequeued { job: name.clone() }, None)
         }
-        Cmd::Stop { .. } => (QueueEvent::StopRequested { job: name.clone() }, when(|s| s == Status::Running)?.runner),
+        Cmd::Stop { .. } => (QueueEvent::StopRequested { job: name.clone() }, stop_target(job, &name)?),
     };
     let recorded = serde_json::to_value(&event)?["type"].clone();
     // A reviewer started afresh reads the new brief as its own.
@@ -220,6 +220,17 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     }
     ctx.wake_dispatch()?;
     ctx.reply(&serde_json::json!({ "job": name, "recorded": recorded }), &format!("{name}: recorded"))
+}
+
+/// The runner a stop of `job` signals: a running job's. A job the disk floor holds has none, and is stopped
+/// by the record alone (it then stays stopped); any other job is not running, so there is nothing to stop.
+fn stop_target(job: Option<&Job>, name: &str) -> Result<Option<(u32, u64)>> {
+    match job {
+        None => fail!(NotFound, "no job named {name}"),
+        Some(j) if j.status == Status::Running => Ok(j.runner),
+        Some(j) if j.held => Ok(None),
+        Some(j) => fail!(Conflict, "{name} is {}", j.status.as_str()),
+    }
 }
 
 /// Ends a running job's runner with a TERM, sent only while the recorded pid is still the recorded

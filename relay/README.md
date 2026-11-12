@@ -373,7 +373,12 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   Otherwise it defers. A job that declares any of these has an `ended` chain
   of `["rule"]` when `hooks.ended` is unset, so it costs nothing to leave unset.
 - `agent:<profile>`: a short read-only session on that profile's harness, model
-  and budget, on another account than the worker's where one is free. A seat is
+  and budget, on another account than the worker's where one is free. Its seat is
+  chosen as the dispatcher chooses a job's, by the same judgment and under the same
+  machine-wide lock, and booked on the bus (`seated`, then `unseated` once the
+  session has ended), so every dispatcher and every other decision counts it as a
+  session like any: with `per_account = 1`, a job queued meanwhile never joins it on
+  its account, and two decisions at once take different accounts or one waits. A seat is
   free when the account has room under `limits.per_account` (counting every
   project's sessions) and a quota reading that is fresh and above the floor; the
   worker's own account serves when no other does. At `cap` and `ended` the
@@ -448,7 +453,9 @@ only if the job is still queued as it was when asked, and one job is asked
 about at most once per queueing and once per five minutes. Hooks never land,
 push or delete: those stay with you.
 
-Every decision is on the bus: `decision-requested {id, job, point}`, `parked
+Every decision is on the bus: `decision-requested {id, job, point}`, `seated
+{id, account, model, provider}` and `unseated {id}` around an `agent:` handler's
+session (its seat counts only while the process that asked lives), `parked
 {id, until}` while it waits for the orchestrator, `answered {id, action, why}`
 from `decide answer` (heard only before `until`), and one `decided {id,
 handler, action, why, cost_usd, refused}` per handler asked, written by the
@@ -982,7 +989,8 @@ too: `limits.per_account` counts the sessions every project runs on the
 account (for omp, on the account *and provider*: one profile serves several
 providers, each with a quota of its own, so a `minimax-code/...` review does not
 hold the seat an `openai-codex/...` job needs; two jobs on one provider still
-share it). A seat is the account and provider the job's dispatch recorded
+share it). A decision's `agent:` session holds a seat too, from its `seated` to its
+`unseated`. A seat is the account and provider the job's dispatch recorded
 (`dispatched` carries the model and provider it resolved), so another project's
 job that names no model counts on the provider its own config chose, not this
 project's default. One machine-wide lock keeps two dispatchers from giving out the
@@ -1254,7 +1262,7 @@ own process, and owns one output port:
 | queue | takes work in (under a profile, if asked), withdraws it, stops it, releases it from its `--after` jobs, reroutes or forces a held one, replaces or detaches a review chain | queued, released, resumed, rerouted, forced, dequeued, unchained, review-briefed, stop-requested |
 | dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
 | session | runs one job, carries out the decisions at its cap and its end, runs its acceptance check, fetches a review's branch, measures its clone and stops it at the disk ceiling, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, requeued, overran, checking, checked, bar-checked, reviewed, disk, ended |
-| decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); takes the orchestrator's answers | decision-requested, parked, decided |
+| decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); books an `agent:` session's seat; takes the orchestrator's answers | decision-requested, seated, unseated, parked, decided |
 | quota | account readings and switches | reading, unreadable, signed-out, account-enabled |
 | land | brings branches back; cleans up, and gc | forgotten, collected |
 | devshell | enters the project's development environment once, under a lock, and records it for every session | warming, warmed, warm-failed |

@@ -815,6 +815,20 @@ fn the_filters_of_view_usage_watch_apply() {
     assert!(fr.iter().any(|l| l.contains("no readings")), "--since: {fr:#?}");
 }
 
+/// Every reading left out (a bare label names no harness): the chart says why it has none, in a
+/// window with room, in either view.
+#[test]
+fn a_view_with_no_rows_still_says_what_was_left_out() {
+    let bus = Buses::new();
+    bus.read("adventor", 0.30, 0.1);
+    for chart in [false, true] {
+        let mut ui = charting(ChartSpec { chart, ..ChartSpec::default() });
+        let fr = bus.shown(&mut ui);
+        assert!(fr.iter().any(|l| l.contains("no readings")), "chart={chart}: {fr:#?}");
+        assert!(fr.iter().any(|l| l.contains("left out: readings under a bare label")), "chart={chart}: {fr:#?}");
+    }
+}
+
 #[test]
 fn the_help_lists_u() {
     let f = two_jobs();

@@ -171,7 +171,8 @@ fn chart(f: &mut Frame<'_>, ui: &mut Ui) {
     let head_h = u16::try_from(head.len()).unwrap_or(u16::MAX).min(total);
     let avail = total - head_h;
     let want = u16::try_from(foot.len()).unwrap_or(u16::MAX);
-    let foot_h = if empty { 0 } else { want.min(avail.saturating_sub(MIN_CHART)) };
+    // With no chart to draw there is nothing to keep room for: what was left out says why.
+    let foot_h = if empty { want.min(avail) } else { want.min(avail.saturating_sub(MIN_CHART)) };
     if foot_h < want && foot_h > 0 {
         foot.truncate(usize::from(foot_h) - 1);
         foot.push(Line::from("… more than the window shows".dim()));

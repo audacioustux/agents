@@ -640,6 +640,35 @@ fn the_bars_give_way_before_a_name_is_cut() {
     assert!(bars(&row).iter().all(|&b| b == 5), "a name cut only once its bars are at five cells: {row}");
 }
 
+/// Review of #66: an 80-column board with all three windows has no room for a bar in each, so the
+/// gauges drop their bars and keep the numbers whole: every percent and every reset time shows.
+#[test]
+fn an_80_column_board_with_three_windows_keeps_every_reset_time() {
+    let g = |used, left, governing| Gauge { used, floor: Some(0.9), left: Some(left), governing };
+    let mut v = gauged();
+    v.rows[0].account = "▸ claude:tangim.thepenguins".into();
+    v.rows[0].gauges.insert(Window::FiveHours, g(0.73, 2 * 3600, false));
+    v.rows[1].gauges.insert(Window::Month, g(0.31, 29 * 86_400 + 23 * 3600, false));
+    let (fr, _) = accounts_pane(&v, 80);
+    let head = &fr[usize::from(row_of(&fr, "│account"))];
+    assert!(head.contains("5 hours") && head.contains("7 days") && head.contains("month"), "{head}");
+    let first = &fr[usize::from(row_of(&fr, "claude:tang"))];
+    let second = &fr[usize::from(row_of(&fr, "claude:tj"))];
+    // The one that decides is bold here, as ever on the board, not starred.
+    let said: [(&String, &[&str]); 2] =
+        [(first, &["73%", "2h", "28%", "6d5h"]), (second, &["85%", "57m", "95%", "1d17h", "31%", "30d"])];
+    for (row, said) in said {
+        for s in said {
+            assert!(row.contains(&format!("{s} ")) || row.contains(&format!("{s}│")), "{s} whole: {row}");
+        }
+    }
+    assert!(!first.contains('░') && !second.contains('█'), "no bar squeezed in: {first}\n{second}");
+    // With room, the bars come back.
+    let (fr, _) = accounts_pane(&v, 140);
+    let wide = &fr[usize::from(row_of(&fr, "claude:tj"))];
+    assert_eq!(bars(wide), [12, 12, 12], "{wide}");
+}
+
 /// The owner's ask of 2026-11-11: each account's email beside its name; when room runs short the
 /// email gives way, down to `…`, before the gauge or a name does.
 #[test]

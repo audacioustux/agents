@@ -13,6 +13,9 @@ pub const MIN_BAR: usize = 5;
 /// What follows the bar: ` 100%* 1d17h`, the time left padded to five columns, which
 /// [`crate::accounts::fmt_left`] never exceeds, so the tail always fits whole.
 pub const TAIL: usize = 12;
+/// The tail alone, without the space that parts it from a bar: what a gauge too narrow for a
+/// bar of [`MIN_BAR`] cells shows instead ([`Gauge::numbers`]).
+pub const NUMBERS: usize = TAIL - 1;
 
 /// A cell partly filled, by eighths.
 const EIGHTHS: [char; 8] = ['░', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
@@ -87,16 +90,21 @@ impl Gauge {
     }
 
     /// The gauge in `width` columns, its bar shrunk first (to [`MIN_BAR`]) so the whole tail
-    /// fits, coloured by its [`Tone`] and bold when it decides.
+    /// fits, and with no room for that, the numbers alone ([`NUMBERS`] wide), so the percent and the
+    /// time to the reset are never cut for a bar. Coloured by its [`Tone`], bold when it decides.
     pub fn line(&self, width: usize) -> Line<'static> {
         let tail = self.tail(false);
-        let cells = width.saturating_sub(tail.chars().count()).clamp(MIN_BAR, BAR);
         let colour = match self.tone() {
             Tone::Room => Color::Green,
             Tone::Over => Color::Red,
             Tone::Near => Color::Yellow,
         };
         let style = if self.governing { Style::new().fg(colour).bold() } else { Style::new().fg(colour) };
+        if width < MIN_BAR + TAIL {
+            let numbers: String = tail.strip_prefix(' ').unwrap_or(&tail).chars().take(width).collect();
+            return Line::from(Span::styled(numbers, style));
+        }
+        let cells = width.saturating_sub(tail.chars().count()).clamp(MIN_BAR, BAR);
         let tail: String = tail.chars().take(width.saturating_sub(cells)).collect();
         Line::from(vec![
             Span::styled(self.bar(cells).chars().take(width).collect::<String>(), style),
@@ -164,7 +172,13 @@ mod tests {
         let text = |l: Line<'_>| l.spans.iter().map(|s| s.content.to_string()).collect::<String>();
         assert_eq!(text(gauge(0.31, Some(0.9)).line(24)), "███▊░░░░░░│░  31%  5d4h ");
         assert_eq!(text(gauge(0.31, Some(0.9)).line(20)), "██▌░░░░│  31%  5d4h ");
-        assert_eq!(text(gauge(0.31, Some(0.9)).line(9)), "█▌░░│  31", "never fewer than five cells");
+        assert_eq!(
+            text(gauge(0.31, Some(0.9)).line(MIN_BAR + TAIL)),
+            "█▌░░│  31%  5d4h ",
+            "never fewer than five cells"
+        );
+        assert_eq!(text(gauge(0.31, Some(0.9)).line(NUMBERS)), " 31%  5d4h ", "then the numbers alone, whole");
+        assert_eq!(text(gauge(0.31, Some(0.9)).line(9)), " 31%  5d4", "cut only past them");
         let bold = Gauge { governing: true, ..gauge(0.31, Some(0.9)) }.line(24);
         assert!(bold.spans.iter().all(|s| s.style.add_modifier.contains(ratatui::style::Modifier::BOLD)));
     }

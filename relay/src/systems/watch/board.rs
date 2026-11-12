@@ -94,13 +94,13 @@ static DECISIONS: [Column; 5] =
     [col("project", 16), col("decision", 30), col("job", 28), col("point", 16), col("until", 0)];
 /// The accounts' columns for `windows`, each account's email beside it with `emails`: the account,
 /// a gauge per window, room/day, run and the state, last. A gauge's column is widened to its whole
-/// bar and tail, and gives way, down to its bar at its shortest, before a name is cut; an email
-/// gives way first, down to `…`.
+/// bar and tail, and gives way before a name is cut: its bar shrinks to five cells, then goes, the
+/// numbers staying whole ([`gauge::NUMBERS`]); an email gives way first, down to `…`.
 pub fn account_columns(windows: &[Window], emails: bool) -> Vec<Column> {
     let gauge = |w: &Window| Column {
         head: std::borrow::Cow::Owned(w.label()),
         cap: gauge::BAR + gauge::TAIL,
-        yields: gauge::MIN_BAR + gauge::TAIL,
+        yields: gauge::NUMBERS,
     };
     let mut cols = vec![ACCOUNT];
     if emails {

@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Axis, Chart, Dataset, GraphType, Paragraph, Widget};
 use serde::Serialize;
 use serde_json::json;
+use unicode_width::UnicodeWidthStr;
 
 use crate::bus::{Event, QuotaEvent, Stamped, now_micros};
 use crate::config::Limits;
@@ -256,14 +257,21 @@ impl Usage<'_> {
 }
 
 /// `buf` as lines of text, trailing blanks dropped; with `colour`, each change of colour as an SGR escape.
+/// A wide symbol's cells are printed once: the cells it covers after its first are skipped.
 pub fn text(buf: &Buffer, colour: bool) -> String {
     let area = buf.area;
     let mut out = String::new();
     for y in area.top()..area.bottom() {
         let mut line = String::new();
         let mut fg = Color::Reset;
+        let mut covered = 0;
         for x in area.left()..area.right() {
+            if covered > 0 {
+                covered -= 1;
+                continue;
+            }
             let cell = &buf[(x, y)];
+            covered = cell.symbol().width().saturating_sub(1);
             if colour && cell.fg != fg {
                 fg = cell.fg;
                 let _ = write!(line, "\x1b[{}m", sgr(fg));
@@ -502,5 +510,12 @@ mod tests {
         buf.set_string(0, 0, "ab", Style::new().fg(Color::Cyan));
         assert_eq!(text(&buf, true), "\x1b[36mab\x1b[39m");
         assert_eq!(text(&buf, false), "ab");
+    }
+
+    #[test]
+    fn a_wide_character_prints_once_with_no_padding() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 16, 1));
+        buf.set_string(0, 0, "claude:日本 x", Style::new());
+        assert_eq!(text(&buf, false), "claude:日本 x");
     }
 }

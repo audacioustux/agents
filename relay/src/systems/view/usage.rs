@@ -51,11 +51,14 @@ pub struct Within {
 
 impl Within {
     /// The accounts `cfg`'s project can dispatch to: its enabled harnesses' accounts, minus
-    /// `accounts.exclude`, found by the code its dispatcher runs.
+    /// `accounts.exclude`, found by the code its dispatcher runs, but writing nothing.
     pub fn of(cfg: &crate::config::Config) -> Self {
         Self {
             project: cfg.name.clone(),
-            accounts: crate::accounts::discover(cfg).iter().map(crate::harness::Home::key).collect(),
+            accounts: crate::accounts::discover_in(crate::host::Mode::ReadOnly, cfg)
+                .iter()
+                .map(crate::harness::Home::key)
+                .collect(),
         }
     }
 }
@@ -645,6 +648,26 @@ mod tests {
         assert_eq!(usage(&week()), "quota since Jan 8 08:00 UTC, 7-day meters");
         let inside = Filter { within: Some(Within { project: "tickify".into(), ..Within::default() }), ..week() };
         assert_eq!(usage(&inside), "tickify's accounts, quota since Jan 8 08:00 UTC, 7-day meters");
+    }
+
+    /// `view usage` promises to write nothing: a program found on `PATH` but not in the record
+    /// (`sh` stands for the claude harness here) is used for the account set, and not recorded.
+    #[test]
+    fn the_accounts_of_a_project_are_found_without_recording_any_program() {
+        let d = crate::config::tempdir::Dir::new();
+        let state = d.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(d.path().join(".git")).unwrap();
+        let mut cfg =
+            crate::config::Config::parse("name = \"t\"\n[harness.claude]\nprogram = \"sh\"\n", d.path()).unwrap();
+        cfg.programs = Some(crate::host::record_in(&state));
+        let record = crate::host::record_in(&state);
+        Within::of(&cfg);
+        assert!(!record.exists(), "the record was written");
+        assert!(!record.with_extension("lock").exists(), "the lock was taken");
+        // The control: the dispatcher's own path records what it finds, so the setup is a real case.
+        crate::accounts::discover(&cfg);
+        assert!(record.exists(), "the dispatcher records what PATH finds");
     }
 
     #[test]

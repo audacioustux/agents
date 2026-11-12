@@ -652,7 +652,8 @@ a very narrow one none.
 
 - **What it reads.** The readings already on the bus, as the project's fold takes
   them in: a quota command's (`quota` `reading` events) and a live session's
-  (`session` `rate` events). It writes nothing, and starts no reading. Every
+  (`session` `rate` events). It writes nothing (a harness's program it finds on `PATH` is used, not recorded
+  in `programs.json`), and starts no reading. Every
   project's bus on this machine is read, in a project or outside one: an account
   is the machine's, so where a reading happened to be taken says nothing about
   whose it is. An account read by several projects is one line, its readings

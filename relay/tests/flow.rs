@@ -405,6 +405,28 @@ fn an_undeclared_cache_stays_a_bind_of_its_own() {
     cache_link("cache-bind", true, false);
 }
 
+/// Waits (bounded: a minute) until `path` is there.
+fn wait_until_there(path: &Path) {
+    for _ in 0..600 {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The entries named `name…` in the cache `rel` of every copy in the pool `pool` (under the test's root).
+fn in_pool(env: &Env, pool: &str, rel: &str, name: &str) -> Vec<PathBuf> {
+    std::fs::read_dir(env.root.join(pool))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|copy| std::fs::read_dir(copy.path().join(rel)).into_iter().flatten().flatten())
+        .map(|e| e.path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(name))
+        .collect()
+}
+
 fn cache_link(tag: &str, home_shown: bool, declared: bool) {
     if !have_bwrap() {
         return;
@@ -435,10 +457,10 @@ fn cache_link(tag: &str, home_shown: bool, declared: bool) {
     let shared = env.root.join("data/relay/flow/caches").join(rel);
     std::fs::create_dir_all(&shared).unwrap();
     std::fs::write(shared.join("seed"), "a package").unwrap();
-    // Red at the base (no output file there yet), green at the tip. Each run first hard-links from the cache
-    // into its tree, then leaves a mark in the cache named after its commit.
+    // Red at the base (no output file there yet), green at the tip. Each run hard-links from the cache (filled
+    // first if cold) into its tree, then leaves a mark in the cache named after its commit.
     let check = format!(
-        r#"ln "$HOME/{rel}/seed" linked && : >"$HOME/{rel}/linked-$(git rev-parse HEAD)" && test -f relay-output.txt"#
+        r#"{{ [ -e "$HOME/{rel}/seed" ] || echo package >"$HOME/{rel}/seed"; }} && ln "$HOME/{rel}/seed" linked && : >"$HOME/{rel}/linked-$(git rev-parse HEAD)" && test -f relay-output.txt"#
     );
     // The probe checks the layout from inside: the linked cache on the clone's mount, its directory the host's.
     let probe = relay(&env, &["probe", "--account", "claude:a"]);
@@ -459,12 +481,7 @@ fn cache_link(tag: &str, home_shown: bool, declared: bool) {
     }
     ok(&relay(&env, &add), "queue");
     let said = |f: &str| std::fs::read_to_string(acct.join(f)).unwrap_or_default();
-    for _ in 0..600 {
-        if acct.join("cache-view").exists() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_until_there(&acct.join("cache-view"));
     let clone = workdir(&env, "linker");
     let mounts: Vec<String> = said("cache-mount").lines().map(str::to_owned).collect();
     let home = |r: &str| env.home.join(r).display().to_string();
@@ -497,20 +514,27 @@ fn cache_link(tag: &str, home_shown: bool, declared: bool) {
     }
     let j = wait_for(&env, "linker");
     assert_eq!(j["status"], "done", "{j}");
-    assert_eq!(std::fs::read_to_string(shared.join("from-session")).unwrap(), "session\n", "what the session added");
     assert!(!env.home.join(rel).join("from-session").exists(), "the host's own cache");
     assert!(!env.home.join(".bun/install/created").exists(), "the host's own directory");
     if !declared {
+        assert_eq!(std::fs::read_to_string(shared.join("from-session")).unwrap(), "session\n", "relay's cache, bound");
         let farms = env.root.join("data/relay/flow/farms");
         assert!(std::fs::read_dir(&farms).map_or(true, |mut d| d.next().is_none()), "no copy in a pool");
         return;
     }
+    // A linked cache is the copy's own: what the session fetched stays in it, and relay's cache is not written.
+    assert!(!shared.join("from-session").exists(), "a copy wrote into relay's shared cache");
+    assert_eq!(
+        in_pool(&env, "data/relay/flow/farms", rel, "from-session").len(),
+        1,
+        "the session's copy, pooled with it"
+    );
     assert_eq!((j["bars"][0]["result"].as_str(), j["bars"][0]["base_exit"].as_i64()), (Some("pass"), Some(1)), "{j}");
-    let marks = std::fs::read_dir(&shared)
-        .unwrap()
-        .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("linked-"))
-        .count();
-    assert_eq!(marks, 2, "the checks at the tip and at the base both linked, and what they added stays");
+    assert_eq!(
+        in_pool(&env, "state/relay/flow/farms", rel, "linked-").len(),
+        2,
+        "the checks at the tip and at the base both linked, in one copy taken from one to the other"
+    );
 }
 
 /// PR #67 review 3: a declared cache with a hidden path under it (`hide_home` names `.cargo/git/secret`) was

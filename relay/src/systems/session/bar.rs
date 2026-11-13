@@ -412,8 +412,9 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, phase: Phase, place:
             account: false,
             caches: None,
         };
-        // Its own copy of the linked caches the plan links, beside its tree in its directory's mount, linked
-        // back when it ends.
+        // Its own copy of the linked caches the plan links, beside its tree in its directory's mount, given
+        // back to the check pool when it ends (the check's sandbox has ended whole by then: `status` returns
+        // once its PID namespace has).
         let rels = crate::sandbox::linkable(ctx, &crate::accounts::home(), &mounts);
         let caches = crate::sandbox::own_caches(ctx, place.work, "caches", &ctx.state.join("farms"), &rels)
             .context("removing a copy of the caches left in the check's directory")?;

@@ -257,10 +257,10 @@ pub fn dir_size(path: &Path, within: Duration) -> (u64, bool) {
         for entry in entries.flatten() {
             let Ok(meta) = entry.path().symlink_metadata() else { continue };
             if meta.is_dir() {
-                // A session's copy of the caches in its clone is hard links to relay's caches: not the job's.
-                let farm =
-                    entry.file_name() == crate::sandbox::farm::IN_CLONE && dir.file_name().is_some_and(|d| d == ".git");
-                if farm {
+                // The clone's copy of the linked caches ([`crate::sandbox::farm`]) is the project's cache, not
+                // the job's work: its own `.git/relay-caches` only, not one at any depth (a job's tree can
+                // name a directory that, and it is the job's). gc counts the copy in its pool.
+                if dir == path.join(".git") && entry.file_name() == crate::sandbox::farm::IN_CLONE {
                     continue;
                 }
                 total += meta.blocks() * 512;
@@ -296,6 +296,21 @@ pub fn size_str(bytes: u64) -> String {
 mod tests {
     use super::*;
     use crate::config::tempdir::Dir;
+
+    /// The clone's own copy of the linked caches is the project's cache, not the job's work, so it is left
+    /// out of the clone's size; a directory of that name anywhere else in the clone is the job's, and counts.
+    #[test]
+    fn a_clones_size_leaves_out_its_own_copy_of_the_caches_only() {
+        let d = Dir::new();
+        let clone = d.path().join("clone");
+        std::fs::create_dir_all(clone.join(".git/relay-caches/.cache")).unwrap();
+        std::fs::write(clone.join(".git/relay-caches/.cache/pkg"), vec![1u8; 1 << 20]).unwrap();
+        let without = dir_size(&clone, Duration::from_secs(10)).0;
+        assert!(without < 1 << 20, "the copy was counted: {without}");
+        std::fs::create_dir_all(clone.join("sub/.git/relay-caches")).unwrap();
+        std::fs::write(clone.join("sub/.git/relay-caches/work"), vec![1u8; 1 << 20]).unwrap();
+        assert!(dir_size(&clone, Duration::from_secs(10)).0 >= without + (1 << 20), "the job's own was not");
+    }
 
     #[test]
     fn sizes_are_summed_without_following_links_and_read_for_people() {

@@ -28,7 +28,7 @@
 # acceptance check's output went (check.out, to $acct/victim) and its /tmp (check-tmp, to $HOME).
 # [plant-config] tries to create, in its own account, config the host would obey: a settings.json with a hook and a hooks/ script.
 # [cache-link] works on the cache $HOME/<rel>, <rel> read from $acct/cache-rel (default .cache): hard-links its
-# `seed` into its clone, as a package manager links from its store, and records in $acct/cache-link `linked` or why
+# `seed` (made there first if the cache is cold) into its clone, as a package manager links from its store, and records in $acct/cache-link `linked` or why
 # link() failed; records in $acct/cache-mount the mount (findmnt TARGET) the cache is on, then the one ~/.cache is on;
 # adds from-session to the cache; and records in $acct/cache-view what it sees around the cache: whether the host's
 # own cache file (host-only) shows, whether the host's `visible` beside the cache is readable, whether it can create
@@ -124,6 +124,7 @@ printf '%s\n--\n' "$prompt" >>"$acct/prompts"
 case "$prompt" in *"[env]"*) env | sort >"$acct/env" ;; esac
 case "$prompt" in *"[cache-link]"*)
   cache="$HOME/$(cat "$acct/cache-rel" 2>/dev/null || echo .cache)"
+  [ -e "$cache/seed" ] || echo package >"$cache/seed" 2>/dev/null || true
   if ln "$cache/seed" cache-linked 2>"$acct/cache-link"; then echo linked >"$acct/cache-link"; fi
   rm -f cache-linked
   { findmnt -n -o TARGET -T "$cache/seed"; findmnt -n -o TARGET -T "$HOME/.cache"; } >"$acct/cache-mount" 2>&1 || true

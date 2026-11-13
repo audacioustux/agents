@@ -18,9 +18,9 @@
 //! `link()` fails across two mounts (EXDEV), even on one filesystem, and some package managers (bun,
 //! pnpm, uv) install by linking from their store into the tree. So a job with a tree (a session's
 //! clone, a check's checkout) does not get the caches a project declares in `sandbox.linked_caches` as
-//! binds of their own: relay makes it a copy of them in hard links inside its tree's mount
-//! ([`farm::Farm`]), and each such cache path is a symlink into that copy. Every other cache is a
-//! bind, as it always was: the copy costs every run a pass over the cache's directories. A symlink cannot
+//! binds of their own: it gets a private copy of them inside its tree's mount, taken from a pool by
+//! rename ([`farm::Farm`]), and each such cache path is a symlink into that copy. Every other cache is a
+//! bind, as it always was: a copy warms on its own, so a package is fetched once per copy. A symlink cannot
 //! stand in the read-only host directory that holds the cache path, so that directory is layer 0: an
 //! empty tmpfs with each of the host's entries bound back read-only (a symlink copied as itself), made
 //! read-only like a hidden one. Where the cache path's directory is hidden already, the symlink goes in
@@ -258,8 +258,8 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
 /// The job's own copy of the caches ([`farm::Farm`]), put at `name` in `parent`, a directory in the mount
 /// that holds its tree, from the idle copies in `pool` (beside it, on its filesystem), of the caches
 /// `rels`: what [`linkable`] says for the job's mounts, and nothing else. None without the sandbox, with
-/// none, or when it cannot be made (`parent` on another mount than relay's caches): then each cache is a
-/// bind of the project's caches, as for a job with no tree, and a copy an interrupted run left at `name`
+/// none, or when it cannot be taken (said on stderr, since the job then installs by copying): then each
+/// cache is a bind of the project's caches, as for a job with no tree, and a copy an interrupted run left at `name`
 /// is removed, since it would still be in the job's tree (with what a hide rule added since covers). An
 /// error when that removal fails: the job must not start beside it.
 pub fn own_caches(
@@ -272,10 +272,15 @@ pub fn own_caches(
     if !ctx.cfg.sandbox.enabled {
         return Ok(None);
     }
-    if !rels.is_empty()
-        && let Ok((copy, _)) = farm::Farm::take(parent, name, pool, &ctx.caches, rels)
-    {
-        return Ok(Some(copy));
+    if !rels.is_empty() {
+        match farm::Farm::take(parent, name, pool, rels) {
+            Ok(copy) => return Ok(Some(copy)),
+            Err(e) => eprintln!(
+                "relay: the linked caches stay binds for this run (a package manager there copies instead of \
+                 linking): taking a copy at {} failed: {e}",
+                parent.join(name).display()
+            ),
+        }
     }
     farm::clear(parent, name)?;
     Ok(None)

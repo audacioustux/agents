@@ -1,68 +1,43 @@
-//! A job's own copy of the project's linked caches, made of hard links, inside the mount that holds its tree.
+//! A job's own copy of the project's linked caches, a whole private cache inside the mount that holds its
+//! tree.
 //!
 //! `link()` works within one mount only: across two it fails with EXDEV, even on one filesystem. A
 //! package manager links from its store into the tree it installs (bun, pnpm, uv), so a cache bound
 //! apart from the tree made it copy every package. For the caches a project declares such a tool links
-//! from (`sandbox.linked_caches`), a job with a tree therefore gets this copy, in the tree's own mount
-//! (a directory in its clone's `.git`, or in its check's directory), and each such cache path is a
-//! symlink into it ([`super::Mount::Symlink`]). Every other cache stays a bind: the copy costs every run
-//! a pass over its directories. gc removes idle copies (`gc.cache_copies_idle_days`).
+//! from (`sandbox.linked_caches`), a job with a tree gets a copy of its own, in the tree's own mount (a
+//! directory in its clone's `.git`, or in its check's directory), and each such cache path is a symlink
+//! into it ([`super::Mount::Symlink`]). Every other cache stays a bind of relay's directory for it.
 //!
-//! - **Cost.** A copy is a directory for each directory of the caches and a hard link for each file:
-//!   no file's data, and no inode for a link. Copies are kept in a pool beside the place they are used
-//!   (on the same filesystem), and a run takes an idle one by renaming it into place and gives it back
-//!   the same way, so the link for each file is made once per copy, not once per run. A run's own cost
-//!   is bringing its copy up to date when it starts and linking back what it added when it ends: each
-//!   compares the two sides' directory listings, so it reads every directory once and touches no file
-//!   that both sides have.
-//! - **Shared and persistent.** Every name a job added is linked back into the project's caches when
-//!   it ends, so the next job has it. Two jobs that add one entry at once: each writes its own copy,
-//!   and the first linked back is the one kept. An entry either side already has stays as it is there,
-//!   so a file a job replaced (renamed over) stays in its copy only; one changed in place is the shared
-//!   file itself (one inode), as it was when the caches were one shared bind.
+//! - **Whole and private.** A copy is a cache in its own right, not a view of relay's: a new one starts
+//!   empty, and what a job fetches into it stays in it. Copies are kept in a pool beside the place they
+//!   are used (on the same filesystem) and moved only by rename: a run takes an idle one into place, and
+//!   gives it back the same way. Relay never links, copies or walks a cache's files; it renames, cuts a
+//!   copy down to the caches this run links ([`purge`]), and removes.
+//! - **What it costs.** A run pays a rename to take and a rename to give back. A new copy is cold (its
+//!   first install fetches everything), and each copy warms on its own: a package new to the project is
+//!   fetched once per copy that needs it.
+//! - **What is shared.** A copy's next holders see what its earlier holders left, as any cache's users
+//!   do; nothing else. Copies share no file with relay's caches, with each other, or between the pools
+//!   of sessions and of checks.
 //! - **Only what the plan links.** A copy is taken for the caches [`super::linkable`] names, the same
-//!   judge the plan asks, and anything else in it (a pooled copy's cache that a hide rule now covers) is
-//!   removed when it is taken: a cache left a bind is never in a job's tree.
-//! - **Nothing followed.** A copy is written by the jobs that had it, and the shared caches by jobs with
-//!   no tree (a review binds them as before), so both are walked through directory handles opened
-//!   without following a symlink, from relay's caches' root down, one component at a time; a symlink
-//!   is linked as a symlink, and anything but a directory on the way to a cache is refused, never
-//!   replaced. A copy is walked only after its job's sandbox has ended (its PID namespace with it),
-//!   through the handles relay opened when it put it in place, so a job that moves or replaces the
-//!   directories around it changes nothing relay reads.
-//! - **Whole or not at all.** A directory a job added appears in the shared cache whole: it is built in
-//!   `.relay-staging` beside the caches and renamed into place, never over anything there.
-//! - **A real link first.** Before a copy is used, a file of the shared cache is linked into it (an
-//!   unnamed `O_TMPFILE`, so no name shows): two mounts of one filesystem share a device number, but
-//!   `link()` between them fails, and an empty cache would make no link to find out. On failure the
-//!   cache is a bind.
+//!   judge the plan asks, and anything else in it is removed when it is taken: a cache left a bind is
+//!   never in a job's tree.
+//! - **Only what was seen to end.** A copy goes back to the pool only once everything in its sandbox has
+//!   ended; one whose sandbox could not be seen to end whole is retired ([`Farm::retire`]) and removed by
+//!   gc, so nothing left running can touch a copy another job holds.
 
-use std::collections::HashMap;
 use std::ffi::{CStr, CString, OsStr};
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
-use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
 use rustix::io::Errno;
 
 use crate::config::CachePath;
 
-/// What bringing a copy up to date, or linking back from it, did.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Tally {
-    /// Directories read.
-    pub read: u64,
-    /// Directories made.
-    pub dirs: u64,
-    /// Hard links made.
-    pub links: u64,
-    /// Caches that could not be reached at all (their way in relay's caches refused) when linking back.
-    pub failed: u64,
-}
-
-/// A job's copy of the caches, in place; linked back and returned to its pool when dropped.
+/// A job's copy of the linked caches, in place; given back to its pool when dropped.
 #[derive(Debug)]
 pub struct Farm {
     path: PathBuf,
@@ -71,24 +46,17 @@ pub struct Farm {
     parent: OwnedFd,
     root: OwnedFd,
     pool: PathBuf,
-    shared: PathBuf,
-    rels: Vec<CachePath>,
     released: bool,
+    /// Its sandbox was not seen to end whole: given back as gone, for gc, never to another run.
+    retired: bool,
 }
 
 impl Farm {
-    /// Puts a copy of the shared caches `shared/<rel>`, for each of `rels`, at `name` in `parent` (a
-    /// directory only relay writes, or a `.git` reached from one without following a link): the copy
-    /// a run that never ended left there, else an idle one from `pool`, else a new one; then links into
-    /// it what the shared caches have that it lacks. Fails, leaving none, when no link can be made at all,
-    /// as when `parent` is on another filesystem than `shared`.
-    pub fn take(
-        parent: &Path,
-        name: &str,
-        pool: &Path,
-        shared: &Path,
-        rels: &[CachePath],
-    ) -> io::Result<(Self, Tally)> {
+    /// Puts a copy of the linked caches `rels` at `name` in `parent` (a directory only relay writes, or a
+    /// `.git` reached from one without following a link): the copy a run that never ended left there,
+    /// else the idle one given back last to `pool`, else a new, empty one; then cuts it down to `rels`.
+    /// Fails, leaving none, when it cannot be cut down.
+    pub fn take(parent: &Path, name: &str, pool: &Path, rels: &[CachePath]) -> io::Result<Self> {
         let parent_fd = open_path(parent)?;
         let cname = CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         let root = if let Ok(root) = open_dir(&parent_fd, &cname) {
@@ -107,37 +75,24 @@ impl Farm {
             parent: parent_fd,
             root,
             pool: pool.to_owned(),
-            shared: shared.to_owned(),
-            rels: rels.to_vec(),
             released: false,
+            retired: false,
         };
-        let mut tally = Tally::default();
-        let brought = (|| -> io::Result<()> {
+        let cut = (|| -> io::Result<()> {
             // A copy from the pool may hold caches this run does not link (one a hide rule now covers):
             // it holds these and nothing else.
             purge(&farm.root, &rels.iter().map(|r| &**r).collect::<Vec<&Path>>())?;
-            let root = shared_root(shared)?;
-            // Every pair relay links across: the copy and each cache (below), and the copy and the staging
-            // directory a release builds in before it renames into a cache. Each is one mount with the copy,
-            // so all three are one.
-            probe_link(&make_shared(&root, Path::new(STAGING))?, &farm.root)?;
             for rel in rels {
-                let from = make_shared(&root, rel)?;
-                let to = make_beneath(&farm.root, rel)?;
-                // A real link, made before anything is walked: two mounts of one filesystem share a device
-                // number but link() between them fails, and an empty cache would make no link to find out.
-                probe_link(&from, &to)?;
-                link_tree(&from, &to, Dest::Copy, &mut tally)?;
+                make_beneath(&farm.root, rel)?;
             }
             Ok(())
         })();
-        if let Err(e) = brought {
-            // Nothing the job did is in it: removed, not linked back.
+        if let Err(e) = cut {
             farm.released = true;
             let _ = crate::hostdir::remove_beneath(farm.parent.as_fd(), &farm.name);
             return Err(e);
         }
-        Ok((farm, tally))
+        Ok(farm)
     }
 
     /// Where the copy is: each cache `rel` is `path/rel`.
@@ -145,31 +100,18 @@ impl Farm {
         &self.path
     }
 
-    /// Links back into the shared caches every name the job added, then gives the copy back to the pool
-    /// (or, when it cannot, removes it). Once only.
-    pub fn release(&mut self) -> Tally {
-        let mut tally = Tally::default();
+    /// Its sandbox could not be seen to end whole (a process may still hold something in the copy): it is
+    /// never given back to a run, only to gc.
+    pub fn retire(&mut self) {
+        self.retired = true;
+    }
+
+    /// Gives the copy back to the pool, by rename (or, when it cannot, removes it). Only the directory
+    /// relay put there goes: a job may have put another in its place. Once only.
+    pub fn release(&mut self) {
         if std::mem::replace(&mut self.released, true) {
-            return tally;
+            return;
         }
-        let root = shared_root(&self.shared);
-        let staging =
-            root.as_ref().map_err(|e| io::Error::from(e.kind())).and_then(|r| make_shared(r, Path::new(STAGING)));
-        // What a release that never finished left being built: no release holds its lock.
-        if let Ok(staging) = &staging {
-            sweep_builds(staging);
-        }
-        for rel in &self.rels {
-            let Ok(from) = open_beneath(&self.root, rel) else { continue };
-            let to = root.as_ref().map_err(|e| io::Error::from(e.kind())).and_then(|r| make_shared(r, rel));
-            match (to, &staging) {
-                (Ok(to), Ok(staging)) => {
-                    let _ = link_tree(&from, &to, Dest::Shared { staging }, &mut tally);
-                }
-                _ => tally.failed += 1,
-            }
-        }
-        // Only the directory relay put there goes back: a job may have put another in its place.
         let same = |a: &rustix::fs::Stat, b: &rustix::fs::Stat| (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino);
         let ours = match (
             rustix::fs::fstat(&self.root),
@@ -178,10 +120,10 @@ impl Farm {
             (Ok(a), Ok(b)) => same(&a, &b),
             _ => false,
         };
-        if ours && !to_pool(&self.pool, &self.parent, &self.name) {
+        let to = if self.retired { GONE } else { IDLE };
+        if ours && !to_pool(&self.pool, &self.parent, &self.name, to) {
             let _ = crate::hostdir::remove_beneath(self.parent.as_fd(), &self.name);
         }
-        tally
     }
 }
 
@@ -207,12 +149,13 @@ fn from_pool(pool: &Path, parent: &OwnedFd, name: &CStr) -> bool {
     false
 }
 
-/// Moves the copy `name` in `parent` into `pool`, idle; false when it cannot.
-fn to_pool(pool: &Path, parent: &OwnedFd, name: &CStr) -> bool {
+/// Moves the copy `name` in `parent` into `pool`, named `prefix` and a v7 UUID ([`IDLE`] for a run to
+/// take, [`GONE`] for gc to remove); false when it cannot.
+fn to_pool(pool: &Path, parent: &OwnedFd, name: &CStr, prefix: &str) -> bool {
     let made = std::fs::DirBuilder::new().recursive(true).create(pool);
     let Ok(pool_fd) = made.and_then(|()| open_path(pool)) else { return false };
-    let idle = format!("{IDLE}{}", uuid::Uuid::now_v7());
-    rustix::fs::renameat(parent, name, &pool_fd, idle.as_str()).is_ok()
+    let to = format!("{prefix}{}", uuid::Uuid::now_v7());
+    rustix::fs::renameat(parent, name, &pool_fd, to.as_str()).is_ok()
 }
 
 /// An idle copy's name in a pool: this, then a v7 UUID made when it was given back, so it says when.
@@ -358,24 +301,8 @@ pub fn names_in_cache(shared: &Path, rel: &CachePath) -> io::Result<Vec<String>>
     Ok(entries(&dir)?.into_iter().filter_map(|(n, _)| n.into_string().ok()).collect())
 }
 
-/// The name a link probe's file has while it is in a cache, then a v7 UUID; never linked in either direction.
-const PROBE: &str = ".relay-link-probe-";
-
 /// The name of `relay probe`'s marker in a cache, then the probe's process id.
 pub const MARKER: &str = ".relay-probe-";
-
-/// Whether `name` is one of relay's own files in a cache (a link probe's, `relay probe`'s marker): the one
-/// test every walk asks, so none is ever linked, into a copy or back into a shared cache.
-fn is_relays_own(name: &[u8]) -> bool {
-    [PROBE, MARKER].iter().any(|own| name.starts_with(own.as_bytes()))
-}
-
-/// The name of a directory being built in [`STAGING`], then a v7 UUID.
-const NEW: &str = "new-";
-
-/// How old something a run makes for a moment (a probe, a directory being built) must be before another
-/// run takes it for one a run that never finished left: no run takes this long over it.
-const STALE_US: u64 = 3_600_000_000;
 
 /// When the entry `name` (`prefix`, then a v7 UUID) was made, in Unix microseconds.
 fn made_at(name: &str, prefix: &str) -> Option<u64> {
@@ -384,101 +311,16 @@ fn made_at(name: &str, prefix: &str) -> Option<u64> {
     Some(secs * 1_000_000 + u64::from(nanos) / 1000)
 }
 
-/// Removes from `dir` each entry named `prefix` and a v7 UUID older than [`STALE_US`], never following a
-/// symlink: what an interrupted run left, which would otherwise stay for ever.
-fn sweep(dir: &OwnedFd, prefix: &str) {
-    let now = crate::bus::now_micros();
-    for (name, _) in entries(dir).unwrap_or_default() {
-        let old =
-            name.to_str().ok().and_then(|n| made_at(n, prefix)).is_some_and(|at| now.saturating_sub(at) > STALE_US);
-        if old {
-            let _ = crate::hostdir::remove_beneath(dir.as_fd(), &name);
-        }
-    }
-}
-
-/// The lock of a build in [`STAGING`]: its name and `.lock`, created, then locked (`flock`), before the
-/// build's directory is made, and unlinked, still locked, once the directory is gone (published or
-/// removed). While it is held the build is someone's, however old.
-struct BuildLock<'a> {
-    staging: &'a OwnedFd,
-    name: CString,
-    _file: OwnedFd,
-}
-
-impl<'a> BuildLock<'a> {
-    fn take(staging: &'a OwnedFd, build: &CStr) -> io::Result<Self> {
-        let name = CString::new([build.to_bytes(), b".lock"].concat()).map_err(|_| Errno::INVAL)?;
-        let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let file = rustix::fs::openat(staging, &name, flags, Mode::from_raw_mode(0o600))?;
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)?;
-        // A sweep could have locked and unlinked it between its creation and this lock: then the build
-        // would be no one's on disk. Held only if the name is still this file.
-        let (named, mine) = (rustix::fs::statat(staging, &name, AtFlags::SYMLINK_NOFOLLOW)?, rustix::fs::fstat(&file)?);
-        if (named.st_dev, named.st_ino) != (mine.st_dev, mine.st_ino) {
-            return Err(Errno::BUSY.into());
-        }
-        Ok(Self { staging, name, _file: file })
-    }
-}
-
-impl Drop for BuildLock<'_> {
-    fn drop(&mut self) {
-        let _ = rustix::fs::unlinkat(self.staging, &self.name, AtFlags::empty());
-    }
-}
-
-/// Removes from `staging` each build no release holds: one whose lock no one has (its release ended
-/// without removing it), or that has no lock (made before it, and so never anyone's since); and each lock
-/// no one holds whose build is gone. A build is removed by its name in `staging`, never through a handle
-/// kept across a moment its release could publish it: one renamed into a cache meanwhile is not there.
-/// Age is never taken for evidence: a release may take as long as it takes.
-fn sweep_builds(staging: &OwnedFd) {
-    for (name, _) in entries(staging).unwrap_or_default() {
-        let bytes = name.to_bytes();
-        if !bytes.starts_with(NEW.as_bytes()) {
-            continue;
-        }
-        let (build, lock) = match bytes.strip_suffix(b".lock") {
-            Some(build) => (CString::new(build).unwrap_or_default(), name.clone()),
-            None => (name.clone(), CString::new([bytes, b".lock"].concat()).unwrap_or_default()),
-        };
-        let flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let held = match rustix::fs::openat(staging, &lock, flags, Mode::empty()) {
-            Ok(file) => match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-                Ok(()) => Some(file),
-                Err(_) => continue,
-            },
-            Err(Errno::NOENT) => None,
-            Err(_) => continue,
-        };
-        // No release holds it: the build (if it is still here) and then the lock go.
-        let _ = crate::hostdir::remove_beneath(staging.as_fd(), &build);
-        if held.is_some() {
-            let _ = rustix::fs::unlinkat(staging, &lock, AtFlags::empty());
-        }
-    }
-}
-
-/// Tests only: the link probe takes its fallback, as on a filesystem with no `O_TMPFILE`.
-#[cfg(test)]
-static NO_TMPFILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// The directory in relay's caches where a new directory is built before it is renamed into a cache whole;
-/// beside the caches, in no cache's mount.
-const STAGING: &str = ".relay-staging";
-
 /// Relay's caches (`<data dir>/<project>/caches`), opened: a directory only relay writes, reached by a
-/// path only relay writes. Every walk of a shared cache starts from this handle.
+/// path only relay writes.
 fn shared_root(shared: &Path) -> io::Result<OwnedFd> {
     std::fs::DirBuilder::new().recursive(true).create(shared)?;
     open_path(shared)
 }
 
 /// `rel` in relay's caches, from their opened root one directory at a time, following no symlink and
-/// making each directory that is not there. Anything else in the way is refused, never replaced: a
-/// shared cache is another job's too, and a symlink there (a job that binds a cache around this one
-/// could make it) would take the walk out of relay's caches.
+/// making each directory that is not there. Anything else in the way is refused, never replaced: what a
+/// bound cache and the probe's markers are made through.
 fn make_shared(root: &OwnedFd, rel: &Path) -> io::Result<OwnedFd> {
     let mut fd = root.try_clone()?;
     for n in names(rel) {
@@ -489,36 +331,6 @@ fn make_shared(root: &OwnedFd, rel: &Path) -> io::Result<OwnedFd> {
         fd = open_dir(&fd, n)?;
     }
     Ok(fd)
-}
-
-/// Whether a file in the shared cache `shared` can be hard-linked into the copy `copy`: an unnamed file
-/// made there (`O_TMPFILE`, so no name ever shows in the shared cache) is linked into the copy and the link
-/// removed. Where the filesystem has no unnamed files, a file made in the copy is linked into the shared
-/// cache itself and removed at once (a run taking its copy meanwhile skips the name: [`is_relays_own`]). EXDEV
-/// when not.
-fn probe_link(shared: &OwnedFd, copy: &OwnedFd) -> io::Result<()> {
-    let name = format!("{PROBE}{}", uuid::Uuid::now_v7());
-    let flags = OFlags::WRONLY | OFlags::TMPFILE | OFlags::CLOEXEC;
-    #[cfg(test)]
-    let forced = NO_TMPFILE.load(std::sync::atomic::Ordering::SeqCst);
-    #[cfg(not(test))]
-    let forced = false;
-    if !forced && let Ok(tmp) = rustix::fs::openat(shared, ".", flags, Mode::from_raw_mode(0o600)) {
-        let magic = format!("/proc/self/fd/{}", tmp.as_raw_fd());
-        rustix::fs::linkat(CWD, magic.as_str(), copy, name.as_str(), AtFlags::SYMLINK_FOLLOW)?;
-        let _ = rustix::fs::unlinkat(copy, name.as_str(), AtFlags::empty());
-        return Ok(());
-    }
-    // A probe a run that never finished left here (it is linked nowhere: every walk skips the name).
-    sweep(shared, PROBE);
-    let made = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    drop(rustix::fs::openat(copy, name.as_str(), made, Mode::from_raw_mode(0o600))?);
-    let linked = rustix::fs::linkat(copy, name.as_str(), shared, name.as_str(), AtFlags::empty());
-    if linked.is_ok() {
-        let _ = rustix::fs::unlinkat(shared, name.as_str(), AtFlags::empty());
-    }
-    let _ = rustix::fs::unlinkat(copy, name.as_str(), AtFlags::empty());
-    Ok(linked?)
 }
 
 /// Removes from a copy everything but the caches `rels` (whole) and the directories on the way to them.
@@ -535,16 +347,6 @@ fn purge(at: &OwnedFd, rels: &[&Path]) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Where [`link_tree`] links to.
-#[derive(Clone, Copy)]
-enum Dest<'a> {
-    /// A job's copy, only relay's while it walks: a directory is made there and filled.
-    Copy,
-    /// A shared cache, read by runs taking their copies meanwhile: a new directory is built in `staging`
-    /// and renamed into place whole, never over anything there, so no run sees one half-filled.
-    Shared { staging: &'a OwnedFd },
 }
 
 /// The entries of `fd` but `.` and `..`, each with whether it is a directory (not a symlink to one).
@@ -568,94 +370,6 @@ fn entries(fd: &OwnedFd) -> io::Result<Vec<(CString, bool)>> {
     Ok(out)
 }
 
-/// Links into `to` every entry of `from` that `to` has no name for: a directory is made there, anything
-/// else hard-linked (a symlink as itself). A directory both have is walked; any other name both have is
-/// left as it is on each side, untouched. Directories made keep their mode, plus the owner's `rwx`, so
-/// that names can be added to them later and a copy can be removed (Go makes its module cache read-only);
-/// a copy linked back from (into a shared cache) gets the same. A new directory in a shared cache appears
-/// whole ([`Dest::Shared`]). All or nothing, for every caller: an entry that cannot be read, made or
-/// linked (EXDEV, ENOSPC, EMLINK, an unreadable directory) stops it with that error, so `take` removes the
-/// copy rather than give a job part of a package, and `publish` removes its build rather than publish
-/// one. No caller reads a count of failures.
-fn link_tree(from: &OwnedFd, to: &OwnedFd, dest: Dest<'_>, tally: &mut Tally) -> io::Result<()> {
-    let own = matches!(dest, Dest::Shared { .. });
-    tally.read += 1;
-    let have: HashMap<CString, bool> = entries(to)?.into_iter().collect();
-    for (name, is_dir) in entries(from)? {
-        let name: &CStr = &name;
-        if is_relays_own(name.to_bytes()) {
-            continue;
-        }
-        let there = have.get(name).copied();
-        if !is_dir {
-            if there.is_some() {
-                continue;
-            }
-            match rustix::fs::linkat(from, name, to, name, AtFlags::empty()) {
-                Ok(()) | Err(Errno::EXIST) => tally.links += 1,
-                Err(e) => return Err(e.into()),
-            }
-            continue;
-        }
-        // Something else under that name there (a file, or a symlink): it stays, and nothing below is linked.
-        if there == Some(false) {
-            continue;
-        }
-        let sub_from = open_dir(from, name)?;
-        let mode = rustix::fs::fstat(&sub_from)?.st_mode & 0o7777;
-        if own && mode & 0o700 != 0o700 {
-            rustix::fs::fchmod(&sub_from, Mode::from_raw_mode(mode | 0o700))?;
-        }
-        match (there, dest) {
-            (None, Dest::Shared { staging }) => publish(&sub_from, to, name, mode, staging, tally)?,
-            (None, Dest::Copy) => {
-                match rustix::fs::mkdirat(to, name, Mode::from_raw_mode(0o700)) {
-                    Ok(()) | Err(Errno::EXIST) => tally.dirs += 1,
-                    Err(e) => return Err(e.into()),
-                }
-                let sub_to = open_dir(to, name)?;
-                link_tree(&sub_from, &sub_to, dest, tally)?;
-                rustix::fs::fchmod(&sub_to, Mode::from_raw_mode(mode | 0o700))?;
-            }
-            (Some(_), _) => link_tree(&sub_from, &open_dir(to, name)?, dest, tally)?,
-        }
-    }
-    Ok(())
-}
-
-/// Puts the copy's new directory `from` at `name` in the shared directory `to`, whole: built in `staging`
-/// (in relay's caches, beside them, which no run reads), then renamed into place unless something took
-/// the name meanwhile (another job's release), in which case what it lacks is linked into that one. Built
-/// all or nothing ([`link_tree`]): on any failure the build is removed and nothing is published.
-fn publish(
-    from: &OwnedFd,
-    to: &OwnedFd,
-    name: &CStr,
-    mode: u32,
-    staging: &OwnedFd,
-    tally: &mut Tally,
-) -> io::Result<()> {
-    let stage = CString::new(format!("{NEW}{}", uuid::Uuid::now_v7())).map_err(|_| Errno::INVAL)?;
-    // Held from before the build's directory is made until after it is gone ([`sweep_builds`]).
-    let _lock = BuildLock::take(staging, &stage)?;
-    rustix::fs::mkdirat(staging, &stage, Mode::from_raw_mode(0o700))?;
-    tally.dirs += 1;
-    let placed = open_dir(staging, &stage).and_then(|staged| {
-        link_tree(from, &staged, Dest::Copy, tally)?;
-        rustix::fs::fchmod(&staged, Mode::from_raw_mode(mode | 0o700))?;
-        Ok(rustix::fs::renameat_with(staging, &stage, to, name, rustix::fs::RenameFlags::NOREPLACE)?)
-    });
-    let raced = match placed {
-        Ok(()) => return Ok(()),
-        Err(e) if e.raw_os_error() == Some(Errno::EXIST.raw_os_error()) => {
-            open_dir(to, name).and_then(|there| link_tree(from, &there, Dest::Shared { staging }, tally))
-        }
-        Err(e) => Err(e),
-    };
-    let _ = crate::hostdir::remove_beneath(staging.as_fd(), &stage);
-    raced
-}
-
 /// The name of the copy in a session's clone: in `.git`, where git and the session's work ignore it.
 pub const IN_CLONE: &str = "relay-caches";
 
@@ -669,11 +383,6 @@ pub fn clone_git(clone: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::config::tempdir::Dir as TempDir;
-    use std::os::unix::fs::MetadataExt;
-
-    fn ino(p: &Path) -> u64 {
-        p.symlink_metadata().unwrap().ino()
-    }
 
     fn cache(spelled: &str) -> CachePath {
         CachePath::new(spelled).unwrap()
@@ -685,160 +394,108 @@ mod tests {
 
     struct Place {
         _d: TempDir,
-        shared: PathBuf,
         job: PathBuf,
         pool: PathBuf,
     }
 
     fn place() -> Place {
         let d = TempDir::new();
-        let (shared, job, pool) = (d.path().join("caches"), d.path().join("job"), d.path().join("farms"));
+        let (job, pool) = (d.path().join("job"), d.path().join("farms"));
         std::fs::create_dir_all(&job).unwrap();
-        Place { _d: d, shared, job, pool }
+        Place { _d: d, job, pool }
     }
 
-    fn take(p: &Place) -> (Farm, Tally) {
-        Farm::take(&p.job, "f", &p.pool, &p.shared, &rels()).unwrap()
+    fn take(p: &Place) -> Farm {
+        Farm::take(&p.job, "f", &p.pool, &rels()).unwrap()
     }
 
     fn pooled(p: &Place) -> usize {
         std::fs::read_dir(&p.pool).map_or(0, Iterator::count)
     }
 
+    /// A new copy is empty; what a job leaves in it goes back to the pool with it, by rename, and the next
+    /// run takes that same copy (the one given back last); two runs at once hold two copies.
     #[test]
-    fn a_copy_links_every_file_and_a_release_adds_only_what_is_new() {
+    fn a_copy_is_private_and_goes_back_whole() {
         let p = place();
-        let shared = &p.shared;
-        std::fs::create_dir_all(shared.join(".cache/bun/pkg")).unwrap();
-        std::fs::write(shared.join(".cache/bun/pkg/index.js"), "old").unwrap();
-        std::os::unix::fs::symlink("index.js", shared.join(".cache/bun/pkg/main.js")).unwrap();
-        let (mut farm, made) = take(&p);
-        assert_eq!((made.links, made.dirs, made.failed), (2, 2, 0), "{made:?}");
+        let farm = take(&p);
         let f = farm.path().to_owned();
-        assert_eq!(ino(&f.join(".cache/bun/pkg/index.js")), ino(&shared.join(".cache/bun/pkg/index.js")));
-        assert!(f.join(".cache/bun/pkg/main.js").symlink_metadata().unwrap().is_symlink(), "a link as a link");
-        assert!(f.join(".cargo/registry").is_dir() && shared.join(".cargo/registry").is_dir());
-
-        // The job adds a package and replaces a file by renaming over it; another job meanwhile added `other`.
-        std::fs::create_dir_all(f.join(".cache/bun/new")).unwrap();
-        std::fs::write(f.join(".cache/bun/new/a.js"), "new").unwrap();
-        std::fs::write(f.join(".cache/bun/pkg/tmp"), "replaced").unwrap();
-        std::fs::rename(f.join(".cache/bun/pkg/tmp"), f.join(".cache/bun/pkg/index.js")).unwrap();
-        std::fs::write(f.join(".cache/other"), "mine").unwrap();
-        std::fs::write(shared.join(".cache/other"), "theirs").unwrap();
-        let back = farm.release();
-        assert_eq!((back.links, back.dirs), (1, 1), "{back:?}");
-        assert_eq!(std::fs::read_to_string(shared.join(".cache/bun/new/a.js")).unwrap(), "new");
-        assert_eq!(std::fs::read_to_string(shared.join(".cache/bun/pkg/index.js")).unwrap(), "old", "kept");
-        assert_eq!(std::fs::read_to_string(shared.join(".cache/other")).unwrap(), "theirs", "the first one kept");
-        assert!(!f.exists() && pooled(&p) == 1, "the copy went back to the pool");
-        assert_eq!(farm.release(), Tally::default(), "once only");
-    }
-
-    /// The next run takes the idle copy back and links in only what it lacks: what the run before saw
-    /// is not linked again, file by file.
-    #[test]
-    fn a_pooled_copy_is_taken_again_and_brought_up_to_date() {
-        let p = place();
-        std::fs::create_dir_all(p.shared.join(".cache/a")).unwrap();
-        for i in 0..50 {
-            std::fs::write(p.shared.join(format!(".cache/a/{i}")), "x").unwrap();
-        }
-        let (farm, first) = take(&p);
-        assert_eq!(first.links, 50);
+        assert!(f.join(".cache").is_dir() && f.join(".cargo/registry").is_dir());
+        assert_eq!(std::fs::read_dir(f.join(".cache")).unwrap().count(), 0, "a new copy is cold");
+        std::fs::create_dir_all(f.join(".cache/bun/pkg")).unwrap();
+        std::fs::write(f.join(".cache/bun/pkg/index.js"), "x").unwrap();
         drop(farm);
-        std::fs::write(p.shared.join(".cache/a/later"), "y").unwrap();
-        let (farm, again) = take(&p);
-        assert_eq!((again.links, again.dirs, pooled(&p)), (1, 0, 0), "{again:?}");
-        assert_eq!(ino(&farm.path().join(".cache/a/later")), ino(&p.shared.join(".cache/a/later")));
-        // Two at once: the second has none idle, and makes its own; both go back.
-        let (other, _) = Farm::take(&p.job, "g", &p.pool, &p.shared, &rels()).unwrap();
+        assert!(!f.exists() && pooled(&p) == 1, "the copy went back to the pool");
+        let farm = take(&p);
+        assert_eq!(std::fs::read_to_string(farm.path().join(".cache/bun/pkg/index.js")).unwrap(), "x");
+        assert_eq!(pooled(&p), 0, "taken from the pool");
+        let other = Farm::take(&p.job, "g", &p.pool, &rels()).unwrap();
+        assert_eq!(std::fs::read_dir(other.path().join(".cache")).unwrap().count(), 0, "none idle: a new one");
         drop((farm, other));
         assert_eq!(pooled(&p), 2);
     }
 
-    /// A copy is the job's to write: a symlink it leaves, or a directory it swaps for one, is linked as
-    /// a link (never walked); a read-only directory (Go's module cache) still takes new names; and a
-    /// directory put where the copy was is not taken into the pool.
+    /// A copy is the job's to write, and the directory around it too: it goes back through the handles
+    /// relay opened when it put it there, so a job that moved the directory and left a link to elsewhere
+    /// in its place changes nothing relay touches; and a directory the job put where its copy was is not
+    /// taken into the pool.
     #[test]
     fn a_release_follows_nothing_the_job_left() {
-        use std::os::unix::fs::PermissionsExt;
         let p = place();
         let outside = p.job.with_file_name("outside");
         std::fs::create_dir_all(outside.join("secret")).unwrap();
-        std::fs::write(outside.join("secret/key"), "k").unwrap();
-        let (mut farm, _) = take(&p);
-        let f = farm.path().to_owned();
-        std::os::unix::fs::symlink(&outside, f.join(".cache/planted")).unwrap();
-        // The job replaced a whole cache with a link elsewhere: nothing is read through it.
-        std::fs::remove_dir_all(f.join(".cargo/registry")).unwrap();
-        std::os::unix::fs::symlink(&outside, f.join(".cargo/registry")).unwrap();
-        std::fs::create_dir_all(f.join(".cache/go/mod")).unwrap();
-        std::fs::write(f.join(".cache/go/mod/x.go"), "x").unwrap();
-        std::fs::set_permissions(f.join(".cache/go/mod"), std::fs::Permissions::from_mode(0o555)).unwrap();
-        // And moved the directory that held its copy, leaving a link to elsewhere in its place.
+        let farm = take(&p);
+        std::os::unix::fs::symlink(&outside, farm.path().join(".cache/planted")).unwrap();
         let moved = p.job.with_file_name("moved");
         std::fs::rename(&p.job, &moved).unwrap();
         std::os::unix::fs::symlink(&outside, &p.job).unwrap();
-        farm.release();
-        assert!(p.shared.join(".cache/planted").symlink_metadata().unwrap().is_symlink(), "linked as a link");
-        assert!(!p.shared.join(".cargo/registry/secret").exists(), "a cache swapped for a link is not walked");
-        assert_eq!(std::fs::read_to_string(p.shared.join(".cache/go/mod/x.go")).unwrap(), "x");
-        assert!(!moved.join("f").exists() && pooled(&p) == 1, "returned through its handle");
-        assert_eq!(std::fs::read_to_string(outside.join("secret/key")).unwrap(), "k", "nothing outside touched");
+        drop(farm);
+        assert!(!moved.join("f").exists() && pooled(&p) == 1, "given back through its handle");
+        assert!(outside.join("secret").is_dir() && !outside.join("f").exists(), "nothing outside touched");
 
-        // A directory the job put in place of its copy stays where it is, out of the pool.
         std::fs::remove_file(&p.job).unwrap();
         std::fs::rename(&moved, &p.job).unwrap();
-        let (mut farm, _) = take(&p);
-        assert!(farm.path().join(".cargo/registry").symlink_metadata().unwrap().is_dir(), "the link it left is gone");
+        let mut farm = take(&p);
         std::fs::rename(farm.path(), p.job.join("away")).unwrap();
         std::fs::create_dir_all(p.job.join("f/planted")).unwrap();
         farm.release();
-        assert!(p.job.join("f/planted").exists() && pooled(&p) == 0);
+        assert!(p.job.join("f/planted").exists() && pooled(&p) == 0, "another directory is not pooled");
     }
 
-    /// What a copy costs on a real cache: `RELAY_FARM_MEASURE=<dir holding the caches>` (each of its
-    /// subdirectories is one cache), on the filesystem of the system temporary directory. Prints the time
-    /// and the counts of the first run (no copy idle: one is made), a release, and a second run (the copy
-    /// taken back from the pool).
+    /// Supervision could not see the sandbox end whole: the copy is never given to another run, only to gc.
     #[test]
-    #[ignore = "measures a real cache; set RELAY_FARM_MEASURE"]
-    #[allow(clippy::disallowed_methods, reason = "the caller names the cache to measure")]
-    fn measure() {
-        let Some(shared) = std::env::var_os("RELAY_FARM_MEASURE").map(PathBuf::from) else { return };
-        let rels: Vec<CachePath> =
-            std::fs::read_dir(&shared).unwrap().flatten().map(|e| cache(&e.file_name().to_string_lossy())).collect();
-        let d = TempDir::new();
-        let (job, pool) = (d.path().join("job"), d.path().join("farms"));
-        std::fs::create_dir_all(&job).unwrap();
-        let timed = |what: &str, f: &mut dyn FnMut() -> Tally| {
-            let t = std::time::Instant::now();
-            let tally = f();
-            eprintln!("{what}: {:.2} s, {tally:?}", t.elapsed().as_secs_f64());
-        };
-        let mut farm = None;
-        timed("first run, a copy made", &mut || {
-            let (f, t) = Farm::take(&job, "f", &pool, &shared, &rels).unwrap();
-            farm = Some(f);
-            t
-        });
-        timed("release", &mut || farm.as_mut().unwrap().release());
-        timed("next run, the copy taken from the pool", &mut || {
-            let (f, t) = Farm::take(&job, "f", &pool, &shared, &rels).unwrap();
-            farm = Some(f);
-            t
-        });
-        timed("release", &mut || farm.as_mut().unwrap().release());
+    fn a_retired_copy_never_goes_back_to_a_run() {
+        let p = place();
+        let mut farm = take(&p);
+        farm.retire();
+        drop(farm);
+        assert!(idle(&p.pool).is_empty(), "a retired copy is idle for the next run");
+        assert_eq!(abandoned(&p.pool).len(), 1, "gc removes it");
+        let farm = take(&p);
+        assert_eq!(std::fs::read_dir(farm.path().join(".cache")).unwrap().count(), 0, "a new copy, not that one");
     }
 
-    /// PR #67 review: a copy holding a directory a job made mode 000 could not be emptied once renamed
-    /// out of the pool, so it stayed as `gone-*`, which nothing lists again: a leak. It goes whole.
+    /// PR #67 review 3: a pooled copy kept a cache a later run does not link (one a hide rule now covers),
+    /// so that run's job could read it in its clone. A copy taken holds the caches it is taken for, only.
+    #[test]
+    fn a_pooled_copy_holds_only_the_caches_it_is_taken_for() {
+        let p = place();
+        let farm = take(&p);
+        std::fs::create_dir_all(farm.path().join(".cargo/registry/secret")).unwrap();
+        std::fs::write(farm.path().join("stray"), "x").unwrap();
+        drop(farm);
+        let farm = Farm::take(&p.job, "f", &p.pool, &[cache(".cache")]).unwrap();
+        assert!(farm.path().join(".cache").is_dir());
+        assert!(!farm.path().join(".cargo").exists() && !farm.path().join("stray").exists(), "not purged");
+    }
+
+    /// PR #67 review: a copy holding a directory a job made mode 000 could not be emptied once renamed out
+    /// of the pool, so it stayed as `gone-*`, which nothing lists again: a leak. It goes whole.
     #[test]
     fn an_idle_copy_holding_an_unreadable_directory_is_removed() {
         use std::os::unix::fs::PermissionsExt;
         let p = place();
-        let (farm, _) = take(&p);
+        let farm = take(&p);
         std::fs::create_dir_all(farm.path().join(".cache/locked/inner")).unwrap();
         std::fs::write(farm.path().join(".cache/locked/inner/f"), "x").unwrap();
         std::fs::set_permissions(farm.path().join(".cache/locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -849,333 +506,17 @@ mod tests {
         assert_eq!(pooled(&p), 0, "nothing left in the pool, not even renamed");
     }
 
-    /// PR #67 review: an empty shared cache made no link, so a copy on another filesystem than the
-    /// shared caches was taken; what the job then added could not be linked back (EXDEV) and stayed in the
-    /// pool, where gc removes it. A copy on another filesystem is refused before anything is walked.
-    #[test]
-    fn a_copy_on_another_filesystem_is_refused_even_for_an_empty_cache() {
-        use std::os::unix::fs::MetadataExt;
-        let p = place();
-        let shm = Path::new("/dev/shm");
-        let dev = |q: &Path| q.metadata().map(|m| m.dev()).ok();
-        if dev(shm).is_none() || dev(shm) == dev(&p.job) {
-            eprintln!("SKIPPED: /dev/shm is not another filesystem here");
-            return;
-        }
-        let shared = shm.join(format!("relay-farm-test-{}", std::process::id()));
-        std::fs::create_dir_all(&shared).unwrap();
-        let taken = Farm::take(&p.job, "f", &p.pool, &shared, &rels());
-        let _ = std::fs::remove_dir_all(&shared);
-        assert_eq!(taken.err().and_then(|e| e.raw_os_error()), Some(Errno::XDEV.raw_os_error()));
-        assert!(!p.job.join("f").exists(), "no copy left");
-    }
-
-    /// PR #67 review 3: a pooled copy kept a cache a later run does not link (one a hide rule now covers),
-    /// so that run's job could read it in its clone. A copy taken holds the caches it is taken for, only.
-    #[test]
-    fn a_pooled_copy_holds_only_the_caches_it_is_taken_for() {
-        let p = place();
-        std::fs::create_dir_all(p.shared.join(".cargo/registry/secret")).unwrap();
-        std::fs::write(p.shared.join(".cargo/registry/secret/key"), "k").unwrap();
-        std::fs::create_dir_all(p.shared.join(".cache")).unwrap();
-        drop(take(&p));
-        std::fs::create_dir_all(p.job.join("f-stray")).unwrap();
-        let (farm, _) = Farm::take(&p.job, "f", &p.pool, &p.shared, &[cache(".cache")]).unwrap();
-        let f = farm.path().to_owned();
-        assert!(f.join(".cache").is_dir());
-        assert!(!f.join(".cargo").exists(), "a cache it was not taken for is purged from the copy");
-    }
-
-    /// PR #67 review 3: the shared side was reached by path, every component but the last followed. A
-    /// directory on the way to a cache replaced by a symlink (by a job that binds a cache around it) took
-    /// the walk out of relay's caches: `take()` made directories and hard links of host files, `release()`
-    /// wrote the job's files there. Every component is opened from the caches' root, following none.
-    #[test]
-    fn the_way_to_a_shared_cache_follows_no_symlink() {
-        let p = place();
-        let outside = p.job.with_file_name("outside");
-        std::fs::create_dir_all(outside.join("hooks")).unwrap();
-        std::fs::write(outside.join("hooks/host-file"), "host").unwrap();
-        std::fs::create_dir_all(&p.shared).unwrap();
-        let rels = [cache(".cache/redirect/hooks")];
-        std::fs::create_dir_all(p.shared.join(".cache")).unwrap();
-        std::os::unix::fs::symlink(&outside, p.shared.join(".cache/redirect")).unwrap();
-        let taken = Farm::take(&p.job, "f", &p.pool, &p.shared, &rels);
-        assert!(taken.is_err(), "taken through a symlink");
-        assert!(!p.job.join("f").exists(), "no copy left");
-        // A copy taken while the way was whole, released after it was swapped: nothing written outside.
-        std::fs::remove_file(p.shared.join(".cache/redirect")).unwrap();
-        let (farm, _) = Farm::take(&p.job, "f", &p.pool, &p.shared, &rels).unwrap();
-        std::fs::write(farm.path().join(".cache/redirect/hooks/planted"), "job").unwrap();
-        std::fs::remove_dir_all(p.shared.join(".cache/redirect")).unwrap();
-        std::os::unix::fs::symlink(&outside, p.shared.join(".cache/redirect")).unwrap();
-        drop(farm);
-        assert!(!outside.join("hooks/planted").exists(), "release wrote outside relay's caches");
-        assert_eq!(std::fs::read_dir(outside.join("hooks")).unwrap().count(), 1);
-    }
-
-    /// PR #67 review 3: release made a new directory in the shared caches before linking its files, so a
-    /// run taking a copy at that moment kept a half-written package. A new directory appears whole.
-    #[test]
-    fn a_take_during_a_release_sees_each_new_package_whole_or_not_at_all() {
-        const PACKAGES: usize = 60;
-        const FILES: usize = 40;
-        let p = place();
-        std::fs::create_dir_all(p.shared.join(".cache")).unwrap();
-        let rels = [cache(".cache")];
-        let (farm, _) = Farm::take(&p.job, "f", &p.pool, &p.shared, &rels).unwrap();
-        for i in 0..PACKAGES {
-            let pkg = farm.path().join(format!(".cache/pkg{i}"));
-            std::fs::create_dir_all(&pkg).unwrap();
-            for j in 0..FILES {
-                std::fs::write(pkg.join(format!("f{j}")), "x").unwrap();
-            }
-        }
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let reader = {
-            let (done, shared, job, pool) = (done.clone(), p.shared.clone(), p.job.clone(), p.pool.with_extension("r"));
-            std::thread::spawn(move || {
-                let mut partial = Vec::new();
-                let mut n = 0;
-                while !done.load(std::sync::atomic::Ordering::SeqCst) || n == 0 {
-                    n += 1;
-                    let (copy, _) = Farm::take(&job, "r", &pool, &shared, &[cache(".cache")]).unwrap();
-                    for e in std::fs::read_dir(copy.path().join(".cache")).unwrap().flatten() {
-                        let files = std::fs::read_dir(e.path()).map_or(0, Iterator::count);
-                        if files != FILES {
-                            partial.push(format!("{:?}: {files}", e.file_name()));
-                        }
-                    }
-                    drop(copy);
-                }
-                partial
-            })
-        };
-        drop(farm);
-        done.store(true, std::sync::atomic::Ordering::SeqCst);
-        let partial = reader.join().unwrap();
-        assert!(partial.is_empty(), "packages seen half-written: {partial:?}");
-        assert_eq!(std::fs::read_dir(p.shared.join(".cache")).unwrap().count(), PACKAGES, "all published");
-    }
-
-    /// PR #67 review 3: two bind mounts of one filesystem have one `st_dev`, but `link()` between them fails
-    /// with EXDEV, so comparing devices let an empty cache take a copy it could never link back from. Run
-    /// in bubblewrap with the caches a bind mount of their own: taking a copy beside them is refused.
-    #[test]
-    #[allow(clippy::disallowed_methods, reason = "the inner run is told its directories by the outer")]
-    fn a_copy_on_another_mount_of_one_filesystem_is_refused() {
-        if let Some(dirs) = std::env::var_os("RELAY_FARM_INNER") {
-            let dirs = PathBuf::from(dirs);
-            let (shared, job, pool) = (dirs.join("caches"), dirs.join("job"), dirs.join("farms"));
-            let taken = Farm::take(&job, "f", &pool, &shared, &rels());
-            assert_eq!(taken.err().and_then(|e| e.raw_os_error()), Some(Errno::XDEV.raw_os_error()));
-            assert!(!job.join("f").exists(), "no copy left");
-            return;
-        }
-        if std::process::Command::new("bwrap").arg("--version").output().is_err() {
-            eprintln!("SKIPPED: no bubblewrap");
-            return;
-        }
-        let p = place();
-        std::fs::create_dir_all(&p.shared).unwrap();
-        let dirs = p.job.parent().unwrap();
-        let out = std::process::Command::new("bwrap")
-            .args(["--dev-bind", "/", "/", "--bind"])
-            .args([&p.shared, &p.shared])
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", "sandbox::farm::tests::a_copy_on_another_mount_of_one_filesystem_is_refused"])
-            .env("RELAY_FARM_INNER", dirs)
-            .output()
-            .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success() && text.contains("1 passed"), "{text}");
-    }
-
-    /// PR #67 review 6: the staging sweep went by age alone, so a release building for over an hour had its
-    /// build removed under it, files of a package it had just published included. A build is held by a
-    /// lock from creation through publication, and the sweep removes only what it can lock.
-    #[test]
-    fn a_build_held_by_its_lock_is_never_swept_however_old() {
-        let p = place();
-        drop(take(&p));
-        let staging = p.shared.join(STAGING);
-        let old = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, 1_000_000, 0));
-        let build = staging.join(format!("{NEW}{old}"));
-        std::fs::create_dir_all(build.join("pkg")).unwrap();
-        std::fs::write(build.join("pkg/f"), "x").unwrap();
-        // The lock a release holds while it builds (its file beside the build, locked).
-        let lock = std::fs::File::create(staging.join(format!("{NEW}{old}.lock"))).unwrap();
-        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
-        drop(take(&p));
-        assert!(build.join("pkg/f").exists(), "a build under way was swept for its age");
-        drop(lock);
-        drop(take(&p));
-        assert!(!build.exists(), "a build no one holds stays for ever");
-    }
-
-    /// PR #67 review 6: the probe's markers (`.relay-probe-<pid>`) were not among the names every walk
-    /// skips, so a copy taken while a probe ran got the marker and its release wrote it into the shared
-    /// cache, for ever. One predicate names relay's own files, and no walk links one, either way.
-    #[test]
-    fn relays_own_files_are_linked_by_no_walk() {
-        let p = place();
-        std::fs::create_dir_all(p.shared.join(".cache")).unwrap();
-        std::fs::write(p.shared.join(".cache/.relay-probe-4242"), "").unwrap();
-        let (farm, _) = take(&p);
-        assert!(!farm.path().join(".cache/.relay-probe-4242").exists(), "a probe's marker was copied");
-        std::fs::write(farm.path().join(".cache/.relay-probe-4343"), "").unwrap();
-        drop(farm);
-        assert!(!p.shared.join(".cache/.relay-probe-4343").exists(), "a probe's marker was written back");
-    }
-
-    /// What an interrupted run left (a build no release holds, an old link probe) goes; a build a release
-    /// holds stays.
-    #[test]
-    fn what_an_interrupted_run_left_is_swept_and_what_a_run_makes_now_is_not() {
-        let p = place();
-        let (farm, _) = take(&p);
-        drop(farm);
-        let staging = p.shared.join(STAGING);
-        let old = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, 1_000_000, 0));
-        std::fs::create_dir_all(staging.join(format!("{NEW}{old}/pkg"))).unwrap();
-        std::fs::write(staging.join(format!("{NEW}{old}/pkg/f")), "x").unwrap();
-        let fresh = format!("{NEW}{}", uuid::Uuid::now_v7());
-        std::fs::create_dir_all(staging.join(&fresh)).unwrap();
-        let held = std::fs::File::create(staging.join(format!("{fresh}.lock"))).unwrap();
-        rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
-        std::fs::write(p.shared.join(format!(".cache/{PROBE}{old}")), "").unwrap();
-        let (farm, _) = take(&p);
-        assert!(!farm.path().join(format!(".cache/{PROBE}{old}")).exists(), "a probe's name is never linked");
-        drop(farm);
-        assert!(!staging.join(format!("{NEW}{old}")).exists(), "an interrupted build stays for ever");
-        assert!(staging.join(&fresh).exists(), "a build under way is not taken for an interrupted one");
-        sweep(&open_path(&p.shared.join(".cache")).unwrap(), PROBE);
-        assert!(!p.shared.join(format!(".cache/{PROBE}{old}")).exists(), "an old probe stays for ever");
-    }
-
-    /// PR #67 review 4: a new directory whose staging failed for an entry (one the job made unreadable) was
-    /// published anyway, half-filled. A directory is published whole, or not at all.
-    #[test]
-    fn a_new_directory_that_could_not_be_staged_whole_is_not_published() {
-        use std::os::unix::fs::PermissionsExt;
-        let p = place();
-        let (farm, _) = take(&p);
-        let pkg = farm.path().join(".cache/pkg");
-        std::fs::create_dir_all(pkg.join("locked")).unwrap();
-        std::fs::write(pkg.join("index.js"), "x").unwrap();
-        std::fs::write(pkg.join("locked/part.js"), "y").unwrap();
-        std::fs::set_permissions(pkg.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
-        drop(farm);
-        assert!(!p.shared.join(".cache/pkg").exists(), "a half-staged package was published");
-        assert_eq!(std::fs::read_dir(p.shared.join(STAGING)).map_or(0, Iterator::count), 0, "staging left behind");
-    }
-
-    /// PR #67 review 5: a link that failed while a copy was filled (here, a directory of the shared cache it
-    /// cannot read; else ENOSPC, EMLINK) was counted and passed over, so the copy held the package without
-    /// it and the job took that for a cache hit. Filling a copy is all or nothing.
-    #[test]
-    fn a_copy_that_could_not_be_filled_whole_is_not_taken() {
-        use std::os::unix::fs::PermissionsExt;
-        let p = place();
-        let pkg = p.shared.join(".cache/pkg");
-        std::fs::create_dir_all(pkg.join("locked")).unwrap();
-        std::fs::write(pkg.join("index.js"), "x").unwrap();
-        std::fs::write(pkg.join("locked/part.js"), "y").unwrap();
-        std::fs::set_permissions(pkg.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
-        let taken = Farm::take(&p.job, "f", &p.pool, &p.shared, &rels());
-        std::fs::set_permissions(pkg.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(taken.is_err(), "a copy missing part of a package was taken");
-        assert!(!p.job.join("f").exists(), "no copy left");
-    }
-
-    /// PR #67 review 5: the link probe tried the cache and the copy, not the staging directory a release
-    /// builds new directories in; with staging on a mount of its own, every release failed with EXDEV and
-    /// what the job added stayed in the pool. Run in bubblewrap with staging a bind mount of its own.
-    #[test]
-    #[allow(clippy::disallowed_methods, reason = "the inner run is told its directories by the outer")]
-    fn a_copy_is_refused_when_staging_cannot_be_linked_into() {
-        if let Some(dirs) = std::env::var_os("RELAY_FARM_INNER_STAGING") {
-            let dirs = PathBuf::from(dirs);
-            let (shared, job, pool) = (dirs.join("caches"), dirs.join("job"), dirs.join("farms"));
-            let taken = Farm::take(&job, "f", &pool, &shared, &rels());
-            assert_eq!(taken.err().and_then(|e| e.raw_os_error()), Some(Errno::XDEV.raw_os_error()));
-            assert!(!job.join("f").exists(), "no copy left");
-            return;
-        }
-        if std::process::Command::new("bwrap").arg("--version").output().is_err() {
-            eprintln!("SKIPPED: no bubblewrap");
-            return;
-        }
-        let p = place();
-        let staging = p.shared.join(STAGING);
-        std::fs::create_dir_all(&staging).unwrap();
-        let out = std::process::Command::new("bwrap")
-            .args(["--dev-bind", "/", "/", "--bind"])
-            .args([&staging, &staging])
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", "sandbox::farm::tests::a_copy_is_refused_when_staging_cannot_be_linked_into"])
-            .env("RELAY_FARM_INNER_STAGING", p.job.parent().unwrap())
-            .output()
-            .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success() && text.contains("1 passed"), "{text}");
-    }
-
-    /// PR #67 review 4: without `O_TMPFILE`, the link probe linked into the staging directory at the caches'
-    /// root, not into the cache: a cache on a mount of its own, empty, was taken though no link could be
-    /// made to it. The fallback probes the cache directory itself. Run in bubblewrap, with the cache (not
-    /// the root) a bind mount of its own, and the fallback forced.
-    #[test]
-    #[allow(clippy::disallowed_methods, reason = "the inner run is told its directories by the outer")]
-    fn without_tmpfile_the_probe_still_links_against_the_cache_itself() {
-        if let Some(dirs) = std::env::var_os("RELAY_FARM_INNER_CACHE") {
-            NO_TMPFILE.store(true, std::sync::atomic::Ordering::SeqCst);
-            let dirs = PathBuf::from(dirs);
-            let (shared, job, pool) = (dirs.join("caches"), dirs.join("job"), dirs.join("farms"));
-            let taken = Farm::take(&job, "f", &pool, &shared, &[cache(".cache")]);
-            assert_eq!(taken.err().and_then(|e| e.raw_os_error()), Some(Errno::XDEV.raw_os_error()));
-            assert!(!job.join("f").exists(), "no copy left");
-            assert_eq!(std::fs::read_dir(shared.join(".cache")).unwrap().count(), 0, "no probe left in the cache");
-            return;
-        }
-        if std::process::Command::new("bwrap").arg("--version").output().is_err() {
-            eprintln!("SKIPPED: no bubblewrap");
-            return;
-        }
-        let p = place();
-        std::fs::create_dir_all(p.shared.join(".cache")).unwrap();
-        let cache = p.shared.join(".cache");
-        let out = std::process::Command::new("bwrap")
-            .args(["--dev-bind", "/", "/", "--bind"])
-            .args([&cache, &cache])
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", "sandbox::farm::tests::without_tmpfile_the_probe_still_links_against_the_cache_itself"])
-            .env("RELAY_FARM_INNER_CACHE", p.job.parent().unwrap())
-            .output()
-            .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success() && text.contains("1 passed"), "{text}");
-    }
-
-    /// An idle copy says when it was given back, and goes whole, read-only directories and all, while
-    /// the shared caches keep every file.
+    /// An idle copy says when it was given back, and goes whole on removal; one already gone is an error.
     #[test]
     fn an_idle_copy_says_when_it_was_used_and_can_be_removed() {
-        use std::os::unix::fs::PermissionsExt;
         let p = place();
-        std::fs::create_dir_all(p.shared.join(".cache/a")).unwrap();
-        std::fs::write(p.shared.join(".cache/a/f"), "x").unwrap();
         let before = crate::bus::now_micros();
-        let (farm, _) = take(&p);
-        std::fs::create_dir_all(farm.path().join(".cache/go")).unwrap();
-        std::fs::set_permissions(farm.path().join(".cache/go"), std::fs::Permissions::from_mode(0o555)).unwrap();
-        drop(farm);
+        drop(take(&p));
         let idle = idle(&p.pool);
         assert_eq!(idle.len(), 1);
         assert!(idle[0].1 >= before / 1000 * 1000 && idle[0].1 <= crate::bus::now_micros(), "{idle:?}");
         remove_idle(&p.pool, &idle[0].0).unwrap();
         assert_eq!(pooled(&p), 0);
-        assert_eq!(std::fs::read_to_string(p.shared.join(".cache/a/f")).unwrap(), "x");
         assert!(remove_idle(&p.pool, &idle[0].0).is_err(), "taken or gone already: nothing to do");
     }
 
@@ -1183,12 +524,10 @@ mod tests {
     #[test]
     fn a_copy_left_in_place_is_used_again() {
         let p = place();
-        let (farm, _) = take(&p);
+        let farm = take(&p);
         std::fs::write(farm.path().join(".cache/left"), "x").unwrap();
         std::mem::forget(farm);
-        let (farm, _) = take(&p);
+        let farm = take(&p);
         assert!(farm.path().join(".cache/left").exists());
-        drop(farm);
-        assert!(p.shared.join(".cache/left").exists());
     }
 }

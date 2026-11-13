@@ -57,7 +57,7 @@ waiting_retain_days = 7.0    # a failed or stopped job's clone is kept this long
 logs_gzip_after_days = 3.0   # <job>.log.ndjson is gzipped after this
 interval_minutes = 60.0      # the dispatcher runs a pass this often while awake
 pass_seconds = 300           # a pass stops after this long
-cache_copies_idle_days = 1.0 # an idle copy of the linked caches goes after this (see sandbox.linked_caches)
+cache_copies_idle_days = 7.0 # an idle copy of the linked caches goes after this (see sandbox.linked_caches)
 
 [session]
 branch_prefix = "relay/"
@@ -133,8 +133,8 @@ hide_home = [".ssh", ".gnupg", ".config/gh", ".git-credentials", ".netrc", ".aws
 # each, never the host's own, so a session cannot change what the host runs.
 caches = [".cache", ".cargo/registry", ".cargo/git"]
 # Those of caches a tool hard-links from into the job's tree (bun, pnpm, uv), which a job with a tree
-# gets on its tree's mount, as a symlink into its own copy of them; each costs every run a pass over
-# its directories (see the README). Each must also be in caches.
+# gets on its tree's mount, as a symlink into a private copy taken from a pool; a new copy is cold, and
+# each warms on its own (see the README). Each must also be in caches.
 # linked_caches = [".bun/install/cache"]
 linked_caches = []
 # env_deny = "..."       # variables whose names match are not passed in (see the README)

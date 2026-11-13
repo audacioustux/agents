@@ -27,7 +27,7 @@ pub struct Ctx {
     pub clones: PathBuf,
     /// `$XDG_DATA_HOME/relay/<name>/caches`: the sessions' own `sandbox.caches`.
     pub caches: PathBuf,
-    /// `$XDG_DATA_HOME/relay/<name>/farms`: idle copies of the linked caches, made of hard links, that a
+    /// `$XDG_DATA_HOME/relay/<name>/farms`: idle copies of the linked caches, each a private cache, that a
     /// session takes into its clone ([`crate::sandbox::farm`]). A check's are in `state/farms`, beside
     /// the directory it runs in.
     pub farms: PathBuf,

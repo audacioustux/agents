@@ -395,7 +395,8 @@ pub struct Gc {
     /// A pass stops after this long, and the next one goes on.
     pub pass_seconds: u64,
     /// An idle copy of the linked caches (`sandbox.linked_caches`) goes once no run has taken it for
-    /// this many days; and a pool keeps no more idle copies than `limits.max_running`.
+    /// this many days; and a pool keeps no more idle copies than `limits.max_running`. A copy is a whole
+    /// cache, warmed by the runs that held it: one removed costs the next run a cold install.
     pub cache_copies_idle_days: f64,
 }
 
@@ -409,7 +410,7 @@ impl Default for Gc {
             logs_gzip_after_days: 3.0,
             interval_minutes: 60.0,
             pass_seconds: 300,
-            cache_copies_idle_days: 1.0,
+            cache_copies_idle_days: 7.0,
         }
     }
 }
@@ -543,11 +544,11 @@ pub struct Sandbox {
     /// directory for the project, mounted there, never the host's: a session
     /// that could write the host's `~/.cargo` could replace what the host runs.
     pub caches: Vec<CachePath>,
-    /// Those of `caches` a job with a tree gets as a symlink into its own copy of them, made of hard
-    /// links, on its tree's mount, so a tool that hard-links from its store into the tree (bun, pnpm,
-    /// uv) can: across two mounts `link()` fails and it copies instead. Each run then pays for bringing
-    /// its copy up to date and linking back what it added (it reads every directory of the cache
-    /// twice), so only a cache a tool links from is worth declaring. Every other cache stays a bind.
+    /// Those of `caches` a job with a tree gets as a symlink into a private copy of its own, on its
+    /// tree's mount, so a tool that hard-links from its store into the tree (bun, pnpm, uv) can: across
+    /// two mounts `link()` fails and it copies instead. Copies are pooled and warm on their own: a new
+    /// one is cold, and a package new to the project is fetched once per copy, so only a cache a tool
+    /// links from is worth declaring. Every other cache stays a bind of relay's directory for it.
     pub linked_caches: Vec<CachePath>,
     /// Environment variables whose names match this regex are not passed in.
     pub env_deny: String,
@@ -906,12 +907,6 @@ impl Config {
         // the way would take relay's own walks (making the inner cache's directory, binding it) out of its
         // caches: so caches are apart, each relay's alone up to its own directory.
         let caches = &self.sandbox.caches;
-        // Where relay builds what it adds to the caches, beside them: no cache may be it.
-        if let Some(p) =
-            caches.iter().find(|p| p.components().next().is_some_and(|c| c.as_os_str() == ".relay-staging"))
-        {
-            bail!("sandbox.caches {} is relay's own staging directory, not a cache", p.display());
-        }
         for (i, a) in caches.iter().enumerate() {
             if let Some(b) = caches[i + 1..].iter().find(|b| a.starts_with(b) || b.starts_with(a)) {
                 bail!(
@@ -1460,10 +1455,8 @@ mod tests {
             "[sandbox]\nlinked_caches = [\".bun/install/cache\"]",
             "[sandbox]\ncaches = [\".cache\", \".cache/uv\"]",
             "[sandbox]\ncaches = [\".cache/uv\", \".cache/\"]",
-            "[sandbox]\ncaches = [\".relay-staging\"]",
             // Spelled otherwise, the same (PR #67 review 5): nested, and relay's staging.
             "[sandbox]\ncaches = [\"./.cache\", \".cache/redirect/hooks\"]",
-            "[sandbox]\ncaches = [\"./.relay-staging\"]",
             "[sandbox]\ncaches = [\"\"]",
             "[sandbox]\ncaches = [\".\"]",
             "[gc]\npass_seconds = 0",

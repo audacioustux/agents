@@ -231,7 +231,7 @@ struct Launch {
     session_id: String,
     brief: String,
     reviewing: Option<Reviewing>,
-    /// The session's own copy of the caches, in its clone: linked back when dropped.
+    /// The session's own copy of the linked caches, in its clone: given back to the pool when dropped.
     caches: Option<sandbox::farm::Farm>,
 }
 
@@ -274,7 +274,13 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     };
     let (mut report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
-    // What the session added to its caches is the project's before its check makes its own copy.
+    // Its copy of the linked caches goes back to the pool now. Not to the pool if anything of its sandbox
+    // may still run (its supervisor was killed): something left could touch it while another job holds it.
+    if let Some(copy) = launch.caches.as_mut()
+        && !ending.tree_ended
+    {
+        copy.retire();
+    }
     drop(launch.caches.take());
     let marker = &ctx.cfg.session.final_marker;
     report.zone = Some(launch.zone.clone());
@@ -1273,6 +1279,7 @@ fn drive(
         Ok(())
     })?;
     settle(&mut child, &mut ending, live, deadline, heard_at, silent_after)?;
+    ending.tree_ended = child.tree_ended();
     Ok((reader.report().clone(), ending, disk))
 }
 

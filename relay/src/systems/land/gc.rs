@@ -16,8 +16,8 @@
 //!   or has ended `outputs_after_hours` ago: a resumed review fetches it again;
 //! - an idle copy of the linked caches (`sandbox.linked_caches`) in a pool goes once no run has taken
 //!   it for `cache_copies_idle_days`, and so does every idle copy past the `limits.max_running` most
-//!   recently used: no more runs than that hold one at once. Its files are the caches' own (hard
-//!   links), so it frees directories, not data, and is counted as freeing nothing.
+//!   recently used: no more runs than that hold one at once. A copy is a whole cache of its own, and
+//!   frees what it holds.
 //!
 //! A clone with a live runner, a symlink, or a path outside relay's own
 //! directories is left alone.
@@ -383,9 +383,7 @@ pub fn run(ctx: &Ctx, dry_run: bool) -> Result<()> {
             left = items.len() - i;
             break;
         };
-        let (bytes, complete) = if item.kind == Kind::CacheCopy {
-            (0, true)
-        } else if matches!(item.kind, Kind::Log | Kind::ReviewRef) {
+        let (bytes, complete) = if matches!(item.kind, Kind::Log | Kind::ReviewRef) {
             (item.path.metadata().map_or(0, |m| m.len()), true)
         } else {
             os::dir_size(&item.path, within)

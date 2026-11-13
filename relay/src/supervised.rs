@@ -111,6 +111,15 @@ impl Supervised {
         Ok(ended.is_some())
     }
 
+    /// Whether everything the child started was seen to end: the supervisor exited (with a code) only
+    /// after it had reaped its whole tree, sandboxed processes included. Killed instead (its
+    /// [`STOP_GRACE`] ran out, or it gave up on its tree), it ended by a signal, and a process of the tree
+    /// may outlive it for a moment: its sandbox's processes are not in its group, and end only as their
+    /// namespace is torn down. False until it has been reaped.
+    pub fn tree_ended(&self) -> bool {
+        self.exited.is_some_and(|status| status.code().is_some())
+    }
+
     /// Waits until the child has exited and `closed` says its output has closed, asking `stop` every
     /// [`LOOK`]. `Ok(Err(why))`: `stop` answered first, and the child's group was killed.
     /// `Ok(Ok(status))`: it ended, however it ended, and whatever it left in its group was killed.
@@ -278,6 +287,20 @@ fn exit_code(status: rustix::process::WaitStatus) -> ExitCode {
 mod tests {
     //! The runner's side, with `sh` standing in for the supervisor as the leader of its group
     //! ([`command`]); the supervisor itself is tested in `tests/supervise.rs`.
+
+    /// A child that exits on its own was seen to end whole; one killed when stopped was not, so what it
+    /// held (a session's copy of the linked caches) is not handed on.
+    #[test]
+    fn a_tree_is_seen_ended_only_when_its_leader_exits_on_its_own() {
+        let mut done = Supervised::spawn(Command::new("sh").args(["-c", "exit 3"])).unwrap();
+        let ended = done.finish(|| true, || None::<()>).unwrap();
+        assert_eq!(ended.map(|s| s.code()), Ok(Some(3)));
+        assert!(done.tree_ended());
+        let mut stopped = Supervised::spawn(Command::new("sleep").arg("30")).unwrap();
+        assert!(!stopped.tree_ended(), "not before it is reaped");
+        assert_eq!(stopped.finish(|| true, || Some(())).unwrap(), Err(()));
+        assert!(!stopped.tree_ended(), "killed: a process of its tree may outlive it");
+    }
 
     use super::*;
 

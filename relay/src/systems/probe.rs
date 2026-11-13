@@ -85,7 +85,7 @@ fn cache_marker() -> String {
     format!("{MARKER}{}", std::process::id())
 }
 
-const MARKER: &str = ".relay-probe-";
+use sandbox::farm::MARKER;
 
 struct Probe<'a> {
     ctx: &'a Ctx,
@@ -296,6 +296,8 @@ impl<'a> Probe<'a> {
         let copy =
             sandbox::own_caches(self.ctx, &self.clone.join(".git"), sandbox::farm::IN_CLONE, &self.ctx.farms, &rels);
         marks.copy = copy?;
+        // No walk copies a marker (it is relay's own file), so the copy gets its own.
+        marks.mark_copy()?;
         let mounts = Mounts { caches: marks.copy.as_ref().map(sandbox::farm::Farm::path), ..mounts };
         let plan = sandbox::plan(self.ctx, &user, &mounts);
         let args = sandbox::args(self.ctx, &user, &mounts, sandbox::session_env(self.ctx, &inv));
@@ -335,6 +337,20 @@ struct Marks<'a> {
     ctx: &'a Ctx,
     marked: Vec<CachePath>,
     copy: Option<sandbox::farm::Farm>,
+}
+
+impl Marks<'_> {
+    /// Puts the marker in each marked cache the clone's copy holds.
+    fn mark_copy(&self) -> std::io::Result<()> {
+        let Some(copy) = &self.copy else { return Ok(()) };
+        for rel in &self.marked {
+            let dir = copy.path().join(rel);
+            if dir.is_dir() {
+                std::fs::File::create_new(dir.join(cache_marker()))?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Marks<'_> {
@@ -463,7 +479,9 @@ mod tests {
             std::slice::from_ref(rel),
         )
         .unwrap();
-        assert!(marks.copy.as_ref().unwrap().path().join(rel).join(cache_marker()).exists(), "the copy has it");
+        assert!(!marks.copy.as_ref().unwrap().path().join(rel).join(cache_marker()).exists(), "copied with the cache");
+        marks.mark_copy().unwrap();
+        assert!(marks.copy.as_ref().unwrap().path().join(rel).join(cache_marker()).exists(), "the copy has its own");
         drop(marks);
         let pooled: Vec<_> = sandbox::farm::idle(&ctx.farms);
         assert_eq!(pooled.len(), 1);

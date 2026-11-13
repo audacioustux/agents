@@ -155,9 +155,9 @@ impl Farm {
         let root = shared_root(&self.shared);
         let staging =
             root.as_ref().map_err(|e| io::Error::from(e.kind())).and_then(|r| make_shared(r, Path::new(STAGING)));
-        // What a release that never finished left being built: no run is building it any more.
+        // What a release that never finished left being built: no release holds its lock.
         if let Ok(staging) = &staging {
-            sweep(staging, NEW);
+            sweep_builds(staging);
         }
         for rel in &self.rels {
             let Ok(from) = open_beneath(&self.root, rel) else { continue };
@@ -361,6 +361,15 @@ pub fn names_in_cache(shared: &Path, rel: &CachePath) -> io::Result<Vec<String>>
 /// The name a link probe's file has while it is in a cache, then a v7 UUID; never linked in either direction.
 const PROBE: &str = ".relay-link-probe-";
 
+/// The name of `relay probe`'s marker in a cache, then the probe's process id.
+pub const MARKER: &str = ".relay-probe-";
+
+/// Whether `name` is one of relay's own files in a cache (a link probe's, `relay probe`'s marker): the one
+/// test every walk asks, so none is ever linked, into a copy or back into a shared cache.
+fn is_relays_own(name: &[u8]) -> bool {
+    [PROBE, MARKER].iter().any(|own| name.starts_with(own.as_bytes()))
+}
+
 /// The name of a directory being built in [`STAGING`], then a v7 UUID.
 const NEW: &str = "new-";
 
@@ -384,6 +393,69 @@ fn sweep(dir: &OwnedFd, prefix: &str) {
             name.to_str().ok().and_then(|n| made_at(n, prefix)).is_some_and(|at| now.saturating_sub(at) > STALE_US);
         if old {
             let _ = crate::hostdir::remove_beneath(dir.as_fd(), &name);
+        }
+    }
+}
+
+/// The lock of a build in [`STAGING`]: its name and `.lock`, created, then locked (`flock`), before the
+/// build's directory is made, and unlinked, still locked, once the directory is gone (published or
+/// removed). While it is held the build is someone's, however old.
+struct BuildLock<'a> {
+    staging: &'a OwnedFd,
+    name: CString,
+    _file: OwnedFd,
+}
+
+impl<'a> BuildLock<'a> {
+    fn take(staging: &'a OwnedFd, build: &CStr) -> io::Result<Self> {
+        let name = CString::new([build.to_bytes(), b".lock"].concat()).map_err(|_| Errno::INVAL)?;
+        let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let file = rustix::fs::openat(staging, &name, flags, Mode::from_raw_mode(0o600))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)?;
+        // A sweep could have locked and unlinked it between its creation and this lock: then the build
+        // would be no one's on disk. Held only if the name is still this file.
+        let (named, mine) = (rustix::fs::statat(staging, &name, AtFlags::SYMLINK_NOFOLLOW)?, rustix::fs::fstat(&file)?);
+        if (named.st_dev, named.st_ino) != (mine.st_dev, mine.st_ino) {
+            return Err(Errno::BUSY.into());
+        }
+        Ok(Self { staging, name, _file: file })
+    }
+}
+
+impl Drop for BuildLock<'_> {
+    fn drop(&mut self) {
+        let _ = rustix::fs::unlinkat(self.staging, &self.name, AtFlags::empty());
+    }
+}
+
+/// Removes from `staging` each build no release holds: one whose lock no one has (its release ended
+/// without removing it), or that has no lock (made before it, and so never anyone's since); and each lock
+/// no one holds whose build is gone. A build is removed by its name in `staging`, never through a handle
+/// kept across a moment its release could publish it: one renamed into a cache meanwhile is not there.
+/// Age is never taken for evidence: a release may take as long as it takes.
+fn sweep_builds(staging: &OwnedFd) {
+    for (name, _) in entries(staging).unwrap_or_default() {
+        let bytes = name.to_bytes();
+        if !bytes.starts_with(NEW.as_bytes()) {
+            continue;
+        }
+        let (build, lock) = match bytes.strip_suffix(b".lock") {
+            Some(build) => (CString::new(build).unwrap_or_default(), name.clone()),
+            None => (name.clone(), CString::new([bytes, b".lock"].concat()).unwrap_or_default()),
+        };
+        let flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let held = match rustix::fs::openat(staging, &lock, flags, Mode::empty()) {
+            Ok(file) => match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => Some(file),
+                Err(_) => continue,
+            },
+            Err(Errno::NOENT) => None,
+            Err(_) => continue,
+        };
+        // No release holds it: the build (if it is still here) and then the lock go.
+        let _ = crate::hostdir::remove_beneath(staging.as_fd(), &build);
+        if held.is_some() {
+            let _ = rustix::fs::unlinkat(staging, &lock, AtFlags::empty());
         }
     }
 }
@@ -422,7 +494,7 @@ fn make_shared(root: &OwnedFd, rel: &Path) -> io::Result<OwnedFd> {
 /// Whether a file in the shared cache `shared` can be hard-linked into the copy `copy`: an unnamed file
 /// made there (`O_TMPFILE`, so no name ever shows in the shared cache) is linked into the copy and the link
 /// removed. Where the filesystem has no unnamed files, a file made in the copy is linked into the shared
-/// cache itself and removed at once (a run taking its copy meanwhile skips the name: [`PROBE`]). EXDEV
+/// cache itself and removed at once (a run taking its copy meanwhile skips the name: [`is_relays_own`]). EXDEV
 /// when not.
 fn probe_link(shared: &OwnedFd, copy: &OwnedFd) -> io::Result<()> {
     let name = format!("{PROBE}{}", uuid::Uuid::now_v7());
@@ -511,7 +583,7 @@ fn link_tree(from: &OwnedFd, to: &OwnedFd, dest: Dest<'_>, tally: &mut Tally) ->
     let have: HashMap<CString, bool> = entries(to)?.into_iter().collect();
     for (name, is_dir) in entries(from)? {
         let name: &CStr = &name;
-        if name.to_bytes().starts_with(PROBE.as_bytes()) {
+        if is_relays_own(name.to_bytes()) {
             continue;
         }
         let there = have.get(name).copied();
@@ -564,6 +636,8 @@ fn publish(
     tally: &mut Tally,
 ) -> io::Result<()> {
     let stage = CString::new(format!("{NEW}{}", uuid::Uuid::now_v7())).map_err(|_| Errno::INVAL)?;
+    // Held from before the build's directory is made until after it is gone ([`sweep_builds`]).
+    let _lock = BuildLock::take(staging, &stage)?;
     rustix::fs::mkdirat(staging, &stage, Mode::from_raw_mode(0o700))?;
     tally.dirs += 1;
     let placed = open_dir(staging, &stage).and_then(|staged| {
@@ -917,8 +991,45 @@ mod tests {
         assert!(out.status.success() && text.contains("1 passed"), "{text}");
     }
 
-    /// What an interrupted run left for a moment (a directory being built, a link probe) goes once it is
-    /// older than any run takes over it; what a run is making now stays.
+    /// PR #67 review 6: the staging sweep went by age alone, so a release building for over an hour had its
+    /// build removed under it, files of a package it had just published included. A build is held by a
+    /// lock from creation through publication, and the sweep removes only what it can lock.
+    #[test]
+    fn a_build_held_by_its_lock_is_never_swept_however_old() {
+        let p = place();
+        drop(take(&p));
+        let staging = p.shared.join(STAGING);
+        let old = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, 1_000_000, 0));
+        let build = staging.join(format!("{NEW}{old}"));
+        std::fs::create_dir_all(build.join("pkg")).unwrap();
+        std::fs::write(build.join("pkg/f"), "x").unwrap();
+        // The lock a release holds while it builds (its file beside the build, locked).
+        let lock = std::fs::File::create(staging.join(format!("{NEW}{old}.lock"))).unwrap();
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        drop(take(&p));
+        assert!(build.join("pkg/f").exists(), "a build under way was swept for its age");
+        drop(lock);
+        drop(take(&p));
+        assert!(!build.exists(), "a build no one holds stays for ever");
+    }
+
+    /// PR #67 review 6: the probe's markers (`.relay-probe-<pid>`) were not among the names every walk
+    /// skips, so a copy taken while a probe ran got the marker and its release wrote it into the shared
+    /// cache, for ever. One predicate names relay's own files, and no walk links one, either way.
+    #[test]
+    fn relays_own_files_are_linked_by_no_walk() {
+        let p = place();
+        std::fs::create_dir_all(p.shared.join(".cache")).unwrap();
+        std::fs::write(p.shared.join(".cache/.relay-probe-4242"), "").unwrap();
+        let (farm, _) = take(&p);
+        assert!(!farm.path().join(".cache/.relay-probe-4242").exists(), "a probe's marker was copied");
+        std::fs::write(farm.path().join(".cache/.relay-probe-4343"), "").unwrap();
+        drop(farm);
+        assert!(!p.shared.join(".cache/.relay-probe-4343").exists(), "a probe's marker was written back");
+    }
+
+    /// What an interrupted run left (a build no release holds, an old link probe) goes; a build a release
+    /// holds stays.
     #[test]
     fn what_an_interrupted_run_left_is_swept_and_what_a_run_makes_now_is_not() {
         let p = place();
@@ -930,6 +1041,8 @@ mod tests {
         std::fs::write(staging.join(format!("{NEW}{old}/pkg/f")), "x").unwrap();
         let fresh = format!("{NEW}{}", uuid::Uuid::now_v7());
         std::fs::create_dir_all(staging.join(&fresh)).unwrap();
+        let held = std::fs::File::create(staging.join(format!("{fresh}.lock"))).unwrap();
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
         std::fs::write(p.shared.join(format!(".cache/{PROBE}{old}")), "").unwrap();
         let (farm, _) = take(&p);
         assert!(!farm.path().join(format!(".cache/{PROBE}{old}")).exists(), "a probe's name is never linked");

@@ -158,7 +158,8 @@ enum Stand {
 /// The linked caches (`sandbox.linked_caches`) a job with a tree gets as a symlink into its own copy, each
 /// with where its symlink stands. The one judge of it: the copy holds these caches and nothing else
 /// ([`linkable`], [`farm::Farm::take`]), and the plan links these and nothing else. A cache is left a bind
-/// (and so never copied) when its path is not there on the host; when another cache is nested in it or
+/// (and so never copied) when its path is not there on the host; when its path, or a directory on its way
+/// under the home, is a symlink (the rules compare paths as written); when another cache is nested in it or
 /// around it (a bind around it would cover the symlink's directory, and a job could reach the way to it
 /// through either); when anything is mounted at or under its path (a hidden path among them: copied, it
 /// would show in the job's tree); when a later layer covers its path or a directory around it (the
@@ -170,6 +171,17 @@ fn linking(cfg: &crate::config::Config, user_home: &Path, before: &Layer, after:
     for (r, p) in cfg.sandbox.caches.iter().zip(&paths) {
         let Some(parent) = p.parent() else { continue };
         if !cfg.sandbox.linked_caches.contains(r) || !p.exists() {
+            continue;
+        }
+        // Every rule here compares paths as written, so the path must be the directory itself: with a
+        // symlink on it (the cache, or a directory on its way under the home), a hide rule naming where it
+        // leads would mask a bind but not the copy. Such a cache stays a bind.
+        let mut way = user_home.to_path_buf();
+        let symlinked = r.components().any(|c| {
+            way.push(c);
+            way.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())
+        });
+        if symlinked {
             continue;
         }
         let nested = paths.iter().any(|q| q != p && (q.starts_with(p) || p.starts_with(q)));
@@ -633,6 +645,43 @@ mod tests {
         let plan = super::plan(&ctx, &user, &m(None));
         assert!(plan.iter().all(|(_, k)| !matches!(k, Mount::Rebuilt | Mount::Symlink(_))), "{plan:#?}");
         assert!(matches!(mount_of(&plan, &user.join(".cache")), Some(Mount::From(_))));
+    }
+
+    /// PR #67 review 6: whether a cache could be linked was decided on its path as written, but the host's
+    /// path can be a symlink: `~/.cargo/git -> .private`, with `hide_home` naming `.private/secret`. As a
+    /// bind, the hide mount lands inside the cache's bind and masks `secret`; linked, it lands on the host's
+    /// directory, and the copy (in the job's tree) held `secret`. A cache whose host path has a symlink on
+    /// it is not linked: it stays a bind.
+    #[test]
+    fn a_cache_whose_host_path_is_a_symlink_is_not_linked() {
+        let d = Dir::new();
+        let root = d.path();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let user = root.join("user");
+        std::fs::create_dir_all(user.join(".private/secret")).unwrap();
+        std::fs::create_dir_all(user.join(".cargo")).unwrap();
+        std::os::unix::fs::symlink("../.private", user.join(".cargo/git")).unwrap();
+        std::fs::create_dir_all(user.join(".npm-real/_cacache")).unwrap();
+        std::os::unix::fs::symlink(".npm-real", user.join(".npm")).unwrap();
+        let conf = "name = \"t\"\n[sandbox]\nhide = []\nhide_home = [\".private/secret\"]\n\
+                    caches = [\".cargo/git\", \".npm/_cacache\"]\nlinked_caches = [\".cargo/git\", \".npm/_cacache\"]\n";
+        let cfg = Config::parse(conf, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        let (scratch, tmp, farm) = (root.join("state/t/jobs/j.d"), root.join("data/t/scratch/j"), root.join("tree/f"));
+        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
+        let m = Mounts {
+            home: &home,
+            workdir: Some(&farm),
+            scratch: &scratch,
+            inbox: None,
+            tmp: &tmp,
+            cwd: &farm,
+            account: false,
+            caches: None,
+        };
+        // The cache itself a symlink, and a directory on its way one.
+        assert!(linkable(&ctx, &user, &m).is_empty(), "{:?}", linkable(&ctx, &user, &m));
     }
 
     /// PR #67 review 4: a copy an interrupted run left in the clone was handled only by taking a copy, so a

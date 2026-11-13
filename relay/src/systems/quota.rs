@@ -396,6 +396,9 @@ struct Judgment {
     state: String,
     /// The meter that decides: the one that holds the account back, else the closest to its limit.
     deciding: Option<String>,
+    /// The meters that govern the model, by name, whether or not one can decide now (every one
+    /// may have just reset).
+    governing: Vec<String>,
     floor: Floor,
     /// How dispatch ranks it ([`accounts::fit`]) when its own state and quota let it take the job.
     score: Option<f64>,
@@ -423,12 +426,24 @@ fn judge(room: &Room, a: &Home, model: Option<&str>, limits: &Limits, now: u64) 
         accounts::at_floor(&governing, &s.meters, limits, secs(now))
             .or_else(|| accounts::tightest(&governing, &s.meters, secs(now)))
     });
+    let governing = st
+        .and_then(|s| {
+            let found = h.meters_for(model, &s.meters).ok()?;
+            Some(
+                s.meters
+                    .iter()
+                    .filter(|(_, m)| found.iter().any(|g| std::ptr::eq(*g, *m)))
+                    .map(|(k, _)| k.clone())
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
     let floor = deciding.map_or_else(Floor::default, |(_, m)| Floor {
         floor: Some(limits.floor_for(m.resets_at, secs(now)).0),
         floor_why: accounts::floor_note(limits, m, secs(now)),
     });
     let score = accounts::fit(a, st, model, limits, now).ok();
-    Judgment { state, deciding: deciding.map(|(k, _)| k.to_owned()), floor, score, ready }
+    Judgment { state, deciding: deciding.map(|(k, _)| k.to_owned()), governing, floor, score, ready }
 }
 
 /// A state cell for what holds an account back.
@@ -493,6 +508,22 @@ impl Shown {
     }
 }
 
+/// The allowance an account's own row shows, by its provider (`None`: the account's whole one):
+/// the one the deciding meter is of, else one a meter that governs is of (none can decide when
+/// every one has just reset), else the account's whole one when it has a meter of it or none at
+/// all, else its first provider's. So the account's row is never an empty one above the
+/// allowance it stands for.
+fn lead(meters: &[(&String, &Meter)], deciding: Option<&str>, governing: &[String]) -> Option<String> {
+    let of = |name: &str| meters.iter().find(|(n, _)| n.as_str() == name).map(|(_, m)| m.provider.clone());
+    if let Some(p) = deciding.and_then(of).or_else(|| governing.iter().find_map(|g| of(g))) {
+        return p;
+    }
+    if meters.iter().any(|(_, m)| m.provider.is_none()) {
+        return None;
+    }
+    meters.iter().filter_map(|(_, m)| m.provider.clone()).min()
+}
+
 /// The rows the meters of an account (`key`, whose state is `st`) make at `now`, their floors by
 /// `limits` when a project's rules apply, `deciding` marked: `main` with the whole allowance the
 /// one that decides is in (else the account's own), a `└` sub-row for each model or group with a
@@ -503,11 +534,11 @@ fn meter_rows(
     key: &str,
     st: Option<&AccountState>,
     limits: Option<&Limits>,
-    deciding: Option<&str>,
+    (deciding, governing): (Option<&str>, &[String]),
     now: u64,
 ) -> Vec<Shown> {
     let meters: Vec<(&String, &Meter)> = st.into_iter().flat_map(|s| &s.meters).collect();
-    let lead = deciding.and_then(|d| st?.meters.get(d)).and_then(|m| m.provider.clone());
+    let lead = lead(&meters, deciding, governing);
     let others: BTreeSet<Option<String>> =
         meters.iter().map(|(_, m)| m.provider.clone()).filter(|p| *p != lead).collect();
     let mut rows = Vec::new();
@@ -812,7 +843,8 @@ fn machine_wide(room: &Room, now: u64) -> AccountsView {
             whole: true,
             ..Shown::default()
         };
-        shown.extend(meter_rows(&main, &row.account, st, None, tightest, now));
+        let all: Vec<String> = st.map(|s| s.meters.keys().cloned().collect()).unwrap_or_default();
+        shown.extend(meter_rows(&main, &row.account, st, None, (tightest, &all), now));
         rows.push(row);
     }
     let mut names: Vec<&str> = found.iter().map(|a| a.harness).collect();
@@ -887,7 +919,7 @@ impl<'a> Judge<'a> {
             whole: true,
             ..Shown::default()
         };
-        let mut shown = meter_rows(&main, &key, st, Some(&cfg.limits), own.deciding.as_deref(), now);
+        let mut shown = meter_rows(&main, &key, st, Some(&cfg.limits), (own.deciding.as_deref(), &own.governing), now);
         // A sub-row that says what its account's row says is left out.
         let differs = |j: &Judgment| (&j.state, &j.deciding) != (&own.state, &own.deciding);
         shown.extend(by_model.iter().filter(|(_, j)| differs(j)).map(|(m, j)| self.sub_row(m, j, st)));
@@ -1468,6 +1500,25 @@ mod tests {
         let taken: Vec<String> = pending.take().unwrap().into_iter().collect();
         assert_eq!(taken, ["claude:a", "claude:b"]);
         assert!(pending.is_empty().unwrap() && pending.take().unwrap().is_empty());
+    }
+
+    /// Review of #66: omp's only meter has just reset, so none can decide. Its provider's row still
+    /// leads, with the account's state and sessions; no empty `omp:default` row stands above it.
+    #[test]
+    fn with_no_meter_to_decide_the_lead_is_still_an_allowance_the_account_has() {
+        let (_d, cfg) = cfg("openai-codex/gpt-6.1-sol");
+        let mut st = AccountState { read_at: Some(NOW - 1), ..Default::default() };
+        let name = "openai-codex/5 hours";
+        st.meters.insert(name.into(), Meter::named(name, 1.0, Some(secs(NOW) - 60)));
+        let mut w = World::default();
+        w.accounts.insert(omp().key(), st);
+        let room = Room::of(vec![omp()], w.accounts.clone(), &w, &[], true);
+        for v in [view(&cfg, &room, &w, &[], NOW), machine_wide(&room, NOW)] {
+            let cells = cells(&v);
+            assert_eq!(cells.len(), 1, "one row, the provider's: {cells:?}");
+            assert!(cells[0][0].ends_with("omp:default · openai-codex"), "{cells:?}");
+            assert!(!cells[0].last().unwrap().is_empty() && cells[0][cells[0].len() - 2] == "0", "{cells:?}");
+        }
     }
 
     #[test]

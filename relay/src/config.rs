@@ -846,6 +846,11 @@ impl Config {
                 );
             }
         }
+        self.validate_sandbox()
+    }
+
+    /// The sandbox's paths: each inside $HOME, caches apart from one another, and linked caches among them.
+    fn validate_sandbox(&self) -> Result<()> {
         for p in self.sandbox.hide_home.iter().chain(&self.sandbox.caches) {
             if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
                 bail!("{} must be a path inside $HOME, written relative to it", p.display());

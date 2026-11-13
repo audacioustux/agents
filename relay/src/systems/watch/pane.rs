@@ -40,6 +40,7 @@ impl Pane {
 
     /// As [`Pane::place`], keeping row `keep` in view when it was in view before: a smaller
     /// window does not hide the selection, while one scrolled away by the wheel stays away.
+    /// Only a resize of the terminal passes a row; a layout that changes with the data does not.
     pub fn place_keeping(&mut self, area: Rect, view: usize, rows: usize, keep: Option<usize>) {
         let shown = keep.filter(|&i| i >= self.offset && i < self.offset + self.view);
         self.place(area, view, rows);

@@ -88,6 +88,8 @@ pub struct Ui {
     /// Its row in the board.
     pub index: usize,
     panes: [Pane; 4],
+    /// The terminal's size at the last frame: a change is a resize.
+    pub screen: Rect,
     /// Where the last frame put each key of the bottom line.
     pub keys: Vec<(Rect, Action)>,
     /// Why the last read failed: the board shown is the last good one.
@@ -111,6 +113,7 @@ impl Ui {
             chosen: false,
             index: 0,
             panes: [Pane::default(); 4],
+            screen: Rect::default(),
             keys: Vec::new(),
             error: None,
             generation: 0,

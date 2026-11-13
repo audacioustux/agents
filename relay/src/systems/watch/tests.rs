@@ -361,18 +361,16 @@ fn empty_states_say_what_is_hidden_and_how_to_show_it() {
     }
 }
 
-#[test]
-fn decisions_waiting_are_a_badge_and_a_pane() {
-    let mut f = two_jobs();
-    // The decision is about the job's current attempt, and its runner (this process) is alive.
+/// A decision waiting on `job`'s current attempt, whose runner (this process) is alive.
+fn waiting_decision(f: &mut Fixture, job: &str) -> Decision {
     let me = std::process::id();
     let runner = crate::os::start_time(me).map(|started| (me, started));
-    let build = f.machine.projects[0].world.jobs_mut().get_mut("build").unwrap();
-    (build.attempts, build.runner) = (1, runner);
-    let created = build.created_at;
+    let j = f.machine.projects[0].world.jobs_mut().get_mut(job).unwrap();
+    (j.attempts, j.runner) = (1, runner);
+    let created = j.created_at;
     let d = Decision {
-        id: "build-cap-1".into(),
-        job: "build".into(),
+        id: format!("{job}-cap-1"),
+        job: job.into(),
         point: crate::bus::Point::Cap,
         created,
         attempt: 1,
@@ -385,6 +383,13 @@ fn decisions_waiting_are_a_badge_and_a_pane() {
         action: None,
     };
     f.machine.projects[0].world.decisions.insert(d.id.clone(), d.clone());
+    d
+}
+
+#[test]
+fn decisions_waiting_are_a_badge_and_a_pane() {
+    let mut f = two_jobs();
+    let d = waiting_decision(&mut f, "build");
     let mut ui = Ui::new(false, false, true);
     let b = f.board(&ui, 1);
     ui.sync(&b);
@@ -983,4 +988,29 @@ fn home_lets_the_selection_stay_on_the_first_row_again() {
     let b = f.board(&ui, 1);
     ui.sync(&b);
     assert_eq!((ui.selected.as_ref().map(|k| k.name.as_str()), ui.index), (Some("newest"), 0));
+}
+
+/// In a short window, a pending decision's pane takes rows from the jobs list between two reads. Like a read, a
+/// shorter list does not scroll: the top row stays, even if the selection drops out of view.
+/// A resize of the terminal still keeps it in view (`a_smaller_window_keeps_the_selection_in_view`).
+#[test]
+fn a_decision_pane_arriving_keeps_the_jobs_list_top_row() {
+    // A decision waits on a running job; it sorts with the others by when it was queued.
+    let status = |i| if i == 30 { Status::Running } else { Status::Queued };
+    let jobs: Vec<Job> = (0..60).map(|i| job(&format!("job-{i:02}"), status(i), 100 + i, "work")).collect();
+    let mut f = fixture(&jobs, &[]);
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    frame(&b, &mut ui, 80, 16);
+    let (view, last_shown) = (ui.pane(Id::Jobs).view, ui.pane(Id::Jobs).view - 1);
+    ui.apply(Action::Step(Step::Rows(isize::try_from(last_shown).unwrap())), &b);
+    assert_eq!(ui.pane(Id::Jobs).offset, 0, "the selection is the last row in view");
+    waiting_decision(&mut f, "job-30");
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    frame(&b, &mut ui, 80, 16);
+    assert!(ui.pane(Id::Jobs).view < view, "in a short window the decision takes rows from the list");
+    assert_eq!(ui.pane(Id::Jobs).offset, 0, "the list keeps its top row");
+    assert_eq!(ui.index, last_shown, "and its selection, now out of view");
 }

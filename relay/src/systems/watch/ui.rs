@@ -82,9 +82,14 @@ pub struct Ui {
     pub focus: Id,
     /// The selected job, followed by its name as rows move.
     pub selected: Option<Key>,
+    /// Whether a key or a click chose the selection. Until one does, and again after Home,
+    /// the selection is the first row, whichever job that is.
+    pub chosen: bool,
     /// Its row in the board.
     pub index: usize,
     panes: [Pane; 4],
+    /// The terminal's size at the last frame: a change is a resize.
+    pub screen: Rect,
     /// Where the last frame put each key of the bottom line.
     pub keys: Vec<(Rect, Action)>,
     /// Why the last read failed: the board shown is the last good one.
@@ -105,8 +110,10 @@ impl Ui {
             chart: None,
             focus: Id::Jobs,
             selected: None,
+            chosen: false,
             index: 0,
             panes: [Pane::default(); 4],
+            screen: Rect::default(),
             keys: Vec::new(),
             error: None,
             generation: 0,
@@ -122,22 +129,32 @@ impl Ui {
         &mut self.panes[id as usize]
     }
 
-    /// After a read: the selection follows its job to its new row; a job gone leaves the one now
-    /// at its row selected, and with nothing selected the first job is.
+    /// After a read: a chosen selection follows its job to its new row, and a job gone leaves the
+    /// one now at its row selected; an unchosen one stays on the first row. A read never scrolls
+    /// the list: only keys, the wheel and clicks do, so rows that move do not take the view along.
     pub fn sync(&mut self, b: &Board) {
         self.generation += 1;
-        let found = self.selected.as_ref().and_then(|k| b.find(k));
-        let i = found.unwrap_or_else(|| self.index.min(b.jobs.len().saturating_sub(1)));
-        // A selection that stays on its row keeps the list where the wheel left it.
-        if found != Some(self.index) {
-            self.select(b, i);
-        }
+        let i = if self.chosen {
+            let found = self.selected.as_ref().and_then(|k| b.find(k));
+            found.unwrap_or_else(|| self.index.min(b.jobs.len().saturating_sub(1)))
+        } else {
+            0
+        };
+        self.mark(b, i);
         if self.focus == Id::Decisions && b.decisions.is_empty() {
             self.focus = Id::Jobs;
         }
     }
 
+    /// Selects row `i` as chosen, and scrolls the list just enough to show it.
     fn select(&mut self, b: &Board, i: usize) {
+        self.chosen = true;
+        self.mark(b, i);
+        self.pane_mut(Id::Jobs).reveal(i);
+    }
+
+    /// Makes row `i` the selection, without scrolling the list.
+    fn mark(&mut self, b: &Board, i: usize) {
         let Some(e) = b.jobs.get(i) else {
             (self.selected, self.index) = (None, 0);
             return;
@@ -147,7 +164,6 @@ impl Ui {
             self.pane_mut(Id::Job).offset = 0;
         }
         self.index = i;
-        self.pane_mut(Id::Jobs).reveal(i);
     }
 
     /// The panes shown, in focus order.
@@ -161,6 +177,8 @@ impl Ui {
             Action::Step(s) if self.focus == Id::Jobs => {
                 let i = self.pane(Id::Jobs).stepped(self.index, s, b.jobs.len());
                 self.select(b, i);
+                // Home hands the selection back to the first row, whichever job comes to be there.
+                self.chosen = s != Step::Top;
             }
             Action::Step(s) => self.pane_mut(self.focus).scroll(s),
             Action::Wheel(id, n) => self.pane_mut(id).scroll(Step::Rows(n)),

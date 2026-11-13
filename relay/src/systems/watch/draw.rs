@@ -23,6 +23,9 @@ pub fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
         return super::chart::draw(f, ui);
     }
     let area = f.area();
+    // Only a resize of the terminal may scroll the jobs list to keep the selection in view: a pane
+    // that comes and goes with the data (decisions) must not move the list under the reader.
+    let resized = std::mem::replace(&mut ui.screen, area) != area;
     // Borders and a heading row; an empty accounts pane says why in two rows.
     let want = |n: usize| u16::try_from(n + 3).unwrap_or(u16::MAX);
     let decisions_want = if b.decisions.is_empty() { 0 } else { want(b.decisions.len()) };
@@ -39,7 +42,8 @@ pub fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
     let rows: Vec<&[String]> = b.jobs.iter().map(|e| e.cells.as_slice()).collect();
     let selected = ui.selected.is_some().then_some(ui.index);
     let style = |i: usize| status_style(b.jobs[i].status);
-    let t = Tabled { cols: b.job_columns(), rows: &rows, style, selected, empty: "", gauge: None };
+    let keep = selected.filter(|_| resized);
+    let t = Tabled { cols: b.job_columns(), rows: &rows, style, selected, keep, empty: "", gauge: None };
     table_pane(f, ui.pane_mut(Id::Jobs), jobs, jobs_block, &t);
 
     if b.decisions.is_empty() {
@@ -52,6 +56,7 @@ pub fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
             rows: &b.decisions,
             style: yellow,
             selected: None,
+            keep: None,
             empty: "",
             gauge: None,
         };
@@ -75,6 +80,7 @@ pub fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
         rows: &b.accounts,
         style: ready,
         selected: None,
+        keep: None,
         empty: &b.no_accounts,
         gauge: Some(&gauge),
     };
@@ -135,6 +141,8 @@ struct Tabled<'a, R, S> {
     rows: &'a [R],
     style: S,
     selected: Option<usize>,
+    /// The row a resize of the terminal keeps in view, if it was.
+    keep: Option<usize>,
     empty: &'a str,
     gauge: Option<Drawn<'a>>,
 }
@@ -148,11 +156,11 @@ fn table_pane<R: AsRef<[String]>, S: Fn(usize) -> Style>(
     block: Block<'_>,
     t: &Tabled<'_, R, S>,
 ) {
-    let Tabled { cols, rows, style, selected, empty, gauge } = t;
+    let Tabled { cols, rows, style, selected, empty, gauge, .. } = t;
     let (selected, empty) = (*selected, *empty);
     let inner = block.inner(area);
     let view = usize::from(inner.height.saturating_sub(1));
-    pane.place_keeping(area, view, rows.len(), selected);
+    pane.place_keeping(area, view, rows.len(), t.keep);
     // A scrollbar takes the last inner column, when there is one; a table with a selection marks
     // it with `› ` (reverse video alone is gone under NO_COLOR) in a column of its own.
     let bar = usize::from(pane.rows > pane.view);
@@ -274,6 +282,7 @@ const HELP: &[&str] = &[
     "↑ ↓, k j                   a row; in the jobs pane, the selection",
     "PgUp PgDn, Space, ^U ^D    a page",
     "Home End, g G              the top, the end",
+    "                           Home in the jobs list: back to the first row",
     "Enter                      the selected job in $PAGER",
     "a                          older jobs too, or recent ones only",
     "p                          every project, or this one",

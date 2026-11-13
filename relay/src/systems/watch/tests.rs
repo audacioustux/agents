@@ -919,3 +919,68 @@ fn the_chart_fits_a_small_window_and_reads_nothing_it_cannot_write() {
     }
     assert_eq!(std::fs::read_dir(bus.dir.path()).unwrap().count(), before, "nothing written");
 }
+
+/// The owner lost the first rows: a read moved the selected job down (newer jobs sorted above it,
+/// or it ended and sorted lower) and the list scrolled after it. A read never scrolls the list.
+#[test]
+fn newer_jobs_above_an_unchosen_selection_leave_the_list_at_the_top() {
+    let mut jobs: Vec<Job> = (0..30).map(|i| job(&format!("old-{i:02}"), Status::Queued, 100 + i, "work")).collect();
+    let mut f = fixture(&jobs, &[]);
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    frame(&b, &mut ui, 80, 24);
+    for i in 0..20 {
+        jobs.push(job(&format!("new-{i:02}"), Status::Queued, 50 - i, "work"));
+        f.machine.projects[0].world.jobs_mut().insert(format!("new-{i:02}"), jobs.last().unwrap().clone());
+    }
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    frame(&b, &mut ui, 80, 24);
+    assert_eq!(ui.pane(Id::Jobs).offset, 0, "the list stays at its top");
+    assert_eq!(ui.index, 0, "an unchosen selection stays on the first row");
+    assert_eq!(ui.selected.as_ref().map(|k| k.name.as_str()), Some(b.jobs[0].key.name.as_str()));
+}
+
+#[test]
+fn a_chosen_job_that_moves_out_of_view_does_not_take_the_list_along() {
+    let jobs: Vec<Job> = (0..30).map(|i| job(&format!("old-{i:02}"), Status::Queued, 100 + i, "work")).collect();
+    let mut f = fixture(&jobs, &[]);
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    frame(&b, &mut ui, 80, 24);
+    ui.apply(Action::Step(Step::Rows(2)), &b);
+    let chosen = ui.selected.clone();
+    for i in 0..40 {
+        f.machine.projects[0]
+            .world
+            .jobs_mut()
+            .insert(format!("new-{i:02}"), job(&format!("new-{i:02}"), Status::Queued, 50 - i, "work"));
+    }
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    frame(&b, &mut ui, 80, 24);
+    assert_eq!(ui.selected, chosen, "the selection follows its job");
+    assert_eq!(ui.index, 42, "to its new row");
+    assert_eq!(ui.pane(Id::Jobs).offset, 0, "while the list stays where it was");
+    ui.apply(Action::Step(Step::Rows(1)), &b);
+    assert!(ui.pane(Id::Jobs).offset > 0, "a key brings the selection back into view");
+}
+
+#[test]
+fn home_lets_the_selection_stay_on_the_first_row_again() {
+    let jobs: Vec<Job> = (0..10).map(|i| job(&format!("old-{i:02}"), Status::Queued, 100 + i, "work")).collect();
+    let mut f = fixture(&jobs, &[]);
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    ui.apply(Action::Step(Step::Rows(3)), &b);
+    assert!(ui.chosen);
+    ui.apply(Action::Step(Step::Top), &b);
+    assert!(!ui.chosen, "Home hands the selection back to the first row");
+    f.machine.projects[0].world.jobs_mut().insert("newest".into(), job("newest", Status::Queued, 1, "work"));
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    assert_eq!((ui.selected.as_ref().map(|k| k.name.as_str()), ui.index), (Some("newest"), 0));
+}

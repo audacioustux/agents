@@ -283,7 +283,9 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   and it reads the buses and nothing else: no reading is started (the board's accounts pane
   does that), and nothing is written. `relay view usage --watch` opens on the rows,
   `--watch --chart` on the chart. A window too short for every row says how many it leaves out.
-- **What stays put.** The selection follows a job by name as rows move; a failed
+- **What stays put.** A read never scrolls the jobs list: only keys, the wheel and
+  clicks do. A selection you chose follows its job by name as rows move, even out of
+  view; until you choose one, and again after Home, it stays on the first row. A failed
   read keeps the last good board with the cause in red in the title, and the next
   read retries; columns are a fixed set (project when every project shows, job, state,
   account, as, **model**, since, spent, disk, task), each capped and cut with `…`; an empty list

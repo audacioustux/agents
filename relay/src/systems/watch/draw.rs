@@ -274,6 +274,7 @@ const HELP: &[&str] = &[
     "↑ ↓, k j                   a row; in the jobs pane, the selection",
     "PgUp PgDn, Space, ^U ^D    a page",
     "Home End, g G              the top, the end",
+    "                           (in the jobs pane, Home: the selection stays on the first row again)",
     "Enter                      the selected job in $PAGER",
     "a                          older jobs too, or recent ones only",
     "p                          every project, or this one",

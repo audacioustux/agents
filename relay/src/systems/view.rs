@@ -355,14 +355,28 @@ fn model_cell(cfg: Option<&Config>, j: &Job) -> String {
     shorts.join(",")
 }
 
-/// Why a job waits or ended: a queued job's dependencies or, with its project's config and the
+/// Why a job waits or ended: a queued (or held) job's dependencies or, with its project's config and the
 /// room it is judged in (`own`), what holds it there, as the dispatcher judges it
 /// ([`Room::hold`]: a profile limit, free disk, or every account's cause); else the reason recorded.
 pub fn reason(own: Option<(&Config, &Room)>, world: &World, j: &Job, now: u64) -> Option<String> {
     let queued = j.status == crate::world::Status::Queued;
-    let waits = if queued { Wait::summary(&world.waits(j)) } else { None };
+    // A job the disk floor holds waits for its prerequisites too, and what blocks it there comes before the disk.
+    let waits = if queued || j.held { Wait::summary(&world.waits(j)) } else { None };
     let held = if queued && waits.is_none() { own.and_then(|(c, room)| room.hold(c, j, now)) } else { None };
-    waits.or(held.map(|h| h.why)).or_else(|| j.reason.clone())
+    waits.or(held.map(|h| h.why)).or_else(|| held_by_floor(own.map(|(c, _)| c), j)).or_else(|| j.reason.clone())
+}
+
+/// What a job the disk floor holds says: the reason it was stopped, and the free space it waits for
+/// (the floor and the margin above it, from its project's config when this reader has it).
+fn held_by_floor(cfg: Option<&Config>, j: &Job) -> Option<String> {
+    if !j.held {
+        return None;
+    }
+    let why = j.reason.as_deref().unwrap_or("disk floor");
+    Some(match cfg {
+        Some(c) => format!("held: {why}; resumes at {} GB free", crate::systems::dispatch::resume_gb(&c.limits)),
+        None => format!("held: {why}; resumes when space is back"),
+    })
 }
 
 /// What a job's row says after its task and reason: its latest checkpoint, check and review,
@@ -641,7 +655,8 @@ fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
     loop {
         let world = ctx.world()?;
         let j = job(&world, name)?;
-        if !j.status.is_live() {
+        // A job the disk floor holds has not ended: the dispatcher resumes it when space is back.
+        if !j.status.is_live() && !j.held {
             if !j.runner_alive() {
                 return Ok(j);
             }
@@ -822,6 +837,41 @@ mod tests {
         );
         let (w, room) = claude_room(std::slice::from_ref(&waiting));
         assert_eq!(super::reason(Some((&cfg, &room)), &w, &waiting, NOW), None, "nothing holds it");
+    }
+
+    /// A job the disk floor holds says so, with what it saw and the free space it waits for; one a
+    /// person stopped says only why it stopped.
+    #[test]
+    fn a_held_job_shows_its_reason_and_the_space_it_waits_for() {
+        use crate::world::{Job, Status};
+        let (_dir, mut cfg) = one_seat();
+        cfg.limits.min_free_disk_gb = 60.0;
+        cfg.limits.disk_resume_margin_gb = 3.0;
+        let held = Job {
+            name: "h".into(),
+            status: Status::Stopped,
+            held: true,
+            reason: Some("disk: 56G free, under 60G".into()),
+            ..Job::default()
+        };
+        let (w, room) = claude_room(std::slice::from_ref(&held));
+        assert_eq!(
+            super::reason(Some((&cfg, &room)), &w, &held, NOW).as_deref(),
+            Some("held: disk: 56G free, under 60G; resumes at 63 GB free")
+        );
+        assert_eq!(
+            super::reason(None, &w, &held, NOW).as_deref(),
+            Some("held: disk: 56G free, under 60G; resumes when space is back"),
+            "another project's job, without its config"
+        );
+        // Its prerequisite failed: what needs an operator is said, not the disk it no longer waits for.
+        let failed = Job { name: "p".into(), status: Status::Failed, ..Job::default() };
+        let child = Job { name: "c".into(), after: vec!["p".into()], ..held.clone() };
+        let (w, room) = claude_room(&[failed, child.clone()]);
+        assert_eq!(super::reason(Some((&cfg, &room)), &w, &child, NOW).as_deref(), Some("waits for p (failed)"));
+        assert_eq!(super::reason(None, &w, &child, NOW).as_deref(), Some("waits for p (failed)"));
+        let stopped = Job { held: false, reason: Some("stopped by request".into()), ..held };
+        assert_eq!(super::reason(Some((&cfg, &room)), &w, &stopped, NOW).as_deref(), Some("stopped by request"));
     }
 
     #[test]

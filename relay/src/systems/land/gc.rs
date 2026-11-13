@@ -82,7 +82,9 @@ fn waited_for(world: &World, name: &str) -> bool {
 /// What `j`'s clone is due for at `now_us` (bus time). Nothing for a live job, a
 /// job something waits for, or one that has not ended.
 pub fn due(world: &World, j: &Job, gc: &Gc, now_us: u64) -> Due {
-    let Some(ended) = j.ended_at.filter(|_| !j.readonly() && !j.status.is_live() && !waited_for(world, &j.name)) else {
+    let Some(ended) =
+        j.ended_at.filter(|_| !j.readonly() && !j.status.is_live() && !j.held && !waited_for(world, &j.name))
+    else {
         return Due::default();
     };
     let age = now_us.saturating_sub(ended);
@@ -95,6 +97,7 @@ pub fn due(world: &World, j: &Job, gc: &Gc, now_us: u64) -> Due {
 fn scratch_due(world: &World, j: &Job, gc: &Gc, now_us: u64) -> bool {
     j.ended_at.is_some_and(|ended| {
         !j.status.is_live()
+            && !j.held
             && !waited_for(world, &j.name)
             && now_us.saturating_sub(ended) >= micros(gc.outputs_after_hours * 3600.0)
     })
@@ -148,7 +151,7 @@ pub fn plan(ctx: &Ctx, world: &World, now_us: u64) -> Vec<Item> {
     let gc = &ctx.cfg.gc;
     let log_age = micros(gc.logs_gzip_after_days * 86_400.0);
     let mut items = Vec::new();
-    for j in world.jobs().values().filter(|j| !j.status.is_live() && !j.runner_alive()) {
+    for j in world.jobs().values().filter(|j| !j.status.is_live() && !j.held && !j.runner_alive()) {
         let log = ctx.job_file(&j.name, "log.ndjson");
         let old =
             log.symlink_metadata().ok().filter(std::fs::Metadata::is_file).and_then(|m| m.modified().ok()).is_some_and(
@@ -215,7 +218,10 @@ fn review_refs(ctx: &Ctx, world: &World, gc: &Gc, now_us: u64) -> Vec<Item> {
         .filter_map(|r| r.strip_prefix(PREFIX).map(|job| (job, r)))
         .filter(|(job, _)| {
             world.jobs().get(*job).is_none_or(|j| {
-                !j.status.is_live() && !j.runner_alive() && j.ended_at.is_some_and(|t| now_us.saturating_sub(t) >= wait)
+                !j.status.is_live()
+                    && !j.held
+                    && !j.runner_alive()
+                    && j.ended_at.is_some_and(|t| now_us.saturating_sub(t) >= wait)
             })
         })
         .map(|(job, r)| Item { job: job.to_owned(), kind: Kind::ReviewRef, path: PathBuf::from(r) })
@@ -540,6 +546,17 @@ mod tests {
             assert_eq!(due_of(n), Due::default(), "{n}");
         }
         assert_eq!(due_of("free"), Due { outputs: true, clone: true });
+    }
+
+    #[test]
+    fn a_job_the_disk_floor_holds_keeps_its_clone_and_scratch_for_its_resume() {
+        let gc = Gc { outputs_after_hours: 0.0, clones_after_days: 0.0, waiting_retain_days: 0.0, ..Gc::default() };
+        let held = Job { held: true, ..job("held", Status::Stopped, Some(1)) };
+        let stopped = job("stopped", Status::Stopped, Some(1));
+        let w = world(vec![held.clone(), stopped.clone()]);
+        assert_eq!(due(&w, &held, &gc, 10 * DAY), Due::default());
+        assert!(!scratch_due(&w, &held, &gc, 10 * DAY));
+        assert_eq!(due(&w, &stopped, &gc, 10 * DAY), Due { outputs: true, clone: true }, "a person's stop is not kept");
     }
 
     #[test]

@@ -24,8 +24,10 @@
 //! stand in the read-only host directory that holds the cache path, so that directory is layer 0: an
 //! empty tmpfs with each of the host's entries bound back read-only (a symlink copied as itself), made
 //! read-only like a hidden one. Where the cache path's directory is hidden already, the symlink goes in
-//! that tmpfs. Where something else covers it, or something else is mounted at or under the cache
-//! path, the cache stays a bind, as for a job with no tree.
+//! that tmpfs. Where something else covers it, something else is mounted at or under the cache path
+//! (a hidden path included), or another cache is nested in it or around it, the cache stays a bind, as
+//! for a job with no tree, and is not copied: the copy is taken for what [`linkable`] says, the judge
+//! the plan asks too.
 //!
 //! Layer 3 is one layer, ordered by depth, so a protected directory that holds other homes (omp's
 //! `profiles`) is mounted before they are hidden inside it.
@@ -44,6 +46,7 @@
 //! it, so sockets are hidden, not just read-only. The network stays shared,
 //! since the session needs its provider's API, and with it abstract sockets.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
@@ -94,8 +97,10 @@ pub enum Mount {
     Symlink(PathBuf),
 }
 
-/// The mounts, in the order bubblewrap must apply them.
-pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)> {
+type Layer = Vec<(PathBuf, Mount)>;
+
+/// The layers below the caches and above them, each ordered by depth, and what each protected path is.
+fn layers(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> (Layer, Layer, BTreeMap<PathBuf, crate::harness::Kind>) {
     let cfg = &ctx.cfg;
     let own = crate::accounts::harness_of(m.home);
     let own_writable = if m.account { own.writable(m.home, user_home) } else { Vec::new() };
@@ -107,7 +112,7 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
     let own_protected = if m.account { own.protected_kinds(m.home) } else { Vec::new() };
     // What the adapter says each protected path is; anything else kept from the session that is not
     // there (a hidden store under the account) is a directory.
-    let kinds: std::collections::BTreeMap<PathBuf, crate::harness::Kind> = own_protected.iter().cloned().collect();
+    let kinds: BTreeMap<PathBuf, crate::harness::Kind> = own_protected.iter().cloned().collect();
     let all = |paths: Vec<PathBuf>, mount: Mount| paths.into_iter().map(|p| (p, mount.clone())).collect::<Vec<_>>();
     let by_depth = |mut layer: Vec<(PathBuf, Mount)>| {
         layer.sort_by_key(|(p, _)| p.components().count());
@@ -136,37 +141,85 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
     .into_iter()
     .flat_map(by_depth)
     .collect();
+    (before, after, kinds)
+}
+
+/// Where a linked cache's symlink stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Stand {
+    /// In its directory, rebuilt from the host's entries.
+    Rebuilt(PathBuf),
+    /// In the empty tmpfs of a hidden directory around it.
+    Hidden,
+}
+
+/// The linked caches (`sandbox.linked_caches`) a job with a tree gets as a symlink into its own copy, each
+/// with where its symlink stands. The one judge of it: the copy holds these caches and nothing else
+/// ([`linkable`], [`farm::Farm::take`]), and the plan links these and nothing else. A cache is left a bind
+/// (and so never copied) when its path is not there on the host; when another cache is nested in it or
+/// around it (a bind around it would cover the symlink's directory, and a job could reach the way to it
+/// through either); when anything is mounted at or under its path (a hidden path among them: copied, it
+/// would show in the job's tree); when a later layer covers its path or a directory around it (the
+/// symlink would be hidden, the copy not); and when what holds its directory is a mount other than a
+/// hidden one.
+fn linking(cfg: &crate::config::Config, user_home: &Path, before: &Layer, after: &Layer) -> Vec<(PathBuf, Stand)> {
     let paths: Vec<PathBuf> = cfg.sandbox.caches.iter().map(|r| user_home.join(r)).collect();
+    let mut out = Vec::new();
+    for (r, p) in cfg.sandbox.caches.iter().zip(&paths) {
+        let Some(parent) = p.parent() else { continue };
+        if !cfg.sandbox.linked_caches.contains(r) || !p.exists() {
+            continue;
+        }
+        let nested = paths.iter().any(|q| q != p && (q.starts_with(p) || p.starts_with(q)));
+        let under = before.iter().chain(after).any(|(q, _)| q.starts_with(p));
+        let covered = after.iter().any(|(q, _)| p.starts_with(q));
+        if nested || under || covered {
+            continue;
+        }
+        // What the cache path's directory is, once the layers before the caches are mounted.
+        match before.iter().rev().find(|(q, _)| parent.starts_with(q)).map(|(_, k)| k) {
+            None => out.push((r.clone(), Stand::Rebuilt(parent.to_path_buf()))),
+            Some(Mount::Hidden) => out.push((r.clone(), Stand::Hidden)),
+            Some(_) => {}
+        }
+    }
+    out
+}
+
+/// The linked caches the plan would link for these mounts, whatever their `caches` says: what a job's copy
+/// of the caches is taken for ([`own_caches`]), so that it holds exactly what the plan links.
+pub fn linkable(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<PathBuf> {
+    let (before, after, _) = layers(ctx, user_home, m);
+    linking(&ctx.cfg, user_home, &before, &after).into_iter().map(|(r, _)| r).collect()
+}
+
+/// The mounts, in the order bubblewrap must apply them.
+pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)> {
+    let (before, after, kinds) = layers(ctx, user_home, m);
+    let by_depth = |mut layer: Layer| {
+        layer.sort_by_key(|(p, _)| p.components().count());
+        layer
+    };
+    let linked = m.caches.map(|farm| (farm, linking(&ctx.cfg, user_home, &before, &after)));
     let mut rebuilt: Vec<PathBuf> = Vec::new();
-    let caches: Vec<(PathBuf, Mount)> = cfg
+    let caches: Layer = ctx
+        .cfg
         .sandbox
         .caches
         .iter()
-        .zip(&paths)
-        .map(|(r, p)| {
-            let bind = (p.clone(), Mount::From(ctx.caches.join(r)));
-            let (Some(farm), Some(parent)) = (m.caches, p.parent()) else { return bind };
-            if !cfg.sandbox.linked_caches.contains(r) {
-                return bind;
-            }
-            // Anything mounted at or under the cache path would land in the job's copy; and a cache around
-            // it is bound over the directory the symlink would stand in, so the symlink would be made in
-            // relay's own cache.
-            let crowded = before.iter().chain(&after).any(|(q, _)| q.starts_with(p))
-                || paths.iter().any(|q| q != p && (q.starts_with(p) || p.starts_with(q)));
-            if crowded || !p.exists() {
-                return bind;
-            }
-            // What the cache path's directory is, once the layers before the caches are mounted.
-            match before.iter().rev().find(|(q, _)| parent.starts_with(q)).map(|(_, k)| k) {
-                None => {
-                    if !rebuilt.iter().any(|q| q == parent) {
-                        rebuilt.push(parent.to_path_buf());
+        .map(|r| {
+            let p = user_home.join(r);
+            let stand = linked.as_ref().and_then(|(farm, l)| l.iter().find(|(q, _)| q == r).map(|(_, s)| (farm, s)));
+            match stand {
+                Some((farm, s)) => {
+                    if let Stand::Rebuilt(parent) = s
+                        && !rebuilt.contains(parent)
+                    {
+                        rebuilt.push(parent.clone());
                     }
-                    (p.clone(), Mount::Symlink(farm.join(r)))
+                    (p, Mount::Symlink(farm.join(r)))
                 }
-                Some(Mount::Hidden) => (p.clone(), Mount::Symlink(farm.join(r))),
-                Some(_) => bind,
+                None => (p, Mount::From(ctx.caches.join(r))),
             }
         })
         .collect();
@@ -189,20 +242,15 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
 }
 
 /// The job's own copy of the caches ([`farm::Farm`]), put at `name` in `parent`, a directory in the mount
-/// that holds its tree, from the idle copies in `pool` (beside it, on its filesystem), of each linked
-/// cache (`sandbox.linked_caches`) the sandbox mounts (one whose path is there in the home). None
-/// without the sandbox, with no such cache, or when it cannot be made (`parent` on another filesystem
-/// than relay's caches): then each cache is a bind of the project's caches, as for a job with no tree.
-pub fn own_caches(ctx: &Ctx, parent: &Path, name: &str, pool: &Path) -> Option<farm::Farm> {
-    if !ctx.cfg.sandbox.enabled {
+/// that holds its tree, from the idle copies in `pool` (beside it, on its filesystem), of the caches
+/// `rels`: what [`linkable`] says for the job's mounts, and nothing else. None without the sandbox, with
+/// none, or when it cannot be made (`parent` on another mount than relay's caches): then each cache is a
+/// bind of the project's caches, as for a job with no tree.
+pub fn own_caches(ctx: &Ctx, parent: &Path, name: &str, pool: &Path, rels: &[PathBuf]) -> Option<farm::Farm> {
+    if !ctx.cfg.sandbox.enabled || rels.is_empty() {
         return None;
     }
-    let home = crate::accounts::home();
-    let rels: Vec<PathBuf> = ctx.cfg.sandbox.linked_caches.iter().filter(|r| home.join(r).exists()).cloned().collect();
-    if rels.is_empty() {
-        return None;
-    }
-    farm::Farm::take(parent, name, pool, &ctx.caches, &rels).ok().map(|(f, _)| f)
+    farm::Farm::take(parent, name, pool, &ctx.caches, rels).ok().map(|(f, _)| f)
 }
 
 /// Makes the placeholder `p` exist on the host, empty: a directory, or a file (`{}` for JSON, so the

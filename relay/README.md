@@ -1294,15 +1294,19 @@ Each session runs under `bwrap`. It sees the machine read-only, except for:
   is on each side, so a file a job replaced by renaming over it stays in its copy only, while one
   changed in place is the shared file itself (one inode), as when the cache was one bind. With hard
   links working, a tool that edits an installed file in place (patch-package) changes the cache for
-  every job, as with bun or pnpm on any machine. Relay walks a copy only after its job's sandbox has
-  ended, never following a symlink in it or in the cache. A clone's measured size
+  every job, as with bun or pnpm on any machine. A directory a job added appears in the shared cache
+  whole (built beside the caches, then renamed into place), so a run taking its copy meanwhile never
+  gets half a package. Relay walks a copy only after its job's sandbox has ended, and walks both sides
+  from an open handle one directory at a time, never following a symlink in either. A clone's measured size
   ([disk](#disk)) leaves its copy out, since its files are relay's cache's. gc removes an idle copy
   unused for `gc.cache_copies_idle_days` (default 1), and any past the `limits.max_running` used last
   in its pool. `relay probe` checks the layout from inside for a project that declares a linked cache.
   Without the sandbox, for a job with no tree (a review, a decision's agent), where the copy cannot
-  be made (the cache on another filesystem than the clones, or than relay's state directory for a
-  check), or where something else is mounted at or under the cache path, a linked cache is a bind
-  as the others, and the tool copies.
+  be made (a test link from the cache into the copy fails: another filesystem, or another mount of
+  the same one), where something else is mounted at or under the cache path (a `hide_home` path
+  inside it), or where another cache is nested in it or around it (`.cache` and `.cache/uv`), a
+  linked cache is a bind as the others, the tool copies, and no copy is made: a cache relay leaves a
+  bind is never in a job's tree, and a copy from the pool is cut down to what this run links.
 
 What is left open, by design or by necessity:
 

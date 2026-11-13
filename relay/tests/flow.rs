@@ -513,6 +513,46 @@ fn cache_link(tag: &str, home_shown: bool, declared: bool) {
     assert_eq!(marks, 2, "the checks at the tip and at the base both linked, and what they added stays");
 }
 
+/// PR #67 review 3: a declared cache with a hidden path under it (`hide_home` names `.cargo/git/secret`) was
+/// rightly a bind in the plan, with `secret` hidden; but the copy was made of it anyway, whole, in the clone's
+/// `.git/relay-caches` and the check's `caches/`, where the session and the check read `secret`. A cache the
+/// plan does not link is never copied, and neither is anything a hide rule covers.
+#[test]
+fn a_cache_with_a_hidden_path_under_it_is_never_copied() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("farm-hidden", false);
+    configure(
+        &env,
+        "job_ceiling_usd = 100.0\n",
+        "[sandbox]\nhide = []\ncaches = [\".cargo/git\"]\nlinked_caches = [\".cargo/git\"]\n\
+         hide_home = [\".cargo/git/secret\"]\n",
+    );
+    claude_account(&env.home, "a", 10, false);
+    std::fs::create_dir_all(env.home.join(".cargo/git/secret")).unwrap();
+    let shared = env.root.join("data/relay/flow/caches/.cargo/git");
+    std::fs::create_dir_all(shared.join("secret")).unwrap();
+    std::fs::write(shared.join("secret/key"), "k").unwrap();
+    std::fs::write(shared.join("plain"), "p").unwrap();
+    // The check fails wherever its directory holds a copy with the secret in it.
+    let check = "test -z \"$(find ../caches -name secret 2>/dev/null)\"";
+    let text = "[farm-peek][status-done] Make a change.";
+    ok(&relay(&env, &["queue", "add", "peek", "--text", text, "--check", check]), "queue");
+    let acct = env.home.join(".claude.a");
+    for _ in 0..600 {
+        if acct.join("farm-secret").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let said = |f: &str| std::fs::read_to_string(acct.join(f)).unwrap_or_default();
+    assert!(!said("farm-ls").contains("secret"), "the session's copy holds the hidden path: {}", said("farm-ls"));
+    assert_eq!(said("farm-secret").trim(), "hidden");
+    let j = wait_for(&env, "peek");
+    assert_eq!((j["status"].as_str(), j["bars"][0]["result"].as_str()), (Some("done"), Some("pass")), "{j}");
+}
+
 /// Audit finding 4: protected config an account does not have yet was not mounted at all, so its
 /// session could create it: a `settings.json` with a hook, a `hooks/` script, or a new omp profile that
 /// relay would then discover as an account. Each now gets a read-only placeholder.

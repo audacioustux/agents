@@ -108,6 +108,12 @@ pub fn remove_tree(path: &Path) -> io::Result<()> {
     remove_at(CWD, &name, &mut path.to_path_buf())
 }
 
+/// [`remove_tree`] for the entry `name` in the open directory `parent` (writable already), so that nothing
+/// on the way to it is a path either: a directory around it moved or swapped for a symlink changes nothing.
+pub fn remove_beneath(parent: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
+    remove_at(parent, name, &mut PathBuf::from(OsStr::from_bytes(name.to_bytes())))
+}
+
 /// An error at `at`, saying where.
 fn failed(at: &Path, e: Errno) -> io::Error {
     let e = io::Error::from(e);

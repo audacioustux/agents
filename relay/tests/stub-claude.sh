@@ -33,6 +33,8 @@
 # adds from-session to the cache; and records in $acct/cache-view what it sees around the cache: whether the host's
 # own cache file (host-only) shows, whether the host's `visible` beside the cache is readable, whether it can create
 # a file there, whether ~/.ssh's key shows, and whether relay's own caches directory shows.
+# [farm-peek] records in $acct/farm-ls every path under its clone's copy of the linked caches (.git/relay-caches),
+# and in $acct/farm-secret whether it could read $HOME/.cargo/git/secret/key.
 # [fsmonitor] leaves a core.fsmonitor in the clone's own configuration that touches $acct/fsmonitor-ran if anything ever runs it.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
@@ -134,6 +136,10 @@ case "$prompt" in *"[cache-link]"*)
     if ls -d "$XDG_DATA_HOME"/relay/*/caches >/dev/null 2>&1; then echo relay-caches-shown; else echo relay-caches-hidden; fi
   } >"$acct/cache-view.part"
   mv "$acct/cache-view.part" "$acct/cache-view" ;;
+esac
+case "$prompt" in *"[farm-peek]"*)
+  find .git/relay-caches >"$acct/farm-ls" 2>&1 || true
+  if cat "$HOME/.cargo/git/secret/key" >/dev/null 2>&1; then echo read; else echo hidden; fi >"$acct/farm-secret" ;;
 esac
 case "$prompt" in *"[idle]"*) ;; *)
 if [ -w . ] && [ -e .git ] && [ ! -f "$acct/once.done" ]; then

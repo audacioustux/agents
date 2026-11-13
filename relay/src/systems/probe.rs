@@ -284,7 +284,6 @@ impl<'a> Probe<'a> {
         }
         // The clone is a session's: its linked caches are a copy in its `.git`, as a session's are.
         std::fs::create_dir_all(self.clone.join(".git"))?;
-        let copy = sandbox::own_caches(self.ctx, &self.clone.join(".git"), sandbox::farm::IN_CLONE, &self.ctx.farms);
         let mounts = Mounts {
             home: self.home,
             workdir: Some(&self.clone),
@@ -293,8 +292,12 @@ impl<'a> Probe<'a> {
             tmp: &self.tmp,
             cwd: &self.clone,
             account: true,
-            caches: copy.as_ref().map(sandbox::farm::Farm::path),
+            caches: None,
         };
+        let rels = sandbox::linkable(self.ctx, &user, &mounts);
+        let copy =
+            sandbox::own_caches(self.ctx, &self.clone.join(".git"), sandbox::farm::IN_CLONE, &self.ctx.farms, &rels);
+        let mounts = Mounts { caches: copy.as_ref().map(sandbox::farm::Farm::path), ..mounts };
         let plan = sandbox::plan(self.ctx, &user, &mounts);
         let args = sandbox::args(self.ctx, &user, &mounts, sandbox::session_env(self.ctx, &inv));
         let inside =

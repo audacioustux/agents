@@ -470,7 +470,7 @@ fn cache_link(tag: &str, home_shown: bool, declared: bool) {
         assert!(p.contains("PASS  linked caches share the tree's mount"), "{p}");
         assert!(p.contains("PASS  a directory holding a linked cache shows the host's entries, read-only"), "{p}");
         // It took a copy for its clone (the check was not vacuous), and gave it back to the pool.
-        let farms = std::fs::read_dir(env.root.join("data/relay/flow/farms")).map_or(0, Iterator::count);
+        let farms = std::fs::read_dir(env.root.join("data/relay/flow/copies-for-sessions")).map_or(0, Iterator::count);
         assert_eq!(farms, 1, "the probe's copy, idle");
     }
     assert!(!env.root.join("data/relay/flow/caches").join(rel).join(".relay-probe-link").exists());
@@ -518,20 +518,20 @@ fn cache_link(tag: &str, home_shown: bool, declared: bool) {
     assert!(!env.home.join(".bun/install/created").exists(), "the host's own directory");
     if !declared {
         assert_eq!(std::fs::read_to_string(shared.join("from-session")).unwrap(), "session\n", "relay's cache, bound");
-        let farms = env.root.join("data/relay/flow/farms");
+        let farms = env.root.join("data/relay/flow/copies-for-sessions");
         assert!(std::fs::read_dir(&farms).map_or(true, |mut d| d.next().is_none()), "no copy in a pool");
         return;
     }
     // A linked cache is the copy's own: what the session fetched stays in it, and relay's cache is not written.
     assert!(!shared.join("from-session").exists(), "a copy wrote into relay's shared cache");
     assert_eq!(
-        in_pool(&env, "data/relay/flow/farms", rel, "from-session").len(),
+        in_pool(&env, "data/relay/flow/copies-for-sessions", rel, "from-session").len(),
         1,
         "the session's copy, pooled with it"
     );
     assert_eq!((j["bars"][0]["result"].as_str(), j["bars"][0]["base_exit"].as_i64()), (Some("pass"), Some(1)), "{j}");
     assert_eq!(
-        in_pool(&env, "state/relay/flow/farms", rel, "linked-").len(),
+        in_pool(&env, "state/relay/flow/copies-for-checks", rel, "linked-").len(),
         2,
         "the checks at the tip and at the base both linked, in one copy taken from one to the other"
     );

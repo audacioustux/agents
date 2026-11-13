@@ -17,14 +17,17 @@
 //!   first install fetches everything), and each copy warms on its own: a package new to the project is
 //!   fetched once per copy that needs it.
 //! - **What is shared.** A copy's next holders see what its earlier holders left, as any cache's users
-//!   do; nothing else. Copies share no file with relay's caches, with each other, or between the pools
-//!   of sessions and of checks.
+//!   do. Its files share inodes with every tree installed from it (that is what linking is for), so a
+//!   file edited in place in such a tree is edited in the copy, for its next holders too. Nothing else:
+//!   no file is shared between a copy and relay's caches, between two copies, or between the pools of
+//!   sessions and of checks (each a directory of its own, named for its purpose).
 //! - **Only what the plan links.** A copy is taken for the caches [`super::linkable`] names, the same
 //!   judge the plan asks, and anything else in it is removed when it is taken: a cache left a bind is
 //!   never in a job's tree.
-//! - **Only what was seen to end.** A copy goes back to the pool only once everything in its sandbox has
-//!   ended; one whose sandbox could not be seen to end whole is retired ([`Farm::retire`]) and removed by
-//!   gc, so nothing left running can touch a copy another job holds.
+//! - **Only with proof it ended.** A copy goes back to the pool for another run only when it is given back
+//!   with evidence that everything its sandbox started has ended ([`Ended`], [`Farm::give_back`]). Dropped
+//!   any other way (an error, a panic, a sandbox killed from outside), it is retired: renamed into the
+//!   pool as gone, for gc, never taken again; so is one that cannot be cut down for its next run.
 
 use std::ffi::{CStr, CString, OsStr};
 use std::io;
@@ -37,7 +40,27 @@ use rustix::io::Errno;
 
 use crate::config::CachePath;
 
-/// A job's copy of the linked caches, in place; given back to its pool when dropped.
+/// Evidence that everything a copy's sandbox started has ended: what a copy is given back to the pool with,
+/// for another run ([`Farm::give_back`]). Made only from what saw it end.
+#[derive(Debug, Clone, Copy)]
+pub struct Ended(());
+
+impl Ended {
+    /// The supervisor exited after reaping its whole tree, sandboxed processes included.
+    pub fn reaped(supervisor: &crate::supervised::Supervised) -> Option<Self> {
+        supervisor.tree_ended().then_some(Self(()))
+    }
+
+    /// bubblewrap, waited for, exited with a code: it waits for its namespace's init, which the kernel
+    /// lets end only after every other process of the namespace has. Killed by a signal instead (from
+    /// outside), it proves nothing.
+    pub fn waited(bwrap: std::process::ExitStatus) -> Option<Self> {
+        bwrap.code().map(|_| Self(()))
+    }
+}
+
+/// A job's copy of the linked caches, in place. Given back to its pool for another run only with [`Ended`];
+/// dropped otherwise, retired.
 #[derive(Debug)]
 pub struct Farm {
     path: PathBuf,
@@ -47,8 +70,6 @@ pub struct Farm {
     root: OwnedFd,
     pool: PathBuf,
     released: bool,
-    /// Its sandbox was not seen to end whole: given back as gone, for gc, never to another run.
-    retired: bool,
 }
 
 impl Farm {
@@ -76,7 +97,6 @@ impl Farm {
             root,
             pool: pool.to_owned(),
             released: false,
-            retired: false,
         };
         let cut = (|| -> io::Result<()> {
             // A copy from the pool may hold caches this run does not link (one a hide rule now covers):
@@ -88,8 +108,8 @@ impl Farm {
             Ok(())
         })();
         if let Err(e) = cut {
-            farm.released = true;
-            let _ = crate::hostdir::remove_beneath(farm.parent.as_fd(), &farm.name);
+            // Retired (a rename, whatever it holds), so the next run starts afresh rather than fail on it.
+            farm.release(GONE);
             return Err(e);
         }
         Ok(farm)
@@ -100,15 +120,14 @@ impl Farm {
         &self.path
     }
 
-    /// Its sandbox could not be seen to end whole (a process may still hold something in the copy): it is
-    /// never given back to a run, only to gc.
-    pub fn retire(&mut self) {
-        self.retired = true;
+    /// Gives the copy back to the pool for another run: only with proof its sandbox has ended.
+    pub fn give_back(mut self, _: Ended) {
+        self.release(IDLE);
     }
 
-    /// Gives the copy back to the pool, by rename (or, when it cannot, removes it). Only the directory
-    /// relay put there goes: a job may have put another in its place. Once only.
-    pub fn release(&mut self) {
+    /// Moves the copy into the pool as `to` ([`IDLE`] or [`GONE`]), by rename (or, when it cannot, removes
+    /// it). Only the directory relay put there goes: a job may have put another in its place. Once only.
+    fn release(&mut self, to: &str) {
         if std::mem::replace(&mut self.released, true) {
             return;
         }
@@ -120,7 +139,6 @@ impl Farm {
             (Ok(a), Ok(b)) => same(&a, &b),
             _ => false,
         };
-        let to = if self.retired { GONE } else { IDLE };
         if ours && !to_pool(&self.pool, &self.parent, &self.name, to) {
             let _ = crate::hostdir::remove_beneath(self.parent.as_fd(), &self.name);
         }
@@ -128,8 +146,9 @@ impl Farm {
 }
 
 impl Drop for Farm {
+    /// Without proof its sandbox ended: retired, for gc.
     fn drop(&mut self) {
-        self.release();
+        self.release(GONE);
     }
 }
 
@@ -194,8 +213,7 @@ const GONE: &str = "gone-";
 
 /// Removes the idle copy `name` from `pool`: first renamed out of the pool, so a run taking it at the
 /// same moment has either it whole or none; then removed whatever modes a job left in it (a directory
-/// it made mode 000), never following a symlink ([`crate::hostdir::remove_tree`]).
-/// Its files are the caches' own (hard links), so this frees directories, not data.
+/// it made mode 000), never following a symlink, at any depth ([`crate::hostdir::remove_tree`]).
 pub fn remove_idle(pool: &Path, name: &Path) -> io::Result<()> {
     let pool_fd = open_path(pool)?;
     let gone = format!("{GONE}{}", uuid::Uuid::now_v7());
@@ -240,22 +258,28 @@ fn make_beneath(at: &OwnedFd, rel: &Path) -> io::Result<OwnedFd> {
             Ok(()) | Err(Errno::EXIST) => {}
             Err(e) => return Err(e.into()),
         }
-        fd = if let Ok(sub) = open_dir(&fd, n) {
-            sub
-        } else {
-            rustix::fs::unlinkat(&fd, n, AtFlags::empty())?;
-            rustix::fs::mkdirat(&fd, n, Mode::from_raw_mode(0o700))?;
-            open_dir(&fd, n)?
+        let cn = CString::new(n.as_bytes()).map_err(|_| Errno::INVAL)?;
+        // A directory a job made unreadable is made usable again (and kept); anything else under the name
+        // (a symlink to elsewhere) goes.
+        fd = match crate::hostdir::open_writable_dir(fd.as_fd(), &cn) {
+            Ok(sub) => sub,
+            Err(Errno::NOTDIR | Errno::LOOP) => {
+                rustix::fs::unlinkat(&fd, &cn, AtFlags::empty())?;
+                rustix::fs::mkdirat(&fd, &cn, Mode::from_raw_mode(0o700))?;
+                open_dir(&fd, &cn)?
+            }
+            Err(e) => return Err(e.into()),
         };
     }
     Ok(fd)
 }
 
-/// Removes the copy `name` in `parent` (a directory only relay writes, or a `.git` reached from one
+/// Takes the copy `name` out of `parent` (a directory only relay writes, or a `.git` reached from one
 /// without following a link), if one is there: one a run left that never ended, which nothing will take
-/// (this run links nothing). Through `parent`'s handle, never following a symlink, whatever modes a job
-/// left in it. An error when something is still there after.
-pub fn clear(parent: &Path, name: &str) -> io::Result<()> {
+/// (this run links nothing). It is retired into `pool` (a rename, whatever it holds), else removed
+/// through `parent`'s handle, never following a symlink, whatever modes or depth a job left in it. An
+/// error only when it is still there after both.
+pub fn clear(parent: &Path, name: &str, pool: &Path) -> io::Result<()> {
     let parent_fd = match open_path(parent) {
         Ok(fd) => fd,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -267,7 +291,9 @@ pub fn clear(parent: &Path, name: &str) -> io::Result<()> {
         Err(e) => return Err(e.into()),
         Ok(_) => {}
     }
-    crate::hostdir::remove_beneath(parent_fd.as_fd(), &cname)?;
+    if !to_pool(pool, &parent_fd, &cname, GONE) {
+        let _ = crate::hostdir::remove_beneath(parent_fd.as_fd(), &cname);
+    }
     match rustix::fs::statat(&parent_fd, &cname, AtFlags::SYMLINK_NOFOLLOW) {
         Err(Errno::NOENT) => Ok(()),
         _ => Err(io::Error::other(format!("{} could not be removed", parent.join(name).display()))),
@@ -341,7 +367,7 @@ fn purge(at: &OwnedFd, rels: &[&Path]) -> io::Result<()> {
         if below.iter().any(|b| b.as_os_str().is_empty()) {
             continue;
         }
-        match (is_dir && !below.is_empty()).then(|| open_dir(at, name.as_c_str())) {
+        match (is_dir && !below.is_empty()).then(|| crate::hostdir::open_writable_dir(at.as_fd(), &name)) {
             Some(Ok(sub)) => purge(&sub, &below)?,
             _ => crate::hostdir::remove_beneath(at.as_fd(), &name)?,
         }
@@ -409,6 +435,11 @@ mod tests {
         Farm::take(&p.job, "f", &p.pool, &rels()).unwrap()
     }
 
+    /// What only supervision makes outside tests: the proof a copy's sandbox ended.
+    fn ended() -> Ended {
+        Ended(())
+    }
+
     fn pooled(p: &Place) -> usize {
         std::fs::read_dir(&p.pool).map_or(0, Iterator::count)
     }
@@ -424,14 +455,15 @@ mod tests {
         assert_eq!(std::fs::read_dir(f.join(".cache")).unwrap().count(), 0, "a new copy is cold");
         std::fs::create_dir_all(f.join(".cache/bun/pkg")).unwrap();
         std::fs::write(f.join(".cache/bun/pkg/index.js"), "x").unwrap();
-        drop(farm);
+        farm.give_back(ended());
         assert!(!f.exists() && pooled(&p) == 1, "the copy went back to the pool");
         let farm = take(&p);
         assert_eq!(std::fs::read_to_string(farm.path().join(".cache/bun/pkg/index.js")).unwrap(), "x");
         assert_eq!(pooled(&p), 0, "taken from the pool");
         let other = Farm::take(&p.job, "g", &p.pool, &rels()).unwrap();
         assert_eq!(std::fs::read_dir(other.path().join(".cache")).unwrap().count(), 0, "none idle: a new one");
-        drop((farm, other));
+        farm.give_back(ended());
+        other.give_back(ended());
         assert_eq!(pooled(&p), 2);
     }
 
@@ -449,25 +481,25 @@ mod tests {
         let moved = p.job.with_file_name("moved");
         std::fs::rename(&p.job, &moved).unwrap();
         std::os::unix::fs::symlink(&outside, &p.job).unwrap();
-        drop(farm);
-        assert!(!moved.join("f").exists() && pooled(&p) == 1, "given back through its handle");
+        farm.give_back(ended());
+        assert!(!moved.join("f").exists() && idle(&p.pool).len() == 1, "given back through its handle");
         assert!(outside.join("secret").is_dir() && !outside.join("f").exists(), "nothing outside touched");
 
         std::fs::remove_file(&p.job).unwrap();
         std::fs::rename(&moved, &p.job).unwrap();
-        let mut farm = take(&p);
+        let farm = take(&p);
         std::fs::rename(farm.path(), p.job.join("away")).unwrap();
         std::fs::create_dir_all(p.job.join("f/planted")).unwrap();
-        farm.release();
+        farm.give_back(ended());
         assert!(p.job.join("f/planted").exists() && pooled(&p) == 0, "another directory is not pooled");
     }
 
-    /// Supervision could not see the sandbox end whole: the copy is never given to another run, only to gc.
+    /// Dropped without proof its sandbox ended (supervision could not see it end whole, a check's bwrap was
+    /// killed from outside): the copy is never given to another run, only to gc.
     #[test]
-    fn a_retired_copy_never_goes_back_to_a_run() {
+    fn a_copy_without_proof_its_sandbox_ended_never_goes_back_to_a_run() {
         let p = place();
-        let mut farm = take(&p);
-        farm.retire();
+        let farm = take(&p);
         drop(farm);
         assert!(idle(&p.pool).is_empty(), "a retired copy is idle for the next run");
         assert_eq!(abandoned(&p.pool).len(), 1, "gc removes it");
@@ -483,7 +515,7 @@ mod tests {
         let farm = take(&p);
         std::fs::create_dir_all(farm.path().join(".cargo/registry/secret")).unwrap();
         std::fs::write(farm.path().join("stray"), "x").unwrap();
-        drop(farm);
+        farm.give_back(ended());
         let farm = Farm::take(&p.job, "f", &p.pool, &[cache(".cache")]).unwrap();
         assert!(farm.path().join(".cache").is_dir());
         assert!(!farm.path().join(".cargo").exists() && !farm.path().join("stray").exists(), "not purged");
@@ -499,7 +531,7 @@ mod tests {
         std::fs::create_dir_all(farm.path().join(".cache/locked/inner")).unwrap();
         std::fs::write(farm.path().join(".cache/locked/inner/f"), "x").unwrap();
         std::fs::set_permissions(farm.path().join(".cache/locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
-        drop(farm);
+        farm.give_back(ended());
         let idle = idle(&p.pool);
         assert_eq!(idle.len(), 1);
         remove_idle(&p.pool, &idle[0].0).unwrap();
@@ -511,13 +543,97 @@ mod tests {
     fn an_idle_copy_says_when_it_was_used_and_can_be_removed() {
         let p = place();
         let before = crate::bus::now_micros();
-        drop(take(&p));
+        take(&p).give_back(ended());
         let idle = idle(&p.pool);
         assert_eq!(idle.len(), 1);
         assert!(idle[0].1 >= before / 1000 * 1000 && idle[0].1 <= crate::bus::now_micros(), "{idle:?}");
         remove_idle(&p.pool, &idle[0].0).unwrap();
         assert_eq!(pooled(&p), 0);
         assert!(remove_idle(&p.pool, &idle[0].0).is_err(), "taken or gone already: nothing to do");
+    }
+
+    /// Fable review of (e): a copy dropped without proof that its sandbox ended (here, on a panic; else an
+    /// error from the runner) went back to the pool for the next run. A copy is retired unless given back
+    /// with that proof.
+    #[test]
+    fn a_copy_dropped_on_a_panic_is_retired() {
+        let p = place();
+        let farm = take(&p);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _farm = farm;
+            panic!("the runner failed");
+        }));
+        assert!(panicked.is_err());
+        assert!(idle(&p.pool).is_empty(), "a copy dropped on a panic went to the next run");
+        assert_eq!(abandoned(&p.pool).len(), 1, "retired, for gc");
+    }
+
+    /// Fable and Copilot on (e): a check gave its copy back whatever became of its bwrap; killed from
+    /// outside, bwrap returns before its namespace has ended. Only an exit with a code proves the end: a
+    /// bwrap killed by a signal gives no proof, and the check's copy is retired.
+    #[test]
+    fn a_check_whose_sandbox_was_killed_retires_its_copy() {
+        let p = place();
+        let farm = take(&p);
+        let killed = std::process::Command::new("sh").args(["-c", "kill -9 $$"]).status().unwrap();
+        let exited = std::process::Command::new("sh").args(["-c", "exit 1"]).status().unwrap();
+        assert!(Ended::waited(killed).is_none() && Ended::waited(exited).is_some());
+        match Ended::waited(killed) {
+            Some(ended) => farm.give_back(ended),
+            None => drop(farm),
+        }
+        assert!(idle(&p.pool).is_empty() && abandoned(&p.pool).len() == 1, "a killed check's copy was pooled");
+    }
+
+    /// Fable review of (e): removal held a handle for every level, so a tree deeper than the process may
+    /// open (here 600 levels under a limit of 128) could be neither cut out of a copy nor removed from the
+    /// pool, and failed every take after. Run with the limit lowered, in a process of its own.
+    #[test]
+    #[allow(clippy::disallowed_methods, reason = "the inner run is told its directory by the outer")]
+    fn a_tree_deeper_than_the_open_handles_allowed_is_still_cut_and_removed() {
+        if let Some(dir) = std::env::var_os("RELAY_FARM_INNER_DEEP") {
+            let job = PathBuf::from(dir);
+            let pool = job.with_file_name("farms");
+            let farm = Farm::take(&job, "f", &pool, &rels()).unwrap();
+            let deep: PathBuf = std::iter::repeat_n("d", 600).collect();
+            std::fs::create_dir_all(farm.path().join("stray").join(&deep)).unwrap();
+            std::fs::create_dir_all(farm.path().join(".cache/pkg").join(&deep)).unwrap();
+            std::mem::forget(farm);
+            let farm = Farm::take(&job, "f", &pool, &[cache(".cargo/registry")]).unwrap();
+            assert!(!farm.path().join("stray").exists() && !farm.path().join(".cache").exists(), "not cut");
+            drop(farm);
+            for (name, _) in idle(&pool).into_iter().chain(abandoned(&pool).into_iter().map(|n| (n, 0))) {
+                remove_idle(&pool, &name).unwrap();
+            }
+            assert_eq!(std::fs::read_dir(&pool).map_or(0, Iterator::count), 0, "left in the pool");
+            return;
+        }
+        let p = place();
+        let exe = std::env::current_exe().unwrap();
+        let test = "sandbox::farm::tests::a_tree_deeper_than_the_open_handles_allowed_is_still_cut_and_removed";
+        let out = std::process::Command::new("sh")
+            .args(["-c", "ulimit -n 128 && exec \"$0\" --exact \"$1\" --test-threads=1"])
+            .arg(&exe)
+            .arg(test)
+            .env("RELAY_FARM_INNER_DEEP", &p.job)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && text.contains("1 passed"), "{text}");
+    }
+
+    /// Fable review of (e): a cache directory a job made mode 000 was unlinked as if it were not a directory
+    /// (which fails), so the next run lost the whole copy. It is made usable again and kept.
+    #[test]
+    fn a_cache_directory_made_unreadable_is_kept_by_the_next_taker() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = place();
+        let farm = take(&p);
+        std::fs::write(farm.path().join(".cache/pkg"), "warm").unwrap();
+        std::fs::set_permissions(farm.path().join(".cache"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::mem::forget(farm);
+        let farm = take(&p);
+        assert_eq!(std::fs::read_to_string(farm.path().join(".cache/pkg")).unwrap(), "warm", "the copy was lost");
     }
 
     /// A copy left by a run relay never saw end is used again in place, and nothing it held is lost.

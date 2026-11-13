@@ -159,7 +159,8 @@ enum Stand {
 /// with where its symlink stands. The one judge of it: the copy holds these caches and nothing else
 /// ([`linkable`], [`farm::Farm::take`]), and the plan links these and nothing else. A cache is left a bind
 /// (and so never copied) when its path is not there on the host; when its path, or a directory on its way
-/// under the home, is a symlink (the rules compare paths as written); when another cache is nested in it or
+/// under the home, is a symlink (the rules compare paths as written); when a mount's path runs through a
+/// symlink to the cache's real path, or into or around it; when another cache is nested in it or
 /// around it (a bind around it would cover the symlink's directory, and a job could reach the way to it
 /// through either); when anything is mounted at or under its path (a hidden path among them: copied, it
 /// would show in the job's tree); when a later layer covers its path or a directory around it (the
@@ -187,7 +188,14 @@ fn linking(cfg: &crate::config::Config, user_home: &Path, before: &Layer, after:
         let nested = paths.iter().any(|q| q != p && (q.starts_with(p) || p.starts_with(q)));
         let under = before.iter().chain(after).any(|(q, _)| q.starts_with(p));
         let covered = after.iter().any(|(q, _)| p.starts_with(q));
-        if nested || under || covered {
+        // A mount whose path runs through a symlink lands where that leads: compared there, with the
+        // cache's own real path, so a hide rule reaching the cache by an alias keeps it a bind.
+        let real_p = real(p);
+        let aliased = before.iter().chain(after).any(|(q, _)| {
+            let real_q = real(q);
+            real_q != *q && (real_q.starts_with(&real_p) || real_p.starts_with(&real_q))
+        });
+        if nested || under || covered || aliased {
             continue;
         }
         // What the cache path's directory is, once the layers before the caches are mounted.
@@ -198,6 +206,25 @@ fn linking(cfg: &crate::config::Config, user_home: &Path, before: &Layer, after:
         }
     }
     out
+}
+
+/// Where `p` leads, every symlink on it resolved: its longest existing part made real, the rest (not there
+/// yet) appended as written.
+fn real(p: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut at = p;
+    loop {
+        if let Ok(found) = at.canonicalize() {
+            return missing.iter().rev().fold(found, |acc: PathBuf, n: &&std::ffi::OsStr| acc.join(n));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(up), Some(n)) => {
+                missing.push(n);
+                at = up;
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
 }
 
 /// The linked caches the plan would link for these mounts, whatever their `caches` says: what a job's copy
@@ -282,7 +309,7 @@ pub fn own_caches(
             ),
         }
     }
-    farm::clear(parent, name)?;
+    farm::clear(parent, name, pool)?;
     Ok(None)
 }
 
@@ -657,6 +684,46 @@ mod tests {
     /// bind, the hide mount lands inside the cache's bind and masks `secret`; linked, it lands on the host's
     /// directory, and the copy (in the job's tree) held `secret`. A cache whose host path has a symlink on
     /// it is not linked: it stays a bind.
+    /// Fable and Copilot on (e): a hide rule could reach a linked cache through a symlink of its own
+    /// (`~/.private -> .cargo/git`, `hide_home = [".private/secret"]`): compared as written, it was not
+    /// under the cache, so the cache was linked, and a copy reused from the pool holding `secret` was bound
+    /// over the hide mount. Hide rules are compared by where they lead, and a cache one leads into or
+    /// around is not linked; the pooled copy is then not taken at all.
+    #[test]
+    fn a_hide_rule_reaching_a_cache_through_a_symlink_keeps_it_a_bind() {
+        let d = Dir::new();
+        let root = d.path();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let user = root.join("user");
+        std::fs::create_dir_all(user.join(".cargo/git/secret")).unwrap();
+        std::os::unix::fs::symlink(".cargo/git", user.join(".private")).unwrap();
+        let conf = "name = \"t\"\n[sandbox]\nhide = []\nhide_home = [\".private/secret\"]\n\
+                    caches = [\".cargo/git\"]\nlinked_caches = [\".cargo/git\"]\n";
+        let cfg = Config::parse(conf, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        let (scratch, tmp, clone) = (root.join("state/t/jobs/j.d"), root.join("data/t/scratch/j"), root.join("clone"));
+        std::fs::create_dir_all(clone.join(".git")).unwrap();
+        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
+        let m = Mounts {
+            home: &home,
+            workdir: Some(&clone),
+            scratch: &scratch,
+            inbox: None,
+            tmp: &tmp,
+            cwd: &clone,
+            account: false,
+            caches: None,
+        };
+        let rels = linkable(&ctx, &user, &m);
+        assert!(rels.is_empty(), "{rels:?}");
+        // A copy in the pool from before the rule, holding what it now hides, stays there.
+        let pool = root.join("pool");
+        std::fs::create_dir_all(pool.join(format!("idle-{}/.cargo/git/secret", uuid::Uuid::now_v7()))).unwrap();
+        let copy = own_caches(&ctx, &clone.join(".git"), farm::IN_CLONE, &pool, &rels).unwrap();
+        assert!(copy.is_none() && !clone.join(".git/relay-caches").exists(), "the pooled copy was taken");
+    }
+
     #[test]
     fn a_cache_whose_host_path_is_a_symlink_is_not_linked() {
         let d = Dir::new();

@@ -27,10 +27,13 @@ pub struct Ctx {
     pub clones: PathBuf,
     /// `$XDG_DATA_HOME/relay/<name>/caches`: the sessions' own `sandbox.caches`.
     pub caches: PathBuf,
-    /// `$XDG_DATA_HOME/relay/<name>/farms`: idle copies of the linked caches, each a private cache, that a
-    /// session takes into its clone ([`crate::sandbox::farm`]). A check's are in `state/farms`, beside
-    /// the directory it runs in.
-    pub farms: PathBuf,
+    /// `$XDG_DATA_HOME/relay/<name>/copies-for-sessions`: idle copies of the linked caches, each a private
+    /// cache, that a session takes into its clone ([`crate::sandbox::farm`]).
+    pub session_copies: PathBuf,
+    /// `$XDG_STATE_HOME/relay/<name>/copies-for-checks`: the same for checks, beside the directory a check
+    /// runs in. Named apart, so the two pools are never one directory, even with the data and state
+    /// directories one.
+    pub check_copies: PathBuf,
     /// `$XDG_DATA_HOME/relay/<name>/scratch`: one directory per job, on disk, that is its `/tmp`.
     pub scratch: PathBuf,
     /// Everything relay keeps for every project, hidden from sessions.
@@ -218,7 +221,8 @@ impl Ctx {
             jobs: state.join("jobs"),
             clones: data.join("clones"),
             caches: data.join("caches"),
-            farms: data.join("farms"),
+            session_copies: data.join("copies-for-sessions"),
+            check_copies: state.join("copies-for-checks"),
             scratch: data.join("scratch"),
             git_dirs: git_dirs(&cfg.repo),
             state,
@@ -565,7 +569,8 @@ impl Ctx {
             jobs: state.join("jobs"),
             clones: data.join("clones"),
             caches: data.join("caches"),
-            farms: data.join("farms"),
+            session_copies: data.join("copies-for-sessions"),
+            check_copies: state.join("copies-for-checks"),
             scratch: data.join("scratch"),
             git_dirs: Vec::new(),
             state,

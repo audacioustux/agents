@@ -16,8 +16,9 @@
 //!   or has ended `outputs_after_hours` ago: a resumed review fetches it again;
 //! - an idle copy of the linked caches (`sandbox.linked_caches`) in a pool goes once no run has taken
 //!   it for `cache_copies_idle_days`, and so does every idle copy past the `limits.max_running` most
-//!   recently used: no more runs than that hold one at once. A copy is a whole cache of its own, and
-//!   frees what it holds.
+//!   recently used: no more runs than that hold one at once, and every retired one (`gone-*`). A copy is
+//!   a whole cache of its own, and frees what it holds;
+//! - a clone a killed `relay probe` left (`probe-<pid>-<start>`) goes once no process is both.
 //!
 //! A clone with a live runner, a symlink, or a path outside relay's own
 //! directories is left alone.
@@ -50,6 +51,8 @@ pub enum Kind {
     ReviewRef,
     /// An idle copy of the linked caches, in a pool; its job is "".
     CacheCopy,
+    /// A clone `relay probe` made (`probe-<pid>-<start>`) whose process is gone; its job is "".
+    Probe,
 }
 
 /// One place a pass acts on, for one job.
@@ -180,13 +183,38 @@ pub fn plan(ctx: &Ctx, world: &World, now_us: u64) -> Vec<Item> {
     items.extend(scratches(ctx, world, gc, now_us));
     items.extend(review_refs(ctx, world, gc, now_us));
     items.extend(cache_copies(ctx, gc, now_us));
+    items.extend(probe_clones(ctx));
+    items
+}
+
+/// The clones a killed `relay probe` left (`probe-<pid>-<start>`, `probe-other-…`): no process is that pid
+/// with that start time any more. A clone named before probes said their start time goes once its pid is.
+fn probe_clones(ctx: &Ctx) -> Vec<Item> {
+    let mut items = Vec::new();
+    for e in std::fs::read_dir(&ctx.clones).into_iter().flatten().flatten() {
+        let Ok(name) = e.file_name().into_string() else { continue };
+        let Some(tag) = name.strip_prefix("probe-other-").or_else(|| name.strip_prefix("probe-")) else { continue };
+        let alive = match tag.split_once('-') {
+            Some((pid, start)) => match (pid.parse::<u32>(), start.parse::<u64>()) {
+                (Ok(pid), Ok(start)) => os::start_time(pid) == Some(start),
+                _ => continue,
+            },
+            None => match tag.parse::<u32>() {
+                Ok(pid) => os::start_time(pid).is_some(),
+                Err(_) => continue,
+            },
+        };
+        if !alive && e.file_type().is_ok_and(|t| t.is_dir()) {
+            items.push(Item { job: String::new(), kind: Kind::Probe, path: e.path() });
+        }
+    }
     items
 }
 
 /// The pools of copies of the linked caches: a session's, beside the clones, and a check's, beside its
 /// directory in the jobs directory.
 pub fn pools(ctx: &Ctx) -> [PathBuf; 2] {
-    [ctx.farms.clone(), ctx.state.join("farms")]
+    [ctx.session_copies.clone(), ctx.check_copies.clone()]
 }
 
 /// The idle copies of the linked caches no run needs: unused for `cache_copies_idle_days`, or past the
@@ -446,6 +474,9 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
         anyhow::ensure!(out.status.success(), "could not delete {name}");
         return Ok(());
     }
+    if item.kind == Kind::Probe {
+        return crate::hostdir::remove_tree(&item.path).with_context(|| format!("removing {}", item.path.display()));
+    }
     if item.kind == Kind::CacheCopy {
         let (Some(pool), Some(name)) = (item.path.parent(), item.path.file_name()) else { bail!("not in a pool") };
         return crate::sandbox::farm::remove_idle(pool, Path::new(name))
@@ -457,7 +488,7 @@ fn act(ctx: &Ctx, item: &Item, a: &mut Action) -> Result<()> {
     }
     let j = world.jobs().get(&item.job).context("the job is gone")?;
     match item.kind {
-        Kind::ReviewRef | Kind::Scratch | Kind::CacheCopy => unreachable!("handled above"),
+        Kind::ReviewRef | Kind::Scratch | Kind::CacheCopy | Kind::Probe => unreachable!("handled above"),
         Kind::Log => gzip_log(&item.path),
         Kind::Outputs => {
             let meta = item.path.symlink_metadata()?;
@@ -590,6 +621,39 @@ mod tests {
 
     /// An idle copy of the linked caches goes once unused for `cache_copies_idle_days`, or when more are
     /// idle in its pool than `limits.max_running`; the ones used last stay.
+    /// Copilot on (e): with the data and the state directories one (`XDG_DATA_HOME` = `XDG_STATE_HOME`), the
+    /// sessions' pool and the checks' pool were one directory. Each pool is named for its purpose.
+    #[test]
+    fn the_session_and_check_pools_never_coincide() {
+        let d = crate::config::tempdir::Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let cfg = crate::config::Config::parse("name = \"t\"\n", &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("one"), d.path().join("one"));
+        let [sessions, checks] = pools(&ctx);
+        assert_ne!(sessions, checks);
+    }
+
+    /// Copilot on (e): a probe that was killed left its clone, with a warmed copy of the linked caches in
+    /// its `.git`, where gc never looked. A probe's clone names its process and when it started, and gc
+    /// removes it once that process is gone.
+    #[test]
+    fn a_dead_probes_clone_is_collected_and_a_live_ones_is_not() {
+        let d = crate::config::tempdir::Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let cfg = crate::config::Config::parse("name = \"t\"\n", &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        let dead = ctx.clones.join("probe-999999999-1");
+        std::fs::create_dir_all(dead.join(".git/relay-caches/.cache")).unwrap();
+        let me = std::process::id();
+        let live = ctx.clones.join(format!("probe-{me}-{}", crate::os::start_time(me).unwrap()));
+        std::fs::create_dir_all(&live).unwrap();
+        let named: Vec<PathBuf> = plan(&ctx, &World::default(), 0).into_iter().map(|i| i.path).collect();
+        assert!(named.contains(&dead), "{named:?}");
+        assert!(!named.contains(&live), "{named:?}");
+    }
+
     #[test]
     fn idle_cache_copies_go_by_age_and_past_the_most_runs_at_once() {
         let d = crate::config::tempdir::Dir::new();

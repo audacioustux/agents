@@ -274,14 +274,11 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
     };
     let (mut report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
-    // Its copy of the linked caches goes back to the pool now. Not to the pool if anything of its sandbox
-    // may still run (its supervisor was killed): something left could touch it while another job holds it.
-    if let Some(copy) = launch.caches.as_mut()
-        && !ending.tree_ended
-    {
-        copy.retire();
+    // Its copy of the linked caches goes back to the pool for another run only with proof its sandbox has
+    // ended; without (its supervisor was killed, or this returned early), it is retired when dropped.
+    if let (Some(copy), Some(ended)) = (launch.caches.take(), ending.ended) {
+        copy.give_back(ended);
     }
-    drop(launch.caches.take());
     let marker = &ctx.cfg.session.final_marker;
     report.zone = Some(launch.zone.clone());
     report.choose(marker);
@@ -454,7 +451,7 @@ fn launch(
     let rels = sandbox::linkable(ctx, &accounts::home(), &mounts);
     // A copy an interrupted run left there goes even when this run links nothing; it must, or no session starts.
     let caches = match work.clone.as_ref().and_then(|c| sandbox::farm::clone_git(c.path())) {
-        Some(git) => sandbox::own_caches(ctx, &git, sandbox::farm::IN_CLONE, &ctx.farms, &rels)
+        Some(git) => sandbox::own_caches(ctx, &git, sandbox::farm::IN_CLONE, &ctx.session_copies, &rels)
             .context("removing the copy of the caches an interrupted run left in the clone")?,
         None => None,
     };
@@ -1279,7 +1276,7 @@ fn drive(
         Ok(())
     })?;
     settle(&mut child, &mut ending, live, deadline, heard_at, silent_after)?;
-    ending.tree_ended = child.tree_ended();
+    ending.ended = crate::sandbox::farm::Ended::reaped(&child);
     Ok((reader.report().clone(), ending, disk))
 }
 

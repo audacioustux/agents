@@ -121,7 +121,18 @@ fn failed(at: &Path, e: Errno) -> io::Error {
 }
 
 /// Removes `name` in `parent` (a directory made writable already), `at` being its path for errors.
+///
+/// A directory is walked holding one handle, the directory being emptied, at any depth: what is left to
+/// visit at each level (its subdirectories' names) and each level's identity are kept in memory, and the
+/// walk climbs back by `..`, checked to be the directory it came down from, so a tree moved meanwhile
+/// stops it rather than lead it out. No symlink is followed: each entry is looked at without following,
+/// and each directory opened by name from the one above it.
 fn remove_at(parent: BorrowedFd<'_>, name: &CStr, at: &mut PathBuf) -> io::Result<()> {
+    struct Level {
+        name: CString,
+        id: (u64, u64),
+        dirs: Vec<CString>,
+    }
     let stat = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) => stat,
         Err(Errno::NOENT) => return Ok(()),
@@ -133,26 +144,87 @@ fn remove_at(parent: BorrowedFd<'_>, name: &CStr, at: &mut PathBuf) -> io::Resul
             Err(e) => Err(failed(at, e)),
         };
     }
-    let dir = open_writable_dir(parent, name).map_err(|e| failed(at, e))?;
-    for entry in Dir::read_from(&dir).map_err(|e| failed(at, e))? {
-        let entry = entry.map_err(|e| failed(at, e))?;
-        let child = entry.file_name();
-        if child == c"." || child == c".." {
+    let id = |fd: &OwnedFd| rustix::fs::fstat(fd).map(|s| (s.st_dev, s.st_ino));
+    let mut cur = open_writable_dir(parent, name).map_err(|e| failed(at, e))?;
+    let dirs = unlink_all_but_dirs(&cur).map_err(|e| failed(at, e))?;
+    let mut levels = vec![Level { name: name.to_owned(), id: id(&cur).map_err(|e| failed(at, e))?, dirs }];
+    while let Some(level) = levels.last_mut() {
+        if let Some(child) = level.dirs.pop() {
+            match open_writable_dir(cur.as_fd(), &child) {
+                Ok(sub) => {
+                    at.push(OsStr::from_bytes(child.to_bytes()));
+                    let dirs = unlink_all_but_dirs(&sub).map_err(|e| failed(at, e))?;
+                    let sub_id = id(&sub).map_err(|e| failed(at, e))?;
+                    levels.push(Level { name: child, id: sub_id, dirs });
+                    cur = sub;
+                }
+                Err(Errno::NOENT) => {}
+                // No longer a directory: removed as what it is now.
+                Err(Errno::NOTDIR | Errno::LOOP) => match rustix::fs::unlinkat(&cur, &child, AtFlags::empty()) {
+                    Ok(()) | Err(Errno::NOENT) => {}
+                    Err(e) => return Err(failed(at, e)),
+                },
+                Err(e) => return Err(failed(at, e)),
+            }
             continue;
         }
-        at.push(OsStr::from_bytes(child.to_bytes()));
-        remove_at(dir.as_fd(), child, at)?;
+        // Its subdirectories are gone; anything made in it since is looked at once more.
+        let again = unlink_all_but_dirs(&cur).map_err(|e| failed(at, e))?;
+        if !again.is_empty() {
+            level.dirs = again;
+            continue;
+        }
+        let done = levels.pop().expect("a level");
+        let Some(above) = levels.last() else { break };
+        let up = rustix::fs::openat(&cur, c"..", dir_flags(), Mode::empty()).map_err(|e| failed(at, e))?;
+        if id(&up).map_err(|e| failed(at, e))? != above.id {
+            return Err(failed(at, Errno::XDEV));
+        }
+        match rustix::fs::unlinkat(&up, &done.name, AtFlags::REMOVEDIR) {
+            Ok(()) | Err(Errno::NOENT) => {}
+            Err(e) => return Err(failed(at, e)),
+        }
+        cur = up;
         at.pop();
     }
+    drop(cur);
     match rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR) {
         Ok(()) | Err(Errno::NOENT) => Ok(()),
         Err(e) => Err(failed(at, e)),
     }
 }
 
+/// Removes everything in `dir` but its subdirectories (never following a symlink: one is removed as
+/// itself), and names those.
+fn unlink_all_but_dirs(dir: &OwnedFd) -> Result<Vec<CString>, Errno> {
+    let mut dirs = Vec::new();
+    for entry in Dir::read_from(dir)? {
+        let entry = entry?;
+        let child = entry.file_name();
+        if child == c"." || child == c".." {
+            continue;
+        }
+        let is_dir = match entry.file_type() {
+            FileType::Directory => true,
+            FileType::Unknown => rustix::fs::statat(dir, child, AtFlags::SYMLINK_NOFOLLOW)
+                .is_ok_and(|s| FileType::from_raw_mode(s.st_mode) == FileType::Directory),
+            _ => false,
+        };
+        if is_dir {
+            dirs.push(child.to_owned());
+        } else {
+            match rustix::fs::unlinkat(dir, child, AtFlags::empty()) {
+                Ok(()) | Err(Errno::NOENT) => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Ok(dirs)
+}
+
 /// Opens the directory `name` in `parent` (not following a symlink) for reading and removing from, giving
 /// its owner `rwx` first when a child process took them away.
-fn open_writable_dir(parent: BorrowedFd<'_>, name: &CStr) -> Result<OwnedFd, Errno> {
+pub fn open_writable_dir(parent: BorrowedFd<'_>, name: &CStr) -> Result<OwnedFd, Errno> {
     let dir = match rustix::fs::openat(parent, name, dir_flags(), Mode::empty()) {
         Ok(dir) => dir,
         Err(Errno::ACCESS) => {

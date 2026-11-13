@@ -416,13 +416,19 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, phase: Phase, place:
         // back to the check pool when it ends (the check's sandbox has ended whole by then: `status` returns
         // once its PID namespace has).
         let rels = crate::sandbox::linkable(ctx, &crate::accounts::home(), &mounts);
-        let caches = crate::sandbox::own_caches(ctx, place.work, "caches", &ctx.state.join("farms"), &rels)
+        let caches = crate::sandbox::own_caches(ctx, place.work, "caches", &ctx.check_copies, &rels)
             .context("removing a copy of the caches left in the check's directory")?;
         let mounts = Mounts { caches: caches.as_ref().map(crate::sandbox::farm::Farm::path), ..mounts };
         let mut c = self::command(ctx, &inv, &mounts);
         c.stdin(Stdio::null()).stdout(file.try_clone()?).stderr(file);
         let status = c.status().context("running the acceptance check");
-        drop(caches);
+        // Back to the pool only if bwrap exited (it waits for its namespace to end); killed from outside, or
+        // not run at all, the copy is retired when dropped.
+        if let (Some(copy), Some(ended)) =
+            (caches, status.as_ref().ok().copied().and_then(crate::sandbox::farm::Ended::waited))
+        {
+            copy.give_back(ended);
+        }
         let status = status?;
         let text = place.inbox.read("check.out").map(|f| tail_text(f, 2 * TAIL as u64)).unwrap_or_default();
         let code = status.code();

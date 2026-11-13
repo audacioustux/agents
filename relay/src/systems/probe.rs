@@ -99,7 +99,10 @@ struct Probe<'a> {
 
 impl<'a> Probe<'a> {
     fn new(ctx: &'a Ctx, home: &'a Home) -> Result<Self> {
-        let id = std::process::id();
+        // Its process and when that started: gc removes what a killed probe left, its clone's warmed copy of
+        // the linked caches included, once no process is both.
+        let me = std::process::id();
+        let id = format!("{me}-{}", crate::os::start_time(me).unwrap_or(0));
         let p = Self {
             ctx,
             home,
@@ -293,8 +296,13 @@ impl<'a> Probe<'a> {
             caches: None,
         };
         let rels = sandbox::linkable(self.ctx, &user, &mounts);
-        let copy =
-            sandbox::own_caches(self.ctx, &self.clone.join(".git"), sandbox::farm::IN_CLONE, &self.ctx.farms, &rels);
+        let copy = sandbox::own_caches(
+            self.ctx,
+            &self.clone.join(".git"),
+            sandbox::farm::IN_CLONE,
+            &self.ctx.session_copies,
+            &rels,
+        );
         marks.copy = copy?;
         // No walk copies a marker (it is relay's own file), so the copy gets its own.
         marks.mark_copy()?;
@@ -303,6 +311,8 @@ impl<'a> Probe<'a> {
         let args = sandbox::args(self.ctx, &user, &mounts, sandbox::session_env(self.ctx, &inv));
         let inside =
             |sh: &str| Command::new("bwrap").args(&args).args([OsString::from("sh"), "-c".into(), sh.into()]).output();
+        // Proof, for the copy, that each sandbox run on it ended: all of them, or none.
+        let mut waited: Vec<Option<sandbox::farm::Ended>> = Vec::new();
         let mut outcomes = Vec::new();
         let mut report = |ok: bool, what: &str, detail: &str| {
             let detail = if ok { String::new() } else { detail.to_owned() };
@@ -314,12 +324,16 @@ impl<'a> Probe<'a> {
                 report(ok, &format!("{} (control: present outside)", c.what), "");
             }
             let out = inside(&c.inside)?;
+            waited.push(sandbox::farm::Ended::waited(out.status));
             report(out.status.success(), &c.what, String::from_utf8_lossy(&out.stderr).trim());
         }
         // The sandbox's own regex, on what the inside sees; the harness's own
         // variables (CLAUDE_CONFIG_DIR, OMP_PROFILE) are meant to be there.
         let deny = regex::Regex::new(&self.ctx.cfg.sandbox.env_deny)?;
-        let env = String::from_utf8_lossy(&inside("env")?.stdout).into_owned();
+        let env_out = inside("env")?;
+        waited.push(sandbox::farm::Ended::waited(env_out.status));
+        marks.ended = waited.iter().copied().collect::<Option<Vec<_>>>().and_then(|all| all.last().copied());
+        let env = String::from_utf8_lossy(&env_out.stdout).into_owned();
         let leaked: Vec<&str> = env
             .lines()
             .filter_map(|l| l.split_once('=').map(|(k, _)| k))
@@ -337,6 +351,8 @@ struct Marks<'a> {
     ctx: &'a Ctx,
     marked: Vec<CachePath>,
     copy: Option<sandbox::farm::Farm>,
+    /// Every sandbox the probe ran on the copy was waited for to the end: the copy goes back to the pool.
+    ended: Option<sandbox::farm::Ended>,
 }
 
 impl Marks<'_> {
@@ -359,7 +375,9 @@ impl Drop for Marks<'_> {
             for rel in &self.marked {
                 let _ = std::fs::remove_file(copy.path().join(rel).join(cache_marker()));
             }
-            drop(copy);
+            if let Some(ended) = self.ended {
+                copy.give_back(ended);
+            }
         }
         for rel in &self.marked {
             let _ = sandbox::farm::remove_in_cache(&self.ctx.caches, rel, &cache_marker());
@@ -388,7 +406,7 @@ fn seed_markers<'a>(ctx: &'a Ctx, user: &Path, home: &Home, clone: &Path) -> std
         let src = ctx.caches.join(r);
         plan.iter().any(|(_, k)| *k == Mount::From(src.clone()))
     });
-    let mut marks = Marks { ctx, marked: Vec::new(), copy: None };
+    let mut marks = Marks { ctx, marked: Vec::new(), copy: None, ended: None };
     for rel in mounted {
         // A probe that was killed removed nothing: its markers go now, once its process is gone.
         for name in sandbox::farm::names_in_cache(&ctx.caches, rel).unwrap_or_default() {
@@ -475,17 +493,22 @@ mod tests {
             &ctx,
             &clone.join(".git"),
             sandbox::farm::IN_CLONE,
-            &ctx.farms,
+            &ctx.session_copies,
             std::slice::from_ref(rel),
         )
         .unwrap();
         assert!(!marks.copy.as_ref().unwrap().path().join(rel).join(cache_marker()).exists(), "copied with the cache");
         marks.mark_copy().unwrap();
+        // As its runs prove, each waited for to its end: here one process, exited with a code.
+        marks.ended = sandbox::farm::Ended::waited(std::process::Command::new("true").status().unwrap());
         assert!(marks.copy.as_ref().unwrap().path().join(rel).join(cache_marker()).exists(), "the copy has its own");
         drop(marks);
-        let pooled: Vec<_> = sandbox::farm::idle(&ctx.farms);
+        let pooled: Vec<_> = sandbox::farm::idle(&ctx.session_copies);
         assert_eq!(pooled.len(), 1);
-        assert!(!ctx.farms.join(&pooled[0].0).join(rel).join(cache_marker()).exists(), "pooled with the marker");
+        assert!(
+            !ctx.session_copies.join(&pooled[0].0).join(rel).join(cache_marker()).exists(),
+            "pooled with the marker"
+        );
         assert!(!ctx.caches.join(rel).join(cache_marker()).exists(), "left in relay's cache");
     }
 

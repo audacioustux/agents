@@ -80,9 +80,23 @@ fn all(tests: impl IntoIterator<Item = String>) -> String {
     if t.is_empty() { "true".into() } else { t.join(" && ") }
 }
 
-/// The marker's name: [`MARKER`], then the probe's process id.
+/// The probe's process id and when it started: together they name one process ([`crate::os::start_time`]).
+fn me() -> String {
+    let pid = std::process::id();
+    format!("{pid}-{}", crate::os::start_time(pid).unwrap_or(0))
+}
+
+/// The marker's name: [`MARKER`], then [`me`].
 fn cache_marker() -> String {
-    format!("{MARKER}{}", std::process::id())
+    format!("{MARKER}{}", me())
+}
+
+/// Whether the probe `<pid>-<start>` is running: a process is both.
+fn running(tag: &str) -> bool {
+    tag.split_once('-').is_some_and(|(pid, start)| match (pid.parse::<u32>(), start.parse::<u64>()) {
+        (Ok(pid), Ok(start)) => crate::os::start_time(pid) == Some(start),
+        _ => false,
+    })
 }
 
 use sandbox::farm::MARKER;
@@ -99,18 +113,18 @@ struct Probe<'a> {
 
 impl<'a> Probe<'a> {
     fn new(ctx: &'a Ctx, home: &'a Home) -> Result<Self> {
-        // Its process and when that started: gc removes what a killed probe left, its clone's warmed copy of
-        // the linked caches included, once no process is both.
-        let me = std::process::id();
-        let id = format!("{me}-{}", crate::os::start_time(me).unwrap_or(0));
+        // All it makes is in its own directory among the probes', named for its process and when that
+        // started: gc removes what a killed probe left, its clone's warmed copy of the linked caches
+        // included, once no process is both; and no job's name can be taken for it.
+        let dir = ctx.probes.join(me());
         let p = Self {
             ctx,
             home,
-            clone: ctx.clones.join(format!("probe-{id}")),
-            neighbour: ctx.clones.join(format!("probe-other-{id}")),
-            scratch: ctx.job_scratch(&format!("probe-{id}")),
-            inbox: ctx.job_inbox(&format!("probe-{id}")),
-            tmp: ctx.job_scratch(&format!("probe-{id}")).join("tmp"),
+            clone: dir.join("clone"),
+            neighbour: dir.join("other"),
+            scratch: dir.join("scratch"),
+            inbox: dir.join("inbox"),
+            tmp: dir.join("scratch/tmp"),
         };
         for d in [&p.clone, &p.neighbour, &p.scratch, &p.inbox, &p.tmp] {
             std::fs::create_dir_all(d)?;
@@ -188,9 +202,9 @@ impl<'a> Probe<'a> {
     }
 
     fn checks(&self, plan: &[(PathBuf, Mount)], inv: &Invocation) -> Vec<Check> {
-        // A hidden path must hide what is inside it, except what a later mount shows again.
-        let shown_later =
-            |i: usize, p: &Path| plan[i + 1..].iter().any(|(m, k)| *k != Mount::Hidden && m.starts_with(p));
+        // A hidden path must hide what is inside it, except where a later mount is: one that shows something
+        // again, or one hidden itself (relay's own state, say), whose mount point is an empty directory there.
+        let shown_later = |i: usize, p: &Path| plan[i + 1..].iter().any(|(m, _)| m.starts_with(p));
         let mut hidden = Vec::new();
         for (i, (p, _)) in plan.iter().enumerate().filter(|(_, (_, k))| *k == Mount::Hidden) {
             if p.is_file() {
@@ -408,9 +422,10 @@ fn seed_markers<'a>(ctx: &'a Ctx, user: &Path, home: &Home, clone: &Path) -> std
     });
     let mut marks = Marks { ctx, marked: Vec::new(), copy: None, ended: None };
     for rel in mounted {
-        // A probe that was killed removed nothing: its markers go now, once its process is gone.
+        // A probe that was killed removed nothing: its markers go now, once no process is both its pid and
+        // its start time (a marker named by a pid alone, from before, says neither: it goes too).
         for name in sandbox::farm::names_in_cache(&ctx.caches, rel).unwrap_or_default() {
-            let gone = name.strip_prefix(MARKER).is_some_and(|pid| !Path::new("/proc").join(pid).exists());
+            let gone = name.strip_prefix(MARKER).is_some_and(|tag| !running(tag));
             if gone {
                 let _ = sandbox::farm::remove_in_cache(&ctx.caches, rel, &name);
             }
@@ -423,9 +438,7 @@ fn seed_markers<'a>(ctx: &'a Ctx, user: &Path, home: &Home, clone: &Path) -> std
 
 impl Drop for Probe<'_> {
     fn drop(&mut self) {
-        for d in [&self.clone, &self.neighbour, &self.scratch, &self.inbox, &self.tmp] {
-            let _ = crate::hostdir::remove_tree(d);
-        }
+        let _ = crate::hostdir::remove_tree(&self.ctx.probes.join(me()));
     }
 }
 
@@ -468,6 +481,35 @@ mod tests {
 
     /// The markers go from the clone's copy of the linked caches before it is given back to the pool, and
     /// from relay's caches; a killed probe's markers go at the next probe.
+    /// Copilot on (e): a marker was named by the probe's pid alone, so a dead probe's marker under a pid
+    /// reused by this probe was taken for this probe's own: it stayed, and making this one's failed with
+    /// EEXIST and stopped the probe. A marker names its probe's pid and start time.
+    #[test]
+    fn a_dead_probes_marker_under_a_reused_pid_neither_stays_nor_stops_a_probe() {
+        let d = Dir::new();
+        let root = d.path();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let user = root.join("user");
+        std::fs::create_dir_all(user.join(".cache")).unwrap();
+        let conf = "name = \"t\"\n[sandbox]\nhide = []\nhide_home = []\ncaches = [\".cache\"]\n";
+        let cfg = Config::parse(conf, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
+        let clone = root.join("clone");
+        std::fs::create_dir_all(&clone).unwrap();
+        let me = std::process::id();
+        let cache = ctx.caches.join(".cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        // Left by probes that had this pid before: one named the old way, one that started at another time.
+        std::fs::write(cache.join(format!("{MARKER}{me}")), "").unwrap();
+        std::fs::write(cache.join(format!("{MARKER}{me}-1")), "").unwrap();
+        let marks = seed_markers(&ctx, &user, &home, &clone).unwrap();
+        assert!(!cache.join(format!("{MARKER}{me}")).exists() && !cache.join(format!("{MARKER}{me}-1")).exists());
+        drop(marks);
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0, "a marker left behind");
+    }
+
     #[test]
     fn markers_leave_the_copy_before_it_is_pooled_and_a_dead_probes_go_too() {
         let d = Dir::new();

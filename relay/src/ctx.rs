@@ -30,6 +30,10 @@ pub struct Ctx {
     /// `$XDG_DATA_HOME/relay/<name>/copies-for-sessions`: idle copies of the linked caches, each a private
     /// cache, that a session takes into its clone ([`crate::sandbox::farm`]).
     pub session_copies: PathBuf,
+    /// `$XDG_DATA_HOME/relay/<name>/probes`: one directory per running `relay probe`, `<pid>-<start>`, holding
+    /// its clone and the rest of what it makes: apart from the clones, so no job's name can be taken for
+    /// a probe's, and gc removes one once no process is both.
+    pub probes: PathBuf,
     /// `$XDG_STATE_HOME/relay/<name>/copies-for-checks`: the same for checks, beside the directory a check
     /// runs in. Named apart, so the two pools are never one directory, even with the data and state
     /// directories one.
@@ -222,6 +226,7 @@ impl Ctx {
             clones: data.join("clones"),
             caches: data.join("caches"),
             session_copies: data.join("copies-for-sessions"),
+            probes: data.join("probes"),
             check_copies: state.join("copies-for-checks"),
             scratch: data.join("scratch"),
             git_dirs: git_dirs(&cfg.repo),
@@ -570,6 +575,7 @@ impl Ctx {
             clones: data.join("clones"),
             caches: data.join("caches"),
             session_copies: data.join("copies-for-sessions"),
+            probes: data.join("probes"),
             check_copies: state.join("copies-for-checks"),
             scratch: data.join("scratch"),
             git_dirs: Vec::new(),

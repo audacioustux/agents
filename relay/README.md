@@ -899,8 +899,10 @@ a totals line, and a `collected` event per clone removed or emptied:
   `limits.max_running` used last in its pool (no more runs than that hold one at once), and
   every retired one (`gone-*`). A copy is a whole cache, and frees what it holds; removal
   holds a bounded number of open directories at any depth.
-- **A killed probe's clone** (`clones/probe-<pid>-<start>`, with its warmed copy of the
-  linked caches): once no process has that pid and start time.
+- **What a killed probe left** (`probes/<pid>-<start>` in the data directory: its clone, with
+  a warmed copy of the linked caches, and the rest): once no process has that pid and start
+  time. Probes keep apart from the clones, so no job's clone, whatever its name, is taken for
+  a probe's. Its size is counted whole, the copy included.
 - Never a clone with a live runner, never a symlink (skipped whole), never a
   path outside relay's own clone and state directories. A `build_outputs` entry
   must be a plain relative path (no `..`, not absolute).
@@ -1363,11 +1365,12 @@ Each session runs under `bwrap`. It sees the machine read-only, except for:
   | take fails halfway | a partly cut copy stays in the job's tree | it is retired by a rename through its parent's handle (or removed), and the run has binds, said on stderr (1) |
   | giving a copy back | the job moved or swapped the directories around its copy | the copy is renamed through the handles opened when it was taken, and only if the name still holds that directory (2; test: a release follows nothing the job left) |
   | giving a copy back while its sandbox may still run | a process left behind touches the copy while another job holds it (an error, a panic, a supervisor killed, a check's bwrap killed from outside) | a copy goes back to the pool only when given back with proof its sandbox ended: a supervisor that exited after reaping its whole tree, or a bwrap that exited with a code (it waits for its namespace's init, which the kernel ends last). Dropped any other way, it is retired for gc (tests: a copy dropped on a panic is retired; a check whose sandbox was killed retires its copy; a copy without proof its sandbox ended never goes back to a run; a tree is seen ended only when its leader exits on its own) |
-  | a probe killed while it holds a copy | its clone, with a warmed copy, left where gc never looks | a probe's clone names its process and start time, and gc removes it once no process is both (3; test: a dead probe's clone is collected and a live one's is not) |
+  | a probe killed while it holds a copy | its clone, with a warmed copy, left where gc never looks; or a job named like a probe's clone (`probe-999999999-1`) taken for one | all a probe makes is in `probes/<pid>-<start>`, apart from every job's clone, and gc removes it once no process is both (3; tests: a dead probe's clone is collected and a live one's is not; a job named like a probe is never probe-collected) |
+  | a probe's marker | a dead probe's marker under a reused pid kept for this probe's, and making this one's fails | a marker names its probe's pid and start time, and one whose process is gone is removed before a probe marks (3; test: a dead probe's marker under a reused pid neither stays nor stops a probe) |
   | gc prune | a run takes a copy as gc removes it | taking and removing both begin with a rename, so one of them gets it; a copy whose removal failed (`gone-*`) is removed again by the next pass (3; tests: idle cache copies go by age and past the most runs at once; an idle copy holding an unreadable directory is removed) |
   | relay probe | a marker left in relay's caches, or in a copy given back | markers go only in the caches the plan mounts, through handles that follow no link, and a guard removes them from the copy and then from relay's caches on every way out; a killed probe's markers go at the next probe (2, 3; tests: markers go only in mounted caches and through no symlink; markers go when what seeded them is dropped; markers leave the copy before it is pooled) |
   | a cache's bind | a symlink planted on the way to its directory in relay's caches | caches are never nested, so nothing on the way is in any sandbox's bind, and the cache directory itself is a mount point in any sandbox that binds it; it is made through handles that follow no link (2) |
-  | a job's disk use | its copy counted as the job's work, or a directory of its own skipped | only the clone's own `.git/relay-caches` is left out (test: a clone's size leaves out its own copy of the caches only) |
+  | a job's disk use | its copy counted as the job's work, or a directory of its own skipped; or gc's sizes leaving copies out | a running job's disk use asks to leave out its clone's own `.git/relay-caches`, and only that one; gc counts every tree whole (tests: a clone's size leaves out its own copy of the caches only; a whole tree counts a copy of the caches in it) |
   | a poisoned copy | a job leaves a bad package in its copy | ordinary cache semantics, confined to that copy's next holders in its one pool; relay's shared caches and other copies are untouched (argument: nothing is linked or copied between them) |
   | what a job could read before | it renamed its old copy inside its clone, out of relay's reach | it keeps only what it could read when it did (it could equally have copied it); relay exposes nothing new (1) |
 

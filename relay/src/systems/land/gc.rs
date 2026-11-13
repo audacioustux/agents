@@ -18,7 +18,8 @@
 //!   it for `cache_copies_idle_days`, and so does every idle copy past the `limits.max_running` most
 //!   recently used: no more runs than that hold one at once, and every retired one (`gone-*`). A copy is
 //!   a whole cache of its own, and frees what it holds;
-//! - a clone a killed `relay probe` left (`probe-<pid>-<start>`) goes once no process is both.
+//! - what a killed `relay probe` left (`probes/<pid>-<start>`, apart from every job's clone) goes once no
+//!   process is both.
 //!
 //! A clone with a live runner, a symlink, or a path outside relay's own
 //! directories is left alone.
@@ -51,7 +52,7 @@ pub enum Kind {
     ReviewRef,
     /// An idle copy of the linked caches, in a pool; its job is "".
     CacheCopy,
-    /// A clone `relay probe` made (`probe-<pid>-<start>`) whose process is gone; its job is "".
+    /// What `relay probe` made (`probes/<pid>-<start>`) whose process is gone; its job is "".
     Probe,
 }
 
@@ -187,23 +188,17 @@ pub fn plan(ctx: &Ctx, world: &World, now_us: u64) -> Vec<Item> {
     items
 }
 
-/// The clones a killed `relay probe` left (`probe-<pid>-<start>`, `probe-other-…`): no process is that pid
-/// with that start time any more. A clone named before probes said their start time goes once its pid is.
+/// What a killed `relay probe` left (`probes/<pid>-<start>`: its clone, with a warmed copy of the linked
+/// caches, and the rest): no process is that pid with that start time any more.
 fn probe_clones(ctx: &Ctx) -> Vec<Item> {
     let mut items = Vec::new();
-    for e in std::fs::read_dir(&ctx.clones).into_iter().flatten().flatten() {
+    // Only the probes' own directory: a job's clone, whatever its name, is never one.
+    for e in std::fs::read_dir(&ctx.probes).into_iter().flatten().flatten() {
         let Ok(name) = e.file_name().into_string() else { continue };
-        let Some(tag) = name.strip_prefix("probe-other-").or_else(|| name.strip_prefix("probe-")) else { continue };
-        let alive = match tag.split_once('-') {
-            Some((pid, start)) => match (pid.parse::<u32>(), start.parse::<u64>()) {
-                (Ok(pid), Ok(start)) => os::start_time(pid) == Some(start),
-                _ => continue,
-            },
-            None => match tag.parse::<u32>() {
-                Ok(pid) => os::start_time(pid).is_some(),
-                Err(_) => continue,
-            },
+        let Some((Ok(pid), Ok(start))) = name.split_once('-').map(|(p, s)| (p.parse::<u32>(), s.parse::<u64>())) else {
+            continue;
         };
+        let alive = os::start_time(pid) == Some(start);
         if !alive && e.file_type().is_ok_and(|t| t.is_dir()) {
             items.push(Item { job: String::new(), kind: Kind::Probe, path: e.path() });
         }
@@ -635,8 +630,8 @@ mod tests {
     }
 
     /// Copilot on (e): a probe that was killed left its clone, with a warmed copy of the linked caches in
-    /// its `.git`, where gc never looked. A probe's clone names its process and when it started, and gc
-    /// removes it once that process is gone.
+    /// its `.git`, where gc never looked. A probe's directory names its process and when it started, and
+    /// gc removes it once that process is gone.
     #[test]
     fn a_dead_probes_clone_is_collected_and_a_live_ones_is_not() {
         let d = crate::config::tempdir::Dir::new();
@@ -644,14 +639,31 @@ mod tests {
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         let cfg = crate::config::Config::parse("name = \"t\"\n", &repo).unwrap();
         let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
-        let dead = ctx.clones.join("probe-999999999-1");
-        std::fs::create_dir_all(dead.join(".git/relay-caches/.cache")).unwrap();
+        let dead = ctx.probes.join("999999999-1");
+        std::fs::create_dir_all(dead.join("clone/.git/relay-caches/.cache")).unwrap();
         let me = std::process::id();
-        let live = ctx.clones.join(format!("probe-{me}-{}", crate::os::start_time(me).unwrap()));
+        let live = ctx.probes.join(format!("{me}-{}", crate::os::start_time(me).unwrap()));
         std::fs::create_dir_all(&live).unwrap();
         let named: Vec<PathBuf> = plan(&ctx, &World::default(), 0).into_iter().map(|i| i.path).collect();
         assert!(named.contains(&dead), "{named:?}");
         assert!(!named.contains(&live), "{named:?}");
+    }
+
+    /// Copilot on (e): probe clones were told apart by name in the clones directory, and a job may be
+    /// named like one (`probe-999999999-1`): gc then removed that job's clone, running or not, past its
+    /// retention and its commits' rescue. Probes live apart from jobs; nothing in the clones directory is
+    /// ever taken for a probe's.
+    #[test]
+    fn a_job_named_like_a_probe_is_never_probe_collected() {
+        let d = crate::config::tempdir::Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let cfg = crate::config::Config::parse("name = \"t\"\n", &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        let job = ctx.clones.join("probe-999999999-1");
+        std::fs::create_dir_all(job.join(".git")).unwrap();
+        let named: Vec<PathBuf> = plan(&ctx, &World::default(), 0).into_iter().map(|i| i.path).collect();
+        assert!(!named.contains(&job), "a job's clone was taken for a probe's: {named:?}");
     }
 
     #[test]

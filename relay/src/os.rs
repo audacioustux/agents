@@ -239,11 +239,23 @@ pub fn free_disk_gb(path: &Path) -> Option<f64> {
     Some((s.f_bavail * s.f_frsize) as f64 / 1e9)
 }
 
-/// Disk space a tree holds, from a recursive stat walk that does not follow
+/// Disk space a tree holds, all of it, from a recursive stat walk that does not follow
 /// symlinks and counts a hard-linked file once, in bytes allocated. Stops when
 /// `within` has passed: then the second value is `false` and the first is a
-/// lower bound.
+/// lower bound. What gc counts.
 pub fn dir_size(path: &Path, within: Duration) -> (u64, bool) {
+    size(path, within, false)
+}
+
+/// The same for a job's clone, as its disk use: its own copy of the linked caches
+/// ([`crate::sandbox::farm`]), `.git/relay-caches`, is the project's cache, not the job's work, and is
+/// left out; only that one (a job's tree can name a directory that, at any other depth, and it is the
+/// job's).
+pub fn job_work_size(path: &Path, within: Duration) -> (u64, bool) {
+    size(path, within, true)
+}
+
+fn size(path: &Path, within: Duration, job_work: bool) -> (u64, bool) {
     use std::os::unix::fs::MetadataExt;
     let end = std::time::Instant::now() + within;
     let mut seen = std::collections::HashSet::new();
@@ -257,10 +269,7 @@ pub fn dir_size(path: &Path, within: Duration) -> (u64, bool) {
         for entry in entries.flatten() {
             let Ok(meta) = entry.path().symlink_metadata() else { continue };
             if meta.is_dir() {
-                // The clone's copy of the linked caches ([`crate::sandbox::farm`]) is the project's cache, not
-                // the job's work: its own `.git/relay-caches` only, not one at any depth (a job's tree can
-                // name a directory that, and it is the job's). gc counts the copy in its pool.
-                if dir == path.join(".git") && entry.file_name() == crate::sandbox::farm::IN_CLONE {
+                if job_work && dir == path.join(".git") && entry.file_name() == crate::sandbox::farm::IN_CLONE {
                     continue;
                 }
                 total += meta.blocks() * 512;
@@ -273,9 +282,10 @@ pub fn dir_size(path: &Path, within: Duration) -> (u64, bool) {
     (total, true)
 }
 
-/// The disk the directories hold together, each walked for at most `within` (a lower bound past it).
+/// The disk a running job's directories hold together, as its disk use ([`job_work_size`]), each walked
+/// for at most `within` (a lower bound past it).
 pub fn dirs_size(paths: &[std::path::PathBuf], within: Duration) -> u64 {
-    paths.iter().map(|p| dir_size(p, within).0).sum()
+    paths.iter().map(|p| job_work_size(p, within).0).sum()
 }
 
 /// A size for people and boards: `340K`, `12G`, `1.5G` (decimal units).
@@ -305,11 +315,23 @@ mod tests {
         let clone = d.path().join("clone");
         std::fs::create_dir_all(clone.join(".git/relay-caches/.cache")).unwrap();
         std::fs::write(clone.join(".git/relay-caches/.cache/pkg"), vec![1u8; 1 << 20]).unwrap();
-        let without = dir_size(&clone, Duration::from_secs(10)).0;
+        let without = job_work_size(&clone, Duration::from_secs(10)).0;
         assert!(without < 1 << 20, "the copy was counted: {without}");
         std::fs::create_dir_all(clone.join("sub/.git/relay-caches")).unwrap();
         std::fs::write(clone.join("sub/.git/relay-caches/work"), vec![1u8; 1 << 20]).unwrap();
-        assert!(dir_size(&clone, Duration::from_secs(10)).0 >= without + (1 << 20), "the job's own was not");
+        assert!(job_work_size(&clone, Duration::from_secs(10)).0 >= without + (1 << 20), "the job's own was not");
+    }
+
+    /// Copilot on (e): the skip of a clone's copy of the caches was in `dir_size` itself, so gc's sizes left
+    /// it out too, and a dead probe's warmed copy freed "nothing". A whole tree is counted whole; only a
+    /// live job's disk accounting leaves its copy out, by asking for that.
+    #[test]
+    fn a_whole_tree_counts_a_copy_of_the_caches_in_it() {
+        let d = Dir::new();
+        let clone = d.path().join("clone");
+        std::fs::create_dir_all(clone.join(".git/relay-caches/.cache")).unwrap();
+        std::fs::write(clone.join(".git/relay-caches/.cache/pkg"), vec![1u8; 1 << 20]).unwrap();
+        assert!(dir_size(&clone, Duration::from_secs(10)).0 >= 1 << 20, "gc's size left the copy out");
     }
 
     #[test]

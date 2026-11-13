@@ -42,12 +42,49 @@ enum Said {
 
 /// What an exit status says. The shell's own codes (125-127), the timeout's (124) and a kill (137,
 /// 143, or no code at all) mean the command did not get to judge anything.
-fn said(code: Option<i32>) -> Said {
+fn said(code: Option<i32>, declared: &[i32]) -> Said {
     match code {
         Some(0) => Said::Passed,
         Some(124..=127 | 137 | 143) | None => Said::Broke,
+        Some(c) if declared.contains(&c) => Said::Broke,
         Some(_) => Said::Failed,
     }
+}
+
+/// Why a command that said nothing about the code could not run, from what relay saw: its exit status
+/// and the timeout it applied. Never from the command's output.
+fn why(code: Option<i32>, declared: &[i32], timeout_secs: u64) -> String {
+    match code {
+        Some(124) => format!("it timed out (exit 124, after {timeout_secs} s: hooks.command_timeout_seconds)"),
+        Some(125) => "the shell or timeout could not start it (exit 125)".to_owned(),
+        Some(126) => "the command was found but is not runnable (exit 126)".to_owned(),
+        Some(127) => "the command was not found (exit 127)".to_owned(),
+        Some(c @ (137 | 143)) => format!("it was killed (exit {c})"),
+        Some(c) if declared.contains(&c) => {
+            format!("it exited {c}, which hooks.check_could_not_run_exit_codes declares as \"could not run\"")
+        }
+        Some(c) => format!("exit {c}"),
+        None => "it was ended by a signal".to_owned(),
+    }
+}
+
+/// The longest explanation a tail keeps whole.
+const NOTE: usize = TAIL / 4;
+
+/// The recorded tail: the `note` (why a check could not run, and where) whole, then the end of the
+/// `output` in what is left of [`TAIL`]. Cutting one string from its start would drop the note first.
+fn tail_for(note: &str, output: &str) -> String {
+    let output = output.trim_end();
+    if note.is_empty() {
+        return checkpoint::bounded(&tail_of(output, TAIL), TAIL + 64);
+    }
+    let note = checkpoint::bounded(note, NOTE);
+    if output.is_empty() {
+        return note;
+    }
+    // Room for the note, the newline and the "… (N earlier bytes)" tail_of adds.
+    let room = (TAIL + 64).saturating_sub(note.len() + 1 + 40).min(TAIL);
+    format!("{note}\n{}", tail_of(output, room))
 }
 
 /// A command run at one commit.
@@ -55,8 +92,11 @@ struct Ran {
     said: Said,
     /// Its exit status, -1 when it had none.
     code: i32,
-    /// The end of its output, or why it could not run.
+    /// The end of its output.
     text: String,
+    /// Why it could not run, when it could not (from its exit status, or what relay could not do):
+    /// kept whole in the record, never cut with the output.
+    note: String,
     /// The failing tests its whole output names, read before the output is cut to its end; `None` when
     /// they could not all be read.
     failing: Option<Vec<String>>,
@@ -83,7 +123,7 @@ pub(super) fn run(
     let red_first = matches!(job.acceptance, crate::bus::Acceptance::CheckRedFirst(_));
     // The check before this one, as the record holds it: this one is compared with it.
     let before = ctx.world()?.jobs().get(&job.name).and_then(|j| j.bars.last().cloned());
-    let (mut base_exit, mut text, mut failing) = (None, head.text.clone(), Vec::new());
+    let (mut base_exit, mut text, mut note, mut failing) = (None, head.text.clone(), head.note.clone(), Vec::new());
     let result = match head.said {
         Said::Broke => BarResult::CheckCouldNotRun,
         // A revert control expects the base to fail: its failure there is the point, not an excuse.
@@ -102,7 +142,7 @@ pub(super) fn run(
                     None => BarResult::Fail,
                 },
                 Said::Broke => {
-                    text = format!("the check could not run at the base commit: {}", at.text);
+                    (text, note) = (at.text, format!("at the base commit, {}", at.note));
                     BarResult::CheckCouldNotRun
                 }
             }
@@ -118,7 +158,7 @@ pub(super) fn run(
                     BarResult::CheckProvesNothing
                 }
                 Said::Broke => {
-                    text = format!("the check could not run at the base commit: {}", at.text);
+                    (text, note) = (at.text, format!("at the base commit, {}", at.note));
                     BarResult::CheckCouldNotRun
                 }
             }
@@ -129,7 +169,7 @@ pub(super) fn run(
     }
     let now = Failure { commit: tip.as_deref(), result, exit: head.code, base_exit, failing: &failing };
     let no_progress = before.as_ref().is_some_and(|b| now.repeats(b));
-    let tail = checkpoint::bounded(&tail_of(text.trim_end(), TAIL), TAIL + 64);
+    let tail = tail_for(&note, &text);
     let event = SessionEvent::BarChecked {
         job: job.name.clone(),
         commit: tip.clone(),
@@ -290,7 +330,7 @@ fn at_base(ctx: &Ctx, base: Option<&str>, home: &Home, command: &str, dir: &Sess
 }
 
 fn broke(why: &str) -> Ran {
-    Ran { said: Said::Broke, code: -1, text: why.to_owned(), failing: Some(Vec::new()) }
+    Ran { said: Said::Broke, code: -1, text: String::new(), note: why.to_owned(), failing: Some(Vec::new()) }
 }
 
 /// Where a check runs: its working directory, made fresh for each run in a place only relay writes,
@@ -339,7 +379,13 @@ fn checkout(source: &SessionRepo, rev: &str, into: &Path) -> Result<()> {
 /// `sh -c command` under `timeout`, on the attempt's development environment `dev`: the one its
 /// warm-up recorded from the repository, never from files the session could have edited, and read
 /// when the attempt started, so a warm-up for a new key during the run does not change it.
-fn invocation(ctx: &Ctx, job: &Job, phase: Phase, command: &str, dev: &[(OsString, Option<OsString>)]) -> Invocation {
+pub(super) fn invocation(
+    ctx: &Ctx,
+    job: &Job,
+    phase: Phase,
+    command: &str,
+    dev: &[(OsString, Option<OsString>)],
+) -> Invocation {
     let mut inv = Invocation::new("timeout");
     let secs = ctx.cfg.hooks.command_timeout_seconds.max(1).to_string();
     inv.args = ["-k", "5", &secs, "sh", "-c", command].map(OsString::from).to_vec();
@@ -362,12 +408,21 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, phase: Phase, place:
         let status = c.status().context("running the acceptance check")?;
         let text = place.inbox.read("check.out").map(|f| tail_text(f, 2 * TAIL as u64)).unwrap_or_default();
         let code = status.code();
-        let failing = match said(code) {
+        let declared = &ctx.cfg.hooks.check_could_not_run_exit_codes;
+        let said = said(code, declared);
+        // A command that could not judge the code says why first, from what relay saw, before its output.
+        let note = match said {
+            Said::Broke => {
+                format!("the check could not run: {}", why(code, declared, ctx.cfg.hooks.command_timeout_seconds))
+            }
+            _ => String::new(),
+        };
+        let failing = match said {
             Said::Failed => place.inbox.read("check.out").ok().and_then(|f| failing_tests(std::io::BufReader::new(f))),
             _ => Some(Vec::new()),
         };
         let _ = place.inbox.remove("check.out");
-        Ok(Ran { said: said(code), code: code.unwrap_or(-1), text, failing })
+        Ok(Ran { said, code: code.unwrap_or(-1), text, note, failing })
     };
     go().unwrap_or_else(|e| broke(&format!("the acceptance check could not run: {e:#}")))
 }
@@ -457,12 +512,51 @@ mod tests {
 
     #[test]
     fn only_a_command_that_ran_and_failed_has_failed() {
-        assert_eq!(said(Some(0)), Said::Passed);
-        assert_eq!(said(Some(1)), Said::Failed);
-        assert_eq!(said(Some(101)), Said::Failed, "a test runner's own failure code");
+        assert_eq!(said(Some(0), &[]), Said::Passed);
+        assert_eq!(said(Some(1), &[]), Said::Failed);
+        assert_eq!(said(Some(101), &[]), Said::Failed, "a test runner's own failure code");
         for broken in [Some(124), Some(125), Some(126), Some(127), Some(137), Some(143), None] {
-            assert_eq!(said(broken), Said::Broke, "{broken:?}");
+            assert_eq!(said(broken, &[]), Said::Broke, "{broken:?}");
         }
+    }
+
+    /// NS-9 follow-up (Tickify): a check that is refused by its environment exits like any failure (mise
+    /// exits 1), and relay cannot tell that from the text. The project declares the code its check uses
+    /// for "could not run"; relay then ends it so, and says why from the code and the timeout it applied.
+    #[test]
+    fn a_declared_exit_code_is_a_check_that_could_not_run() {
+        assert_eq!(said(Some(3), &[]), Said::Failed, "undeclared, 3 is a failure");
+        assert_eq!(said(Some(3), &[3]), Said::Broke);
+        assert_eq!(said(Some(1), &[3]), Said::Failed, "only what is declared");
+        assert_eq!(said(Some(0), &[0]), Said::Passed, "a pass is never a refusal");
+    }
+
+    #[test]
+    fn a_check_that_could_not_run_says_why_from_what_relay_saw() {
+        assert!(why(Some(124), &[], 120).contains("120 s"), "{}", why(Some(124), &[], 120));
+        assert!(why(Some(127), &[], 120).contains("not found"));
+        assert!(why(Some(126), &[], 120).contains("not runnable"));
+        assert!(why(Some(137), &[], 120).contains("killed"));
+        assert!(why(None, &[], 120).contains("signal"));
+        let declared = why(Some(3), &[3], 120);
+        assert!(declared.contains("exited 3") && declared.contains("check_could_not_run_exit_codes"), "{declared}");
+    }
+
+    /// Copilot on #65: a check that could not run and printed 4 KiB or more lost the line saying why (and
+    /// the base-commit prefix), because the tail keeps the end of one string. The explanation stays
+    /// whole; only the output is cut to what is left.
+    #[test]
+    fn the_explanation_of_a_check_that_could_not_run_survives_a_long_output() {
+        let note = "at the base commit, the check could not run: it timed out (exit 124, after 120 s)";
+        let output = format!("{}the last line", "noise\n".repeat(2000));
+        let tail = tail_for(note, &output);
+        assert!(tail.starts_with(note), "{tail}");
+        assert!(tail.ends_with("the last line"), "the end of the output is what stays");
+        assert!(tail.len() <= TAIL + 64, "{}", tail.len());
+        assert_eq!(tail_for("", "short"), "short");
+        assert_eq!(tail_for(note, ""), note);
+        let tail = tail_for(&"x".repeat(10_000), &output);
+        assert!(tail.len() <= NOTE + 64 + TAIL + 64 && tail.ends_with("the last line"), "{}", tail.len());
     }
 
     const RED: &str = "running 3 tests\ntest a::one ... ok\ntest a::two ... FAILED\n\nfailures:\n\n\

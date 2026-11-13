@@ -128,7 +128,7 @@ that run alone.
 `--after A,B` waits for jobs to be `done`, not landed: landing is your step. If
 one fails or stops, the job shows `waits for A (failed)` and never starts on
 its own (`view result --wait` on it exits 4 with that line): queue A again, or
-`relay queue release NAME [--from A]`.
+`relay queue release NAME [--from A]` (that starts the job now; it does not cancel the wait: `dequeue` withdraws it).
 
 ### Hooks: deciding for relay
 

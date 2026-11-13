@@ -28,7 +28,7 @@ use crate::sandbox::{self, Mounts};
 use crate::supervised::Supervised;
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request, Reviewing};
-use crate::systems::dispatch::Room;
+use crate::systems::dispatch::{self, Room};
 use crate::world::{Job, World};
 
 mod bar;
@@ -196,7 +196,7 @@ fn layer_env(ctx: &Ctx, job: &Job, phase: Phase, inv: &mut Invocation, dev: &[(O
         .env
         .iter()
         .filter(|(k, _)| !deny.is_match(k))
-        .map(|(k, v)| (OsString::from(k), Some(OsString::from(v))));
+        .map(|(k, v)| (OsString::from(k), Some(crate::host::expand(v, &ctx.cfg, &ctx.state_root, &ctx.data_root))));
     inv.env = dev.iter().cloned().chain(session_env).chain(std::mem::take(&mut inv.env)).collect();
     name_the_job(ctx, job, phase, inv);
 }
@@ -279,9 +279,10 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         std::fs::write(ctx.job_file(&job.name, "result.md"), format!("{}\n", report.answer))?;
     }
     *spend = (report.cost_usd, report.turns);
-    if disk.is_some() {
-        // Stopped, not failed: the clone and the session are kept for a resume after cleanup.
-        return Ok((Outcome::Stopped, disk));
+    if let Some(DiskStop { why, floor }) = disk {
+        // Stopped, not failed: the clone and the session are kept for a resume. The floor's stop is
+        // held, which the dispatcher resumes once the space is back; a clone over its ceiling waits for a person.
+        return Ok((if floor { Outcome::Held } else { Outcome::Stopped }, Some(why)));
     }
     let ran = Ran {
         report: &report,
@@ -616,20 +617,25 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
 
 /// A read-only session for a decision on `agent`'s harness: the account it
 /// ran on, what it cost, and its answer or why there is none.
-/// With `patient` it first waits for a seat, up to `hooks.seat_wait_minutes`.
+/// With `patient` it first waits for a seat, up to `hooks.seat_wait_minutes`. Its seat is booked
+/// for decision `id` as a job's is, and given back once the session has ended.
 pub fn consult(
     ctx: &Ctx,
     job: &Job,
     agent: &decide::Agent,
     prompt: &str,
+    id: &str,
     patient: bool,
     live: &dyn Fn() -> bool,
 ) -> (Option<String>, f64, Result<String, String>) {
     let wait = if patient { ctx.cfg.hooks.seat_wait_minutes } else { 0.0 };
-    let home = match await_seat(ctx, job, agent, wait, live) {
+    // In place before any booking, so whatever goes wrong once one is recorded gives it back.
+    let mut seat = Booking { ctx, id, hold: None, booked: false };
+    let home = match await_seat(ctx, job, agent, &mut seat, wait, live) {
         Ok(home) => home,
         Err(why) => return (None, 0.0, Err(why)),
     };
+    let hold = seat.hold.as_ref().map(|(_, path)| path.clone());
     let run = || -> Result<(Report, Ending)> {
         let harness = harness_of(&home);
         let conf = ctx.cfg.harness(harness.id());
@@ -670,7 +676,7 @@ pub fn consult(
             cwd: &ctx.cfg.repo,
             account: true,
         };
-        let mut cmd = supervised_command(ctx, &inv, &mounts)?;
+        let mut cmd = build(ctx, &inv, &mounts, |p| crate::supervised::holding(p, hold.as_deref()))?;
         let run = Run {
             session_id: None,
             budget_usd: agent.budget_usd,
@@ -696,32 +702,99 @@ pub fn consult(
 
 /// How often a wait for a seat looks again.
 const SEAT_POLL: Duration = Duration::from_secs(2);
+/// How long past its own bound a wait for a seat tries again while the machine's seat lock is busy.
+const SEAT_LOCK_GRACE: Duration = Duration::from_secs(10);
+/// How often it tries then.
+const SEAT_LOCK_POLL: Duration = Duration::from_millis(50);
 /// The least between two quota readings a wait for a seat asks for.
 const SEAT_REREAD: Duration = Duration::from_secs(30);
 
-/// A seat for `agent`'s session: waits up to `minutes` for one to free, asking for a fresh quota
-/// reading of any account whose reading is old (dispatch only takes readings for queued jobs, and a
-/// checkpoint is not one). Nothing else is held meanwhile but the worker's own seat.
+/// A decision's seat, booked on the bus: given back when dropped, however the session went.
+/// The seat's lock is held by this process from before the booking is recorded, and by the session's
+/// supervisor (`relay supervise --hold`) until it has ended and reaped every process of the session's
+/// tree, sandbox and `setsid` orphans too: the seat counts while either holds it.
+struct Booking<'a> {
+    ctx: &'a Ctx,
+    id: &'a str,
+    /// The hold on the seat's lock, and its path, once one was taken.
+    hold: Option<(os::SeatHold, PathBuf)>,
+    /// Whether a booking may have been recorded.
+    booked: bool,
+}
+
+impl Booking<'_> {
+    /// Takes a fresh lock for the seat `start` and records the booking on the bus.
+    fn book(&mut self, start: &dispatch::Start) -> Result<()> {
+        let dir = self.ctx.state_root.join("seats");
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let path = dir.join(format!("{}.lock", uuid::Uuid::now_v7()));
+        self.hold = Some((os::SeatHold::take(&path)?, path.clone()));
+        self.booked = true;
+        decide::record_seat(self.ctx, self.id, Some((start, &path)))
+    }
+}
+
+impl Drop for Booking<'_> {
+    fn drop(&mut self) {
+        if self.booked
+            && let Err(e) = decide::record_seat(self.ctx, self.id, None)
+        {
+            eprintln!("{} decision {}: its seat was not given back: {e:#}", crate::os::stamp(), self.id);
+        }
+        // Its own hold only: the lock file goes only when nobody else holds it (a supervisor still
+        // ending its tree does, and a seat whose lock file is gone would look free).
+        if let Some((hold, path)) = self.hold.take() {
+            drop(hold);
+            if let Ok(Some(_alone)) = os::Role::try_take(&path) {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+/// A seat for `agent`'s session, booked for decision `id` by the dispatcher's own choice under the
+/// machine's seat lock ([`dispatch::book_session`]): another account than the worker's where one
+/// admits it, so no worker grades itself, else the worker's own. Waits up to `minutes` for one to
+/// free, asking for a fresh quota reading of any account of its harness whose reading is old
+/// (dispatch only takes readings for queued jobs, and a checkpoint is not one). Nothing else is
+/// held meanwhile but the worker's own seat.
 fn await_seat(
     ctx: &Ctx,
     job: &Job,
     agent: &decide::Agent,
+    seat: &mut Booking<'_>,
     minutes: f64,
     live: &dyn Fn() -> bool,
 ) -> Result<Home, String> {
     let wait = Duration::from_secs_f64(minutes.max(0.0) * 60.0);
     let started = Instant::now();
+    // A wait that cannot be had has had its turn at a reading under way already.
+    let since = if wait.is_zero() { now_micros().saturating_sub(dispatch::READING_WAIT_MICROS) } else { now_micros() };
     let mut asked: Option<Instant> = None;
     loop {
-        let (home, stale) = checker_home(ctx, job, &agent.harness, agent.model.as_deref());
-        if let Some(home) = home {
-            return Ok(home);
+        let id = seat.id;
+        let record = |s: &dispatch::Start| seat.book(s);
+        match dispatch::book_session(ctx, id, job, &agent.harness, agent.model.as_deref(), since, record) {
+            Ok(dispatch::Booking::Booked(home)) => return Ok(home),
+            // Another planner has the machine's seats a moment: try again soon, still within the
+            // wait's bound and its withdrawal, and a wait that cannot be had gets a moment's grace.
+            Ok(dispatch::Booking::Busy) if started.elapsed() < wait + SEAT_LOCK_GRACE => {
+                if !live() {
+                    return Err(format!("agent:{} was withdrawn while it waited for a seat", agent.label));
+                }
+                std::thread::sleep(SEAT_LOCK_POLL);
+                continue;
+            }
+            Ok(dispatch::Booking::Held | dispatch::Booking::Busy) => {}
+            Err(e) => return Err(format!("agent:{} found no seat: {e:#}", agent.label)),
         }
-        if stale && asked.is_none_or(|t| t.elapsed() >= SEAT_REREAD) {
-            asked = Some(Instant::now());
-            if let Ok(world) = ctx.world() {
-                let neighbours = ctx.neighbours();
-                let room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
+        if asked.is_none_or(|t| t.elapsed() >= SEAT_REREAD)
+            && let Ok(world) = ctx.world()
+        {
+            let neighbours = ctx.neighbours();
+            let room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
+            if stale(&room, &agent.harness) {
+                asked = Some(Instant::now());
                 let _ = crate::systems::quota::start_refresh(ctx, &room, &world, false);
             }
         }
@@ -741,29 +814,13 @@ fn await_seat(
     }
 }
 
-/// An account of `harness` that may take a session for `model`: another than the worker's where
-/// one admits it, so no worker grades itself, else the worker's own. Whether one admits it is the
-/// dispatcher's judgment ([`Room::admit`]): its quota, and a seat free under `limits.per_account`
-/// among every project's sessions, the worker's own run's seat given back first.
-/// Also whether some account of the harness has a quota reading that is old, so none can be trusted.
-fn checker_home(ctx: &Ctx, job: &Job, harness: &str, model: Option<&str>) -> (Option<Home>, bool) {
-    let model = model.map(str::to_owned).or_else(|| ctx.cfg.harness(harness).model);
-    let Ok(world) = ctx.world() else { return (None, false) };
+/// Whether some account of `harness` in `room` has a quota reading that is old, so none can be trusted.
+fn stale(room: &Room, harness: &str) -> bool {
     let now = now_micros();
-    let neighbours = ctx.neighbours();
-    let mut room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
-    if let Some(worker) = world.jobs().get(&job.name) {
-        room.free(worker);
-    }
-    let homes = || room.found().iter().filter(|h| h.harness == harness);
-    let stale = homes().any(|h| {
+    room.found().iter().filter(|h| h.harness == harness).any(|h| {
         let state = room.account(&h.key());
         !state.is_some_and(|s| s.unsigned) && accounts::due(harness_of(h), state, now)
-    });
-    let admits = |h: &&Home| room.admit(&ctx.cfg.limits, h, model.as_deref(), now).is_ok();
-    let worker = |h: &&Home| job.account.as_deref() == Some(h.key().as_str());
-    let home = homes().filter(admits).find(|h| !worker(h)).or_else(|| homes().filter(admits).find(worker));
-    (home.cloned(), stale)
+    })
 }
 
 /// The session to resume, when the job has one its history can follow here:
@@ -898,8 +955,8 @@ enum Heard {
     Line(std::io::Result<String>),
     End,
     Disk(u64),
-    /// `Some(reason)` stops the job; `None` lets it go on.
-    DiskDecided(Result<Option<String>>),
+    /// `Some(stop)` stops the job; `None` lets it go on.
+    DiskDecided(Result<Option<DiskStop>>),
 }
 
 /// What a measured clone asks of the runner. Deciding is not among them: a
@@ -907,9 +964,9 @@ enum Heard {
 /// thread of its own while the drive loop goes on enforcing every limit.
 enum DiskStep {
     Go,
-    Stop(String),
-    /// Ask the `disk` chain this request, with the reason that stands if every handler defers.
-    Ask(Box<Request>, Vec<decide::Handler>, String),
+    Stop(DiskStop),
+    /// Ask the `disk` chain this request, with the stop that stands if every handler defers.
+    Ask(Box<Request>, Vec<decide::Handler>, DiskStop),
 }
 
 /// The longest one measurement of a clone may take.
@@ -917,11 +974,24 @@ const DISK_WALK: Duration = Duration::from_secs(120);
 /// After a `disk` decision says `wait`, the least time before it is asked again.
 const DISK_REASK: Duration = Duration::from_mins(60);
 
+/// Why a job is stopped for its disk, and whether it is the floor (`limits.min_free_disk_gb`) that did it:
+/// that one is held and resumed when space is back, where a clone over its ceiling stays stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskStop {
+    pub why: String,
+    pub floor: bool,
+}
+
 /// Why a clone of `bytes` should stop its job, when it should: it is over
 /// `limits.job_disk_gb`, or the disk has `free_gb` left, under `limits.min_free_disk_gb`
 /// while this is the largest clone running (`largest`), since stopping a small one
 /// would not help and stopping every one would be worse than the full disk.
-pub fn disk_reason(limits: &crate::config::Limits, bytes: u64, free_gb: Option<f64>, largest: bool) -> Option<String> {
+pub fn disk_reason(
+    limits: &crate::config::Limits,
+    bytes: u64,
+    free_gb: Option<f64>,
+    largest: bool,
+) -> Option<DiskStop> {
     let gb = |g: f64| {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         os::size_str((g * 1e9) as u64)
@@ -929,10 +999,11 @@ pub fn disk_reason(limits: &crate::config::Limits, bytes: u64, free_gb: Option<f
     #[allow(clippy::cast_precision_loss)]
     let held = bytes as f64 / 1e9;
     if limits.job_disk_gb > 0.0 && held > limits.job_disk_gb {
-        return Some(format!("disk: clone {} over {}", os::size_str(bytes), gb(limits.job_disk_gb)));
+        let why = format!("disk: clone {} over {}", os::size_str(bytes), gb(limits.job_disk_gb));
+        return Some(DiskStop { why, floor: false });
     }
     let free = free_gb.filter(|&f| largest && limits.min_free_disk_gb > 0.0 && f < limits.min_free_disk_gb)?;
-    Some(format!("disk: {} free, under {}", gb(free), gb(limits.min_free_disk_gb)))
+    Some(DiskStop { why: format!("disk: {} free, under {}", gb(free), gb(limits.min_free_disk_gb)), floor: true })
 }
 
 /// A measured clone: records its size, and when it is a reason to stop, says
@@ -950,31 +1021,32 @@ fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: Option<Instant>, askin
         .filter(|o| o.name != job.name && o.status.has_runner())
         .all(|o| o.disk_bytes.unwrap_or(0) <= bytes);
     let free = os::free_disk_gb(&ctx.clones);
-    let Some(why) = disk_reason(&ctx.cfg.limits, bytes, free, largest) else { return Ok(DiskStep::Go) };
-    let Some(handlers) = decide::chain(&ctx.cfg, Point::Disk) else { return Ok(DiskStep::Stop(why)) };
+    let Some(stop) = disk_reason(&ctx.cfg.limits, bytes, free, largest) else { return Ok(DiskStep::Go) };
+    let Some(handlers) = decide::chain(&ctx.cfg, Point::Disk) else { return Ok(DiskStep::Stop(stop)) };
     let mut req = Request::new(job, Point::Disk);
     req.brief = std::fs::read_to_string(ctx.job_file(&job.name, "prompt.md")).unwrap_or_default();
     req.situation = format!(
-        "{why}. The job is running. Stopping it keeps its clone and session, so it can be resumed after cleanup."
+        "{}. The job is running. Stopping it keeps its clone and session, so it can be resumed after cleanup.",
+        stop.why
     );
     req.spent_usd = job.cost_usd;
     req.earlier = decide::earlier(&world, job);
-    Ok(DiskStep::Ask(Box::new(req), handlers, why))
+    Ok(DiskStep::Ask(Box::new(req), handlers, stop))
 }
 
-/// Runs the `disk` chain for as long as `wanted` holds: `Some(why)` stops the job, `None` (`wait`) lets it go on.
+/// Runs the `disk` chain for as long as `wanted` holds: `Some(stop)` stops the job, `None` (`wait`) lets it go on.
 fn decide_disk(
     ctx: &Ctx,
     job: &Job,
     req: &Request,
     handlers: &[decide::Handler],
-    why: String,
+    stop: DiskStop,
     wanted: &(dyn Fn() -> bool + Sync),
-) -> Result<Option<String>> {
-    let fallback = Action::Stop { why: why.clone() };
+) -> Result<Option<DiskStop>> {
+    let fallback = Action::Stop { why: stop.why.clone() };
     let d = decide::decide_while(ctx, job, req, handlers, &|| None, fallback, wanted)?;
     // A decision the job has moved past stops nothing: the run it was asked for is over.
-    Ok(d.carry(ctx, |_, action, _| Ok((action != Action::Wait).then_some(why)))?.flatten())
+    Ok(d.carry(ctx, |_, action, _| Ok((action != Action::Wait).then_some(stop)))?.flatten())
 }
 
 /// Withdraws an outstanding decision when dropped, however the drive loop ends.
@@ -1083,7 +1155,7 @@ fn drive(
     stdin: Option<&str>,
     mut reader: Box<dyn Reader>,
     live: &dyn Fn() -> bool,
-) -> Result<(Report, Ending, Option<String>)> {
+) -> Result<(Report, Ending, Option<DiskStop>)> {
     let port = port(ctx, job);
     let mut log = Ctx::append_private(&ctx.job_file(&job.name, run.log))?;
     let mut child = start(ctx, job, run, cmd, stdin)?;
@@ -1140,29 +1212,29 @@ fn drive(
                 }
                 Ok(Heard::Disk(bytes)) => match on_disk(ctx, job, bytes, quiet_until, asking)? {
                     DiskStep::Go => {}
-                    DiskStep::Stop(why) => {
-                        disk = Some(why);
+                    DiskStep::Stop(stop) => {
+                        disk = Some(stop);
                         // bwrap's --die-with-parent and pid namespace take everything inside with it.
                         child.kill();
                         break;
                     }
-                    DiskStep::Ask(req, handlers, why) => {
+                    DiskStep::Ask(req, handlers, stop) => {
                         asking = true;
                         let (answers, wanted) = (answers.clone(), &wanted);
                         scope.spawn(move || {
                             let still = || wanted.load(Ordering::Relaxed);
                             let _ =
-                                answers.send(Heard::DiskDecided(decide_disk(ctx, job, &req, &handlers, why, &still)));
+                                answers.send(Heard::DiskDecided(decide_disk(ctx, job, &req, &handlers, stop, &still)));
                         });
                     }
                 },
                 Ok(Heard::DiskDecided(answer)) => {
                     asking = false;
-                    let Some(why) = answer? else {
+                    let Some(stop) = answer? else {
                         quiet_until = Some(Instant::now() + DISK_REASK);
                         continue;
                     };
-                    disk = Some(why);
+                    disk = Some(stop);
                     child.kill();
                     break;
                 }
@@ -1304,21 +1376,23 @@ fn checkpoint_rev(dir: &Path, rev: &str) -> Option<String> {
 
 #[cfg(test)]
 mod disk_tests {
-    use super::disk_reason;
+    use super::{DiskStop, disk_reason};
     use crate::config::Limits;
 
     #[test]
     fn a_clone_over_the_ceiling_or_a_full_disk_names_its_reason() {
         let l = Limits { job_disk_gb: 40.0, min_free_disk_gb: 20.0, ..Limits::default() };
         let gb = |g: u64| g * 1_000_000_000;
-        assert_eq!(disk_reason(&l, gb(52), Some(500.0), true).as_deref(), Some("disk: clone 52G over 40G"));
+        let reason = |l: &Limits, bytes, free, largest| disk_reason(l, bytes, free, largest);
+        let stop = |why: &str, floor| Some(DiskStop { why: why.into(), floor });
+        assert_eq!(reason(&l, gb(52), Some(500.0), true), stop("disk: clone 52G over 40G", false));
         assert_eq!(disk_reason(&l, gb(40), Some(500.0), true), None, "at the ceiling is not over it");
-        assert_eq!(disk_reason(&l, gb(12), Some(8.0), true).as_deref(), Some("disk: 8G free, under 20G"));
+        assert_eq!(reason(&l, gb(12), Some(8.0), true), stop("disk: 8G free, under 20G", true));
         assert_eq!(disk_reason(&l, gb(12), Some(8.0), false), None, "only the largest clone answers for a full disk");
         assert_eq!(disk_reason(&l, gb(12), None, true), None, "unmeasured free space is not a reason");
         assert_eq!(
-            disk_reason(&l, gb(52), Some(8.0), true).as_deref(),
-            Some("disk: clone 52G over 40G"),
+            reason(&l, gb(52), Some(8.0), true),
+            stop("disk: clone 52G over 40G", false),
             "the job's own size comes first"
         );
         let off = Limits { job_disk_gb: 0.0, min_free_disk_gb: 0.0, ..l };
@@ -1467,6 +1541,34 @@ mod env_tests {
             assert_eq!(get("RELAY_JOB").as_deref(), Some("add-login"));
             assert_eq!(get("RELAY_ATTEMPT").as_deref(), Some("2"));
             assert_eq!(get("RELAY_PHASE").as_deref(), Some(want));
+        }
+    }
+
+    /// Copilot on #65: the expanded `${RELAY_STATE}` was overwritten by the raw `session.env` the
+    /// invocation's overlay carried, so a session and a check saw the literal text. What matters is the
+    /// final sandbox environment, over the development environment, for both.
+    #[test]
+    fn session_env_names_are_expanded_in_the_final_environment_of_a_session_and_a_check() {
+        let d = Dir::new();
+        let repo = d.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let text = "name = \"t\"\n[session.env]\nMISE_TRUSTED_CONFIG_PATHS = \"${RELAY_STATE}:${RELAY_CLONES}\"\n";
+        let cfg = Config::parse(text, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), d.path().join("state"), d.path().join("data"));
+        // The development environment names it too: `session.env` stays over it.
+        let dev = [(OsString::from("MISE_TRUSTED_CONFIG_PATHS"), Some(OsString::from("/dev")))];
+        let want = format!("{}:{}", ctx.state.display(), ctx.clones.display());
+        assert!(!want.contains("${"), "{want}");
+        let mut session = Invocation::new("harness");
+        layer_env(&ctx, &Job::default(), Phase::Session, &mut session, &dev);
+        let check = super::bar::invocation(&ctx, &Job::default(), Phase::Check, "true", &dev);
+        for (who, inv) in [("session", &session), ("check", &check)] {
+            let env = crate::sandbox::session_env(&ctx, inv);
+            let got = env
+                .iter()
+                .find(|(k, _)| k == "MISE_TRUSTED_CONFIG_PATHS")
+                .map(|(_, v)| v.to_string_lossy().into_owned());
+            assert_eq!(got.as_deref(), Some(want.as_str()), "the {who}'s environment");
         }
     }
 }

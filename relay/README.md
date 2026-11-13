@@ -73,8 +73,9 @@ dependent shows `waits for a (failed)` and does not start on its own, nor keep
 the dispatcher awake. So does every job queued behind it, however deep the chain
 (`waits for b (blocked)`), and jobs that wait for each other (`a cycle`); `view result --wait` on it exits 4 with that line rather
 than wait forever. Queue the dependency again (or `queue resume` it), or
-`relay queue release NAME [--from a]`. Only existing jobs can be named, so there
-are no cycles.
+`relay queue release NAME [--from a]`, which **starts the job now** (once a seat is free): it
+drops the waits and does not cancel anything. To withdraw the job instead, `relay queue dequeue NAME`.
+Only existing jobs can be named, so there are no cycles.
 
 **Where a build job starts.** A build job starts from the repository's `HEAD`,
 unless it waits for build jobs (`--after`) or forks one (`--fork`): then its
@@ -134,8 +135,8 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue unreview JOB` | Detach the review chained to JOB, with no replacement: it no longer re-reviews or resumes JOB (exit 4 when none is chained) |
 | `relay queue add NAME ... --fork JOB` | Start as a fork of JOB's session, from its branch when it is a build job ([forks](#what-a-job-is)) |
 | `relay decide list [--wait [--timeout S]]` / `relay decide answer ID --action A ...` | Decisions waiting for the orchestrator / answer one ([hooks](#hooks)) |
-| `relay queue release NAME [--from A,...]` | Stop a queued job waiting for some or all of its `--after` jobs |
-| `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one. A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
+| `relay queue release NAME [--from A,...]` | Start a queued job now, without waiting for some or all of its `--after` jobs to finish (not a cancel: `dequeue` withdraws it). A job the [disk floor](#disk) holds is freed of those jobs too, and starts when there is room |
+| `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one (or a job the [disk floor](#disk) holds, which then stays stopped). A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends and its runner has exited (it may re-review or wake the dispatcher after the end), and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |
 | `relay view watch [--all] [--everywhere]` | The status live in a terminal UI, every pane scrolling on its own ([the board](#the-board)); `u` swaps it for the quota rows ([usage](#usage)), `c` there for the chart |
@@ -390,7 +391,7 @@ job_ceiling_usd = 50                # required once any chain is set
 Every handler may also answer `defer`, which passes the decision to the next.
 When all defer, relay does what it does without hooks: at `cap` the job waits
 for a human (`failed`, resume with `--budget`), at `ended` the run's outcome
-stands, at `held` the job waits, at `disk` the job is stopped.
+stands, at `held` the job waits, at `disk` the job is stopped (held, when the floor did it: [disk](#disk)).
 
 - `rule`: relay's own checks, free and deterministic. At `cap`, no new commit
   and no changed file since the last checkpoint is `stop`. At `ended`, a done
@@ -402,10 +403,17 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   Otherwise it defers. A job that declares any of these has an `ended` chain
   of `["rule"]` when `hooks.ended` is unset, so it costs nothing to leave unset.
 - `agent:<profile>`: a short read-only session on that profile's harness, model
-  and budget, on another account than the worker's where one is free. A seat is
+  and budget, on another account than the worker's where one is free. Its seat is
+  chosen as the dispatcher chooses a job's, by the same judgment and under the same
+  machine-wide lock (never waited on: a handler that finds it busy tries again within its own
+  wait, or a few seconds when it cannot wait), and booked on the bus (`seated`, then `unseated` once the
+  session has ended), so every dispatcher and every other decision counts it as a
+  session like any: with `per_account = 1`, a job queued meanwhile never joins it on
+  its account, and two decisions at once take different accounts or one waits. A seat is
   free when the account has room under `limits.per_account` (counting every
   project's sessions) and a quota reading that is fresh and above the floor; the
-  worker's own account serves when no other does. At `cap` and `ended` the
+  worker's own account serves when no other does. A worker at `cap` or `ended` holds no seat
+  while it is asked about; one at `disk` still runs, so it keeps its seat. At `cap` and `ended` the
   handler waits up to `hooks.seat_wait_minutes` for a seat (taking a new quota
   reading where one is old), then defers with a reason that names that bound;
   at `held` and `disk` it does not wait, since neither can: a held job is asked
@@ -418,8 +426,10 @@ stands, at `held` the job waits, at `disk` the job is stopped.
   not only until its output closes, and is killed with its group once its
   decision is withdrawn or goes stale, or a limit passes. Every handler and
   session runs under a small supervisor (`relay supervise`) that leads its
-  process group and kills the group when the handler exits, when it is stopped,
-  or within moments of its runner ending (`queue stop`, killed, crashed); nothing
+  process group and ends everything the handler started when the handler exits, when it
+  is stopped, or within moments of its runner ending (`queue stop`, killed, crashed). It is
+  a subreaper, so what leaves its group (a `setsid` child, a sandbox's processes) comes
+  back to it, and it exits only once it has ended and reaped every one of them; nothing
   is recorded and no stored pid is signalled.
 - `command:<argv>`: runs the program (argv split on spaces, with no quoting) on
   the host with the request as JSON on stdin, and reads one JSON object from
@@ -477,7 +487,13 @@ only if the job is still queued as it was when asked, and one job is asked
 about at most once per queueing and once per five minutes. Hooks never land,
 push or delete: those stay with you.
 
-Every decision is on the bus: `decision-requested {id, job, point}`, `parked
+Every decision is on the bus: `decision-requested {id, job, point}`, `seated
+{id, account, model, provider, lock}` and `unseated {id}` around an `agent:` handler's
+session (its seat counts until `unseated`, even if the job is cleaned away meanwhile, and only
+while something holds its `lock` file: the process that asked, and the session's supervisor, which
+holds it until it has ended and reaped the session's whole tree, so a session outliving a killed
+runner for a moment still holds its seat; a booking for a decision already cleaned away is
+refused), `parked
 {id, until}` while it waits for the orchestrator, `answered {id, action, why}`
 from `decide answer` (heard only before `until`), and one `decided {id,
 handler, action, why, cost_usd, refused}` per handler asked, written by the
@@ -568,12 +584,24 @@ handlers as untrusted.
   worker fixing what it did not break; when only one does,
   they failed differently and the failure is the job's. A new failing test is the job's:
   it is resumed as above. A timeout or failed checkout at the base is
-  `check-could-not-run`, never base-red. A job with a revert control expects its base to
-  fail, so its fails are always the job's.
+  `check-could-not-run`, never base-red, and so is a base run that exited a code the project
+  declares (below). A job with a revert control expects its base to fail, so its fails are
+  always the job's.
 - **Could not run:** a command that timed out (124), was not found or not runnable
   (126, 127), was killed, or whose checkout failed said nothing about the code. relay
   records `check-could-not-run`, does not accept, and stops the job for you to look
-  at: a broken check is not the session's to fix.
+  at: a broken check is not the session's to fix. This holds at the tip and at the
+  base: a check that fails at the tip and could not run at the base ends so, never
+  base-red, and the record's `tail` begins with why, kept whole however long the output (`the check could not run: it timed
+  out (exit 124, after 120 s: hooks.command_timeout_seconds)`; `at the base commit, …` for
+  the base), from the exit status and the timeout relay applied. relay never reads the
+  output's text for this. A tool that refuses to run exits with an ordinary failure code
+  (mise's untrusted-config refusal exits 1), which relay cannot tell from a failing check;
+  the project says which code its check uses: `hooks.check_could_not_run_exit_codes = [125]`
+  (codes 1-255; 124-127, 137 and 143 always count), and the check ends with that code where
+  it knows the environment refused it (`mise trust -q || exit 125`, or
+  `some-tool --version || exit 125` before the suite). A declared code is the project's
+  word: it also turns a real failure that exits it into `check-could-not-run`.
 - **Revert control:** `--check-red-first` (or `check_red_first = true` beside the
   profile's `check`) also runs the check at the commit the job's branch started from
   (its base), and requires it to **fail** there. Only a real failure counts: a
@@ -825,6 +853,7 @@ pass_seconds = 300           # a pass stops here; the next goes on
 [limits]
 job_disk_gb = 40             # a running clone over this reaches the `disk` point (0: off)
 min_free_disk_gb = 10        # also: a pass runs at once below this, and holds new starts
+disk_resume_margin_gb = 3    # a held job resumes, and a queued one starts, this far over the floor
 disk_sample_minutes = 3      # how often a running clone is measured
 
 [session.env]
@@ -880,7 +909,8 @@ read-only job has too. The size is on the board (`12G`) and in `--json`
 point is reached. With no `disk` chain, or every handler deferring, the job is
 stopped with the reason `disk: clone 52G over 40G` or `disk: 8G free, under 20G`,
 its clone and session kept: free some space (`land gc` first), then `queue
-resume`. `wait` lets it go on, and asks again only after an hour. While the
+resume`. A job stopped by the free-space floor is not left for you: see
+[the floor holds](#the-floor-holds-a-job-and-resumes-it) below. `wait` lets it go on, and asks again only after an hour. While the
 chain decides (an orchestrator can take `orchestrator_timeout_minutes`), the run
 goes on under all its limits: its spend cap, silence limit and time limit still
 end it, and a decision still waiting then is withdrawn (`decided` by
@@ -890,11 +920,70 @@ whole process group is killed, an agent's session ended), so the job ends, frees
 its seat and `view result --wait` returns without waiting for the handler. Nothing is
 ever deleted inside a running job's clone.
 
+### The floor holds a job and resumes it
+
+Free disk on a shared machine swings as other projects build, so the floor
+(`min_free_disk_gb`) pauses a job rather than ending it. A job the floor stops
+(`disk: 8G free, under 20G`) is **held**: it is `stopped` with `held` set (`held: true`
+in `--json`), its clone, target and session kept, and the board shows
+`held: disk: 8G free, under 20G; resumes at 23 GB free`. A clone over `job_disk_gb`
+is not held, since free space does not cure it: that stop waits for a person.
+
+The dispatcher looks at free disk every minute while a job is held. When it is at least
+`min_free_disk_gb` plus `disk_resume_margin_gb` (default 3 GB, so a disk hovering at the
+floor does not flap), it puts the held job that has waited longest back in the queue,
+and its session is told the disk floor paused it, that nothing in its work caused it,
+and that free space is back. Only one resumes at a time: the next waits until the first
+has started and has run for one `disk_sample_minutes` (its clone measured), so the space
+is not eaten again at once. That holds across the machine's projects (a job another
+project resumed from a hold settles for this one too), and through an automatic retry of
+the resumed job; a hand `queue resume` of it ends the wait, and each job settles for the
+`disk_sample_minutes` of the project that resumed it. A held job whose `--after` jobs are
+not done (a parent held after it) waits for them, and if one of them fails it is blocked
+like a queued one (`waits for p (failed)`), so waiters on it exit 4 rather than wait forever;
+`queue release NAME` frees it of them, and the dispatcher then resumes it when space allows.
+A resume is another run, so it never passes `limits.job_ceiling_usd`: the run's cap is cut
+to what the ceiling leaves, and a job whose ceiling is spent stays stopped with a reason
+that says to raise it and `queue resume`. Turning the floor off
+(`min_free_disk_gb = 0`) lets what is held resume, still one at a time. A held job not yet resumed counts as moving: a job queued
+`--after` it waits for it, and `view result --wait` goes on waiting.
+
+- A queued job obeys the same rule: a build job does not start while free disk is under
+  floor plus margin (the board says `free disk below 23 GB (the 20 GB floor and its
+  margin)`). Read-only jobs still start; the floor can still hold one that runs.
+- The floor itself is unchanged: its value, and what stops a running job (free disk under
+  it while that is the largest clone), are as above. The margin only moves when a job
+  goes back.
+- `queue stop` on a held job, or an earlier stop by a person, keeps it stopped for good:
+  the dispatcher resumes only what the floor held. `queue resume` by hand still works
+  at any time, and the dispatcher then leaves the job alone.
+- A `disk` handler answering `stop` for a job under the floor holds it the same way.
+  Nothing here deletes a held job's clone; `gc` keeps it by the rules above.
+
 `[session] env` sets variables in every job's environment (and the dispatcher's), over
 relay's own (see [What a job is](#what-a-job-is)) and the development environment's and under
 the harness's own account variables; a `PATH` there replaces relay's default. Nothing is
 taken from the shell that queued the job. relay hard-codes none: `CARGO_INCREMENTAL = "0"`
 is the suggestion above.
+
+A value may name the project's own directories without the home path: `${RELAY_STATE}` is this
+project's state directory (an acceptance check's checkout is made under it) and `${RELAY_CLONES}`
+its clones directory (every build job's clone). They are the only two names relay expands; any
+other `${...}` stays as written.
+
+**Recipe: mise.** Inside the sandbox `bun`, `node` and the like resolve to mise's shims
+(`~/.local/share/mise/shims`), which read the `mise.toml` of the directory they run in and refuse
+a clone's, or a check's checkout's, as untrusted (`mise ERROR Config files in …/mise.toml are not
+trusted`, exit 1). relay knows nothing of mise; declare the trust yourself. mise trusts every
+config below a path named in `MISE_TRUSTED_CONFIG_PATHS` (colon-separated):
+
+```toml
+[session.env]
+MISE_TRUSTED_CONFIG_PATHS = "${RELAY_STATE}:${RELAY_CLONES}"
+```
+
+This trusts files written by the session's own clone, so use it only for a project whose
+`mise.toml` you would run anyway (a `mise.toml` can set environment variables and run tasks).
 
 ## Harnesses and accounts
 
@@ -1090,7 +1179,8 @@ too: `limits.per_account` counts the sessions every project runs on the
 account (for omp, on the account *and provider*: one profile serves several
 providers, each with a quota of its own, so a `minimax-code/...` review does not
 hold the seat an `openai-codex/...` job needs; two jobs on one provider still
-share it). A seat is the account and provider the job's dispatch recorded
+share it). A decision's `agent:` session holds a seat too, from its `seated` to its
+`unseated`. A seat is the account and provider the job's dispatch recorded
 (`dispatched` carries the model and provider it resolved), so another project's
 job that names no model counts on the provider its own config chose, not this
 project's default. One machine-wide lock keeps two dispatchers from giving out the
@@ -1362,7 +1452,7 @@ own process, and owns one output port:
 | queue | takes work in (under a profile, if asked), withdraws it, stops it, releases it from its `--after` jobs, reroutes or forces a held one, replaces or detaches a review chain | queued, released, resumed, rerouted, forced, dequeued, unchained, review-briefed, stop-requested |
 | dispatch | gives queued jobs a seat on an account; reaps dead runners | dispatched, reaped |
 | session | runs one job, carries out the decisions at its cap and its end, runs its acceptance check, fetches a review's branch, measures its clone and stops it at the disk ceiling, and reports what happened | cloned, started, rate, limited, signed-out, follow-up, requeued, overran, checking, checked, bar-checked, reviewed, disk, ended |
-| decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); takes the orchestrator's answers | decision-requested, parked, decided |
+| decide | runs a decision point's handler chain, in the process that reached it (a runner, or `decide held`, which dispatch starts); books an `agent:` session's seat; takes the orchestrator's answers | decision-requested, seated, unseated, parked, decided |
 | quota | account readings and switches | reading, unreadable, signed-out, account-enabled |
 | land | brings branches back; cleans up, and gc | forgotten, collected |
 | devshell | enters the project's development environment once, under a lock, and records it for every session | warming, warmed, warm-failed |
@@ -1393,7 +1483,7 @@ It drops:
 - **Scheduling extras:** per-model caps.
 
 `--after` is kept, with one change: a dependency that did not finish blocks
-its dependents (`relay queue release` frees them) instead of freeing them.
+its dependents (`relay queue release` starts them anyway) instead of freeing them.
 
 Like lanes, relay never pushes or merges. Landing work on your main branch
 stays with your project's gate.

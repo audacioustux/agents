@@ -143,6 +143,20 @@ pub enum DispatchEvent {
     },
     /// The runner is gone without an `ended` event.
     Reaped { job: String },
+    /// Free disk is back above the floor and its margin: the job the floor held goes back in the queue,
+    /// and its session is told `message`. Acts only on a job that is still held.
+    /// `settle_us` is how long (bus time) the next held job, in any project, waits for this one to show what it does to
+    /// the disk; `budget_usd` caps the run when the job's ceiling leaves less than its budget.
+    Unheld {
+        job: String,
+        message: String,
+        #[serde(default)]
+        settle_us: u64,
+        #[serde(default)]
+        budget_usd: Option<f64>,
+    },
+    /// A held job is held no longer and is not resumed: it stays stopped, for `why`, until a person acts.
+    HoldEnded { job: String, why: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +165,8 @@ pub enum Outcome {
     Done,
     Failed,
     Stopped,
+    /// Stopped by the disk floor, kept to resume on its own when free space is back (`DispatchEvent::Unheld`).
+    Held,
     /// Back in the queue, for another account or a later attempt.
     Retry,
     /// Back in the queue after a death with no output; counted against `limits.max_retries`.
@@ -718,6 +734,22 @@ pub enum DecideEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         waiter: Option<(u32, u64)>,
     },
+    /// An `agent:` handler's session took a seat: chosen and booked as a dispatch books a job's, under
+    /// the machine's seat lock, so every project's dispatcher counts it until `unseated`.
+    Seated {
+        id: String,
+        account: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        provider: String,
+        /// The seat's lock file: held (shared) by the booker, and by the session's whole supervised
+        /// process tree, which inherits it. The seat counts while anyone holds it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lock: Option<PathBuf>,
+    },
+    /// That session has ended, and its seat is free.
+    Unseated { id: String },
     /// The chain reached `orchestrator`: the request waits for `relay decide answer` until `until` (bus time).
     Parked { id: String, until: u64 },
     /// `relay decide answer`: what the orchestrator answered. It counts only if

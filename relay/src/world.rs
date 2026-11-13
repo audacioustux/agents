@@ -50,6 +50,11 @@ impl Status {
     }
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if takes a reference")]
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Job {
     pub name: String,
@@ -105,6 +110,17 @@ pub struct Job {
     pub turns: u32,
     pub reason: Option<String>,
     pub stop_requested: bool,
+    /// Stopped by the disk floor, not by a person: the dispatcher resumes it when free space is back
+    /// (`reason` says what it saw). A person's stop or resume clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
+    /// When the dispatcher last resumed it from that hold (bus time): the next held job waits while it is queued (an
+    /// automatic requeue keeps this) or has run less than a disk sample. A hand resume clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unheld_at: Option<u64>,
+    /// How long after `unheld_at` that resume settles (bus time); 0 for one recorded before it was.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub settle_us: u64,
     /// Every checkpoint at a spend cap, oldest first.
     #[serde(default)]
     pub checkpoints: Vec<bus::Check>,
@@ -385,6 +401,10 @@ pub struct World {
     /// Decisions by id, while their job is kept.
     #[serde(default)]
     pub decisions: BTreeMap<String, Decision>,
+    /// The seats decisions' `agent:` sessions hold, by decision id, from `seated` until `unseated`:
+    /// kept apart from the decisions, which a job's cleanup forgets while its session may still run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub seats: BTreeMap<String, SessionSeat>,
     /// The project's development environment (`session.env_shell`): its latest warm-up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devshell: Option<DevShell>,
@@ -486,6 +506,40 @@ pub struct Decision {
     pub action: Option<Action>,
 }
 
+/// A seat a session that is no job's own run holds (a decision's `agent:` session), as its booking
+/// recorded it: the account, the model and provider it was judged on there, and the process that
+/// runs the session (its decision's waiter).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSeat {
+    pub account: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider: String,
+    pub waiter: Option<(u32, u64)>,
+    /// Its lock file, held while its booker or any process of its session's tree lives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock: Option<std::path::PathBuf>,
+}
+
+impl SessionSeat {
+    /// The seat it holds while its session may run: while anything holds its lock (its booker, or
+    /// the session's supervised tree, which outlives a booker killed outright until the supervisor
+    /// sees and ends it), or, booked before seats had locks, while its booker lives. One whose
+    /// every holder died without a word holds nothing, since nobody is left to give it back.
+    pub fn held(&self) -> Option<(&str, crate::accounts::Draws)> {
+        let live = match &self.lock {
+            Some(lock) => crate::os::seat_held(lock),
+            None => self.waiter.is_some_and(|(pid, started)| crate::os::same_process(pid, started)),
+        };
+        if !live {
+            return None;
+        }
+        let harness = self.account.split_once(':').map_or(self.account.as_str(), |(h, _)| h);
+        Some((&self.account, crate::accounts::draws(self.model.as_deref(), &self.provider, harness)))
+    }
+}
+
 /// One handler's answer to a decision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Step {
@@ -513,7 +567,11 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// fixed bus, so a fold that changes without a bump fails the tests.
 /// 13: `dispatched` records the model and provider; a job back in the queue has no account.
 /// 14: the development environment's warm-ups (`devshell`).
-/// 18: a meter says its window, provider and scope (17 is the decision seats, #63).
+/// 15: a quota read that fails records why (`failing`).
+/// 16: a failure streak stands only after the last good reading (`Failing::last`).
+/// 17: a decision's `agent:` session holds a seat (`seated`, `unseated`), kept apart from the
+/// decisions (`seats`) so a job's cleanup keeps it.
+/// 18: a meter says its window, provider and scope; a stored reset past its window reads as none.
 const FOLD_VERSION: u32 = 18;
 
 fn fold_version() -> String {
@@ -659,7 +717,7 @@ impl Deps {
     fn build(jobs: &BTreeMap<String, Job>) -> Analysis {
         let mut walk =
             Walk { jobs, stuck: std::collections::HashMap::new(), path: std::collections::HashSet::new(), steps: 0 };
-        for j in jobs.values().filter(|j| j.status == Status::Queued) {
+        for j in jobs.values().filter(|j| j.status == Status::Queued || j.held) {
             walk.settle(j);
         }
         let waits = jobs.values().map(|j| (j.name.clone(), walk.waits(j))).collect();
@@ -673,7 +731,9 @@ impl<'w> Walk<'w> {
     fn edge(&self, a: &str) -> Edge<'w> {
         match self.jobs.get(a) {
             Some(d) if d.status == Status::Done => Edge::Done,
-            Some(d) if d.status == Status::Queued => Edge::Queued(d),
+            // A job the disk floor holds is the dispatcher's to resume once its own prerequisites can progress:
+            // it is blocked as a queued job is, and so are the jobs that wait for it.
+            Some(d) if d.status == Status::Queued || d.held => Edge::Queued(d),
             Some(d) if d.status.is_live() => Edge::Live(d.status.as_str()),
             Some(d) if d.reason.as_deref() == Some("dequeued") => Edge::Blocked("dequeued"),
             Some(d) => Edge::Blocked(d.status.as_str()),
@@ -735,7 +795,7 @@ impl<'w> Walk<'w> {
                 Edge::Queued(d) if self.stuck.get(d.name.as_str()).copied().unwrap_or(false) => {
                     Some(wait(a, "blocked", true))
                 }
-                Edge::Queued(d) => Some(wait(a, d.status.as_str(), false)),
+                Edge::Queued(d) => Some(wait(a, if d.held { "held" } else { d.status.as_str() }, false)),
                 Edge::Live(state) => Some(wait(a, state, false)),
                 Edge::Blocked(state) => Some(wait(a, state, true)),
             });
@@ -792,9 +852,10 @@ impl World {
         job.status == Status::Queued && self.waits(job).is_empty()
     }
 
-    /// Whether `job` is queued and can never start on its own until released or its dependency is queued again.
+    /// Whether `job` is queued, or held by the disk floor, and can never start on its own until released or its
+    /// dependency is queued again.
     pub fn blocked(&self, job: &Job) -> bool {
-        job.status == Status::Queued && self.waits(job).iter().any(|w| w.blocked)
+        (job.status == Status::Queued || job.held) && self.waits(job).iter().any(|w| w.blocked)
     }
 
     /// Whether decision `d` is still about its job as the job is now: the same incarnation and
@@ -805,6 +866,11 @@ impl World {
             (j.created_at, j.attempts) == (d.created, d.attempt)
                 && if d.point == Point::Held { j.status == Status::Queued } else { j.status.has_runner() }
         })
+    }
+
+    /// Whether decision `id`'s `agent:` session holds a seat on record.
+    pub fn seated(&self, id: &str) -> bool {
+        self.seats.contains_key(id)
     }
 
     /// Whether decision `id` is still on record and asks about its job as it is ([`World::asks_now`]).
@@ -826,7 +892,7 @@ impl World {
     /// queued and not blocked. The one test of "still moving": the dispatcher stays awake while any
     /// job moves, and a waiter for a job's end gives up on a live job that does not.
     pub fn moves_on_its_own(&self, job: &Job) -> bool {
-        job.status.has_runner() || job.status == Status::Queued && !self.blocked(job)
+        job.status.has_runner() || (job.held || job.status == Status::Queued) && !self.blocked(job)
     }
 
     /// The fold of the bus at `bus`, from the checkpoint at `file` when it is
@@ -985,6 +1051,9 @@ impl World {
                     j.message = Some(message.clone());
                     j.reason = None;
                     j.stop_requested = false;
+                    j.held = false;
+                    // A person took it over: it no longer settles as the dispatcher's resume.
+                    j.unheld_at = None;
                     j.follow_ups = 0;
                     j.reruns = 0;
                     j.budget_usd = budget_usd.unwrap_or(j.budget_usd);
@@ -1019,6 +1088,10 @@ impl World {
             QueueEvent::StopRequested { job } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.stop_requested = true;
+                    // A person stopping a held job takes it out of the floor's hands: it stays stopped.
+                    if j.held {
+                        (j.held, j.reason) = (false, Some("stopped by request".into()));
+                    }
                 }
             }
         }
@@ -1059,6 +1132,25 @@ impl World {
                     j.attempts += 1;
                     j.reason = None;
                     j.forced = false;
+                }
+            }
+            DispatchEvent::Unheld { job, message, settle_us, budget_usd } => {
+                // A person who resumed or stopped it meanwhile was first: nothing is resumed twice.
+                if let Some(j) = self.jobs.get_mut(job).filter(|j| j.held && j.status == Status::Stopped) {
+                    j.requeue(t);
+                    j.unheld_at = Some(t);
+                    j.settle_us = *settle_us;
+                    j.budget_usd = budget_usd.unwrap_or(j.budget_usd);
+                    j.message = Some(message.clone());
+                    j.reason = None;
+                    j.held = false;
+                    j.follow_ups = 0;
+                    j.reruns = 0;
+                }
+            }
+            DispatchEvent::HoldEnded { job, why } => {
+                if let Some(j) = self.jobs.get_mut(job).filter(|j| j.held && j.status == Status::Stopped) {
+                    (j.held, j.reason) = (false, Some(why.clone()));
                 }
             }
             DispatchEvent::Reaped { job } => {
@@ -1221,10 +1313,12 @@ impl World {
                     }
                     j.reason.clone_from(reason);
                     j.ended_at = Some(t);
+                    // A person's stop, asked while the floor was stopping it, is the one that stands.
+                    j.held = *outcome == Outcome::Held && !j.stop_requested;
                     j.status = match outcome {
                         Outcome::Done => Status::Done,
                         Outcome::Failed => Status::Failed,
-                        Outcome::Stopped => Status::Stopped,
+                        Outcome::Stopped | Outcome::Held => Status::Stopped,
                         Outcome::Retry | Outcome::Rerun => Status::Queued,
                     };
                     if j.status == Status::Queued {
@@ -1353,6 +1447,19 @@ impl World {
                         action: None,
                     },
                 );
+            }
+            // A booking for a decision no longer on record (its job cleaned away) is not one: its
+            // booker sees that (`seated`) and stops. Once made, it stands until `unseated`, whatever
+            // becomes of the decision, since its session runs until its handler hears and stops.
+            DecideEvent::Seated { id, account, model, provider, lock } => {
+                if let Some(d) = self.decisions.get(id) {
+                    let (account, model, provider, lock) =
+                        (account.clone(), model.clone(), provider.clone(), lock.clone());
+                    self.seats.insert(id.clone(), SessionSeat { account, model, provider, waiter: d.waiter, lock });
+                }
+            }
+            DecideEvent::Unseated { id } => {
+                self.seats.remove(id);
             }
             DecideEvent::Parked { id, until } => {
                 if let Some(d) = self.decisions.get_mut(id).filter(|d| d.action.is_none()) {
@@ -1551,7 +1658,8 @@ mod tests {
             (14, 0x0599_7a27_1a95_7bbd),
             (15, 0x5351_e6de_0d8d_bfd8),
             (16, 0x5351_e6de_0d8d_bfd8),
-            (18, 0xcaf0_805c_bb93_9777),
+            (17, 0x2132_12e7_f06d_d32d),
+            (18, 0x4bb9_80c4_5c80_027a),
         ];
         let dispatched = |t, model: Option<&str>| {
             st(
@@ -1598,6 +1706,27 @@ mod tests {
                     why: "exited 1".into(),
                     tail: "error".into(),
                     timed_out: false,
+                }),
+            ),
+            st(
+                12,
+                Event::Decide(DecideEvent::DecisionRequested {
+                    id: "d".into(),
+                    job: "a".into(),
+                    point: Point::Held,
+                    created: 1,
+                    attempt: 2,
+                    waiter: None,
+                }),
+            ),
+            st(
+                13,
+                Event::Decide(DecideEvent::Seated {
+                    id: "d".into(),
+                    account: "omp:w".into(),
+                    model: Some("minimax-code/M3".into()),
+                    provider: "minimax-code".into(),
+                    lock: None,
                 }),
             ),
         ];
@@ -1909,6 +2038,216 @@ mod tests {
         evs.push(st(3, Event::Queue(QueueEvent::StopRequested { job: "a".into() })));
         evs.push(st(4, Event::Dispatch(DispatchEvent::Reaped { job: "a".into() })));
         assert_eq!(World::fold(&evs).jobs["a"].status, Status::Stopped);
+    }
+
+    fn dispatched(job: &str) -> Event {
+        Event::Dispatch(DispatchEvent::Dispatched {
+            job: job.into(),
+            account: "x".into(),
+            model: None,
+            provider: String::new(),
+            runner_pid: 9,
+            runner_started: 1,
+        })
+    }
+
+    fn ended_for(job: &str, outcome: Outcome, why: &str) -> Event {
+        Event::Session(SessionEvent::Ended {
+            job: job.into(),
+            outcome,
+            cost_usd: 0.0,
+            turns: 0,
+            reason: Some(why.into()),
+        })
+    }
+
+    fn unheld(job: &str) -> Event {
+        Event::Dispatch(DispatchEvent::Unheld {
+            job: job.into(),
+            message: "the disk floor paused you".into(),
+            settle_us: 0,
+            budget_usd: None,
+        })
+    }
+
+    #[test]
+    fn a_job_the_floor_stopped_is_held_and_resumed_once() {
+        let mut evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+        ];
+        let w = World::fold(&evs);
+        let j = &w.jobs["a"];
+        assert_eq!((j.status, j.held), (Status::Stopped, true));
+        assert_eq!(j.reason.as_deref(), Some("disk: 56G free, under 60G"));
+        assert!(w.moves_on_its_own(j), "the dispatcher resumes it: waiters keep waiting");
+
+        evs.push(st(4, unheld("a")));
+        let w = World::fold(&evs);
+        let j = &w.jobs["a"];
+        assert_eq!((j.status, j.held, j.unheld_at, j.queued_at), (Status::Queued, false, Some(4), 4));
+        assert_eq!((j.message.as_deref(), j.reason.as_deref()), (Some("the disk floor paused you"), None));
+
+        // A second one, once it has started again, resumes nothing: it is not held.
+        evs.extend([st(5, dispatched("a")), st(6, unheld("a"))]);
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.unheld_at), (Status::Running, Some(4)));
+    }
+
+    #[test]
+    fn a_retry_keeps_the_hold_marker_and_a_hand_resume_clears_it() {
+        let retried = Event::Session(SessionEvent::Ended {
+            job: "a".into(),
+            outcome: Outcome::Retry,
+            cost_usd: 0.0,
+            turns: 0,
+            reason: Some("the development environment changed".into()),
+        });
+        let mut evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+            st(4, unheld("a")),
+            st(5, dispatched("a")),
+            st(6, retried),
+        ];
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.unheld_at), (Status::Queued, Some(4)), "an automatic requeue is still the resume");
+        let resumed = Event::Queue(QueueEvent::Resumed {
+            job: "a".into(),
+            message: "mine".into(),
+            budget_usd: None,
+            models: BTreeMap::new(),
+        });
+        evs.push(st(7, resumed));
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.unheld_at), (Status::Queued, None), "a person took it over");
+    }
+
+    #[test]
+    fn a_stop_by_a_person_is_never_held_and_wins_over_the_floor() {
+        // A plain stop by a person.
+        let evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, Event::Queue(QueueEvent::StopRequested { job: "a".into() })),
+            st(4, Event::Dispatch(DispatchEvent::Reaped { job: "a".into() })),
+            st(5, unheld("a")),
+        ];
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.held), (Status::Stopped, false), "a person's stop is not resumed by the dispatcher");
+
+        // The floor and a person at once: the person's stop is the one that stands.
+        let evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, Event::Queue(QueueEvent::StopRequested { job: "a".into() })),
+            st(4, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+            st(5, unheld("a")),
+        ];
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.held), (Status::Stopped, false));
+
+        // A person stopping a job that is already held takes it from the floor.
+        let evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+            st(4, Event::Queue(QueueEvent::StopRequested { job: "a".into() })),
+            st(5, unheld("a")),
+        ];
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.held, j.reason.as_deref()), (Status::Stopped, false, Some("stopped by request")));
+
+        // A clone over its ceiling is stopped, not held.
+        let evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, ended_for("a", Outcome::Stopped, "disk: clone 52G over 40G")),
+            st(4, unheld("a")),
+        ];
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.held), (Status::Stopped, false));
+    }
+
+    #[test]
+    fn a_hand_resume_of_a_held_job_leaves_nothing_for_the_dispatcher() {
+        let resumed = Event::Queue(QueueEvent::Resumed {
+            job: "a".into(),
+            message: "mine".into(),
+            budget_usd: None,
+            models: BTreeMap::new(),
+        });
+        let evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+            st(4, resumed),
+            st(5, unheld("a")),
+        ];
+        let j = &World::fold(&evs).jobs["a"].clone();
+        assert_eq!((j.status, j.held, j.unheld_at, j.message.as_deref()), (Status::Queued, false, None, Some("mine")));
+    }
+
+    #[test]
+    fn a_held_job_whose_prerequisite_failed_is_blocked_and_so_are_its_dependents() {
+        let evs = vec![
+            st(1, queued("p")),
+            st(2, dispatched("p")),
+            st(3, ended("p", Outcome::Done)),
+            st(4, queued_after("a", &["p"])),
+            st(5, dispatched("a")),
+            st(6, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+            st(7, queued_after("b", &["a"])),
+        ];
+        let w = World::fold(&evs);
+        assert!(w.moves_on_its_own(&w.jobs["a"]), "its prerequisite is done: the dispatcher resumes it");
+        // The prerequisite is resumed by hand and fails while `a` is held.
+        let resumed = Event::Queue(QueueEvent::Resumed {
+            job: "p".into(),
+            message: "again".into(),
+            budget_usd: None,
+            models: BTreeMap::new(),
+        });
+        let evs = [evs, vec![st(8, resumed), st(9, dispatched("p")), st(10, ended("p", Outcome::Failed))]].concat();
+        let w = World::fold(&evs);
+        let (a, b) = (&w.jobs["a"], &w.jobs["b"]);
+        assert!(w.blocked(a) && !w.moves_on_its_own(a), "{:?}", w.waits(a));
+        assert!(w.blocked(b) && !w.moves_on_its_own(b), "and what waits for it: {:?}", w.waits(b));
+        assert_eq!(Wait::summary(&w.waits(a)).as_deref(), Some("waits for p (failed)"));
+    }
+
+    #[test]
+    fn the_dispatcher_ends_a_hold_and_caps_a_resume() {
+        let held = vec![st(1, queued("a")), st(2, dispatched("a")), st(3, ended_for("a", Outcome::Held, "disk"))];
+        let capped = Event::Dispatch(DispatchEvent::Unheld {
+            job: "a".into(),
+            message: "m".into(),
+            settle_us: 7,
+            budget_usd: Some(0.25),
+        });
+        let w = World::fold(&[held.clone(), vec![st(4, capped)]].concat());
+        let j = &w.jobs["a"];
+        assert_eq!((j.status, j.budget_usd, j.settle_us), (Status::Queued, 0.25, 7));
+        let ended = Event::Dispatch(DispatchEvent::HoldEnded { job: "a".into(), why: "ceiling".into() });
+        let w = World::fold(&[held, vec![st(4, ended.clone()), st(5, ended)]].concat());
+        let j = &w.jobs["a"];
+        assert_eq!((j.status, j.held, j.reason.as_deref()), (Status::Stopped, false, Some("ceiling")));
+        assert!(!w.moves_on_its_own(j), "it waits for a person now");
+    }
+
+    #[test]
+    fn a_job_waiting_for_a_held_one_waits_and_is_not_blocked() {
+        let evs = vec![
+            st(1, queued("a")),
+            st(2, dispatched("a")),
+            st(3, ended_for("a", Outcome::Held, "disk: 56G free, under 60G")),
+            st(4, queued_after("b", &["a"])),
+        ];
+        let w = World::fold(&evs);
+        assert!(!w.blocked(&w.jobs["b"]), "the dispatcher will resume what it waits for");
+        assert!(w.moves_on_its_own(&w.jobs["b"]));
     }
 
     #[test]

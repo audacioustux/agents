@@ -24,13 +24,16 @@ use crate::ctx::Ctx;
 use crate::harness::{Harness, Home};
 use crate::os::{self, Role};
 use crate::world::{AccountState, DAY_MICROS, Job, Status, Wait, World};
-pub use room::{Hold, Room, Start};
+pub use room::{Hold, READING_WAIT_MICROS, Room, Start};
 
 /// The longest sleep. Only a runner that dies without a word (one started by
 /// an earlier dispatcher, or killed outright) waits this long to be reaped.
 const BACKSTOP: Duration = Duration::from_mins(5);
 /// The least time between gc passes the disk gauge starts.
 const LOW_DISK_GAP: Duration = Duration::from_mins(5);
+/// How often the dispatcher looks at free disk while a job the floor holds waits for it: no event
+/// announces space coming back.
+const HELD_POLL: Duration = Duration::from_mins(1);
 /// How long the dispatcher stays with nothing queued or running.
 const IDLE_EXIT: Duration = Duration::from_secs(60);
 
@@ -183,6 +186,7 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     // Seats are the machine's: no other project's dispatcher plans while this one does.
     let _seats = Role::take(&ctx.state_root.join("seats.lock"))?;
     let port = ctx.port(&Source(()));
+    unhold(ctx, &port)?;
     let mut world = ctx.world()?;
     for j in world.jobs_mut().values_mut().filter(|j| j.status.has_runner()) {
         if !j.runner.is_some_and(|(pid, started)| os::same_process(pid, started)) {
@@ -225,7 +229,13 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     let waiting = world.jobs().values().any(|j| world.startable(j));
     let states: Vec<_> = room.found().iter().map(|a| (harness_of(a), room.account(&a.key()))).collect();
     let due = next_due(&states, waiting, now_micros());
-    Ok((busy, Held(held.0, None, Vec::new()), [due, held.1, held_due].into_iter().flatten().min()))
+    // Free space coming back is no event: while the floor holds a job, look again soon.
+    let poll = world
+        .jobs()
+        .values()
+        .any(|j| j.held && world.moves_on_its_own(j))
+        .then(|| now_micros() + u64::try_from(HELD_POLL.as_micros()).unwrap_or(0));
+    Ok((busy, Held(held.0, None, Vec::new()), [due, held.1, held_due, poll].into_iter().flatten().min()))
 }
 
 /// Starts the `held` chain for each job in `held` that has waited past
@@ -276,9 +286,118 @@ fn next_due(accounts: &[(&dyn Harness, Option<&AccountState>)], waiting: bool, n
     times.into_iter().filter(|&t| t > now_us).min()
 }
 
+/// The free disk (GB) a job the floor held resumes at, and a queued build job starts at: the floor
+/// (`limits.min_free_disk_gb`) and the margin above it (`limits.disk_resume_margin_gb`).
+pub fn resume_gb(limits: &Limits) -> f64 {
+    limits.min_free_disk_gb + limits.disk_resume_margin_gb
+}
+
 /// Whether free disk under the clones (`clones`) lets a build job start: unmeasured is not enough.
 pub fn disk_ok(limits: &Limits, clones: &Path) -> bool {
-    limits.min_free_disk_gb <= 0.0 || os::free_disk_gb(clones).is_some_and(|gb| gb >= limits.min_free_disk_gb)
+    enough_disk(limits, os::free_disk_gb(clones))
+}
+
+/// Whether `free_gb` is room to start a job, or to resume one the floor held: the floor and its
+/// margin above it. The floor off (zero) is always room.
+fn enough_disk(limits: &Limits, free_gb: Option<f64>) -> bool {
+    limits.min_free_disk_gb <= 0.0 || free_gb.is_some_and(|gb| gb >= resume_gb(limits))
+}
+
+/// Resumes the job the floor has held longest, when free disk is back over the floor and its margin, or the
+/// floor has been turned off ([`resume_due`]). Called with the machine's seats lock held, so the other
+/// projects' jobs it waits on are the ones as they stand.
+fn unhold(ctx: &Ctx, port: &crate::bus::Port<DispatchEvent>) -> Result<()> {
+    let limits = &ctx.cfg.limits;
+    let free = os::free_disk_gb(&ctx.clones);
+    let neighbours = ctx.neighbours();
+    let others: Vec<&World> = neighbours.iter().collect();
+    match resume_due(limits, &ctx.world()?, &others, free, now_micros()) {
+        Some(Due::Resume { job, message, settle_us, budget_usd }) => {
+            eprintln!(
+                "{} resumed {job}: disk is back ({} GB free)",
+                crate::os::stamp(),
+                free.unwrap_or_default().round()
+            );
+            port.emit(DispatchEvent::Unheld { job, message, settle_us, budget_usd })?;
+        }
+        Some(Due::Release { job, why }) => {
+            eprintln!("{} {job} stays stopped: {why}", crate::os::stamp());
+            port.emit(DispatchEvent::HoldEnded { job, why })?;
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// How long (bus time) a resumed job is given to show what it does to the disk: one sample of its clone.
+fn settle_micros(limits: &Limits) -> u64 {
+    u64::try_from(Duration::from_secs_f64(limits.disk_sample_minutes * 60.0).as_micros()).unwrap_or(u64::MAX)
+}
+
+/// What the dispatcher does about the floor's held jobs now.
+#[derive(Debug, Clone, PartialEq)]
+enum Due {
+    /// Resume `job`, telling its session `message`; `budget_usd` caps the run to what the job's ceiling leaves.
+    Resume { job: String, message: String, settle_us: u64, budget_usd: Option<f64> },
+    /// Another run would pass the job's ceiling: it stays stopped, for `why`, until a person acts.
+    Release { job: String, why: String },
+}
+
+/// The job to resume now, with the message its session is told: the one held longest whose dependencies are
+/// done (a child held before its parent waits for it), when `free_gb` is over the floor and its margin or the
+/// floor is off, and no job resumed from a hold, in this project or another on the machine (`others`), is
+/// still settling (queued, or started less than a disk sample ago), so the space is not eaten again by two
+/// at once.
+fn resume_due(limits: &Limits, world: &World, others: &[&World], free_gb: Option<f64>, now_us: u64) -> Option<Due> {
+    if !enough_disk(limits, free_gb) {
+        return None;
+    }
+    let settle = settle_micros(limits);
+    let settling = std::iter::once(world).chain(others.iter().copied()).flat_map(|w| w.jobs().values()).any(|j| {
+        j.unheld_at.is_some_and(|at| match j.status {
+            // Still queued, again after an automatic requeue too: it has not spent its space yet.
+            Status::Queued => true,
+            // Each against the interval of the project that resumed it (recorded with the resume).
+            s if s.has_runner() => j.started_at.is_some_and(|t| {
+                t >= at && now_us.saturating_sub(t) < if j.settle_us > 0 { j.settle_us } else { settle }
+            }),
+            _ => false,
+        })
+    });
+    if settling {
+        return None;
+    }
+    let j = world
+        .jobs()
+        .values()
+        .filter(|j| j.held && j.status == Status::Stopped && world.waits(j).is_empty())
+        .min_by_key(|j| (j.ended_at, &j.name))?;
+    // A resume is another run: it may not pass the job's ceiling, so the run is capped to what is left of it.
+    let mut budget_usd = None;
+    if let Some(ceiling) = limits.job_ceiling_usd.filter(|c| j.cost_usd + j.budget_usd > *c) {
+        let left = ceiling - j.cost_usd;
+        if left <= 0.0 {
+            let why = format!(
+                "held by the disk floor, but another run would pass limits.job_ceiling_usd (${ceiling:.2}, ${:.2} spent): \
+                 raise it, then `relay queue resume {}`",
+                j.cost_usd, j.name
+            );
+            return Some(Due::Release { job: j.name.clone(), why });
+        }
+        budget_usd = Some(left);
+    }
+    let seen = j.reason.as_deref().unwrap_or("free disk was under the floor");
+    let back = if limits.min_free_disk_gb > 0.0 {
+        format!("Free disk is back ({} GB free)", free_gb.unwrap_or_default().round())
+    } else {
+        "The disk floor has since been turned off".to_owned()
+    };
+    let message = format!(
+        "Relay's disk floor paused this session ({seen}): the machine's free disk was under its floor, so \
+         relay stopped the job rather than let the disk fill. Nothing in your work caused it, and your clone and \
+         session are as you left them. {back}, so carry on from where you left off."
+    );
+    Some(Due::Resume { job: j.name.clone(), message, settle_us: settle, budget_usd })
 }
 
 /// Why a job of profile `name` may not start at `now_us`, with when (bus time) that
@@ -336,21 +455,106 @@ fn plan(cfg: &Config, room: &mut Room, world: &World, now_us: u64, held: &mut He
             }
             continue;
         }
-        let home = match room.judge(cfg, j, now_us) {
-            Ok(fits) => choose(j, &fits).cloned(),
+        match place(cfg, room, j, None, now_us) {
+            Ok(Some(start)) => {
+                total += 1;
+                out.push(start);
+            }
+            Ok(None) => {}
             Err(Hold { why, until }) => {
                 held.0.push(format!("{}: {why}", j.name));
                 held.1 = [held.1, until].into_iter().flatten().min();
                 held.2.push(j.name.clone());
-                continue;
             }
-        };
-        if let Some(home) = home {
-            total += 1;
-            out.push(room.take(cfg, j, &home, now_us));
         }
     }
     out
+}
+
+/// The one choice of a seat, for a queued job and for a decision's session alike: `j` judged by
+/// `room.judge`, the account chosen by [`choose`] (away from `avoid` where another fits), and the
+/// start booked in `room` ([`Room::take`]) so whatever is judged next sees it.
+fn place(cfg: &Config, room: &mut Room, j: &Job, avoid: Option<&str>, now_us: u64) -> Result<Option<Start>, Hold> {
+    let fits = room.judge(cfg, j, now_us)?;
+    let Some(home) = choose(j, &fits, avoid).cloned() else { return Ok(None) };
+    Ok(Some(room.take(cfg, j, &home, now_us)))
+}
+
+/// What a decision's `agent:` session for `worker` is judged as: a read-only job on `harness` alone,
+/// on `model` there (the harness's configured one when `None`), of no profile, queued at `since`
+/// (bus time: when it began to wait for a seat, which bounds its wait for a reading as a job's).
+fn session_job(worker: &Job, harness: &str, model: Option<&str>, since: u64) -> Job {
+    Job {
+        name: format!("{}.check", worker.name),
+        kind: crate::bus::Kind::Read,
+        harnesses: vec![harness.to_owned()],
+        models: model.map(|m| [(harness.to_owned(), m.to_owned())].into()).unwrap_or_default(),
+        queued_at: since,
+        ..Job::default()
+    }
+}
+
+/// A seat in `room` for a decision's `agent:` session for `worker` ([`session_job`]), chosen as a
+/// queued job's is ([`place`]): another account than the worker's where one fits, so no worker grades
+/// itself; else the worker's own. The worker's seat is as the fold has it: a run that asked at `cap`
+/// or `ended` is `checking` and holds none, while one at `disk` still runs and keeps its seat.
+pub fn place_session(
+    cfg: &Config,
+    room: &mut Room,
+    worker: &Job,
+    harness: &str,
+    model: Option<&str>,
+    since: u64,
+    now_us: u64,
+) -> Result<Start, Hold> {
+    let j = session_job(worker, harness, model, since);
+    place(cfg, room, &j, worker.account.as_deref(), now_us)?
+        .ok_or_else(|| Hold { why: format!("no {harness} account has room"), until: None })
+}
+
+/// Books a seat for decision `id`'s `agent:` session for `worker` ([`place_session`]) under the
+/// machine's seat lock, as a dispatch books a job's: `record` writes the booking to the bus before the
+/// lock is let go, so every dispatcher (and every other decision) that plans next counts it. A
+/// booking the fold did not take, since the decision is no longer on record (its job was cleaned
+/// away meanwhile), is an error: the session must not start. The lock is never waited for: held by
+/// another, it is [`Booking::Busy`], for the caller's wait to try again within its own bound.
+pub fn book_session(
+    ctx: &Ctx,
+    id: &str,
+    worker: &Job,
+    harness: &str,
+    model: Option<&str>,
+    since: u64,
+    record: impl FnOnce(&Start) -> Result<()>,
+) -> Result<Booking> {
+    let Some(_seats) = Role::try_take(&ctx.state_root.join("seats.lock"))? else { return Ok(Booking::Busy) };
+    let world = ctx.world()?;
+    let neighbours = ctx.neighbours();
+    let others: Vec<&World> = neighbours.iter().collect();
+    // A decision's session is read-only: free disk does not hold it, nor does the dev shell.
+    let mut room = Room::new(&ctx.cfg, &world, &others, true);
+    let Ok(start) = place_session(&ctx.cfg, &mut room, worker, harness, model, since, now_micros()) else {
+        return Ok(Booking::Held);
+    };
+    let Some(home) = room.found().iter().find(|h| h.key() == start.account).cloned() else {
+        anyhow::bail!("{} was chosen but is not found", start.account);
+    };
+    record(&start)?;
+    if !ctx.world()?.seated(id) {
+        anyhow::bail!("decision {id} is no longer on record, so its seat was not booked");
+    }
+    Ok(Booking::Booked(home))
+}
+
+/// What a try at booking a decision's seat came to ([`book_session`]).
+#[derive(Debug)]
+pub enum Booking {
+    /// Booked and recorded: the home of the account it is on.
+    Booked(Home),
+    /// No account takes the session now.
+    Held,
+    /// The machine's seat lock is held by another planner for now.
+    Busy,
 }
 
 /// The queued jobs, oldest first: the order [`plan`] judges them in.
@@ -365,7 +569,7 @@ fn queue(world: &World) -> Vec<&Job> {
 /// queued, the account a job that asks for nothing would get. `None` when every queued job free
 /// of waits is held. The load average and `max_running` aside: they say when, not where.
 pub fn next_pick(cfg: &Config, room: &Room, world: &World, now_us: u64) -> Option<(Option<String>, String)> {
-    let pick = |j: &Job| room.judge(cfg, j, now_us).ok().and_then(|fits| choose(j, &fits).map(Home::key));
+    let pick = |j: &Job| room.judge(cfg, j, now_us).ok().and_then(|fits| choose(j, &fits, None).map(Home::key));
     let free: Vec<&Job> = queue(world).into_iter().filter(|j| world.waits(j).is_empty()).collect();
     if free.is_empty() {
         return pick(&Job::default()).map(|a| (None, a));
@@ -395,10 +599,13 @@ fn kept(job: &Job) -> Option<&str> {
 /// Of the accounts that fit, the one a resumable session already ran on ([`kept`]), so
 /// the provider's prompt cache still holds its transcript (moving it means
 /// re-reading all of it at full price); otherwise the best-scoring one, its room shared among the
-/// sessions it runs ([`Room::admit`]).
-fn choose<'a>(job: &Job, fits: &[(&'a Home, f64)]) -> Option<&'a Home> {
+/// sessions it runs ([`Room::admit`]). `avoid` is an account to take only when no other fits: a
+/// decision's session keeps off its worker's.
+fn choose<'a>(job: &Job, fits: &[(&'a Home, f64)], avoid: Option<&str>) -> Option<&'a Home> {
     let home = kept(job).and_then(|last| fits.iter().find(|(a, _)| a.key() == last));
-    home.or_else(|| fits.iter().max_by(|(_, x), (_, y)| x.total_cmp(y))).map(|&(a, _)| a)
+    let best = |fits: &mut dyn Iterator<Item = &(&'a Home, f64)>| fits.max_by(|(_, x), (_, y)| x.total_cmp(y)).copied();
+    let elsewhere = || best(&mut fits.iter().filter(|(a, _)| avoid.is_none_or(|w| a.key() != w)));
+    home.copied().or_else(elsewhere).or_else(|| best(&mut fits.iter())).map(|(a, _)| a)
 }
 
 #[cfg(test)]
@@ -472,12 +679,20 @@ mod tests {
         let (a, b) = (home("claude", "a"), home("claude", "b"));
         let fits = [(&a, 0.1), (&b, 0.9)];
         let key = |h: Option<&Home>| h.map(Home::key);
-        assert_eq!(key(choose(&job(None, None), &fits)), Some("claude:b".into()), "best score");
-        assert_eq!(key(choose(&job(Some("s"), Some("claude:a")), &fits)), Some("claude:a".into()), "its own");
-        assert_eq!(key(choose(&job(None, Some("claude:a")), &fits)), Some("claude:b".into()), "no session to keep");
+        assert_eq!(key(choose(&job(None, None), &fits, None)), Some("claude:b".into()), "best score");
+        assert_eq!(key(choose(&job(Some("s"), Some("claude:a")), &fits, None)), Some("claude:a".into()), "its own");
+        assert_eq!(
+            key(choose(&job(None, Some("claude:a")), &fits, None)),
+            Some("claude:b".into()),
+            "no session to keep"
+        );
         let only_b = [(&b, 0.9)];
-        assert_eq!(key(choose(&job(Some("s"), Some("claude:a")), &only_b)), Some("claude:b".into()), "a does not fit");
-        assert_eq!(choose(&job(Some("s"), Some("claude:a")), &[]).map(Home::key), None);
+        assert_eq!(
+            key(choose(&job(Some("s"), Some("claude:a")), &only_b, None)),
+            Some("claude:b".into()),
+            "a does not fit"
+        );
+        assert_eq!(choose(&job(Some("s"), Some("claude:a")), &[], None).map(Home::key), None);
     }
 
     #[test]
@@ -805,6 +1020,263 @@ mod tests {
         (world, accounts.iter().map(|(label, ..)| home("claude", label)).collect())
     }
 
+    /// Bug of 2026-11-12 (`verify.md` of the pools review): with `per_account = 1` on accounts a and b,
+    /// job x on a ends and its decision frees a. Its `agent:` session went to b, chosen with no lock and
+    /// never recorded, and the dispatcher then started queued job q on b too: two sessions on b. A
+    /// decision's seat is now placed by the dispatcher's own choice and booked on the bus, so the fold
+    /// counts it: q takes a, and two decisions at once take different accounts or one waits.
+    #[test]
+    fn a_decisions_session_holds_its_seat_as_a_job_does() {
+        use crate::bus::{DecideEvent, Event, Point, Stamped};
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let cfg =
+            Config::parse("name = \"demo\"\n[limits]\nmin_free_disk_gb = 0\nper_account = 1\n", d.path()).unwrap();
+        let me = std::process::id();
+        let waiter = Some((me, os::start_time(me).unwrap()));
+        let apply =
+            |w: &mut World, e: DecideEvent| w.apply(&Stamped { t: NOW_US, event: Event::Decide(e), from: None });
+        let running = |w: &mut World, name: &str, account: &str| {
+            let j = Job {
+                name: name.into(),
+                status: Status::Running,
+                kind: crate::bus::Kind::Read,
+                account: Some(account.into()),
+                created_at: 100,
+                attempts: 1,
+                ..Job::default()
+            };
+            w.jobs_mut().insert(j.name.clone(), j);
+        };
+        // The run of `job` ends and asks: its seat is given back.
+        let ask = |w: &mut World, job: &str| {
+            let asked = DecideEvent::DecisionRequested {
+                id: format!("{job}-ended-1"),
+                job: job.into(),
+                point: Point::Ended,
+                created: 100,
+                attempt: 1,
+                waiter,
+            };
+            apply(w, asked);
+        };
+        // Its `agent:` session is placed and booked as a dispatch places and books a job.
+        let seat = |w: &mut World, job: &str| -> Result<Start, Hold> {
+            let worker = w.jobs()[job].clone();
+            let mut room = Room::of(found_ab(), w.accounts.clone(), w, &[], true);
+            let start = place_session(&cfg, &mut room, &worker, "claude", None, 0, NOW_US)?;
+            let seated = DecideEvent::Seated {
+                id: format!("{job}-ended-1"),
+                account: start.account.clone(),
+                model: start.model.clone(),
+                provider: start.provider.clone(),
+                lock: None,
+            };
+            apply(w, seated);
+            Ok(start)
+        };
+        let decide = |w: &mut World, job: &str| {
+            ask(w, job);
+            seat(w, job)
+        };
+        let sessions = |w: &World| {
+            let room = Room::of(found_ab(), w.accounts.clone(), w, &[], true);
+            ["claude:a", "claude:b"].map(|a| room.running_on(a))
+        };
+        let plan_q = |w: &World| plan_among(&cfg, w, &[], &found_ab()).0;
+
+        // One decision: its session keeps off its worker's account, and q takes the seat left.
+        let (mut w, _) = burst(&[("a", 0.3, 72), ("b", 0.3, 72)], NOW_US - 1, 1);
+        running(&mut w, "x", "claude:a");
+        assert_eq!(decide(&mut w, "x").map(|s| s.account), Ok("claude:b".into()), "not the worker's own account");
+        assert_eq!(sessions(&w), [0, 1], "the decision's session holds b; x's ended run holds nothing");
+        assert_eq!(plan_q(&w), [("j00".into(), "claude:a".into())], "q never joins the decision on b");
+        // Its seat is free once the session has ended.
+        apply(&mut w, DecideEvent::Unseated { id: "x-ended-1".into() });
+        assert_eq!(sessions(&w), [0, 0]);
+
+        // Two decisions at once: each takes the other's freed account, and q waits.
+        let (mut w, _) = burst(&[("a", 0.3, 72), ("b", 0.3, 72)], NOW_US - 1, 1);
+        running(&mut w, "x", "claude:a");
+        running(&mut w, "y", "claude:b");
+        ask(&mut w, "x");
+        ask(&mut w, "y");
+        assert_eq!(seat(&mut w, "x").map(|s| s.account), Ok("claude:b".into()));
+        assert_eq!(seat(&mut w, "y").map(|s| s.account), Ok("claude:a".into()), "b is the first decision's");
+        assert_eq!(sessions(&w), [1, 1], "never two sessions on one account");
+        let (starts, held) = plan_among(&cfg, &w, &[], &found_ab());
+        assert!(starts.is_empty(), "{starts:?}");
+        assert!(held.0.iter().any(|h| h.contains("busy (1 of 1 seat)")), "{held:?}");
+        // A third decision at once (q's, held) finds no seat: it waits, or, unable to, defers.
+        let mut room = Room::of(found_ab(), w.accounts.clone(), &w, &[], true);
+        let hold = place_session(&cfg, &mut room, &w.jobs()["j00"].clone(), "claude", None, 0, NOW_US).unwrap_err();
+        assert!(hold.why.contains("busy"), "{hold:?}");
+
+        // A seat whose session's process has died holds nothing: nobody is left to give it back.
+        let (mut w, _) = burst(&[("a", 0.3, 72), ("b", 0.3, 72)], NOW_US - 1, 1);
+        running(&mut w, "x", "claude:a");
+        decide(&mut w, "x").unwrap();
+        w.seats.get_mut("x-ended-1").unwrap().waiter = Some((me, 1));
+        assert_eq!(sessions(&w), [0, 0]);
+    }
+
+    /// `per_account = 1` on accounts a and b, both read and with room.
+    fn one_seat_each() -> (crate::config::tempdir::Dir, Config, World) {
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let text = "name = \"demo\"\n[limits]\nmin_free_disk_gb = 0\nper_account = 1\n";
+        let cfg = Config::parse(text, d.path()).unwrap();
+        let (w, _) = burst(&[("a", 0.3, 72), ("b", 0.3, 72)], NOW_US - 1, 0);
+        (d, cfg, w)
+    }
+
+    fn run_on(w: &mut World, name: &str, account: &str) {
+        let j = Job {
+            name: name.into(),
+            status: Status::Running,
+            kind: crate::bus::Kind::Read,
+            account: Some(account.into()),
+            created_at: 100,
+            attempts: 1,
+            ..Job::default()
+        };
+        w.jobs_mut().insert(j.name.clone(), j);
+    }
+
+    fn decide_event(w: &mut World, t: u64, e: crate::bus::DecideEvent) {
+        w.apply(&crate::bus::Stamped { t, event: crate::bus::Event::Decide(e), from: None });
+    }
+
+    /// Copilot on PR #63, finding 1: a `disk` decision runs while its worker still runs (its job
+    /// stays `running`), so the worker's seat is not the decision's to take. With b busy and a the
+    /// worker's, a disk decision finds no seat rather than a second session on a.
+    #[test]
+    fn a_disk_decision_never_takes_its_running_workers_seat() {
+        let (_d, cfg, mut w) = one_seat_each();
+        run_on(&mut w, "x", "claude:a");
+        run_on(&mut w, "y", "claude:b");
+        let me = std::process::id();
+        let asked = crate::bus::DecideEvent::DecisionRequested {
+            id: "x-disk-1".into(),
+            job: "x".into(),
+            point: crate::bus::Point::Disk,
+            created: 100,
+            attempt: 1,
+            waiter: Some((me, os::start_time(me).unwrap())),
+        };
+        decide_event(&mut w, NOW_US, asked);
+        assert_eq!(w.jobs()["x"].status, Status::Running, "a disk decision leaves its worker running");
+        let mut room = Room::of(found_ab(), w.accounts.clone(), &w, &[], true);
+        let worker = w.jobs()["x"].clone();
+        let placed = place_session(&cfg, &mut room, &worker, "claude", None, 0, NOW_US);
+        assert!(placed.as_ref().is_err_and(|h| h.why.contains("busy")), "{placed:?}");
+        // With b free, it goes there.
+        w.jobs_mut().remove("y");
+        let mut room = Room::of(found_ab(), w.accounts.clone(), &w, &[], true);
+        let placed = place_session(&cfg, &mut room, &worker, "claude", None, 0, NOW_US);
+        assert_eq!(placed.map(|s| s.account), Ok("claude:b".into()));
+    }
+
+    /// Copilot on PR #63, finding 2: a held job dequeued and cleaned while its decision's session runs
+    /// forgets the decision, but the session still runs until its handler hears and stops: its seat
+    /// counts until `unseated` or its waiter's death, not until the cleanup. A booking that arrives
+    /// once its decision is gone is not recorded, and the booker can tell ([`World::seated`]).
+    #[test]
+    fn a_seat_outlives_the_cleanup_of_its_decision() {
+        use crate::bus::{DecideEvent, Event, LandEvent, Point, Stamped};
+        let (_d, _cfg, mut w) = one_seat_each();
+        let me = std::process::id();
+        let waiter = Some((me, os::start_time(me).unwrap()));
+        let asked = |id: &str| DecideEvent::DecisionRequested {
+            id: id.into(),
+            job: "q".into(),
+            point: Point::Held,
+            created: 100,
+            attempt: 0,
+            waiter,
+        };
+        let seated = |id: &str| DecideEvent::Seated {
+            id: id.into(),
+            account: "claude:b".into(),
+            model: None,
+            provider: String::new(),
+            lock: None,
+        };
+        let forgotten = Stamped { t: NOW_US, event: Event::Land(LandEvent::Forgotten { job: "q".into() }), from: None };
+        let on_b = |w: &World| Room::of(found_ab(), w.accounts.clone(), w, &[], true).running_on("claude:b");
+        decide_event(&mut w, NOW_US, asked("q-held-1"));
+        decide_event(&mut w, NOW_US, seated("q-held-1"));
+        assert!(w.seated("q-held-1"));
+        w.apply(&forgotten);
+        assert!(!w.decisions.contains_key("q-held-1"), "the decision went with its job");
+        assert_eq!(on_b(&w), 1, "its session still runs on b");
+        decide_event(&mut w, NOW_US, DecideEvent::Unseated { id: "q-held-1".into() });
+        assert_eq!(on_b(&w), 0);
+        // Asked again, and cleaned before the booking lands: the booking is not recorded.
+        decide_event(&mut w, NOW_US, asked("q-held-2"));
+        w.apply(&forgotten);
+        decide_event(&mut w, NOW_US, seated("q-held-2"));
+        assert!(!w.seated("q-held-2"), "a booking for a decision no longer on record");
+        assert_eq!(on_b(&w), 0);
+    }
+
+    /// Copilot on PR #63, third pass, finding 1: a booking waited on the machine's seat lock for as
+    /// long as another holder kept it, where nothing checks the wait's bound or a withdrawal. It
+    /// returns at once instead, for the wait loop to try again.
+    #[test]
+    fn booking_a_decisions_seat_never_waits_on_a_busy_seat_lock() {
+        let d = crate::config::tempdir::Dir::new();
+        let root = d.path().to_owned();
+        std::fs::create_dir_all(root.join("repo/.git")).unwrap();
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        let _held = Role::take(&root.join("state/seats.lock")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let cfg = Config::parse("name = \"t\"\n", &root.join("repo")).unwrap();
+            let ctx = Ctx::unclaimed(cfg, root.join("repo/relay.toml"), root.join("state"), root.join("data"));
+            let booked = book_session(&ctx, "d", &Job::default(), "claude", None, 0, |_| Ok(()));
+            let _ = tx.send(matches!(booked, Ok(Booking::Busy)));
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true), "a busy seat lock is a hold, at once");
+    }
+
+    /// Copilot on PR #63, third pass, finding 2: the booker of a decision's seat (its waiter) can die
+    /// while its session's process tree still runs, until the supervisor sees and ends it. The seat
+    /// counts while anything holds its lock (the tree inherits it), not only while the booker lives.
+    #[test]
+    fn a_seat_counts_while_its_lock_is_held_past_its_bookers_death() {
+        use crate::bus::{DecideEvent, Point};
+        let (d, _cfg, mut w) = one_seat_each();
+        let lock = d.path().join("seat.lock");
+        let dead = Some((std::process::id(), 1));
+        let asked = DecideEvent::DecisionRequested {
+            id: "q-held-1".into(),
+            job: "q".into(),
+            point: Point::Held,
+            created: 100,
+            attempt: 0,
+            waiter: dead,
+        };
+        decide_event(&mut w, NOW_US, asked);
+        let tree = crate::os::SeatHold::take(&lock).unwrap();
+        let seated = DecideEvent::Seated {
+            id: "q-held-1".into(),
+            account: "claude:b".into(),
+            model: None,
+            provider: String::new(),
+            lock: Some(lock.clone()),
+        };
+        decide_event(&mut w, NOW_US, seated);
+        let on_b = |w: &World| Room::of(found_ab(), w.accounts.clone(), w, &[], true).running_on("claude:b");
+        assert_eq!(on_b(&w), 1, "its booker is gone, but its session's tree still holds the lock");
+        drop(tree);
+        assert_eq!(on_b(&w), 0, "nothing holds it: the tree has ended");
+    }
+
+    fn found_ab() -> Vec<Home> {
+        vec![home("claude", "a"), home("claude", "b")]
+    }
+
     /// How many of `starts` each account took.
     fn spread(starts: &[(String, String)]) -> BTreeMap<String, usize> {
         let mut n = BTreeMap::new();
@@ -949,5 +1421,201 @@ mod tests {
 
         std::fs::write(&project, "name = \"other\"\n").unwrap();
         assert!(sources.changed(), "the project config was edited");
+    }
+
+    /// A world of jobs by `(name, status, held, ended_at)`.
+    fn resumed(due: Due) -> Option<String> {
+        match due {
+            Due::Resume { job, .. } => Some(job),
+            Due::Release { .. } => None,
+        }
+    }
+
+    fn message(due: Due) -> String {
+        match due {
+            Due::Resume { message, .. } => message,
+            Due::Release { why, .. } => why,
+        }
+    }
+
+    fn held_world(jobs: &[(&str, Status, bool, u64)]) -> World {
+        let mut w = World::default();
+        for &(name, status, held, ended) in jobs {
+            let j = Job { name: name.into(), status, held, ended_at: Some(ended), ..Job::default() };
+            w.jobs_mut().insert(name.into(), j);
+        }
+        w
+    }
+
+    fn floor(min: f64, margin: f64) -> Limits {
+        Limits { min_free_disk_gb: min, disk_resume_margin_gb: margin, ..Limits::default() }
+    }
+
+    #[test]
+    fn a_held_job_resumes_only_over_the_floor_and_its_margin() {
+        let l = floor(60.0, 3.0);
+        let w = held_world(&[("a", Status::Stopped, true, 5)]);
+        let due = |free| resume_due(&l, &w, &[], free, NOW_US).and_then(resumed);
+        assert_eq!(due(Some(57.0)), None, "under the floor");
+        assert_eq!(due(Some(62.9)), None, "over the floor, not over its margin: no flapping");
+        assert_eq!(due(None), None, "unmeasured is not room");
+        assert_eq!(due(Some(63.0)).as_deref(), Some("a"));
+        let off = floor(0.0, 3.0);
+        assert!(off.min_free_disk_gb <= 0.0);
+        let message = message(resume_due(&l, &w, &[], Some(65.2), NOW_US).unwrap());
+        assert!(message.contains("disk floor") && message.contains("Nothing in your work"), "{message}");
+        assert!(message.contains("65 GB free"), "{message}");
+    }
+
+    #[test]
+    fn a_person_s_stop_is_never_resumed() {
+        let l = floor(60.0, 3.0);
+        // Stopped and not held: by a person (or any other end), whatever the disk says.
+        let w = held_world(&[("p", Status::Stopped, false, 1), ("f", Status::Failed, false, 1)]);
+        assert_eq!(resume_due(&l, &w, &[], Some(900.0), NOW_US), None);
+    }
+
+    #[test]
+    fn held_jobs_resume_one_at_a_time_oldest_first() {
+        let l = floor(60.0, 3.0);
+        let mut w = held_world(&[("late", Status::Stopped, true, 9), ("early", Status::Stopped, true, 4)]);
+        let first = resumed(resume_due(&l, &w, &[], Some(70.0), NOW_US).unwrap()).unwrap();
+        assert_eq!(first, "early", "the one held longest");
+        // It is resumed: queued, and the next waits while it has not started.
+        let at = NOW_US - 10;
+        let j = w.jobs_mut().get_mut("early").unwrap();
+        (j.status, j.held, j.unheld_at, j.queued_at) = (Status::Queued, false, Some(at), at);
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US), None, "still queued: the space is not spent yet");
+        // It starts: still settling for a disk sample, then the next one goes.
+        let j = w.jobs_mut().get_mut("early").unwrap();
+        (j.status, j.started_at) = (Status::Running, Some(NOW_US - 5));
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US), None, "just started: not measured yet");
+        let later = NOW_US + settle_micros(&l);
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), later).and_then(resumed).as_deref(), Some("late"));
+        // The first ended; nothing settles.
+        w.jobs_mut().get_mut("early").unwrap().status = Status::Done;
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).and_then(resumed).as_deref(), Some("late"));
+    }
+
+    /// A held project's neighbour has resumed a job from its own hold, as `unheld_at` says.
+    fn settling_neighbour(status: Status) -> World {
+        let mut w = held_world(&[("n", status, false, 1)]);
+        let j = w.jobs_mut().get_mut("n").unwrap();
+        (j.unheld_at, j.queued_at, j.started_at) = (Some(NOW_US - 10), NOW_US - 10, Some(NOW_US - 5));
+        w
+    }
+
+    #[test]
+    fn a_job_another_project_resumed_from_a_hold_settles_for_this_one_too() {
+        let l = floor(60.0, 3.0);
+        let w = held_world(&[("mine", Status::Stopped, true, 4)]);
+        for status in [Status::Queued, Status::Running] {
+            let theirs = settling_neighbour(status);
+            assert_eq!(
+                resume_due(&l, &w, &[&theirs], Some(70.0), NOW_US),
+                None,
+                "{status:?}: the space is not spent yet"
+            );
+        }
+        let theirs = settling_neighbour(Status::Running);
+        let later = NOW_US + settle_micros(&l);
+        assert!(resume_due(&l, &w, &[&theirs], Some(70.0), later).is_some(), "once it has run a sample");
+        assert!(resume_due(&l, &w, &[&settling_neighbour(Status::Done)], Some(70.0), NOW_US).is_some(), "it ended");
+    }
+
+    #[test]
+    fn a_held_job_whose_dependency_is_held_too_waits_for_it() {
+        let l = floor(60.0, 3.0);
+        // The child was held first (older), the done parent after it was resumed: the parent goes first.
+        let mut w = held_world(&[("child", Status::Stopped, true, 3), ("parent", Status::Stopped, true, 8)]);
+        w.jobs_mut().get_mut("child").unwrap().after = vec!["parent".into()];
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).and_then(resumed).as_deref(), Some("parent"));
+        // With the parent done, the child is free to go.
+        w.jobs_mut().get_mut("parent").unwrap().status = Status::Done;
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).and_then(resumed).as_deref(), Some("child"));
+    }
+
+    #[test]
+    fn holds_resume_when_the_floor_is_turned_off_one_at_a_time() {
+        let enabled = floor(60.0, 3.0);
+        let off = floor(0.0, 3.0);
+        let mut w = held_world(&[("a", Status::Stopped, true, 4), ("b", Status::Stopped, true, 9)]);
+        assert_eq!(resume_due(&enabled, &w, &[], Some(10.0), NOW_US), None, "under the floor while it is on");
+        for free in [Some(10.0), None] {
+            let due = resume_due(&off, &w, &[], free, NOW_US).unwrap();
+            let (job, message) = (resumed(due.clone()).unwrap(), message(due));
+            assert_eq!(job, "a", "the oldest, whatever the disk says: there is no floor");
+            assert!(message.contains("turned off") && !message.contains("0 GB floor"), "{message}");
+        }
+        let j = w.jobs_mut().get_mut("a").unwrap();
+        (j.status, j.held, j.unheld_at, j.queued_at) = (Status::Queued, false, Some(NOW_US - 10), NOW_US - 10);
+        assert_eq!(resume_due(&off, &w, &[], Some(10.0), NOW_US), None, "still one at a time");
+    }
+
+    #[test]
+    fn an_automatic_requeue_keeps_the_resumed_job_settling() {
+        let l = floor(60.0, 3.0);
+        let mut w = held_world(&[("early", Status::Stopped, true, 4), ("late", Status::Stopped, true, 9)]);
+        let j = w.jobs_mut().get_mut("early").unwrap();
+        // Resumed at `at`, started, and sent back to the queue by a retry: `queued_at` moved on, the marker did not.
+        (j.status, j.held, j.unheld_at, j.queued_at) = (Status::Queued, false, Some(NOW_US - 10), NOW_US - 5);
+        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US), None, "queued again: still not started");
+    }
+
+    #[test]
+    fn a_resumed_job_settles_for_its_own_projects_interval() {
+        let l = floor(60.0, 3.0);
+        let w = held_world(&[("mine", Status::Stopped, true, 4)]);
+        // Another project samples every 30 minutes, we every 3: its job, started 5 minutes ago, still settles.
+        let mut theirs = settling_neighbour(Status::Running);
+        let (at, started) = (NOW_US - 6 * 60_000_000, NOW_US - 5 * 60_000_000);
+        let j = theirs.jobs_mut().get_mut("n").unwrap();
+        (j.unheld_at, j.started_at, j.settle_us) = (Some(at), Some(started), 30 * 60_000_000);
+        assert_eq!(resume_due(&l, &w, &[&theirs], Some(70.0), NOW_US), None);
+        let after = started + 30 * 60_000_000;
+        assert!(resume_due(&l, &w, &[&theirs], Some(70.0), after).is_some(), "its own window has passed");
+        // One recorded without a window settles for ours.
+        theirs.jobs_mut().get_mut("n").unwrap().settle_us = 0;
+        assert!(resume_due(&l, &w, &[&theirs], Some(70.0), NOW_US).is_some());
+    }
+
+    #[test]
+    fn a_resume_never_passes_the_jobs_ceiling() {
+        let l = Limits { job_ceiling_usd: Some(10.0), ..floor(60.0, 3.0) };
+        let spent = |cost, budget| {
+            let mut w = held_world(&[("a", Status::Stopped, true, 4)]);
+            let j = w.jobs_mut().get_mut("a").unwrap();
+            (j.cost_usd, j.budget_usd) = (cost, budget);
+            resume_due(&l, &w, &[], Some(70.0), NOW_US)
+        };
+        let budget = |due| match due {
+            Some(Due::Resume { budget_usd, .. }) => Some(budget_usd),
+            _ => None,
+        };
+        assert_eq!(budget(spent(0.0, 10.0)), Some(None), "within the ceiling: its own budget");
+        assert_eq!(budget(spent(9.0, 10.0)), Some(Some(1.0)), "capped to what the ceiling leaves");
+        let Some(Due::Release { job, why }) = spent(10.0, 10.0) else { panic!("a spent ceiling resumes nothing") };
+        assert_eq!(job, "a");
+        assert!(why.contains("job_ceiling_usd") && why.contains("queue resume"), "{why}");
+        let no_ceiling = Limits { job_ceiling_usd: None, ..l };
+        let mut w = held_world(&[("a", Status::Stopped, true, 4)]);
+        w.jobs_mut().get_mut("a").unwrap().cost_usd = 99.0;
+        assert!(matches!(resume_due(&no_ceiling, &w, &[], Some(70.0), NOW_US), Some(Due::Resume { .. })));
+    }
+
+    #[test]
+    fn admission_waits_for_the_floor_and_its_margin() {
+        let l = floor(60.0, 3.0);
+        assert!(!enough_disk(&l, Some(61.0)), "over the floor is not enough to start");
+        assert!(enough_disk(&l, Some(63.0)));
+        assert!(!enough_disk(&l, None), "unmeasured is not enough");
+        assert!(enough_disk(&floor(0.0, 3.0), Some(0.5)), "the floor off lets everything start");
+        let (_d, cfg) = omp_config("");
+        let cfg = Config { limits: Limits { min_free_disk_gb: 60.0, ..cfg.limits }, ..cfg };
+        let queued = Job { name: "q".into(), status: Status::Queued, ..Job::default() };
+        let w = World::default();
+        let hold = |ok| Room::of(Vec::new(), BTreeMap::new(), &w, &[], ok).hold(&cfg, &queued, NOW_US).map(|h| h.why);
+        assert!(hold(false).unwrap().contains("free disk below 63 GB"), "{:?}", hold(false));
+        assert!(hold(true).is_none_or(|w| !w.contains("free disk")));
     }
 }

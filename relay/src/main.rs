@@ -100,6 +100,9 @@ enum System {
     Supervise {
         #[arg(long)]
         parent: u32,
+        /// A seat's lock to hold, shared, for as long as the child or anything it starts lives.
+        #[arg(long)]
+        hold: Option<std::path::PathBuf>,
         #[arg(last = true, required = true)]
         argv: Vec<std::ffi::OsString>,
     },
@@ -111,7 +114,7 @@ fn main() -> ExitCode {
     let result = match cli.system {
         System::Ask(a) => systems::ask::run(&a, json),
         // Its output is the handler's: it says nothing of its own there.
-        System::Supervise { parent, argv } => return supervised::supervise(parent, &argv),
+        System::Supervise { parent, hold, argv } => return supervised::supervise(parent, hold.as_deref(), &argv),
         system => run(cli.config.as_deref(), json, system).map(|()| 0),
     };
     reply::finish(result, json, "relay")

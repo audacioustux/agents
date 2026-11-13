@@ -3,12 +3,12 @@
 
 use std::sync::LazyLock;
 
+use jiff::Timestamp;
 use jiff::civil::{Date, Time};
 use jiff::tz::TimeZone;
-use jiff::{Timestamp, Zoned};
 use regex::Regex;
 
-use crate::harness::Meters;
+use crate::harness::{Meters, Window};
 
 /// A run's output, in harness-neutral terms.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -133,7 +133,7 @@ pub fn verdict(r: &Report, end: Ending, final_marker: &str, readonly: bool, now_
                 .meters
                 .as_ref()
                 .and_then(|m| m.values().filter(|w| w.utilization >= 1.0).filter_map(|w| w.resets_at).max())
-                .or_else(|| parse_reset_in(&head, now_s, r.zone.as_ref().unwrap_or(&TimeZone::system())));
+                .or_else(|| parse_reset_in(&head, now_s, r.zone.as_ref().unwrap_or(&TimeZone::system()), None));
             return Verdict::Limited { until };
         }
         if AUTH.is_match(&head) || r.api_status == Some(401) {
@@ -167,18 +167,46 @@ static RESET: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RESETS_IN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"resets in\s+((?:\d+[dhms])+)").expect("regex"));
 
-/// The next moment after `now_s` matching "resets [Mon D,] H[:MM]am|pm [(Zone)]"
-/// or "resets in 6d23h". A time with no zone is in this machine's, as the CLI printed it.
+/// How far behind `now` a meter's reset time may be and still be read as this meter's own: the
+/// CLI keeps printing the reset that just passed for a while. The one place the grace is declared.
+pub const RESET_GRACE_S: i64 = 3600;
+
+/// The furthest a reset of a meter of this `window` can lie ahead of `now_s` (a month as its
+/// longest, 31 days); none for a window of a length not said.
+pub fn reset_ahead_limit(now_s: i64, window: Window) -> Option<i64> {
+    let hours = if window == Window::Month { 744 } else { window.hours()? };
+    Some(now_s + i64::from(hours) * 3600)
+}
+
+/// `reset` when it is a reset time of a meter of this `window` read at `now_s`: in
+/// (`now_s` - [`RESET_GRACE_S`], `now_s` + the window]. A reset in the past within the grace is the
+/// meter resetting now, and stays as it is. Any other is no reset time. The one place the range
+/// is judged, for every harness.
+pub fn reset_in_range(reset: i64, now_s: i64, window: Window) -> Option<i64> {
+    let ahead = reset_ahead_limit(now_s, window).is_none_or(|limit| reset <= limit);
+    (reset > now_s - RESET_GRACE_S && ahead).then_some(reset)
+}
+
+/// The moment matching "resets [Mon D,] H[:MM]am|pm [(Zone)]" or "resets in 6d23h" that is a reset
+/// of a meter of `window` ([`reset_in_range`]): the earliest candidate in range, so a reset that
+/// passed a minute ago stays that moment, not next year or tomorrow. None when no candidate is in
+/// range. A time with no zone is in this machine's, as the CLI printed it.
 #[cfg(test)]
 pub fn parse_reset(text: &str, now_s: i64) -> Option<i64> {
-    parse_reset_in(text, now_s, &TimeZone::system())
+    parse_reset_in(text, now_s, &TimeZone::system(), None)
 }
 
 /// [`parse_reset`], with `local` as the zone of a time that names none: the zone of the process
-/// that printed it ([`zone_of`]).
-pub fn parse_reset_in(text: &str, now_s: i64, local: &TimeZone) -> Option<i64> {
+/// that printed it ([`zone_of`]). `window: None` is for a limit message, which names a reset
+/// still to come, of no meter: the next moment after `now_s`, however far.
+pub fn parse_reset_in(text: &str, now_s: i64, local: &TimeZone, window: Option<Window>) -> Option<i64> {
+    // The window of a limit message is unknown and its reset is ahead: no grace, no upper bound.
+    let keep = |r: i64| match window {
+        Some(w) => reset_in_range(r, now_s, w),
+        None => (r > now_s).then_some(r),
+    };
     if let Some(c) = RESETS_IN.captures(text) {
-        return Some(now_s + duration_seconds(&c[1]));
+        return keep(now_s + duration_seconds(&c[1]));
     }
     let c = RESET.captures(text)?;
     let tz = c.name("tz").map_or(Some(local.clone()), |z| match z.as_str() {
@@ -195,16 +223,18 @@ pub fn parse_reset_in(text: &str, now_s: i64, local: &TimeZone) -> Option<i64> {
     }
     let time = Time::new(hour, minute, 0, 0).ok()?;
     let now = Timestamp::from_second(now_s).ok()?.to_zoned(tz.clone());
-    let at = |date: Date| date.to_datetime(time).to_zoned(tz.clone()).ok();
-    let after = |z: &Zoned| z.timestamp().as_second() > now_s;
-    let found = if let (Some(mon), Some(day)) = (c.name("mon"), c.name("day")) {
+    let at = |date: Date| date.to_datetime(time).to_zoned(tz.clone()).ok().map(|z| z.timestamp().as_second());
+    let mut candidates: Vec<i64> = if let (Some(mon), Some(day)) = (c.name("mon"), c.name("day")) {
         let month = month_number(mon.as_str())?;
         let day: i8 = day.as_str().parse().ok()?;
-        [now.year(), now.year() + 1].into_iter().filter_map(|y| Date::new(y, month, day).ok().and_then(at)).find(after)
+        let year = now.year();
+        [year - 1, year, year + 1].into_iter().filter_map(|y| Date::new(y, month, day).ok().and_then(at)).collect()
     } else {
-        [now.date(), now.date().tomorrow().ok()?].into_iter().filter_map(at).find(after)
+        let today = now.date();
+        [today.yesterday().ok()?, today, today.tomorrow().ok()?].into_iter().filter_map(at).collect()
     };
-    found.map(|z| z.timestamp().as_second())
+    candidates.sort_unstable();
+    candidates.into_iter().find_map(keep)
 }
 
 /// "6d23h", "4h30m": seconds.
@@ -305,10 +335,10 @@ mod tests {
     fn a_reset_with_no_zone_is_in_the_local_zone() {
         let dhaka = TimeZone::get("Asia/Dhaka").unwrap();
         // 21:00 in Dhaka (UTC+6): 3pm there is 09:00 UTC tomorrow.
-        assert_eq!(parse_reset_in("resets 3pm", NOW, &dhaka), Some(NOW + 18 * 3600));
-        assert_eq!(parse_reset_in("resets 4pm (UTC)", NOW, &dhaka), Some(NOW + 3600), "a stated zone wins");
+        assert_eq!(parse_reset_in("resets 3pm", NOW, &dhaka, None), Some(NOW + 18 * 3600));
+        assert_eq!(parse_reset_in("resets 4pm (UTC)", NOW, &dhaka, None), Some(NOW + 3600), "a stated zone wins");
         for tz in ["Etc/GMT-6", ":Etc/GMT-6", "UTC-6"] {
-            assert_eq!(parse_reset_in("resets 3pm", NOW, &zone_of(Some(tz))), Some(NOW + 18 * 3600), "{tz}");
+            assert_eq!(parse_reset_in("resets 3pm", NOW, &zone_of(Some(tz)), None), Some(NOW + 18 * 3600), "{tz}");
         }
         assert_eq!(zone_of(Some("")), TimeZone::UTC);
     }
@@ -322,5 +352,44 @@ mod tests {
         assert_eq!(verdict(&dhaka, OK, "FINAL", false, NOW), Verdict::Limited { until: Some(NOW + 18 * 3600) });
         let utc = Report { zone: Some(TimeZone::UTC), ..error("You've hit your limit · resets 4pm") };
         assert_eq!(verdict(&utc, OK, "FINAL", false, NOW), Verdict::Limited { until: Some(NOW + 3600) });
+    }
+
+    const UTC: &TimeZone = &TimeZone::UTC;
+
+    /// 2026-11-13T01:00 +06, on the real bus: the reset that had just passed read a year out.
+    #[test]
+    fn a_reset_that_just_passed_stays_in_range_of_its_window() {
+        // Undated, a 5-hour meter, read at 7:01pm: 7pm is a minute ago, not tomorrow.
+        let seven_oh_one = NOW + 4 * 3600 + 60;
+        assert_eq!(
+            parse_reset_in("resets 7pm (UTC)", seven_oh_one, UTC, Some(Window::FiveHours)),
+            Some(NOW + 4 * 3600)
+        );
+        // The same time read an hour and a minute later is no reset of that meter at all: tomorrow is
+        // further than five hours.
+        let later = NOW + 5 * 3600 + 60;
+        assert_eq!(parse_reset_in("resets 7pm (UTC)", later, UTC, Some(Window::FiveHours)), None);
+        // A dated week reset one minute past (Nov 2, 3pm; read at 15:01).
+        assert_eq!(
+            parse_reset_in("resets Nov 2, 3pm (UTC)", NOW + 60, UTC, Some(Window::Week)),
+            Some(NOW),
+            "not Nov 2 of next year"
+        );
+        // Across a year's end: read at 00:01 on Jan 1, a reset of Dec 31 11:30pm is a minute-old reset.
+        let jan1 = 1_798_761_660; // 2027-01-01T00:01:00Z
+        assert_eq!(parse_reset_in("resets Dec 31, 11:30pm (UTC)", jan1, UTC, Some(Window::Week)), Some(jan1 - 1860));
+        // Past the grace it is no reset time, and a candidate beyond the window is none either.
+        assert_eq!(parse_reset_in("resets Nov 2, 3pm (UTC)", NOW + RESET_GRACE_S + 1, UTC, Some(Window::Week)), None);
+        assert_eq!(parse_reset_in("resets Nov 20, 3pm (UTC)", NOW, UTC, Some(Window::Week)), None);
+        assert_eq!(parse_reset_in("resets in 6d23h", NOW, UTC, Some(Window::FiveHours)), None);
+        assert_eq!(parse_reset_in("resets in 4h59m", NOW, UTC, Some(Window::FiveHours)), Some(NOW + 17_940));
+        // A month is up to 31 days.
+        assert_eq!(parse_reset_in("resets in 31d", NOW, UTC, Some(Window::Month)), Some(NOW + 31 * 86_400));
+        // The range itself, for readings that state a time: the edges.
+        assert_eq!(reset_in_range(NOW - RESET_GRACE_S, NOW, Window::Week), None);
+        assert_eq!(reset_in_range(NOW - RESET_GRACE_S + 1, NOW, Window::Week), Some(NOW - RESET_GRACE_S + 1));
+        assert_eq!(reset_in_range(NOW + 168 * 3600, NOW, Window::Week), Some(NOW + 168 * 3600));
+        assert_eq!(reset_in_range(NOW + 168 * 3600 + 1, NOW, Window::Week), None);
+        assert_eq!(reset_in_range(NOW + 10_000 * 3600, NOW, Window::Other(None)), Some(NOW + 10_000 * 3600));
     }
 }

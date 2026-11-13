@@ -2,12 +2,14 @@
 //! where it has been, its pace over the last day and what that pace comes to by the reset.
 //! Folded from the same [`Point`]s the chart draws.
 
+use std::fmt::Write as _;
+
 use ratatui::style::Color;
 use serde_json::json;
 
 use super::{History, Point};
 use crate::config::Limits;
-use crate::harness::Meter;
+use crate::harness::{Meter, Window};
 use crate::systems::quota::gauge::{self, Gauge, Tone};
 
 /// The sparkline's cells, when there is room; it shrinks to [`MIN_SPARK`].
@@ -157,11 +159,77 @@ fn percent(f: f64) -> i64 {
     p
 }
 
+/// What names a row: its account, the provider and the model or group its meter counts alone, and
+/// its window unless that is the week's (`omp:w · google-antigravity └ Gemini`, `claude:a 5 hours`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Label {
+    pub account: String,
+    pub provider: Option<String>,
+    pub scope: Option<String>,
+    /// The window's words, when it is not the week's.
+    pub window: Option<String>,
+    /// The meter's own name, when another of the account's would read the same without it.
+    pub name: Option<String>,
+}
+
+impl Label {
+    pub fn of(account: &str, m: &Meter) -> Self {
+        Self {
+            account: account.to_owned(),
+            provider: m.provider.clone(),
+            scope: m.scope.clone(),
+            window: (m.window != Window::Week).then(|| m.window.label()),
+            name: None,
+        }
+    }
+
+    pub fn text(&self) -> String {
+        self.with(&self.account, self.provider.as_deref(), self.scope.as_deref())
+    }
+
+    fn with(&self, account: &str, provider: Option<&str>, scope: Option<&str>) -> String {
+        let mut t = account.to_owned();
+        if let Some(p) = provider {
+            let _ = write!(t, " · {p}");
+        }
+        if let Some(s) = scope {
+            let _ = write!(t, " └ {s}");
+        }
+        for w in self.window.iter().chain(&self.name) {
+            let _ = write!(t, " {w}");
+        }
+        t
+    }
+
+    /// In `max` columns, where it can be: the provider is cut first, then the account, then the
+    /// model or group, each at its end with `…` and no further than it must, so what tells two
+    /// rows apart (the `└ Gemini` at the end) stays as long as it can.
+    pub fn within(&self, max: usize) -> String {
+        use unicode_width::UnicodeWidthStr;
+        let mut parts = [self.provider.clone(), Some(self.account.clone()), self.scope.clone()];
+        loop {
+            let t = self.with(parts[1].as_deref().unwrap_or_default(), parts[0].as_deref(), parts[2].as_deref());
+            if t.width() <= max {
+                return t;
+            }
+            let Some(p) = parts.iter_mut().flatten().find(|p| p.trim_end_matches('…').chars().count() > 1) else {
+                return t;
+            };
+            let mut kept: Vec<char> = p.trim_end_matches('…').chars().collect();
+            kept.pop();
+            *p = kept.into_iter().chain(['…']).collect();
+        }
+    }
+}
+
 /// One account's one meter.
 #[derive(Debug, Clone)]
 pub struct Row {
     pub account: String,
     pub meter: String,
+    /// What it measures: its window, provider and scope.
+    pub kind: Meter,
+    pub name: Label,
     pub readings: usize,
     /// At the last reading.
     pub gauge: Gauge,
@@ -179,13 +247,10 @@ impl Row {
         spark(&resample(&self.levels, cells))
     }
 
-    /// What names the row: the account, and its meter unless that is the usual 7-day one.
+    /// What names the row: the account, and what its meter counts as `quota show` says it
+    /// ([`Label`]).
     pub fn label(&self) -> String {
-        if self.meter == "seven_day" {
-            self.account.clone()
-        } else {
-            format!("{} {}", self.account, gauge::heading(&self.meter))
-        }
+        self.name.text()
     }
 
     /// `+14%/d`, or `—`.
@@ -220,6 +285,9 @@ impl Row {
         json!({
             "account": self.account,
             "meter": self.meter,
+            "window": self.kind.window,
+            "provider": self.kind.provider,
+            "scope": self.kind.scope,
             "readings": self.readings,
             "utilization": self.gauge.used,
             "floor": self.gauge.floor,
@@ -252,14 +320,18 @@ fn resample(levels: &[Option<f64>], cells: usize) -> Vec<Option<f64>> {
 /// The rows of `history`, the meters that reset soonest first (those that say no time last).
 pub fn rows(history: &History, limits: &Limits, since: u64, now: u64) -> Vec<Row> {
     let now_s = i64::try_from(now / 1_000_000).unwrap_or(i64::MAX);
+    let labels = history.labels();
     let mut rows: Vec<Row> = history
         .each()
         .filter_map(|(account, meter, points)| {
             let last = points.last()?;
             let read_s = i64::try_from(last.t / 1_000_000).unwrap_or(i64::MAX);
             let pace = pace(points, now);
-            let m = Meter { utilization: last.utilization, resets_at: last.resets_at };
+            let m = Meter { utilization: last.utilization, resets_at: last.resets_at, ..Meter::default() };
+            let kind = history.kind(account, meter);
             Some(Row {
+                name: labels.get(&(account, meter)).cloned().unwrap_or_else(|| Label::of(account, &kind)),
+                kind,
                 account: account.to_owned(),
                 meter: meter.to_owned(),
                 readings: points.len(),
@@ -335,11 +407,13 @@ const LABEL: usize = 30;
 /// too wide, each outlook goes on a line of its own below its row, and a line is cut only past that.
 pub fn table(rows: &[Row], width_of: Option<usize>) -> Vec<Line> {
     use unicode_width::UnicodeWidthStr;
-    let label = |r: &Row| {
-        let l = r.label();
-        if l.width() > LABEL { format!("{}…", l.chars().take(LABEL - 1).collect::<String>()) } else { l }
-    };
-    let labels: Vec<String> = rows.iter().map(label).collect();
+    // Each cut to fit, unless that makes two read alike: those stay whole.
+    let short: Vec<String> = rows.iter().map(|r| r.name.within(LABEL)).collect();
+    let labels: Vec<String> = rows
+        .iter()
+        .zip(&short)
+        .map(|(r, l)| if short.iter().filter(|c| *c == l).count() > 1 { r.label() } else { l.clone() })
+        .collect();
     let col = |f: &dyn Fn(&Row) -> String| rows.iter().map(|r| f(r).width()).max().unwrap_or(0);
     let (label_w, pace_w, resets_w) =
         (labels.iter().map(|l| l.width()).max().unwrap_or(0), col(&Row::pace_text), col(&Row::resets_text));
@@ -596,6 +670,7 @@ mod tests {
         let mut h = History::default();
         for (a, m, points) in series {
             h.series.entry((*a).to_owned()).or_default().insert((*m).to_owned(), points.clone());
+            h.kinds.entry((*a).to_owned()).or_default().insert((*m).to_owned(), Meter::named(m, 0.0, None));
         }
         h
     }
@@ -623,8 +698,46 @@ mod tests {
         let rows = rows(&two(), &limits(0.9), NOW - 7 * 24 * H, NOW);
         let order: Vec<&str> = rows.iter().map(|r| r.account.as_str()).collect();
         assert_eq!(order, ["omp:w", "claude:soon", "claude:late", "claude:never"]);
-        assert_eq!(rows[0].label(), "omp:w openai-codex/7 days", "a meter that is not claude's 7 days is named");
+        assert_eq!(rows[0].label(), "omp:w · openai-codex", "a provider's week is named by its provider");
         assert_eq!(rows[1].label(), "claude:soon");
+    }
+
+    /// The owner's ask of 2026-11-12: a row says its meter as `quota show` does, by provider,
+    /// model or group and window, so omp's read `omp:w · google-antigravity └ Gemini`, and two
+    /// meters never read alike, however narrow the table.
+    #[test]
+    fn a_row_names_its_meter_by_provider_scope_and_window() {
+        let at = |r| vec![reset(NOW_S + r, p(0, 0.1))];
+        let h = history(&[
+            ("omp:default", "google-antigravity/Claude & GPT (shared) (Weekly)", at(100)),
+            ("omp:default", "google-antigravity/Gemini (Weekly)", at(200)),
+            ("omp:default", "openai-codex/5 hours", at(300)),
+            ("claude:studyac17", "seven_day_fable", at(400)),
+            ("claude:studyac17", "seven_day", at(500)),
+        ]);
+        let rows = rows(&h, &limits(0.9), NOW - 7 * 24 * H, NOW);
+        let labels: Vec<String> = rows.iter().map(Row::label).collect();
+        assert_eq!(
+            labels,
+            [
+                "omp:default · google-antigravity └ Claude & GPT (shared)",
+                "omp:default · google-antigravity └ Gemini",
+                "omp:default · openai-codex 5 hours",
+                "claude:studyac17 └ Fable",
+                "claude:studyac17",
+            ]
+        );
+        let text = |l: &Line| l.iter().map(|s| s.text.as_str()).collect::<String>();
+        for width in [None, Some(100), Some(60)] {
+            let shown: Vec<String> = table(&rows, width).iter().map(text).collect();
+            let rows = shown.iter().filter(|l| !l.starts_with(' '));
+            let names: Vec<&str> = rows.map(|l| l.split("  ").next().unwrap()).collect();
+            let mut distinct = names.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            assert_eq!(distinct.len(), names.len(), "{width:?}: {shown:#?}");
+            assert!(names[1].ends_with("└ Gemini"), "the end that tells them apart stays: {names:?}");
+        }
     }
 
     #[test]

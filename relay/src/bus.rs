@@ -203,7 +203,7 @@ pub enum SessionEvent {
     },
     Rate {
         account: String,
-        #[serde(alias = "windows")]
+        #[serde(alias = "windows", deserialize_with = "crate::harness::deserialize_meters")]
         meters: Meters,
     },
     Limited {
@@ -515,7 +515,7 @@ pub enum QuotaEvent {
     /// A reading from the harness's quota command, which costs no model call.
     Reading {
         account: String,
-        #[serde(alias = "windows")]
+        #[serde(alias = "windows", deserialize_with = "crate::harness::deserialize_meters")]
         meters: Meters,
         /// The home's sign-in (`Identity::stamp`) when it was read, so a new one is read again.
         #[serde(default, skip_serializing_if = "Option::is_none")]

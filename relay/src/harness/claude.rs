@@ -8,6 +8,7 @@
 //! and from `rate_limit_event`s; transcripts live in the home, under
 //! `projects/<cwd key>/<session>.jsonl`.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -21,7 +22,7 @@ use sha2::{Digest, Sha256};
 use crate::harness::report::{Report, Said, parse_reset_in};
 use crate::harness::{
     Caps, Harness, Home, Identity, Invocation, Kind, Meter, Meters, Permissions, Reader, Refusal, Session, SignIn,
-    Task, read_json,
+    Task, Window, read_json,
 };
 
 const PREFIX: &str = ".claude";
@@ -167,22 +168,72 @@ impl Account for ClaudeAccount {
         i
     }
 
+    /// `Current session` is the five-hour meter and `Current week (all models)` the week's;
+    /// `Current week (Fable)` is the week's for that model alone, a meter of its own, scoped when
+    /// it names one of [`MODELS`]; any other `Current week (...)` is another week of the whole account.
     fn parse_quota(&self, text: &str, now_s: i64, local: &TimeZone) -> Meters {
         static LINE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"^Current (week \(all models\)|session):\s+(\d+)% used(?:\s+·\s+resets\s+(.+?))?\s*$")
+            Regex::new(r"^Current (week \(([^)]+)\)|session):\s+(\d+)% used(?:\s+·\s+resets\s+(.+?))?\s*$")
                 .expect("regex")
         });
         let clean = strip_ansi(text);
         let mut out = Meters::new();
         for line in clean.lines() {
             let Some(c) = LINE.captures(line.trim()) else { continue };
-            let key = if c[1].starts_with("week") { "seven_day" } else { "five_hour" };
-            let used: f64 = c[2].parse().unwrap_or(0.0);
-            let resets_at = c.get(3).and_then(|r| parse_reset_in(&format!("resets {}", r.as_str()), now_s, local));
-            out.insert(key.into(), Meter { utilization: used / 100.0, resets_at });
+            let used: f64 = c[3].parse().unwrap_or(0.0);
+            let (name, mut meter) = match c.get(2).map(|m| m.as_str().trim()) {
+                None => ("five_hour".to_owned(), Meter::new(Window::FiveHours, used / 100.0, None)),
+                Some("all models") => ("seven_day".to_owned(), Meter::new(Window::Week, used / 100.0, None)),
+                Some(what) => {
+                    let name = format!("seven_day_{}", what.to_ascii_lowercase().replace(' ', "_"));
+                    let meter = Meter { utilization: used / 100.0, resets_at: None, ..window_of(&name) };
+                    (name, meter)
+                }
+            };
+            // A reset is read against its meter's window (`report::reset_in_range`), never rolled a year on.
+            meter.resets_at = c
+                .get(4)
+                .and_then(|r| parse_reset_in(&format!("resets {}", r.as_str()), now_s, local, Some(meter.window)));
+            out.insert(name, meter);
         }
         out
     }
+}
+
+/// The model families Claude meters a week of apart, as `/usage` names them (`Current week
+/// (Fable)`) and the API does after `seven_day_` (`seven_day_opus`). Only these are scopes: any
+/// other suffix (`overage_included`, `oauth_apps`) says how the account's week is counted, not
+/// whose it is, so that meter stays the whole account's.
+pub const MODELS: [&str; 4] = ["Opus", "Sonnet", "Haiku", "Fable"];
+
+/// What a meter named as Claude's API names its windows measures (`five_hour`, `seven_day`,
+/// `seven_day_opus`, `seven_day_overage_included`), and puku's, which uses the same names
+/// (`monthly`, `requests`). A `seven_day_<model>` of [`MODELS`] is that model's week alone, which
+/// governs only a job whose model names it ([`covers`]); every other week is the account's.
+pub fn window_of(name: &str) -> Meter {
+    match name {
+        "five_hour" => Meter::new(Window::FiveHours, 0.0, None),
+        "seven_day" => Meter::new(Window::Week, 0.0, None),
+        "monthly" => Meter::new(Window::Month, 0.0, None),
+        n => match n.strip_prefix("seven_day_").filter(|r| !r.is_empty()) {
+            Some(rest) => {
+                let week = Meter::new(Window::Week, 0.0, None);
+                match MODELS.iter().find(|m| m.eq_ignore_ascii_case(rest)) {
+                    Some(model) => week.scope(*model),
+                    None => week,
+                }
+            }
+            // `requests`, or a name this crate does not know: the whole allowance, of a length not said.
+            None => Meter::new(Window::Other(None), 0.0, None),
+        },
+    }
+}
+
+/// Whether the meter `m` governs a job on `model`: a meter of the whole account always; one of a
+/// model of [`MODELS`] when the job's model names it (`claude-fable-5-2`). A job on the home's
+/// default model (`None`) is judged by the account's alone: relay cannot tell what that model is.
+pub fn covers(m: &Meter, model: Option<&str>) -> bool {
+    m.scope.as_ref().is_none_or(|s| model.is_some_and(|id| id.to_ascii_lowercase().contains(&s.to_ascii_lowercase())))
 }
 
 /// Tools that schedule the session's own later turns. Nothing is there to take
@@ -334,9 +385,10 @@ impl Harness for ClaudeCode {
         self.account.parse_quota(text, now_s, local)
     }
 
-    fn meters_for<'m>(&self, _model: Option<&str>, meters: &'m Meters) -> Result<Vec<&'m Meter>, Refusal> {
-        // One allowance per account, whatever the model.
-        Ok(meters.values().collect())
+    /// One allowance per account, whatever the model, and a meter of one model's own (the Fable
+    /// week) for a model that names it. A model not named (the home's default) is not told.
+    fn meters_for<'m>(&self, model: Option<&str>, meters: &'m Meters) -> Result<Vec<&'m Meter>, Refusal> {
+        Ok(meters.values().filter(|m| covers(m, model)).collect())
     }
 
     fn carry(&self, session: &str, from: Option<&Home>, to: &Home, _scratch: &Path) -> bool {
@@ -562,7 +614,15 @@ impl Reader for StreamReader {
                 self.report.session_id = v.get("session_id").and_then(Value::as_str).map(str::to_owned);
             }
             Some("rate_limit_event") => {
-                let m: Meters = serde_json::from_value(v.pointer("/rate_limit_info/unifiedWindows")?.clone()).ok()?;
+                let raw: BTreeMap<String, Meter> =
+                    serde_json::from_value(v.pointer("/rate_limit_info/unifiedWindows")?.clone()).ok()?;
+                let m: Meters = raw
+                    .into_iter()
+                    .map(|(name, w)| {
+                        let meter = Meter { utilization: w.utilization, resets_at: w.resets_at, ..window_of(&name) };
+                        (name, meter)
+                    })
+                    .collect();
                 self.report.meters = Some(m.clone());
                 return Some(m);
             }
@@ -704,13 +764,95 @@ mod tests {
         assert!(matches!(verdict(&r, ok, "FINAL", false, 0), Verdict::Limited { .. }), "{r:?}");
     }
 
+    /// 2026-11-13, on the real bus: `claude:tj.pro`'s five-hour reset read 1794513540 at 1794513435, and
+    /// `/usage` still printed it 53 s after it passed, which read as a year out ("resets 365d").
+    #[test]
+    fn a_reset_a_minute_old_is_not_rolled_a_year_forward() {
+        let tz = TimeZone::get("Asia/Dhaka").unwrap(); // 2026-11-13 01:59 +06
+        let text = |at: &str| {
+            format!(
+                "Current session: 100% used · resets {at}\nCurrent week (all models): 9% used · resets Nov 13, 1:59am\n"
+            )
+        };
+        let m = Claude.parse_quota(&text("1:59am"), 1_794_513_435, &tz);
+        assert_eq!(m["five_hour"].resets_at, Some(1_794_513_540));
+        let m = Claude.parse_quota(&text("1:59am"), 1_794_513_593, &tz);
+        assert_eq!(m["five_hour"].resets_at, Some(1_794_513_540), "kept as it is, not 1826049540 or tomorrow");
+        assert_eq!(m["seven_day"].resets_at, Some(1_794_513_540), "a dated week reset a minute past");
+        let m = Claude.parse_quota("Current session: 5% used · resets Nov 20, 1:59am\n", 1_794_513_593, &tz);
+        assert_eq!(m["five_hour"].resets_at, None, "further out than its window is no reset time");
+    }
+
     #[test]
     fn usage() {
         let text = "\x1b[1mCurrent week (all models): 24% used · resets Nov 8, 3pm (UTC)\x1b[0m\nCurrent week (Fable): 0% used\nCurrent session: 61% used · resets 7pm (UTC)\n";
         let m = Claude.parse_quota(text, 1_793_631_600, &TimeZone::UTC);
-        assert_eq!(m.len(), 2);
+        assert_eq!(m.len(), 3);
         assert!((m["seven_day"].utilization - 0.24).abs() < 1e-9);
         assert_eq!(m["five_hour"].resets_at, Some(1_793_631_600 + 4 * 3600));
+    }
+
+    /// The owner's report of 2026-11-12, studyac17's real `/usage`: the all-models week and the
+    /// Fable week are two meters, and both survive the reading.
+    #[test]
+    fn a_models_own_week_is_a_meter_beside_the_all_models_one() {
+        let text = "Current session: 4% used · resets 7pm (UTC)\nCurrent week (all models): 28% used · resets Nov 18, 3pm (UTC)\nCurrent week (Fable): 11% used · resets Nov 18, 3pm (UTC)\n";
+        let m = Claude.parse_quota(text, 1_793_631_600, &TimeZone::UTC);
+        assert_eq!(m.len(), 3, "{m:?}");
+        assert!((m["seven_day"].utilization - 0.28).abs() < 1e-9, "all models: {m:?}");
+        assert!((m["seven_day_fable"].utilization - 0.11).abs() < 1e-9, "Fable: {m:?}");
+        let (all, fable) = (&m["seven_day"], &m["seven_day_fable"]);
+        assert_eq!((all.window, all.scope.as_deref()), (Window::Week, None));
+        assert_eq!((fable.window, fable.scope.as_deref()), (Window::Week, Some("Fable")));
+        assert_eq!(m["five_hour"].window, Window::FiveHours);
+        // A Fable job is judged against the Fable week too; any other model, and the home's
+        // default, which relay cannot tell, against the whole account's alone.
+        let governs = |model| Claude.meters_for(model, &m).unwrap().into_iter().any(|g| std::ptr::eq(g, fable));
+        assert!(governs(Some("claude-fable-5-2")) && governs(Some("fable")));
+        assert!(!governs(Some("claude-opus-5-5")) && !governs(None));
+        assert_eq!(Claude.meters_for(Some("fable"), &m).unwrap().len(), 3);
+    }
+
+    /// A rate event names its windows as Claude's API does; one of a model's own is scoped to it.
+    #[test]
+    fn a_streamed_window_says_what_it_measures() {
+        let mut r = Claude.reader();
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"seven_day":{"utilization":0.3},"seven_day_opus":{"utilization":0.1},"five_hour":{"utilization":0.2}}}}"#;
+        let m = r.line(line).unwrap();
+        assert_eq!(m["seven_day"].window, Window::Week);
+        assert_eq!((m["seven_day_opus"].window, m["seven_day_opus"].scope.as_deref()), (Window::Week, Some("Opus")));
+        assert_eq!(m["five_hour"].window, Window::FiveHours);
+    }
+
+    /// Review of #66: only the suffixes that name a model are scopes. `overage_included` says how
+    /// the week is counted, not whose it is, so it stays the whole account's and governs every job.
+    #[test]
+    fn only_a_declared_models_week_is_scoped() {
+        for (name, scope) in [
+            ("seven_day_opus", Some("Opus")),
+            ("seven_day_sonnet", Some("Sonnet")),
+            ("seven_day_fable", Some("Fable")),
+            ("seven_day_overage_included", None),
+            ("seven_day_oauth_apps", None),
+        ] {
+            let m = window_of(name);
+            assert_eq!((m.window, m.scope.as_deref()), (Window::Week, scope), "{name}");
+        }
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"seven_day":{"utilization":0.3},"seven_day_overage_included":{"utilization":0.95}}}}"#;
+        let m = Claude.reader().line(line).unwrap();
+        let overage = &m["seven_day_overage_included"];
+        for model in [None, Some("claude-opus-5-5"), Some("fable")] {
+            let governing = Claude.meters_for(model, &m).unwrap();
+            assert!(governing.iter().any(|g| std::ptr::eq(*g, overage)), "{model:?}: account-wide");
+        }
+        // `/usage` alike: a model it names is scoped, anything else in the brackets is not.
+        let text = "Current week (all models): 20% used\nCurrent week (Sonnet): 5% used\nCurrent week (extra usage): 9% used\n";
+        let m = Claude.parse_quota(text, 0, &TimeZone::UTC);
+        assert_eq!(m["seven_day_sonnet"].scope.as_deref(), Some("Sonnet"));
+        assert_eq!(
+            (m["seven_day_extra_usage"].window, m["seven_day_extra_usage"].scope.as_deref()),
+            (Window::Week, None)
+        );
     }
 
     #[test]

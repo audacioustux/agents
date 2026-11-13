@@ -2,7 +2,7 @@
 //! reviewer can read, tells it exactly which commit to judge, reads its verdict, and for a reject
 //! sends the findings back to the builder.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -10,6 +10,7 @@ use super::{Ran, checkpoint_rev, port};
 use crate::bus::{Reason, SessionEvent, Verdict};
 use crate::config::model_family;
 use crate::ctx::Ctx;
+use crate::hostdir::HostDir;
 use crate::systems::checkpoint;
 use crate::systems::decide::Reviewing;
 use crate::world::Job;
@@ -81,9 +82,47 @@ fn merge_base(repo: &Path, commit: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|s| !s.is_empty())
 }
 
+/// The file in a review's inbox that holds its builder's last result.
+pub(super) const BUILDER_RESULT: &str = "builder-result.md";
+
+/// The most of a builder's result a review is handed: a report, not a transcript.
+const BUILDER_RESULT_MAX: usize = 64 * 1024;
+
+/// Hands the review the builder's last result, written afresh on every start and resume into the review's
+/// inbox, which its session reads and cannot write: the builder's own record lives in relay's state, which a
+/// session never sees. Returns the file's path, the same inside the sandbox as outside.
+pub(super) fn hand_over(ctx: &Ctx, inbox: &HostDir, r: &Reviewing) -> Result<PathBuf> {
+    let result = std::fs::read_to_string(ctx.job_file(&r.job, "result.md")).ok();
+    let text = builder_result(&r.job, result.as_deref(), &ctx.cfg.session.final_marker);
+    Ok(inbox.write(BUILDER_RESULT, text.as_bytes())?)
+}
+
+/// What the builder-result file says: the builder's last result (its final section and the summary above it),
+/// and plainly when that result has no final section or there is none at all.
+fn builder_result(job: &str, result: Option<&str>, marker: &str) -> String {
+    let head = format!("# The last result of {job}\n\n");
+    let Some(text) = result.map(str::trim).filter(|t| !t.is_empty()) else {
+        return format!(
+            "{head}{job}'s latest run left no final message, so there is no {marker} section to read. Judge the \
+             branch by its commits and its diff alone.\n"
+        );
+    };
+    let text = checkpoint::bounded(text, BUILDER_RESULT_MAX);
+    if !marker.is_empty() && text.contains(marker) {
+        format!(
+            "{head}What {job}'s latest run ended with: its {marker} section and what it wrote above it.\n\n{text}\n"
+        )
+    } else {
+        format!(
+            "{head}{job}'s latest run ended without a {marker} section. This is its last message as relay read it; \
+             do not take it for a report, and judge the branch by its commits and its diff.\n\n{text}\n"
+        )
+    }
+}
+
 /// What a review is told before anything else, on every start and every resume: the commit it is to
-/// judge now, which can be newer than the one it saw before.
-pub(super) fn preamble(r: &Reviewing) -> String {
+/// judge now, which can be newer than the one it saw before, and where the builder's last result is.
+pub(super) fn preamble(r: &Reviewing, result: &Path) -> String {
     let base = r.base.as_deref().unwrap_or("HEAD");
     let range = format!("{base}..{}", r.reference);
     let codes: Vec<&str> = Reason::ALL.iter().map(|r| r.as_str()).collect();
@@ -91,11 +130,14 @@ pub(super) fn preamble(r: &Reviewing) -> String {
         "This is a review of job {job}'s branch. relay fetched it into the repository as `{reference}`, at commit \
          {commit}: judge exactly that commit, even if you saw an earlier one. It started from {base}, so \
          `git log {range}` lists its commits and `git diff {range}` is its change. Judge the work as the brief asks.\n\n\
+         {job}'s last result, its FINAL section and the summary above it as of this start, is in `{result}` \
+         (read-only). It says what the builder claims; check that against the commit.\n\n\
          End your FINAL section with a line `verdict: accept` or `verdict: reject`. For a reject, add a line \
          `reason: <code>` ({codes}) and put the findings the builder must act on in `notes`.",
         job = r.job,
         reference = r.reference,
         commit = r.commit,
+        result = result.display(),
         codes = codes.join(", "),
     )
 }
@@ -178,7 +220,7 @@ pub(super) fn carry_out(
         reason.map_or("other", Reason::as_str),
         checkpoint::bounded(findings.trim(), 4096)
     );
-    Ok(match crate::systems::queue::resume_reviewed(ctx, of, message)? {
+    Ok(match crate::systems::queue::resume_reviewed(ctx, of, &job.name, message)? {
         None => format!("{said}; {of} resumed with the findings"),
         Some(why) => format!("{said}; {of} not resumed: {why}"),
     })
@@ -267,12 +309,34 @@ mod tests {
             commit: "abc".into(),
             base: Some("def".into()),
         };
-        let p = preamble(&r);
+        let p = preamble(&r, Path::new("/in/builder-result.md"));
         assert!(
             p.contains("at commit abc")
                 && p.contains("git diff def..refs/relay/review/r")
-                && p.contains("exactly that commit"),
+                && p.contains("exactly that commit")
+                && p.contains("b's last result, its FINAL section and the summary above it as of this start, is in `/in/builder-result.md`"),
             "{p}"
         );
+    }
+
+    #[test]
+    fn the_builders_result_is_handed_over_as_it_is_and_its_absence_is_said() {
+        let with = builder_result("b", Some("Did the parser.\n\nFINAL\nstatus: done\n"), "FINAL");
+        assert!(
+            with.contains("its FINAL section and what it wrote above it")
+                && with.contains("Did the parser.\n\nFINAL\nstatus: done"),
+            "{with}"
+        );
+        let without = builder_result("b", Some("I ran out of turns."), "FINAL");
+        assert!(
+            without.contains("ended without a FINAL section") && without.contains("I ran out of turns."),
+            "{without}"
+        );
+        for none in [None, Some("  \n")] {
+            let none = builder_result("b", none, "FINAL");
+            assert!(none.contains("left no final message, so there is no FINAL section"), "{none}");
+        }
+        let long = builder_result("b", Some(&"x".repeat(BUILDER_RESULT_MAX + 10)), "FINAL");
+        assert!(long.len() < BUILDER_RESULT_MAX + 512 && long.contains("(10 more bytes)"), "bounded");
     }
 }

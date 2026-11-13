@@ -172,6 +172,10 @@ pub struct Job {
     /// For a review: the brief it is told, in place of its own, when its session next starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebrief: Option<String>,
+    /// For a reviewed job: its review chain stopped short of an accept, and why
+    /// (`QueueEvent::ReviewHalted`), until the builder or its reviewer is resumed or judged again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_halted: Option<String>,
 }
 
 /// A review that no longer belongs to its build job's chain.
@@ -572,7 +576,8 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// 17: a decision's `agent:` session holds a seat (`seated`, `unseated`), kept apart from the
 /// decisions (`seats`) so a job's cleanup keeps it.
 /// 18: a meter says its window, provider and scope; a stored reset past its window reads as none.
-const FOLD_VERSION: u32 = 18;
+/// 19: a review chain that stopped short of an accept (`review_halted`), for the jobs that wait on it.
+const FOLD_VERSION: u32 = 19;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -675,16 +680,22 @@ pub struct Wait {
     pub state: String,
     /// It has ended without being done, so the waiting job never starts on its own.
     pub blocked: bool,
+    /// It is done, and the wait is for its review chain's accept (`state` says where the chain is).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub review: bool,
 }
 
 impl Wait {
-    /// One line for a board: `after a, b` while they work, `waits for a (failed)` once one cannot finish.
+    /// One line for a board: `after a, b` while they work, `after a (rejected; b at work)` while a review chain
+    /// has yet to accept, `waits for a (failed)` once one cannot finish.
     pub fn summary(waits: &[Self]) -> Option<String> {
-        let names = |w: &[&Self]| w.iter().map(|w| w.job.as_str()).collect::<Vec<_>>().join(", ");
         let blocked: Vec<_> = waits.iter().filter(|w| w.blocked).collect();
         if blocked.is_empty() {
-            let all: Vec<_> = waits.iter().collect();
-            return (!all.is_empty()).then(|| format!("after {}", names(&all)));
+            let all: Vec<_> = waits
+                .iter()
+                .map(|w| if w.review { format!("{} ({})", w.job, w.state) } else { w.job.clone() })
+                .collect();
+            return (!all.is_empty()).then(|| format!("after {}", all.join(", ")));
         }
         let reasons: Vec<_> = blocked.iter().map(|w| format!("{} ({})", w.job, w.state)).collect();
         Some(format!("waits for {}", reasons.join(", ")))
@@ -699,24 +710,66 @@ impl Wait {
 /// waits, read off those answers.
 struct Walk<'w> {
     jobs: &'w BTreeMap<String, Job>,
+    /// Each build job's live review chain: its reviews that were not replaced or detached.
+    chains: std::collections::HashMap<&'w str, Vec<&'w Job>>,
     stuck: std::collections::HashMap<&'w str, bool>,
     path: std::collections::HashSet<&'w str>,
     steps: usize,
 }
 
 /// What one dependency, `a`, of a job means: blocked for good, waiting on a queued job (whose blocking
-/// is still to be known), or neither.
+/// is still to be known), or neither. `review` marks a dependency that is done itself and waits for its
+/// review chain's accept; the queued job is then the one the chain waits on, `label` where the chain is.
 enum Edge<'w> {
     Done,
-    Blocked(&'static str),
-    Live(&'static str),
-    Queued(&'w Job),
+    Blocked(String, bool),
+    Live(String, bool),
+    Queued(&'w Job, Option<String>),
+}
+
+impl Edge<'_> {
+    /// The same answer, as a wait for a review chain whose state is `label`.
+    fn for_review(self, label: impl Fn(&str) -> String) -> Self {
+        match self {
+            Edge::Done => Edge::Done,
+            Edge::Blocked(s, _) => Edge::Blocked(label(&s), true),
+            Edge::Live(s, _) => Edge::Live(label(&s), true),
+            Edge::Queued(d, l) => {
+                let s = l.unwrap_or_else(|| if d.held { "held".into() } else { d.status.as_str().into() });
+                Edge::Queued(d, Some(label(&s)))
+            }
+        }
+    }
+}
+
+/// What a dependency on `d` means by its own status alone.
+fn plain(d: &Job) -> Edge<'_> {
+    match d {
+        d if d.status == Status::Done => Edge::Done,
+        // A job the disk floor holds is the dispatcher's to resume once its own prerequisites can progress:
+        // it is blocked as a queued job is, and so are the jobs that wait for it.
+        d if d.status == Status::Queued || d.held => Edge::Queued(d, None),
+        d if d.status.is_live() => Edge::Live(d.status.as_str().into(), false),
+        d if d.reason.as_deref() == Some("dequeued") => Edge::Blocked("dequeued".into(), false),
+        d => Edge::Blocked(d.status.as_str().into(), false),
+    }
 }
 
 impl Deps {
     fn build(jobs: &BTreeMap<String, Job>) -> Analysis {
-        let mut walk =
-            Walk { jobs, stuck: std::collections::HashMap::new(), path: std::collections::HashSet::new(), steps: 0 };
+        let mut chains: std::collections::HashMap<&str, Vec<&Job>> = std::collections::HashMap::new();
+        for r in jobs.values().filter(|r| r.unchained.is_none()) {
+            if let Some(b) = r.review_of() {
+                chains.entry(b).or_default().push(r);
+            }
+        }
+        let mut walk = Walk {
+            jobs,
+            chains,
+            stuck: std::collections::HashMap::new(),
+            path: std::collections::HashSet::new(),
+            steps: 0,
+        };
         for j in jobs.values().filter(|j| j.status == Status::Queued || j.held) {
             walk.settle(j);
         }
@@ -728,17 +781,76 @@ impl Deps {
 }
 
 impl<'w> Walk<'w> {
-    fn edge(&self, a: &str) -> Edge<'w> {
-        match self.jobs.get(a) {
-            Some(d) if d.status == Status::Done => Edge::Done,
-            // A job the disk floor holds is the dispatcher's to resume once its own prerequisites can progress:
-            // it is blocked as a queued job is, and so are the jobs that wait for it.
-            Some(d) if d.status == Status::Queued || d.held => Edge::Queued(d),
-            Some(d) if d.status.is_live() => Edge::Live(d.status.as_str()),
-            Some(d) if d.reason.as_deref() == Some("dequeued") => Edge::Blocked("dequeued"),
-            Some(d) => Edge::Blocked(d.status.as_str()),
-            None => Edge::Blocked("gone"),
+    /// What `of`'s dependency `a` means. A dependency that is done is waited for until its review chain accepts:
+    /// a review (`--review-of`) until its own verdict is an accept, a build job with a live chain until that
+    /// chain's is. Only a review of `a` itself waits for `a` alone, or the chain would wait for itself.
+    fn edge(&self, a: &str, of: &Job) -> Edge<'w> {
+        let Some(d) = self.jobs.get(a) else { return Edge::Blocked("gone".into(), false) };
+        match plain(d) {
+            Edge::Done if d.review_of().is_some() => self.verdict(d),
+            Edge::Done if of.review_of() != Some(a) => self.reviewed(d),
+            e => e,
         }
+    }
+
+    /// The build job `b`, done, as its live review chain stands.
+    fn reviewed(&self, b: &'w Job) -> Edge<'w> {
+        let chain = self.chains.get(b.name.as_str()).map_or(&[][..], Vec::as_slice);
+        let mut worst = Edge::Done;
+        for r in chain {
+            let e = match plain(r) {
+                Edge::Done => self.verdict(r),
+                e => e.for_review(|s| format!("in review: {} {s}", r.name)),
+            };
+            // One blocked review blocks; else the first one still to accept is what it waits on.
+            worst = match (worst, e) {
+                (Edge::Blocked(s, r), _) | (_, Edge::Blocked(s, r)) => Edge::Blocked(s, r),
+                (Edge::Done, e) => e,
+                (w, _) => w,
+            };
+        }
+        worst
+    }
+
+    /// What the verdict of `r`, a review that ended done, means for a job that waits on its chain: an accept of
+    /// the branch's head releases it; a reject (or a verdict on a head the branch left) waits while the builder
+    /// answers and the chain judges again, and blocks once nothing will: the builder failed or was stopped, the
+    /// chain halted (`review_halted`), or it was detached. A replaced review hands the wait to its replacement.
+    fn verdict(&self, mut r: &'w Job) -> Edge<'w> {
+        let blocked = |s: String| Edge::Blocked(s, true);
+        // A chain of replacements is as long as the reviews of one job: bounded by the jobs.
+        for _ in 0..=self.jobs.len() {
+            let Some(of) = r.review_of() else { return Edge::Done };
+            match r.unchained.as_ref().map(|u| u.by.as_ref()) {
+                None => {}
+                Some(None) => return blocked("review detached".into()),
+                Some(Some(next)) => match self.jobs.get(next) {
+                    Some(n) if n.status == Status::Done => {
+                        r = n;
+                        continue;
+                    }
+                    Some(n) => return plain(n).for_review(|s| format!("superseded by {next} {s}")),
+                    None => return blocked(format!("superseded by {next}, gone")),
+                },
+            }
+            let Some(b) = self.jobs.get(of) else { return blocked(format!("{of} gone")) };
+            let Some(v) = b.verdicts.iter().rev().find(|v| v.reviewer == r.name) else {
+                return blocked("no verdict".into());
+            };
+            if !v.wants_again() {
+                return Edge::Done;
+            }
+            let said = v.summary();
+            return match plain(b) {
+                Edge::Done => match &b.review_halted {
+                    Some(why) => blocked(format!("{said}; {why}")),
+                    // The builder answered: its end resumes the review in the same breath.
+                    None => Edge::Live(format!("{said}; re-review due"), true),
+                },
+                e => e.for_review(|s| format!("{said}; {of} {s}")),
+            };
+        }
+        blocked("a cycle of replaced reviews".into())
     }
 
     /// Works out whether `root` and every queued job under it is stuck, on an explicit stack of
@@ -755,11 +867,11 @@ impl<'w> Walk<'w> {
             if let Some(a) = job.after.get(next) {
                 stack[top].1 += 1;
                 self.steps += 1;
-                let blocked = match self.edge(a) {
-                    Edge::Done | Edge::Live(_) => false,
-                    Edge::Blocked(_) => true,
-                    Edge::Queued(d) if self.path.contains(d.name.as_str()) => true,
-                    Edge::Queued(d) => {
+                let blocked = match self.edge(a, job) {
+                    Edge::Done | Edge::Live(..) => false,
+                    Edge::Blocked(..) => true,
+                    Edge::Queued(d, _) if self.path.contains(d.name.as_str()) => true,
+                    Edge::Queued(d, _) => {
                         if let Some(&known) = self.stuck.get(d.name.as_str()) {
                             known
                         } else {
@@ -785,19 +897,26 @@ impl<'w> Walk<'w> {
 
     /// What `job` waits for, read off the settled blocking of every queued job.
     fn waits(&mut self, job: &'w Job) -> Vec<Wait> {
-        let wait = |name: &String, state: &str, blocked| Wait { job: name.clone(), state: state.into(), blocked };
+        let wait = |name: &String, state: &str, blocked, review| Wait {
+            job: name.clone(),
+            state: state.into(),
+            blocked,
+            review,
+        };
         let mut out = Vec::new();
         for a in &job.after {
             self.steps += 1;
-            out.extend(match self.edge(a) {
+            out.extend(match self.edge(a, job) {
                 Edge::Done => None,
-                Edge::Queued(d) if d.name == job.name => Some(wait(a, "a cycle", true)),
-                Edge::Queued(d) if self.stuck.get(d.name.as_str()).copied().unwrap_or(false) => {
-                    Some(wait(a, "blocked", true))
+                Edge::Queued(d, _) if d.name == job.name => Some(wait(a, "a cycle", true, false)),
+                Edge::Queued(d, label) if self.stuck.get(d.name.as_str()).copied().unwrap_or(false) => {
+                    let review = label.is_some();
+                    Some(wait(a, &label.map_or_else(|| "blocked".into(), |l| format!("{l}, blocked")), true, review))
                 }
-                Edge::Queued(d) => Some(wait(a, if d.held { "held" } else { d.status.as_str() }, false)),
-                Edge::Live(state) => Some(wait(a, state, false)),
-                Edge::Blocked(state) => Some(wait(a, state, true)),
+                Edge::Queued(_, Some(label)) => Some(wait(a, &label, false, true)),
+                Edge::Queued(d, None) => Some(wait(a, if d.held { "held" } else { d.status.as_str() }, false, false)),
+                Edge::Live(state, review) => Some(wait(a, &state, false, review)),
+                Edge::Blocked(state, review) => Some(wait(a, &state, true, review)),
             });
         }
         out
@@ -1042,6 +1161,7 @@ impl World {
                 }
             }
             QueueEvent::Resumed { job, message, budget_usd, models } => {
+                self.chain_moves(job);
                 if let Some(j) = self.jobs.get_mut(job) {
                     // Resumed by hand during its check: the checking runner no longer speaks for it.
                     if j.status == Status::Checking {
@@ -1080,6 +1200,7 @@ impl World {
                 }
             }
             QueueEvent::Unchained { job, by } => self.unchain(t, job, by.as_ref()),
+            QueueEvent::ReviewHalted { job, review, why } => self.halt_chain(job, review, why),
             QueueEvent::ReviewBriefed { job, brief } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.rebrief = Some(brief.clone());
@@ -1097,12 +1218,31 @@ impl World {
         }
     }
 
+    /// `job` was resumed: the review chain it is part of moves again, as the builder answers or its reviewer
+    /// judges again.
+    fn chain_moves(&mut self, job: &str) {
+        let builder = self.jobs.get(job).and_then(Job::review_of).unwrap_or(job).to_owned();
+        if let Some(b) = self.jobs.get_mut(&builder) {
+            b.review_halted = None;
+        }
+    }
+
+    /// The chain of `builder` halted where `review` left it. Only the live chain's halt stands: a replaced
+    /// review's says nothing of the new one.
+    fn halt_chain(&mut self, builder: &str, review: &str, why: &str) {
+        let chained = self.jobs.get(review).is_some_and(|r| r.unchained.is_none());
+        if let Some(b) = self.jobs.get_mut(builder).filter(|_| chained) {
+            b.review_halted = Some(format!("{review}'s chain halted: {why}"));
+        }
+    }
+
     /// The review `job` leaves its build job's chain.
     fn unchain(&mut self, t: u64, job: &str, by: Option<&String>) {
         let builder = self.jobs.get(job).and_then(|r| r.review_of()).map(str::to_owned);
         if let Some(b) = builder.and_then(|b| self.jobs.get_mut(&b)) {
             // Its verdicts are history now, in the log; the board shows the chain that is.
             b.verdicts.retain(|v| v.reviewer != job);
+            b.review_halted = None;
         }
         if let Some(j) = self.jobs.get_mut(job) {
             let left = Unchained { by: by.cloned() };
@@ -1385,6 +1525,7 @@ impl World {
                 // A review that left the chain still wrote its verdict to the log; the board does not keep it.
                 let chained = self.jobs.get(job).is_some_and(|r| r.unchained.is_none());
                 if let Some(j) = self.jobs.get_mut(of).filter(|_| chained) {
+                    j.review_halted = None;
                     let r = Reviewed {
                         reviewer: job.clone(),
                         commit: commit.clone(),
@@ -1660,6 +1801,7 @@ mod tests {
             (16, 0x5351_e6de_0d8d_bfd8),
             (17, 0x2132_12e7_f06d_d32d),
             (18, 0x4bb9_80c4_5c80_027a),
+            (19, 0x4bb9_80c4_5c80_027a),
         ];
         let dispatched = |t, model: Option<&str>| {
             st(
@@ -1920,6 +2062,135 @@ mod tests {
         assert_eq!(state(&events), (true, false, None), "done");
         events.push(st(8, Event::Land(LandEvent::Forgotten { job: "a".into() })));
         assert_eq!(state(&events), (true, false, None), "a done job cleaned away was waited for");
+    }
+
+    fn queued_review(job: &str, of: &str) -> Event {
+        let Event::Queue(QueueEvent::Queued { task, harnesses, models, effort, budget_usd, .. }) = queued(job) else {
+            unreachable!()
+        };
+        Event::Queue(QueueEvent::Queued {
+            job: job.into(),
+            task,
+            readonly: true,
+            harnesses,
+            models,
+            effort,
+            budget_usd,
+            pinned: None,
+            reuse_key: None,
+            after: vec![of.into()],
+            profile: None,
+            fork: None,
+            parent: None,
+            depth: 0,
+            acceptance: bus::Acceptance::ReviewOf(of.into()),
+        })
+    }
+
+    fn reviewed(job: &str, of: &str, verdict: bus::Verdict) -> Event {
+        let reason = (verdict == bus::Verdict::Reject).then_some(bus::Reason::TestFailure);
+        Event::Session(SessionEvent::Reviewed {
+            job: job.into(),
+            of: of.into(),
+            commit: "c1".into(),
+            verdict,
+            reason,
+            family: None,
+            stale_head: None,
+        })
+    }
+
+    fn resumed(job: &str) -> Event {
+        Event::Queue(QueueEvent::Resumed {
+            job: job.into(),
+            message: "again".into(),
+            budget_usd: None,
+            models: BTreeMap::new(),
+        })
+    }
+
+    /// `TheGrid`, 2026-11-13: beam/U6, queued after a review that rejected, started on the branch the review had
+    /// just sent back. A job after a review waits for its accept, through the builder's answer and the
+    /// re-review; so does a job after a build job with a review chain. Each wait says where the chain is.
+    #[test]
+    fn a_job_after_a_review_or_a_reviewed_build_waits_for_the_accept() {
+        use bus::Verdict::{Accept, Reject};
+        let mut events = vec![st(1, queued("b")), st(2, ended("b", Outcome::Done))];
+        events.extend([
+            st(3, queued_review("r", "b")),
+            st(4, queued_after("d", &["r"])),
+            st(5, queued_after("f", &["b"])),
+        ]);
+        let state = |events: &[Stamped], job: &str| {
+            let w = World::fold(events);
+            let j = &w.jobs[job];
+            (w.startable(j), w.blocked(j), Wait::summary(&w.waits(j)))
+        };
+        let waits = |s: &str| (false, false, Some(s.to_owned()));
+        let w = World::fold(&events);
+        assert!(w.startable(&w.jobs["r"]), "the review waits for its build alone: {:?}", w.waits(&w.jobs["r"]));
+        assert_eq!(state(&events, "d"), waits("after r"));
+        assert_eq!(state(&events, "f"), waits("after b (in review: r queued)"), "the build is done, not accepted");
+
+        // A reject resumes the builder, then the review ends: both dependents wait while the builder answers.
+        events.extend([st(6, reviewed("r", "b", Reject)), st(7, resumed("b")), st(8, ended("r", Outcome::Done))]);
+        assert_eq!(state(&events, "d"), waits("after r (reject: test-failure; b queued)"));
+        assert_eq!(state(&events, "f"), waits("after b"));
+        events.push(st(9, ended("b", Outcome::Done)));
+        assert_eq!(state(&events, "d"), waits("after r (reject: test-failure; re-review due)"));
+        assert_eq!(state(&events, "f"), waits("after b (reject: test-failure; re-review due)"));
+        let answered = events.clone();
+        events.push(st(10, resumed("r")));
+        assert_eq!(state(&events, "d"), waits("after r"));
+        assert_eq!(state(&events, "f"), waits("after b (in review: r queued)"));
+        events.extend([st(11, reviewed("r", "b", Accept)), st(12, ended("r", Outcome::Done))]);
+        assert_eq!(state(&events, "d"), (true, false, None), "the accept releases it");
+        assert_eq!(state(&events, "f"), (true, false, None));
+
+        // Where nothing will move the chain, the wait is blocked and says why.
+        let blocked = |s: &str| (false, true, Some(s.to_owned()));
+        let halted = [
+            &answered[..],
+            &[st(
+                10,
+                Event::Queue(QueueEvent::ReviewHalted {
+                    job: "b".into(),
+                    review: "r".into(),
+                    why: "r has had 2 decisions already (hooks.max_decisions)".into(),
+                }),
+            )],
+        ]
+        .concat();
+        let why = "reject: test-failure; r's chain halted: r has had 2 decisions already (hooks.max_decisions)";
+        assert_eq!(state(&halted, "d"), blocked(&format!("waits for r ({why})")));
+        assert_eq!(state(&halted, "f"), blocked(&format!("waits for b ({why})")));
+        let again = [&halted[..], &[st(11, resumed("r"))]].concat();
+        assert_eq!(state(&again, "d"), waits("after r"), "a resume by hand moves the chain again");
+
+        let failed = [&answered[..8], &[st(9, ended("b", Outcome::Failed))]].concat();
+        assert_eq!(state(&failed, "d"), blocked("waits for r (reject: test-failure; b failed)"));
+        assert_eq!(state(&failed, "f"), blocked("waits for b (failed)"));
+
+        let detached =
+            [&answered[..], &[st(10, Event::Queue(QueueEvent::Unchained { job: "r".into(), by: None }))]].concat();
+        assert_eq!(state(&detached, "d"), blocked("waits for r (review detached)"));
+        assert_eq!(state(&detached, "f"), (true, false, None), "a build with no chain left is done");
+
+        // A replaced review hands the wait to its replacement.
+        let replaced = [
+            &answered[..],
+            &[
+                st(10, queued_review("r2", "b")),
+                st(11, Event::Queue(QueueEvent::Unchained { job: "r".into(), by: Some("r2".into()) })),
+            ],
+        ]
+        .concat();
+        assert_eq!(state(&replaced, "d"), waits("after r (superseded by r2 queued)"));
+        assert_eq!(state(&replaced, "f"), waits("after b (in review: r2 queued)"));
+        let accepted =
+            [&replaced[..], &[st(12, reviewed("r2", "b", Accept)), st(13, ended("r2", Outcome::Done))]].concat();
+        assert_eq!(state(&accepted, "d"), (true, false, None));
+        assert_eq!(state(&accepted, "f"), (true, false, None));
     }
 
     #[test]

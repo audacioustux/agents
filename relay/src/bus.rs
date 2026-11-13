@@ -104,6 +104,16 @@ pub enum QueueEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<String>,
     },
+    /// The review chain of the build job `job` stopped short of an accept: its reviewer `review`
+    /// rejected it (or judged a head it has left) and relay could not resume the one whose turn it is,
+    /// for `why` (`hooks.max_decisions`, the job's ceiling, a banned model). Nothing moves the chain
+    /// on its own until a person resumes the builder or the reviewer, so a job queued `--after` it
+    /// is blocked rather than left waiting.
+    ReviewHalted {
+        job: String,
+        review: String,
+        why: String,
+    },
     /// The brief the chained review `job` is judged by from its next re-review on.
     ReviewBriefed {
         job: String,

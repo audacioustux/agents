@@ -397,7 +397,11 @@ fn launch(
         Ok(r) => r,
         Err(why) => return Ok(ControlFlow::Break((Outcome::Failed, Some(why)))),
     };
-    let preamble = reviewing.as_ref().map(review::preamble);
+    // It reads its builder's last result from its inbox, as of this start: a re-review gets the answer to its reject.
+    let preamble = match &reviewing {
+        Some(r) => Some(review::preamble(r, &review::hand_over(ctx, &work.inbox, r)?)),
+        None => None,
+    };
     // A fork has its parent's context but not its own task: it is told its brief.
     // A review whose brief was replaced is told the new one when it picks its session up again.
     let message = match (&job.rebrief, resumed.is_some()) {

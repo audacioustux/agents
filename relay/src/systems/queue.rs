@@ -407,13 +407,30 @@ pub fn follow_up(ctx: &Ctx, world: &World, parent: &Job, f: FollowUp) -> Result<
 /// on any account with room. Not while it works, not once `hooks.max_decisions` reviews have rejected it,
 /// and not on a banned model. `None` when resumed, else why not.
 /// Only a review's decision does this, so it runs inside `Decided::carry`, which holds the jobs lock.
-pub fn resume_reviewed(ctx: &Ctx, builder: &str, message: String) -> Result<Option<String>> {
+pub fn resume_reviewed(ctx: &Ctx, builder: &str, reviewer: &str, message: String) -> Result<Option<String>> {
     let world = ctx.world()?;
     let Some(j) = world.jobs().get(builder) else { return Ok(Some(format!("{builder} is gone"))) };
     // This reject is already among the verdicts: `hooks.max_decisions` of them resume the builder.
     let rejected =
         j.verdicts.iter().filter(|v| v.verdict == crate::bus::Verdict::Reject && v.stale_head.is_none()).count();
-    resume_by_review(ctx, j, rejected, message)
+    resume_by_review(ctx, j, rejected, message).and_then(|why| halted(ctx, (builder, reviewer), builder, why))
+}
+
+/// Records that the review chain `(builder, reviewer)` stopped short of an accept, when the resume of `turn`
+/// (one of the two) that it needed was refused for good (`why`), so a job waiting on the chain is blocked
+/// rather than left waiting. A refusal because `turn` is at work, or gone, is not one: its end moves the
+/// chain on, and a job waiting on one that is gone is blocked as it is.
+fn halted(ctx: &Ctx, (builder, reviewer): (&str, &str), turn: &str, why: Option<String>) -> Result<Option<String>> {
+    let Some(why) = why else { return Ok(None) };
+    let world = ctx.world()?;
+    if world.jobs().get(turn).is_some_and(|j| !j.status.is_live()) {
+        ctx.port(&Source(())).emit(QueueEvent::ReviewHalted {
+            job: builder.to_owned(),
+            review: reviewer.to_owned(),
+            why: why.clone(),
+        })?;
+    }
+    Ok(Some(why))
 }
 
 /// Resumes the reviewer `reviewer` of a branch whose builder has answered its reject, so its verdict is
@@ -433,10 +450,8 @@ pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String
     }
     // A run that could not record its verdict (the cap on decisions per job) would leave the stale one.
     if !crate::systems::decide::can_decide(&ctx.cfg, &world, j) {
-        return Ok(Some(format!(
-            "{reviewer} has had {} decisions already (hooks.max_decisions)",
-            ctx.cfg.hooks.max_decisions
-        )));
+        let why = format!("{reviewer} has had {} decisions already (hooks.max_decisions)", ctx.cfg.hooks.max_decisions);
+        return halted(ctx, (builder, reviewer), reviewer, Some(why));
     }
     let rejected = world.jobs().get(builder).map_or(0, |b| {
         b.verdicts
@@ -444,7 +459,7 @@ pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String
             .filter(|v| v.reviewer == reviewer && v.verdict == crate::bus::Verdict::Reject && v.stale_head.is_none())
             .count()
     });
-    resume_by_review(ctx, j, rejected, message)
+    resume_by_review(ctx, j, rejected, message).and_then(|why| halted(ctx, (builder, reviewer), reviewer, why))
 }
 
 /// The shared bounds of a resume that a review causes: `j` is not live, `rejected` is within

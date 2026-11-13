@@ -3169,6 +3169,91 @@ fn a_builder_that_answers_a_reject_is_judged_again_on_its_new_tip() {
     assert_eq!(rev_parse(&env.repo, "refs/relay/review/rev"), "");
 }
 
+/// `TheGrid`, 2026-11-13: beam/U6 was queued `--after` a review that rejected, and started on the branch the
+/// review had just sent back. A job after a review starts only once the chain accepts, and so does a job
+/// after the reviewed build: both on the branch the builder answered with.
+#[test]
+fn a_job_after_a_review_or_its_build_waits_for_the_accept_and_starts_on_the_answer() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-gate", false);
+    configure(&env, "job_ceiling_usd = 100.0\nmax_running = 4\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &["--model", "claude=claude-opus-5-5"]);
+    let tip = rev_parse(&workdir(&env, "build"), "HEAD");
+    // The review rejects and leaves the account on hold: what starts next stays running until the hold goes.
+    let text = "[verdict-reject] [hold-after] Review the change.";
+    let out = relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", text]);
+    ok(&out, "queue the review");
+    for (name, after) in [("next", "rev"), ("follow", "build")] {
+        let out = relay(&env, &["queue", "add", name, "--after", after, "--text", "[status-done] Build on it."]);
+        ok(&out, "queue the dependent");
+    }
+    wait_status(&env, "build", "running");
+    // A second account, on hold too, so a seat is free for whatever may start now.
+    claude_account(&env.home, "b", 10, false);
+    let holds = [env.home.join(".claude.a/hold"), env.home.join(".claude.b/hold")];
+    std::fs::write(&holds[1], "").unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let shown = board(&env);
+    for name in ["next", "follow"] {
+        assert_eq!(job(&env, name)["status"], "queued", "{name} must not start on the rejected branch: {shown}");
+    }
+    assert!(shown.contains("after rev (reject: test-failure; build running)"), "{shown}");
+    assert!(shown.contains("after build"), "{shown}");
+    for h in &holds {
+        std::fs::remove_file(h).unwrap();
+    }
+
+    for name in ["next", "follow"] {
+        assert_eq!(wait_for(&env, name)["status"], "done", "{}", board(&env));
+    }
+    let b = job(&env, "build");
+    let new_tip = rev_parse(&workdir(&env, "build"), "HEAD");
+    assert_ne!(new_tip, tip, "the reject sent the builder back: {b}");
+    let logged = events(&env);
+    let at = |pred: &dyn Fn(&serde_json::Value) -> bool| logged.iter().position(pred);
+    let accepted = at(&|e| e["type"] == "reviewed" && e["job"] == "rev" && e["verdict"] == "accept")
+        .unwrap_or_else(|| panic!("no accept: {b}"));
+    for name in ["next", "follow"] {
+        let started = at(&|e| e["type"] == "started" && e["job"] == name).unwrap();
+        assert!(started > accepted, "{name} started before the accept: {}", board(&env));
+        assert_eq!(job(&env, name)["base"].as_str(), Some(new_tip.as_str()), "{name} starts on the answered branch");
+    }
+}
+
+/// w2r-beam-u2b judged from commit messages: "the builder's FINAL was not readable here". A review reads its
+/// builder's last result in its own inbox, named in its preamble, and a re-review reads the answer to its reject.
+#[test]
+fn a_review_reads_its_builders_last_result_and_a_re_review_the_newer_one() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-result", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    rejected(&env);
+    wait_verdicts(&env, "build", 2);
+    assert_eq!(wait_for(&env, "rev")["attempts"], 2);
+    let read = std::fs::read_to_string(env.home.join(".claude.a/builder-results")).unwrap_or_default();
+    let seen: Vec<&str> = read.split("--\n").filter(|s| !s.trim().is_empty()).collect();
+    assert_eq!(seen.len(), 2, "one read per start of the review: {read}");
+    let head = "# The last result of build";
+    assert!(
+        seen.iter().all(|s| s.starts_with(head) && s.contains("its FINAL section and what it wrote above it")),
+        "{read}"
+    );
+    assert!(
+        seen[0].contains("ran on .claude.a with 1 transcript turns\nFINAL\nstatus: done"),
+        "the first run's: {read}"
+    );
+    assert!(
+        seen[1].contains("with 2 transcript turns\nFINAL ok") && !seen[1].contains("status: done"),
+        "the answer to the reject: {read}"
+    );
+    assert!(prompts(&env, "a").contains("builder-result.md` (read-only)"), "{}", prompts(&env, "a"));
+}
+
 /// A reviewer that keeps rejecting is asked again only while it can still record its verdict
 /// (`hooks.max_decisions` caps the decisions on a job), so the loop stops and the board is the last verdict.
 #[test]
@@ -3199,6 +3284,7 @@ fn a_reject_loop_stops_where_the_reviewer_can_no_longer_record_a_verdict() {
         ),
         "queue the review",
     );
+    ok(&relay(&env, &["queue", "add", "next", "--after", "rev", "--text", "Build on it."]), "queue the dependent");
     // reject, builder again, reject again, builder a third time; then the reviewer has had its two
     // decisions, so it is not resumed on the third tip (its verdict would be dropped, leaving a stale one).
     let mut settled = None;
@@ -3227,6 +3313,18 @@ fn a_reject_loop_stops_where_the_reviewer_can_no_longer_record_a_verdict() {
     // The board shows the last recorded verdict, for the commit it judged.
     assert!(board(&env).contains("review by rev: reject: other"), "{}", board(&env));
     assert!(r2["reason"].as_str().unwrap_or_default().contains("build resumed"), "its last verdict was acted on: {r2}");
+    // The chain will not accept on its own, so what waits on it is blocked, and says why.
+    let next = job(&env, "next");
+    assert_eq!(next["status"], "queued", "{next}");
+    let shown = board(&env);
+    assert!(
+        shown.contains("waits for rev (reject: other; rev's chain halted: rev has had 2 decisions already"),
+        "{shown}"
+    );
+    let mut cmd = Command::new("timeout");
+    cmd.args(["30", env!("CARGO_BIN_EXE_relay"), "view", "result", "next", "--wait"]);
+    let out = relay_cmd(&env, &mut cmd);
+    assert_eq!(out.status.code(), Some(4), "a wait on it ends: {}", out_of(&out));
 }
 
 /// `hooks.max_decisions` bounds one chain's rejects of a builder; a replaced chain's verdicts left the board,

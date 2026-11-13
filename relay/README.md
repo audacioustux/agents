@@ -75,7 +75,8 @@ the dispatcher awake. So does every job queued behind it, however deep the chain
 than wait forever. Queue the dependency again (or `queue resume` it), or
 `relay queue release NAME [--from a]`, which **starts the job now** (once a seat is free): it
 drops the waits and does not cancel anything. To withdraw the job instead, `relay queue dequeue NAME`.
-Only existing jobs can be named, so there are no cycles.
+Only existing jobs can be named, so there are no cycles. A dependency that is
+reviewed counts as done only once its review accepts ([below](#reviews)).
 
 **Where a build job starts.** A build job starts from the repository's `HEAD`,
 unless it waits for build jobs (`--after`) or forks one (`--fork`): then its
@@ -695,6 +696,33 @@ so an earlier commit's reject is history, not the state.
   "family"`: at `queue add` (exit 5) when every harness it may use would do, else when
   its session starts, which then fails at once. Otherwise the family is recorded and
   allowed.
+- **What waits on a review waits for its accept.** A job queued `--after REV`, where
+  REV is a review (`--review-of BUILD`), starts only once REV's latest verdict is an
+  accept of BUILD's branch, not when REV's run ends. While REV has rejected, BUILD
+  answers and the chain judges again, the dependent waits and says where the chain is
+  (`after rev (reject: test-failure; build running)`, then `re-review due`); the
+  re-review's accept releases it. **A job queued `--after BUILD` waits the same way
+  when BUILD has a live review chain**: accepted work is what a successor should build
+  on, and a build after BUILD starts from BUILD's branch, so it would otherwise start
+  from the commit the review sent back (`after build (in review: rev running)`). A
+  review of BUILD itself waits for BUILD alone. Where nothing will move the chain on, the
+  wait is **blocked** rather than endless: BUILD failed or was stopped (`waits for rev
+  (reject: test-failure; build failed)`); a resume the chain needs was refused for good
+  (`hooks.max_decisions`, the ceiling, a banned model: relay records `review-halted {job,
+  review, why}` and the board says `rev's chain halted: ...`); or `queue unreview BUILD`
+  detached REV (`waits for rev (review detached)`; a job after BUILD then has no chain
+  to wait for and starts). A blocked job does not start or keep the dispatcher awake,
+  `view result --wait` on it exits 4, and `queue release` starts it anyway, as for any
+  dependency. Resuming BUILD or REV by hand clears a halt. When REV is replaced
+  (`superseded by rev2`), its dependents wait for the replacement's accept.
+- **The reviewer reads the builder's last result.** Before every start and resume of
+  the review, relay writes BUILD's last result (what its latest run ended with: its
+  FINAL section and the summary above it, up to 64 KiB) to `builder-result.md` in the
+  review's inbox, which the session reads but cannot write (BUILD's own record lives in
+  relay's state, which no session sees), and the preamble names the file. A re-review
+  after a resume reads the builder's answer to the reject. When that run ended without
+  a FINAL section, the file says so above its last message; when it left no message at
+  all, the file says there is no FINAL to read and to judge by the commits and diff.
 - **Landing.** `land fetch` prints `note: no review has accepted <tip>` when a review
   was asked of the job and none accepted its tip. It never blocks: landing stays
   your step.

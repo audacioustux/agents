@@ -169,6 +169,10 @@ pub enum DispatchEvent {
     InLine { job: String, pool: String, planner_pid: u32, planner_started: u64 },
     /// The job is in line no longer though still queued: something of its own project holds it now.
     OutOfLine { job: String },
+    /// A runner process this project dispatched has exited, and nothing it started is left: the
+    /// dispatcher saw it gone and its claim lock free. The one thing that ends its claim on the
+    /// machine's pools (`World::claims`); a job's end, a resume or a cleanup never does.
+    RunnerExited { runner_pid: u32, runner_started: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

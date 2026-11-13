@@ -911,16 +911,25 @@ fn stderr_tail(ctx: &Ctx, job: &Job) -> String {
     if read.is_err() || lines.is_empty() { String::new() } else { format!("; its stderr ends: {}", lines.join(" / ")) }
 }
 
-/// The invocation, niced, inside the sandbox when it is on.
-fn command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> Command {
-    let Ok(c) = build(ctx, inv, mounts, |p| Ok::<_, std::convert::Infallible>(Command::new(p)));
-    c
+/// The invocation, niced, inside the sandbox when it is on, under `relay supervise`: the one way this
+/// runner starts anything, its session and each run of its acceptance check alike: the whole process group ends with it, with the runner, or when it is stopped
+/// ([`crate::supervised`]). The supervisor holds this runner's claim lock ([`own_claim`]) until the
+/// last process of its tree is reaped, so the runner's claim on the machine outlasts a runner that
+/// is killed outright for exactly as long as anything it started still runs.
+fn supervised_command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<Command> {
+    let hold = own_claim();
+    build(ctx, inv, mounts, |p| crate::supervised::holding(p, Some(&hold)))
 }
 
-/// The same under `relay supervise`, for a session the runner drives: its whole process group ends
-/// with it, with the runner, or when it is stopped ([`crate::supervised`]).
-fn supervised_command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<Command> {
-    build(ctx, inv, mounts, |p| crate::supervised::command(p))
+/// This runner's claim lock ([`crate::world::claim_lock`]), in a directory that is there.
+fn own_claim() -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let me = std::process::id();
+    let lock = crate::world::claim_lock((me, os::start_time(me).unwrap_or(0)));
+    if let Some(dir) = lock.parent() {
+        let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir);
+    }
+    lock
 }
 
 fn build<E>(
@@ -995,6 +1004,7 @@ pub struct DiskStop {
 /// would not help and stopping every one would be worse than the full disk.
 pub fn disk_reason(
     limits: &crate::config::Limits,
+    floor: crate::config::Floor,
     bytes: u64,
     free_gb: Option<f64>,
     largest: bool,
@@ -1009,8 +1019,8 @@ pub fn disk_reason(
         let why = format!("disk: clone {} over {}", os::size_str(bytes), gb(limits.job_disk_gb));
         return Some(DiskStop { why, floor: false });
     }
-    let free = free_gb.filter(|&f| largest && limits.min_free_disk_gb > 0.0 && f < limits.min_free_disk_gb)?;
-    Some(DiskStop { why: format!("disk: {} free, under {}", gb(free), gb(limits.min_free_disk_gb)), floor: true })
+    let free = free_gb.filter(|&f| largest && floor.on() && f < floor.gb)?;
+    Some(DiskStop { why: format!("disk: {} free, under {}", gb(free), gb(floor.gb)), floor: true })
 }
 
 /// A measured clone: records its size, and when it is a reason to stop, says
@@ -1028,7 +1038,9 @@ fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: Option<Instant>, askin
         .filter(|o| o.name != job.name && o.status.has_runner())
         .all(|o| o.disk_bytes.unwrap_or(0) <= bytes);
     let free = os::free_disk_gb(&ctx.clones);
-    let Some(stop) = disk_reason(&ctx.cfg.limits, bytes, free, largest) else { return Ok(DiskStep::Go) };
+    // The floor as it stands at this sample: the owner may have moved the machine's since the session began.
+    let floor = ctx.cfg.disk_floor();
+    let Some(stop) = disk_reason(&ctx.cfg.limits, floor, bytes, free, largest) else { return Ok(DiskStep::Go) };
     let Some(handlers) = decide::chain(&ctx.cfg, Point::Disk) else { return Ok(DiskStep::Stop(stop)) };
     let mut req = Request::new(job, Point::Disk);
     req.brief = std::fs::read_to_string(ctx.job_file(&job.name, "prompt.md")).unwrap_or_default();
@@ -1383,12 +1395,15 @@ fn checkpoint_rev(dir: &Path, rev: &str) -> Option<String> {
 
 #[cfg(test)]
 mod disk_tests {
-    use super::{DiskStop, disk_reason};
+    use super::DiskStop;
     use crate::config::Limits;
 
     #[test]
     fn a_clone_over_the_ceiling_or_a_full_disk_names_its_reason() {
-        let l = Limits { job_disk_gb: 40.0, min_free_disk_gb: 20.0, ..Limits::default() };
+        let l = Limits { job_disk_gb: 40.0, min_free_disk_gb: 20.0.into(), ..Limits::default() };
+        let disk_reason = |l: &Limits, bytes, free, largest| {
+            super::disk_reason(l, crate::config::Floor::of(l, &crate::config::Machine::default()), bytes, free, largest)
+        };
         let gb = |g: u64| g * 1_000_000_000;
         let reason = |l: &Limits, bytes, free, largest| disk_reason(l, bytes, free, largest);
         let stop = |why: &str, floor| Some(DiskStop { why: why.into(), floor });
@@ -1402,7 +1417,7 @@ mod disk_tests {
             stop("disk: clone 52G over 40G", false),
             "the job's own size comes first"
         );
-        let off = Limits { job_disk_gb: 0.0, min_free_disk_gb: 0.0, ..l };
+        let off = Limits { job_disk_gb: 0.0, min_free_disk_gb: 0.0.into(), ..l };
         assert_eq!(disk_reason(&off, gb(900), Some(0.1), true), None, "zero turns both off");
     }
 }

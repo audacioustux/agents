@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use crate::accounts::{self, Draws, Refusal};
-use crate::config::{Config, Limits, Machine};
+use crate::config::{Config, Floor, Limits, Machine};
 use crate::ctx::Others;
 use crate::harness::Home;
 use crate::world::{AccountState, Job, SessionSeat, Status, World};
@@ -108,7 +108,7 @@ pub struct Room {
     machine: Machine,
     /// The projects whose state could not be read: what they run is in no count of this room.
     unread: Vec<String>,
-    /// Whether a compiling unit is held by a runner on its way out ([`Job::lingers`]).
+    /// Whether a compiling unit is held by a runner on its way out ([`World::lingering`]).
     lingering: bool,
     /// The project's development environment, when it names one: no job starts until it is warm.
     dev_shell: Option<Gate>,
@@ -225,10 +225,10 @@ impl Room {
         }
         // A compiling unit is its runner process's, in every project alike and whatever the job's
         // status says: held while that process lives, by the evidence a seat's is.
-        for j in world.jobs().values().chain(others.iter().flat_map(|w| w.jobs().values())) {
-            let units = j.compiling_units();
-            (0..units).for_each(|_| room.add(Pool::Compiling));
-            room.lingering |= units > 0 && j.lingers();
+        // The claims are each fold's own, apart from its jobs, so a job cleaned away takes none with it.
+        for w in std::iter::once(world).chain(others.iter().copied()) {
+            (0..w.compiling_units()).for_each(|_| room.add(Pool::Compiling));
+            room.lingering |= w.lingering();
         }
         for j in world.jobs().values() {
             if j.status == Status::Running {
@@ -248,6 +248,14 @@ impl Room {
     #[must_use]
     pub fn with_machine(mut self, machine: Machine) -> Self {
         self.machine = machine;
+        self
+    }
+
+    /// The room where free disk does (`true`) or does not let a build job start.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_disk(mut self, disk_ok: bool) -> Self {
+        self.disk_ok = disk_ok;
         self
     }
 
@@ -456,11 +464,10 @@ impl Room {
             self.memory(now_us)?;
         }
         if !j.readonly() && !self.disk_ok {
-            let (floor, need) = (cfg.limits.min_free_disk_gb, crate::systems::dispatch::resume_gb(&cfg.limits));
-            let whose = match cfg.origin("limits.min_free_disk_gb") {
-                crate::config::Origin::Policy => "the machine's ",
-                crate::config::Origin::Project => "the ",
-            };
+            // The floor as the room read it: the project's own, or the machine's where that is higher.
+            let floor = Floor::of(&cfg.limits, &self.machine);
+            let (floor, need) = (floor.gb, floor.resume_gb());
+            let whose = if Floor::of(&cfg.limits, &self.machine).machines { "the machine's " } else { "the " };
             return Err(Hold {
                 why: format!("free disk below {need} GB ({whose}{floor} GB floor and its margin)"),
                 until: Some(now_us.saturating_add(LOOK_AGAIN_MICROS)),

@@ -377,7 +377,7 @@ fn held_by_floor(cfg: Option<&Config>, j: &Job) -> Option<String> {
     }
     let why = j.reason.as_deref().unwrap_or("disk floor");
     Some(match cfg {
-        Some(c) => format!("held: {why}; resumes at {} GB free", crate::systems::dispatch::resume_gb(&c.limits)),
+        Some(c) => format!("held: {why}; resumes at {} GB free", c.disk_floor().resume_gb()),
         None => format!("held: {why}; resumes when space is back"),
     })
 }
@@ -851,7 +851,7 @@ mod tests {
     fn a_held_job_shows_its_reason_and_the_space_it_waits_for() {
         use crate::world::{Job, Status};
         let (_dir, mut cfg) = one_seat();
-        cfg.limits.min_free_disk_gb = 60.0;
+        cfg.limits.min_free_disk_gb = 60.0.into();
         cfg.limits.disk_resume_margin_gb = 3.0;
         let held = Job {
             name: "h".into(),

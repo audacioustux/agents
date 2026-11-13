@@ -207,6 +207,64 @@ pub struct Machine {
     pub min_free_disk_gb: Option<f64>,
 }
 
+/// A project's own disk floor, as its `relay.toml` wrote it (GB). It is half of a floor: the
+/// machine's, in the owner's policy, may be higher, and may change while a session runs. So it
+/// cannot be compared with anything: a disk decision reads a [`Floor`], made of both at that moment.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(transparent)]
+pub struct OwnFloor(f64);
+
+impl From<f64> for OwnFloor {
+    fn from(gb: f64) -> Self {
+        Self(gb)
+    }
+}
+
+impl PartialEq<f64> for OwnFloor {
+    fn eq(&self, gb: &f64) -> bool {
+        self.0 == *gb
+    }
+}
+
+/// The disk floor one decision is made by: the higher of the project's own and the machine's, with
+/// the project's margin above it. A value of the moment it was made ([`Config::disk_floor`] reads
+/// the policy then): whatever decides about the disk makes one, and none is stored.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Floor {
+    /// No job starts, and the largest running clone's job is held, under this much free disk (GB).
+    pub gb: f64,
+    /// A held job resumes, and a queued one starts, this far over it.
+    pub margin_gb: f64,
+    /// Whether it is the machine's floor that stands, being higher than the project's own.
+    pub machines: bool,
+}
+
+impl Floor {
+    /// The floor of a project with `limits` under the owner's caps `machine`: a project may raise
+    /// the machine's floor, never lower it or turn it off.
+    pub fn of(limits: &Limits, machine: &Machine) -> Self {
+        let own = limits.min_free_disk_gb.0;
+        let theirs = machine.min_free_disk_gb.filter(|m| *m > own);
+        Self { gb: theirs.unwrap_or(own), margin_gb: limits.disk_resume_margin_gb, machines: theirs.is_some() }
+    }
+
+    /// Whether there is a floor at all (zero is off).
+    pub fn on(&self) -> bool {
+        self.gb > 0.0
+    }
+
+    /// The free disk (GB) a job the floor held resumes at, and a queued build job starts at.
+    pub fn resume_gb(&self) -> f64 {
+        self.gb + self.margin_gb
+    }
+
+    /// Whether `free_gb` is room to start a job, or to resume one the floor held: the floor and its
+    /// margin above it. Unmeasured is not enough; the floor off is always room.
+    pub fn enough(&self, free_gb: Option<f64>) -> bool {
+        !self.on() || free_gb.is_some_and(|gb| gb >= self.resume_gb())
+    }
+}
+
 /// Where a config reads the machine's caps from. It holds no value a caller could keep: the caps
 /// are whatever the policy file says when they are asked for ([`Caps::now`]).
 #[derive(Debug, Clone, Default)]
@@ -325,7 +383,7 @@ pub struct Limits {
     /// job reaches the `disk` decision point. Never under the policy's
     /// `[machine] min_free_disk_gb`: merged, it is the higher of the two.
     #[serde(alias = "min_free_gb")]
-    pub min_free_disk_gb: f64,
+    pub min_free_disk_gb: OwnFloor,
     /// Free disk must be this many GB above `min_free_disk_gb` before a job the floor held resumes and
     /// before a queued job starts, so a disk hovering at the floor does not flap. It moves neither the
     /// floor nor what stops a running job.
@@ -448,7 +506,7 @@ impl Default for Limits {
             budget_usd: 10.0,
             silent_minutes: 30,
             max_load: None,
-            min_free_disk_gb: 10.0,
+            min_free_disk_gb: OwnFloor(10.0),
             disk_resume_margin_gb: 3.0,
             job_disk_gb: 40.0,
             disk_sample_minutes: 3.0,
@@ -749,14 +807,10 @@ impl Config {
             }
             self.profiles = merged;
             self.policy_path = Some(path.to_path_buf());
-            // The machine's caps are the policy's alone. Its disk floor is the least any project
-            // has: every reader of `limits.min_free_disk_gb` (admission, gc, the floor that stops
-            // a running job) then sees the higher of the two.
+            // The machine's caps are the policy's alone, and nothing of them is copied into this
+            // config: the project's own disk floor stays as written, and each disk decision takes
+            // the higher of it and the machine's floor as the policy has it then ([`Floor`]).
             self.caps = Caps { at_load: policy.machine, source: Some(path.to_path_buf()) };
-            if let Some(floor) = policy.machine.min_free_disk_gb.filter(|f| *f > self.limits.min_free_disk_gb) {
-                self.limits.min_free_disk_gb = floor;
-                origins.insert("limits.min_free_disk_gb".to_owned(), Origin::Policy);
-            }
         }
         self.origins = origins;
     }
@@ -790,6 +844,12 @@ impl Config {
     /// admission point, never kept.
     pub fn machine(&self) -> Machine {
         self.caps.now()
+    }
+
+    /// The disk floor for a decision made now ([`Floor::of`] the project's own and the machine's
+    /// as the policy file says at this moment): asked at each one, never kept.
+    pub fn disk_floor(&self) -> Floor {
+        Floor::of(&self.limits, &self.machine())
     }
 
     /// Where a merged setting came from, `project` when unrecorded.
@@ -1456,7 +1516,8 @@ mod tests {
         assert_eq!(cfg.gc.build_outputs, ["target", "node_modules", ".venv"]);
         assert_eq!((cfg.gc.outputs_after_hours, cfg.gc.clones_after_days, cfg.gc.waiting_retain_days), (6.0, 7.0, 7.0));
         assert_eq!((cfg.gc.logs_gzip_after_days, cfg.gc.interval_minutes), (3.0, 60.0));
-        assert_eq!((cfg.limits.job_disk_gb, cfg.limits.min_free_disk_gb), (40.0, 10.0));
+        assert_eq!(cfg.limits.job_disk_gb, 40.0);
+        assert_eq!(cfg.limits.min_free_disk_gb, 10.0);
         assert_eq!(cfg.limits.disk_resume_margin_gb, 3.0);
         assert!(cfg.session.env.is_empty(), "no variable is hard-coded");
         let cfg = Config::parse(
@@ -1537,6 +1598,13 @@ budget = 3
         assert_eq!(caps(&cfg), (Some(6), None));
         write("[machine]\nmax_compiling = 2\nmin_free_mem_gb = 4\n");
         assert_eq!(caps(&cfg), (Some(2), Some(4.0)), "the same config, loaded before the owner's edit");
+        // The disk floor of a decision follows the file too, over the project's own (10 by default).
+        assert_eq!((cfg.disk_floor().gb, cfg.disk_floor().machines), (10.0, false));
+        write("[machine]\nmin_free_disk_gb = 30\n");
+        assert_eq!((cfg.disk_floor().gb, cfg.disk_floor().machines), (30.0, true), "raised while the process runs");
+        write("[machine]\nmin_free_disk_gb = 50\n");
+        assert_eq!(cfg.disk_floor().resume_gb(), 53.0, "and raised again");
+        assert_eq!(cfg.limits.min_free_disk_gb, 10.0, "the project's own is never written over");
         write("[machine]\nmax_compiling = ");
         assert_eq!(caps(&cfg), (Some(6), None), "half-saved: the caps at load stand, not none");
         write("[machine]\nmax_compiling = 0\n");
@@ -1572,17 +1640,25 @@ budget = 3
         let cfg = merged_with(caps, "");
         let m = cfg.caps.at_load;
         assert_eq!((m.max_compiling, m.min_free_mem_gb, m.min_free_disk_gb), (Some(6), Some(4.0), Some(30.0)));
-        assert_eq!(cfg.limits.min_free_disk_gb, 30.0, "the project's default of 10 is under the machine's floor");
-        assert_eq!(cfg.origin("limits.min_free_disk_gb"), Origin::Policy);
+        // Copilot review of PR #70 (second round), finding 4: nothing of the machine's floor is copied
+        // into the project's limits, so no reader can hold an old one. A decision takes both, then.
+        assert_eq!(cfg.limits.min_free_disk_gb, 10.0, "the project's own floor stays as written");
+        assert_eq!(cfg.origin("limits.min_free_disk_gb"), Origin::Project);
+        let floor = |cfg: &Config| Floor::of(&cfg.limits, &m);
+        assert_eq!((floor(&cfg).gb, floor(&cfg).machines), (30.0, true), "the project's 10 is under the machine's");
         let lower = merged_with(caps, "[limits]\nmin_free_disk_gb = 0\n");
-        assert_eq!(lower.limits.min_free_disk_gb, 30.0, "a project cannot lower it, nor turn it off");
-        let higher = merged_with(caps, "[limits]\nmin_free_disk_gb = 60\n");
-        assert_eq!(higher.limits.min_free_disk_gb, 60.0, "a project may raise it");
-        assert_eq!(higher.origin("limits.min_free_disk_gb"), Origin::Project);
+        assert_eq!(floor(&lower).gb, 30.0, "a project cannot lower it, nor turn it off");
+        let higher = merged_with(caps, "[limits]\nmin_free_disk_gb = 60\ndisk_resume_margin_gb = 5\n");
+        assert_eq!((floor(&higher).gb, floor(&higher).machines), (60.0, false), "a project may raise it");
+        assert_eq!(floor(&higher).resume_gb(), 65.0);
+        assert!(
+            floor(&higher).enough(Some(65.0)) && !floor(&higher).enough(Some(64.0)) && !floor(&higher).enough(None)
+        );
 
         let none = merged("[limits]\nmin_free_disk_gb = 0\n");
         assert_eq!(none.caps.at_load, Machine::default(), "no [machine] table: no cap");
-        assert_eq!(none.limits.min_free_disk_gb, 0.0, "and the project's floor is its own, as before");
+        let off = Floor::of(&none.limits, &Machine::default());
+        assert!(!off.on() && off.enough(Some(0.1)), "and the project's floor is its own, as before: off");
 
         let d = repo();
         let in_project = Config::parse("name = \"demo\"\n[machine]\nmax_compiling = 99\n", d.path());

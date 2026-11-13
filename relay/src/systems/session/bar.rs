@@ -17,12 +17,13 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
-use super::{Phase, clear, command, layer_env, port};
+use super::{Phase, clear, layer_env, port};
 use crate::bus::{BarResult, SessionEvent};
 use crate::ctx::{Ctx, SessionRepo};
 use crate::harness::{Home, Invocation};
 use crate::hostdir::{self, HostDir};
 use crate::sandbox::Mounts;
+use crate::supervised::Supervised;
 use crate::systems::checkpoint;
 use crate::systems::decide::CheckRun;
 use crate::world::{Bar, Job};
@@ -434,9 +435,17 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, phase: Phase, place:
         std::fs::create_dir(&tmp)?;
         let mounts =
             Mounts { home, workdir: None, scratch: place.work, inbox: None, tmp: &tmp, cwd: tree, account: false };
-        let mut c = self::command(ctx, &inv, &mounts);
+        // Under the supervisor, as the session was: whatever the check starts (the compilers under
+        // it) ends with it or with this runner, sandbox or none, and holds the runner's claim till then.
+        let mut c = super::supervised_command(ctx, &inv, &mounts).context("running the acceptance check")?;
         c.stdin(Stdio::null()).stdout(file.try_clone()?).stderr(file);
-        let status = c.status().context("running the acceptance check")?;
+        let mut child = Supervised::spawn(&mut c).context("running the acceptance check")?;
+        // Its output is a file, so there is no pipe to see closed; its own `timeout` bounds it.
+        let ended = child.finish(|| true, || None::<std::convert::Infallible>);
+        let status = match ended.context("running the acceptance check")? {
+            Ok(status) => status,
+            Err(never) => match never {},
+        };
         let text = place.inbox.read("check.out").map(|f| tail_text(f, 2 * TAIL as u64)).unwrap_or_default();
         let code = status.code();
         let declared = &ctx.cfg.hooks.check_could_not_run_exit_codes;

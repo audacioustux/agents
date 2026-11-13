@@ -387,13 +387,22 @@ per-project shares: the caps are one ceiling over all projects.
 
 - `max_compiling` counts every project's jobs that compile (see `compiles` above).
   A unit is held by the job's runner process itself, named by its pid and start
-  time as a seat's holder is, from its dispatch until that process exits, whatever
-  the job's status says meanwhile: through its acceptance check, through the work
-  a runner does after its `ended` (a re-review), and by a runner a hand resume
-  took a checking job from, which is not stopped by that. A runner that dies gives
-  its unit back with nobody having to reap it; a dispatcher that waits for a unit
-  looks again within a minute, and within seconds when the holder is a runner on
-  its way out. The count is kept where the seats are: under the machine's one seat
+  time as a seat's holder is, from its dispatch until that process and everything
+  it started have ended, whatever the job's status says meanwhile: through its
+  acceptance check, through the work a runner does after its `ended` (a re-review),
+  and by a runner a hand resume took a checking job from, which is not stopped by
+  that. The claim is recorded with the dispatch, apart from the job (`claims` in
+  `view status --json`), so nothing that happens to the job, `land clean` and
+  `queue dequeue` included, can erase the claim of a process that still runs. A
+  runner's session and each run of its check go through `relay supervise`, which
+  holds the runner's claim lock (`<state root>/claims/<pid>-<start>.lock`) until
+  the last process of its tree is reaped: a runner killed outright keeps its unit
+  for exactly as long as a compiler it started is still there, sandbox or none.
+  Once the process is gone and its lock free, the unit is free at once, with
+  nobody having to reap it, and its project's dispatcher records the exit
+  (`runner-exited`), the one thing that removes a claim. A dispatcher that waits
+  for a unit looks again within a minute, and within seconds when the holder is a
+  runner on its way out. The count is kept where the seats are: under the machine's one seat
   lock, from what every project's bus recorded, so two dispatchers never both take
   the last unit. It is a count only when every project was read: while the state of
   one cannot be read, its jobs are in nobody's sum, so nothing that compiles
@@ -414,10 +423,13 @@ per-project shares: the caps are one ceiling over all projects.
   it waits in its runner until the memory is back (its runner's log says so). Nothing running is touched. Where the memory cannot be read, the
   gate holds nothing.
 - `min_free_disk_gb` is the machine's disk floor. A project's
-  `limits.min_free_disk_gb` may raise it, never lower it or turn it off: the
-  higher of the two is the project's floor everywhere that key is used (admission,
-  the gc pass, the floor that holds a running job). `relay config show` prints the
-  caps, and which file the project's floor came from.
+  `limits.min_free_disk_gb` may raise it, never lower it or turn it off. Nothing is
+  copied between the two: the project's own floor stays as written, and each disk
+  decision (a start, a held job's resume, the gc pass, every sample of a running
+  clone) takes the higher of it and the machine's as the policy says at that
+  moment, so a session that began under 30 GB is held by the 50 GB the owner set
+  since. `relay config show` prints the caps, and the floor a decision would take
+  now with the file it comes from.
 
 A job any of these holds stays queued like one held by a project limit: its
 reason is on the board and in the dispatcher's log, it is judged again within a

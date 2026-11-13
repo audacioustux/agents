@@ -141,8 +141,9 @@ fn show(cfg: &Config, project: Option<&Path>, json: bool) -> Result<()> {
             out!("  {field} = {value}  [policy]");
         }
         if project.is_some() && machine.min_free_disk_gb.is_some() {
-            let floor = cfg.limits.min_free_disk_gb;
-            out!("  limits.min_free_disk_gb = {floor}  [{}]", from("limits.min_free_disk_gb"));
+            // The floor a decision would take now: the project's own, or the machine's where higher.
+            let floor = cfg.disk_floor();
+            out!("  disk floor = {} GB  [{}]", floor.gb, if floor.machines { "policy" } else { "project" });
         }
     }
     if !cfg.session.banned_models.is_empty() {

@@ -968,6 +968,78 @@ fn a_checks_run_at_the_base_commit_waits_for_the_memory_gate_too() {
     assert_eq!((j["status"].as_str(), j["bars"][0]["base_exit"].as_i64()), (Some("done"), Some(1)), "{j}");
 }
 
+/// Copilot review of PR #70 (second round), finding 2: an acceptance check ran as a plain child of
+/// its runner. With the sandbox off nothing ties it to the runner, so a runner killed outright left
+/// the check, and whatever compiles under it, running with no claim on the machine. A check runs
+/// under the supervisor as the session does: it ends with its runner.
+#[test]
+fn a_killed_runners_check_ends_with_it_when_the_sandbox_is_off() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("check-orphan", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "[sandbox]\nenabled = false\n");
+    claude_account(&env.home, "a", 10, false);
+    let pid_file = env.root.join("check.pid");
+    let check = format!("echo $$ > {}; exec sleep 300", pid_file.display());
+    let add = ["queue", "add", "orphan", "--text", "[status-done] Make a change.", "--check", check.as_str()];
+    ok(&relay(&env, &add), "queue");
+    appears(&pid_file);
+    let mut check_pid = String::new();
+    for _ in 0..50 {
+        check_pid = std::fs::read_to_string(&pid_file).unwrap_or_default().trim().to_owned();
+        if !check_pid.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!gone_within(&check_pid, 1), "the check is running: {check_pid:?}");
+    let runner = job(&env, "orphan")["runner"].clone();
+    let (pid, started) = (runner[0].as_u64().unwrap(), runner[1].as_u64().unwrap());
+    assert!(Command::new("kill").args(["-9", &pid.to_string()]).status().unwrap().success());
+    dies(pid, started);
+    let gone = gone_within(&check_pid, 50);
+    if !gone {
+        let _ = Command::new("kill").args(["-9", &check_pid]).status();
+    }
+    assert!(gone, "the check (pid {check_pid}) outlived its killed runner");
+    until(&env, "orphan", "failed");
+}
+
+/// Copilot review of PR #70 (second round), finding 4: the machine's disk floor was copied into a
+/// process's limits when it loaded its config, so a session already running went on by the floor of
+/// when it began. The floor is taken at each disk decision: the owner raises it mid-session and the
+/// session is held at its next sample, and resumed once the owner lowers it again.
+#[test]
+fn a_disk_floor_the_owner_raises_while_a_session_runs_holds_it() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("machine-disk-late", false);
+    env.write_policy("[machine]\n");
+    configure(&env, "disk_sample_minutes = 0.02\nper_account = 4\n", "");
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "long", "--text", "Look around.", "--readonly"]), "queue");
+    until(&env, "long", "running");
+    // Its session has started, so its runner loaded its config, with no floor anywhere, long ago.
+    appears(&env.home.join(".claude.a/pids"));
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(job(&env, "long")["status"], "running", "no floor, no hold");
+    env.write_policy("[machine]\nmin_free_disk_gb = 1000000000\n");
+    let j = poll_job(&env, "long", |j| j["status"] == "stopped");
+    assert_eq!(j["held"], true, "stopped by the machine's floor, so held: {j}");
+    let why = j["reason"].as_str().unwrap();
+    assert!(why.starts_with("disk: ") && why.contains(" free, under "), "{why}");
+    // The owner lowers it again: any event has the dispatcher look, and the held job is resumed.
+    env.write_policy("[machine]\n");
+    nudge(&env);
+    poll_job(&env, "long", |j| j["status"] == "running");
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(wait_for(&env, "long")["status"], "done");
+}
+
 /// Audit finding 6: a second checkout whose relay.toml has the same `name` would share the first's
 /// state directory, and the first's dispatcher would run its jobs from the first's repository. It is
 /// refused, naming both repositories, and the first's queue is untouched.

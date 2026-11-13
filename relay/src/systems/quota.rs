@@ -762,7 +762,7 @@ impl<'a> Rules<'a> {
 pub fn room_for(rules: Rules<'_>, world: &World, others: &crate::ctx::Others<'_>) -> Room {
     match rules {
         Rules::Project(ctx) => {
-            Room::new(&ctx.cfg, world, others, crate::systems::dispatch::disk_ok(&ctx.cfg.limits, &ctx.clones))
+            Room::new(&ctx.cfg, world, others, crate::systems::dispatch::disk_ok(&ctx.cfg, &ctx.clones))
                 .with_load(&ctx.cfg)
                 .with_dev_shell(crate::systems::devshell::Gate::of(ctx, world))
         }

@@ -1,6 +1,6 @@
 ---
 name: writing-interface-copy
-description: Use when writing or reviewing user-facing copy - headlines, labels, errors, empty states, settings, toggles, confirmations, and button text - for voice consistency, plain wording, and translation safety.
+description: Use when writing or reviewing user-facing copy - headlines, labels, errors, empty states, settings, toggles, confirmations, button text, and the copy of a landing or marketing page - for voice consistency, plain wording, translation safety, and copy that reads as generated (the same device in every section, figures or quotes nobody supplied).
 uses:
   - name: refining-typography
     source: audacioustux/agents
@@ -44,6 +44,18 @@ The one rule worth memorizing exactly: never assemble a sentence from fragments 
 ## Headlines make a claim the page keeps
 
 A headline says what this product does for this reader, plainly enough that a first-time reader knows what the page offers before reading further. Swapping a competitor's name in is a quick prompt, not the test: a line that stays true of every product in the category ("The future of invoicing") usually names no job at all, while a line a rival could also truthfully use is still clear when it names the job ("Invoices that chase late payers for you"). Shared capability is not vagueness. Recommend a rewrite only when the headline and the copy under it together leave the reader unsure what this product does, which is the ambiguity that justifies raising a brand line at all. The page under it then has to keep the claim, since a headline promising speed above a six-step form reads as a broken promise. A deliberate brand line can stay when a specific line beside it does this work.
+
+## Devices are a budget
+
+A heading in two fragments ("Small oven. Big mornings."), a contrast ("X, not Y"), a run of refusals ("No X. No Y."), a dry line closing a paragraph, a list of three, an eyebrow over a section: none of these is a defect, and each works once, where it lands hardest. The defect is the default. Generated copy uses the same device in every section and the same warm, wry voice on every product, so a bakery and a CI tool sound alike; a reader cannot name what is wrong, only that it reads as copy. Before writing, decide where each device is spent; when reviewing, count them: a device in section after section is a tic, whatever it is.
+
+The fix is a fact or a decision, never a synonym. Swapping the word a list bans for its neighbour moves the tic rather than removing it, and a rule applied everywhere breeds its replacement: "not X but Y" removed becomes "rather than" everywhere, "be specific" becomes a figure nobody measured, "end strong" becomes a quip on every paragraph. After an edit, look for the habit that took the removed one's place, and let a sentence that a rule made worse break the rule.
+
+Two checks reach what a reading of one page cannot. When several pages were written in one session, read their first headings side by side: a shared shape or cadence is the session's tic, not the brand's voice. And give a reader who has not seen the brief only the page's text, asking what this is, who it is for, what it costs, and which three lines could sit on any site; rewrite those lines from the facts.
+
+## Specifics are true or absent
+
+A figure, a quote, a rating, a customer name or logo, a date, a price or an address comes from the source material or it is not on the page. Generated copy fills the gaps with plausible specifics, and that is the slop that looks like good copy: a review count, a batch number, a percentage nobody measured. Where the material lacks a fact, write around it ("Price on request") or leave the element out. An assumption the page cannot avoid (an opening time the brief omitted) is marked where it is made, as an attribute on the element and a line in the hand-off, so a reviewer finds it rather than trusting it. A placeholder, a bracketed note or a "sample" label never ships. A contact detail that is not the client's is never printed in a real format: a plausible phone number or street number points at a stranger's door.
 
 ## Verb-first buttons
 
@@ -101,3 +113,5 @@ A placeholder shows the expected format: `name@example.com`, `DD/MM/YYYY`. It va
 | An error that repeats "we" | Rewrite from the reader's perspective, drop the pronoun |
 | An empty state holding a stat or notice found nowhere else | Move that content out of the empty state before it ships |
 | A headline and the copy under it that together leave a first-time reader unsure what this product does (a line true of every product in the category is the usual sign) | Rewrite it to name the job, or add a line beside it that does |
+| The same device in section after section: every heading in two fragments, every paragraph closing on a quip, "X, not Y" in each block | Keep the one that lands hardest; rewrite the rest from the facts, and check that no new device took the old one's place |
+| A figure, quote, review, customer name or price that appears nowhere in the source material | Remove it or replace it with a fact; an unavoidable assumption is marked on its element and named in the hand-off |

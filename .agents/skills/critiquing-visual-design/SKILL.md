@@ -1,6 +1,6 @@
 ---
 name: critiquing-visual-design
-description: Use when judging how a screen, page, mockup or screenshot looks - a design critique, a polish pass, an "AI slop" or "looks AI-generated" audit, a list of design tells to check a page against, or a sense that something is off that nobody can name. Stack-agnostic.
+description: Use when judging how a screen, page, mockup or screenshot looks - a design critique, a polish pass, an "AI slop" or "looks AI-generated" audit, a list of design tells to check a page against, or a sense that something is off that nobody can name - and before building a page from a brief, to put its look on record as chosen. Stack-agnostic.
 uses:
   - name: reviewing-ux-in-browser
     source: audacioustux/agents
@@ -59,6 +59,8 @@ Some choices are fashions of generated design: the display serif of the season, 
 It arrived by default when it repeats identically whatever the content, or clashes with the product's own system. It was chosen when the brand or the design system declares it, when it carries information (numbers on a real sequence, monospace on codes), or when it is used sparingly and the same way each time.
 
 A tell reaches the report only through a harm. The eyebrow that repeats its heading is words doing no work, which `writing-interface-copy` already rules on; text on a gradient that fails contrast where it sits is a reading harm. Otherwise ask the question of whoever owns the design, as a question.
+
+The question is cheapest before the page exists. Asked to build one, write down what is sold, who it is for, the one action the page asks for, and the material in hand (photographs, the product's own interface, a logo), then what each section shows and why that visual and not another. The subject answers most of it: a place is shown in photographs of the place, software in its own interface doing its job, a device as the device. A choice written down before building is a choice that was made, and whatever the plan does not account for is the part that arrived with the template.
 
 ## Composition questions no sibling owns
 

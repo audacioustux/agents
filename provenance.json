@@ -57,6 +57,13 @@
       "license": "MIT",
       "retrieved": "2026-09-09",
       "note": "Official Cursor plugin marketplace. Audited in full; three items adopted."
+    },
+    "Leonxlnx/taste-skill": {
+      "sha": "f6b76575f949707b4e3c37cd86cb44b0b98643e8",
+      "ref": "HEAD",
+      "license": "MIT",
+      "captured": "2026-11-13",
+      "note": "tasteskill 2.5.1 (skills/taste-skill): a prescriptive landing-page build kit (house rules, randomised 'deals' of palette, type and hero, CSS/WebGL asset libraries, fx-* components, headless-Chrome checker and finish gate). Read in full on 2026-11-13 at the owner's request to merge it. Nothing copied: the kit, its assets, scripts, hooks, numeric house rules (one section per screen, 60-80 words a screen, 12-20 photographs, hover lift 2px, no violet, no caption under an image, figma.com and x.ai as the bar) and its banned-word lists are fashion or vendor material and stay upstream, which remains a fine source of optional inspiration for a page built from scratch. Four cross-cutting ideas were restated in this corpus's voice as instances of rules their owners already hold: rhetorical devices as a budget, with synonym swaps and over-correction as the next tell, and the sameness and fresh-reader checks (writing-interface-copy); specifics true or absent, assumptions marked, no real-format stand-in contacts (writing-interface-copy); a reveal's resting state authored visible, and the same entrance on every section as the common form of motion with nothing to explain (animating-interface-motion); an empty visual frame at one width as a finding, and the report closing with what was not checked and what is assumed (reviewing-ux-in-browser). critiquing-visual-design gained the question asked before building. Everything else it states was already owned (verb-first buttons, destination links, one wording per action, headline claim, rails, overflow, tap targets, reduced motion, pause controls, radius scale, image sizing, lazy loading, skip link, heading order, metadata)."
     }
   },
   "skills": {
@@ -78,9 +85,12 @@
       "note": "Split out of building-accessible-interfaces on 2026-09-07. Holds the motion-craft rules that carry no accessibility failure mode; the constraints they must satisfy stayed behind. Stated as a boundary rather than a count, since the rule set grows.",
       "files": {
         "SKILL.md": {
-          "sha256": "3f13a4b9185ae3084dc6deee16f39abaa036df8d01dc115228691fad2e30b825"
+          "sha256": "661102a2d393872c760944171778864be057f5ca68bb5c8c501589b4292012bb"
         }
-      }
+      },
+      "decisions": [
+        "2026-11-13: two instances added from Leonxlnx/taste-skill's motion rules, restated: the 'un-animated state is the readable one' clause now covers every reveal, not only scroll timelines (an element authored hidden stays hidden when its trigger does not fire), and the 'motion added because a surface looked static' anti-pattern names the same entrance on every section as its common form. The second was the one motion default a RED run (Sonnet, bakery brief asking for a tech site's particle and fade-in look) still reached for after it had refused the particles; no GREEN run was made for a two-clause change."
+      ]
     },
     "brainstorming": {
       "disposition": "merge",
@@ -1073,14 +1083,16 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "1407d41935f2799f428a540cef143dcd0cde8e6f41e478167ee1fe486edf2714",
+          "sha256": "84794d0a36988ec1e319781e07bfd38ab40690b5d39ab86c705a6c039cf300d0",
           "upstream": {
             "status": "diverged",
             "sha256": "6726079ea77a416c18d1753d9bf0c54eea469f3854757a586af7e6df903f4931"
           }
         }
       },
-      "decisions": [],
+      "decisions": [
+        "2026-11-13: two instances added from Leonxlnx/taste-skill's checker and report shape, restated: a visual frame that drew nothing at one of the inspected widths is a finding (step 3), and the report closes with what could not be checked and every assumption or stand-in the work ships (step 6). Procedure additions; not pressure-tested, since the scenario needs a rendered fixture, so they are owed a test."
+      ],
       "rationale": "audacioustux-owned, pristine",
       "owned": true
     },
@@ -1601,14 +1613,15 @@
       "state": "owned-normalized",
       "files": {
         "SKILL.md": {
-          "sha256": "2200b548a2da60ee09ce0288bd1d1e132a6bb91becd426d5235302b9f897bffd",
+          "sha256": "97d4d6abc335a518f3bf7f3b327a9db798275c78983f179db5aab48c5ef86ef7",
           "upstream": {
             "status": "rewritten"
           }
         }
       },
       "decisions": [
-        "2026-11-10: added 'Headlines make a claim the page keeps': the competitor swap as a prompt (shared capability is not vagueness; a rewrite only when headline and copy leave a first-time reader unsure, after review on PR 44), tied to the ambiguity ground under 'a deliberate brand voice is not a defect'; the page keeping the claim; a brand line kept beside a specific one. Plus its detection row and headlines in the description. Prompted by critiquing-visual-design, which hands headlines here."
+        "2026-11-10: added 'Headlines make a claim the page keeps': the competitor swap as a prompt (shared capability is not vagueness; a rewrite only when headline and copy leave a first-time reader unsure, after review on PR 44), tied to the ambiguity ground under 'a deliberate brand voice is not a defect'; the page keeping the claim; a brand line kept beside a specific one. Plus its detection row and headlines in the description. Prompted by critiquing-visual-design, which hands headlines here.",
+        "2026-11-13: added 'Devices are a budget' and 'Specifics are true or absent', restating two ideas from Leonxlnx/taste-skill (copy-voice.md, copy-tells.md, copy.md) as instances of this skill's existing voice and plain-words rules, in the owner's framing: no device is banned, each works once, the defect is the default; the fix is a fact or a decision, never a synonym; a figure, quote or price comes from the source material or is absent, with unavoidable assumptions marked on the element and in the hand-off. Description gained landing-page copy and copy that reads as generated; two detection rows. RED (Sonnet, one run, no skill): a bakery brief asking for 'punchy two-part headings' and 'proof' produced six headings all in the same two-fragment shape and a quip closing most sections; it invented no proof. GREEN (one run, skill read first): the device spent once and named as such, plain headings elsewhere, three readings of the brief listed for confirmation, no invented proof. Known limit: the GREEN copy ran flat, and one section repeated the hours, which the writer flagged; one run each, so the loophole pass is still owed."
       ],
       "rationale": "domain rewritten in house voice; upstream reporting/severity sections and stack-specific material dropped",
       "owned": true
@@ -1925,9 +1938,12 @@
       "note": "2026-11-10: written test-first at the owner's request. Inspiration: three short lists by the designer Charles Liu (ways to unslop AI designs, AI design slop indicators, backgrounds that make a design less flat), shared by the owner; restated as prompts for looking, not reproduced. The owner's framing is the skill's premise: something is slop only if it looks weird, inconsistent, aesthetically not pleasing, or practically ruins something; the lists say what to measure and rethink, not what to follow or avoid. Most rules already had owners and stay there; this skill owns the judgement, the evidence a finding carries, and the composition questions no sibling covered. Tests (Sonnet unless noted) used rendered fixtures: an orders dashboard whose list-like items each do a job, a clean copy of it, and a landing page with ten planted defects. RED, 7 runs: list matches reported as 'confirmed slop' (a brand gradient, per-row status pills, table row rules), seven of them on the clean copy; offered the corpus, no reviewer opened a skill; a three-bullet request answered with vibes and false facts about the render. With the skill, 11 runs over the initial text, two refactor rounds and two review rounds: the dashboard's planted defects reported first and measured, list items kept with their jobs named, no list-match findings on the clean copy; loopholes closed for an installed owner left unread, header rules counted as the same role as row rules, a count of findings never written down, the answer to a list growing past the items present plus one line for those absent, and an unpleasant look reported with nothing to point at (under 'it is ugly, don't tell me it is fine', the last run named elements for every finding and labelled the rest preference). Known limit: Sonnet missed the 16/16/6 card radii and the non-concentric inset band in every run, and the icon styles in the post-review run; one Opus run, on the first refactor's text, found all ten.",
       "files": {
         "SKILL.md": {
-          "sha256": "2a6a9a3f0f9041488d12447ea0b47b663616aa7093f821be18d103de88866aab"
+          "sha256": "9143b4ec46c5601ef7934b36dad42bcaa393e780602c7fff25b0c69d8b3ade4d"
         }
-      }
+      },
+      "decisions": [
+        "2026-11-13: 'Chosen, or arrived by default?' gained a paragraph asking the question before the page exists: write down what is sold, who it is for, the one action, the material in hand, and what each section shows and why; the subject answers most of it (a place in photographs of the place, software in its own interface, a device as the device). Description gained 'before building a page from a brief'. Restated from Leonxlnx/taste-skill's brief-reading and page-plan steps, minus its kit, its page-kind table and its numeric house rules. Evidence is weak: in two RED runs (Sonnet, no skill; a bakery brief pushed towards a tech site's gradient and particles, and a SaaS brief with no screenshots pushed towards a finished-looking mock) the baseline already chose photographs of the place, refused the particle look, declared its schematic as sample data and asked for screenshots. The owner may drop this paragraph as unearned; it is kept because the owner's merge request named art direction before building as the craft to look for, and because it records the choice rather than adding a rule."
+      ]
     }
   },
   "dispositionsRecorded": "2026-09-04",

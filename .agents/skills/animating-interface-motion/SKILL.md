@@ -123,7 +123,10 @@ listener. `animation-timeline: scroll()` drives an animation from a scroller's
 progress and `view()` from an element's passage through the viewport, both off the
 main thread, where the hand-rolled equivalent measures geometry on every scroll event.
 Firefox ships neither outside preview, so put them behind `@supports` and make the
-un-animated state the readable one. The reduced-motion obligation is external to this
+un-animated state the readable one. That holds for every reveal, scroll-driven or
+not: an element authored hidden and shown by its entrance stays hidden whenever the
+trigger does not fire, so author the resting state visible and animate from it rather
+than towards it. The reduced-motion obligation is external to this
 feature — the scroll-animations spec's normative text imposes none — and scroll-triggered
 decoration is exactly the non-essential motion WCAG names, parallax included.
 
@@ -149,4 +152,6 @@ decoration is exactly the non-essential motion WCAG names, parallax included.
   when the system starts responding rather than how long the motion runs.
 - Growing a card's width or height on hover, reflowing its neighbours under the cursor.
 - Parallax or scroll reveals hand-rolled on a scroll listener with no reduced-motion path.
-- Motion added because a surface looked static, with no state change to explain.
+- Motion added because a surface looked static, with no state change to explain. The
+  same entrance on every section, so the page reveals itself piece by piece as it
+  scrolls, is the common form.

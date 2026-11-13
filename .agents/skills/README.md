@@ -60,13 +60,13 @@ Current UI ownership boundaries:
 | `building-responsive-layouts` | Responsive adaptation, overlay stability, stacking order, safe areas, direction and locale resilience |
 | `building-color-systems` | Ramp construction, color token tiers, notation and gamut, measuring rendered pairs, dark-mode palettes |
 | `refining-typography` | Text rendering: scale, line-height, measure, wrapping, truncation, numerals, font faces |
-| `writing-interface-copy` | User-facing wording: headlines, labels, errors, empty states, terminology, translation-safe strings |
+| `writing-interface-copy` | User-facing wording: headlines, labels, errors, empty states, terminology, translation-safe strings, rhetorical devices as a budget, specifics true or absent |
 | `designing-component-systems` | Component APIs, composition, state ownership, token consumption |
 | `animating-interface-motion` | Whether to animate, continuity, entrance and exit shaping, technique choice |
 | `following-repo-ui-conventions` | Repository convention precedence, theme safety, styling discipline |
 | `improving-web-performance` | Loading, runtime responsiveness, visual stability, resilience |
 | `reviewing-ux-in-browser` | Browser verification procedure |
-| `critiquing-visual-design` | Visual judgement: defect or taste, the evidence a finding carries, decoration doing no work, the main thing shown largest, emphasis, icon families |
+| `critiquing-visual-design` | Visual judgement: defect or taste, the evidence a finding carries, decoration doing no work, the main thing shown largest, emphasis, icon families, a page's look chosen on record before it is built |
 
 How the UI skills compose. A solid arrow means "defers this concern to", declared in
 the source skill's `uses:` block and stated in its hand-off line. The one dashed arrow

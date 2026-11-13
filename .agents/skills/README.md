@@ -66,7 +66,7 @@ Current UI ownership boundaries:
 | `following-repo-ui-conventions` | Repository convention precedence, theme safety, styling discipline |
 | `improving-web-performance` | Loading, runtime responsiveness, visual stability, resilience |
 | `reviewing-ux-in-browser` | Browser verification procedure |
-| `critiquing-visual-design` | Visual judgement: defect or taste, the evidence a finding carries, decoration doing no work, the main thing shown largest, emphasis, icon families, a page's look chosen on record before it is built |
+| `critiquing-visual-design` | Visual judgement: defect or taste, the evidence a finding carries, decoration doing no work, the main thing shown largest, emphasis, icon families |
 
 How the UI skills compose. A solid arrow means "defers this concern to", declared in
 the source skill's `uses:` block and stated in its hand-off line. The one dashed arrow

@@ -124,9 +124,10 @@ progress and `view()` from an element's passage through the viewport, both off t
 main thread, where the hand-rolled equivalent measures geometry on every scroll event.
 Firefox ships neither outside preview, so put them behind `@supports` and make the
 un-animated state the readable one. That holds for every reveal, scroll-driven or
-not: an element authored hidden and shown by its entrance stays hidden whenever the
-trigger does not fire, so author the resting state visible and animate from it rather
-than towards it. The reduced-motion obligation is external to this
+not: an element whose base styles hide it, waiting for an entrance to show it, stays
+hidden whenever the trigger does not fire. The base styles carry the visible resting
+state, which is also the fallback, and the entrance animates from a temporary hidden
+or offset start state to that resting state. The reduced-motion obligation is external to this
 feature — the scroll-animations spec's normative text imposes none — and scroll-triggered
 decoration is exactly the non-essential motion WCAG names, parallax included.
 

@@ -13,6 +13,7 @@ use crate::bus::{
     self, Action, DecideEvent, DevShellEvent, DispatchEvent, Event, Fork, LandEvent, Meters, Offsets, Outcome, Point,
     QueueEvent, QuotaEvent, ReadFailure, SessionEvent, Stamped,
 };
+use crate::harness::report::reset_ahead_limit;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -350,6 +351,7 @@ pub struct AccountState {
     /// across projects, the latest change wins.
     #[serde(default)]
     pub signed_at: Option<u64>,
+    #[serde(deserialize_with = "crate::harness::deserialize_meters")]
     pub meters: Meters,
     /// Unix microseconds of the last reading.
     pub read_at: Option<u64>,
@@ -569,7 +571,8 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// 16: a failure streak stands only after the last good reading (`Failing::last`).
 /// 17: a decision's `agent:` session holds a seat (`seated`, `unseated`), kept apart from the
 /// decisions (`seats`) so a job's cleanup keeps it.
-const FOLD_VERSION: u32 = 17;
+/// 18: a meter says its window, provider and scope; a stored reset past its window reads as none.
+const FOLD_VERSION: u32 = 18;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -799,6 +802,19 @@ impl<'w> Walk<'w> {
         }
         out
     }
+}
+
+/// `meters` as read at bus time `t`, each with no reset time that lies further ahead than its
+/// window: a reading from before the parsers judged the range ([`reset_in_range`]) holds such a
+/// time (a reset rolled a year out), which is no reset time. The bus keeps the reading as it was.
+fn in_reach(meters: &Meters, t: u64) -> Meters {
+    let read_s = i64::try_from(t / 1_000_000).unwrap_or(i64::MAX);
+    let mut out = meters.clone();
+    for m in out.values_mut() {
+        let limit = reset_ahead_limit(read_s, m.window);
+        m.resets_at = m.resets_at.filter(|r| limit.is_none_or(|l| *r <= l));
+    }
+    out
 }
 
 impl World {
@@ -1191,7 +1207,7 @@ impl World {
             }
             QuotaEvent::Reading { account, meters, sign_in } => {
                 let a = self.account(account);
-                a.meters.clone_from(meters);
+                a.meters = in_reach(meters, t);
                 a.read_at = Some(t);
                 a.failing = None;
                 a.sign_in.clone_from(sign_in);
@@ -1389,7 +1405,7 @@ impl World {
         match e {
             SessionEvent::Rate { account, meters } => {
                 let a = self.account(account);
-                a.meters.clone_from(meters);
+                a.meters = in_reach(meters, t);
                 a.read_at = Some(t);
             }
             SessionEvent::Limited { account, until } => {
@@ -1607,6 +1623,34 @@ mod tests {
     /// the fold of a fixed bus (a dispatch, a run that ends, retries and is resumed by hand, a
     /// limit, a reading). When the fold changes, the digest does: bump `FOLD_VERSION` and add the
     /// new pair; never change a pair already recorded.
+    /// 2026-11-13: the bus holds `claude:tj.pro`'s five-hour reset read as 1826049540 at
+    /// 1794513593, a year out. The fold takes no reset time that is further ahead than its window.
+    #[test]
+    fn a_stored_reset_past_its_window_is_no_reset_time() {
+        use crate::harness::{Meter, Window};
+        let read = |t_s: u64, r: i64| {
+            let meters = BTreeMap::from([
+                ("five_hour".to_owned(), Meter::new(Window::FiveHours, 1.0, Some(r))),
+                ("other".to_owned(), Meter::new(Window::Other(None), 0.5, Some(r))),
+            ]);
+            let rate = Event::Session(SessionEvent::Rate { account: "claude:x".into(), meters: meters.clone() });
+            let reading = Event::Quota(QuotaEvent::Reading { account: "claude:y".into(), meters, sign_in: None });
+            World::fold(&[st(t_s * 1_000_000, rate), st(t_s * 1_000_000 + 1, reading)])
+        };
+        let w = read(1_794_513_593, 1_826_049_540);
+        for account in ["claude:x", "claude:y"] {
+            let m = &w.accounts[account].meters;
+            assert_eq!(m["five_hour"].resets_at, None, "{account}");
+            assert_eq!(m["other"].resets_at, Some(1_826_049_540), "a window of no said length has no limit");
+        }
+        let w = read(1_794_513_593, 1_794_513_540);
+        assert_eq!(
+            w.accounts["claude:y"].meters["five_hour"].resets_at,
+            Some(1_794_513_540),
+            "a reset a minute old stays"
+        );
+    }
+
     #[test]
     fn the_fold_version_moves_with_the_fold() {
         const PINNED: &[(u32, u64)] = &[
@@ -1615,6 +1659,7 @@ mod tests {
             (15, 0x5351_e6de_0d8d_bfd8),
             (16, 0x5351_e6de_0d8d_bfd8),
             (17, 0x2132_12e7_f06d_d32d),
+            (18, 0x4bb9_80c4_5c80_027a),
         ];
         let dispatched = |t, model: Option<&str>| {
             st(
@@ -1639,7 +1684,7 @@ mod tests {
             account: "omp:w".into(),
             meters: BTreeMap::from([(
                 "openai-codex/5 hours".to_owned(),
-                crate::harness::Meter { utilization: 0.5, resets_at: Some(99) },
+                crate::harness::Meter { utilization: 0.5, resets_at: Some(99), ..Default::default() },
             )]),
             sign_in: None,
         });
@@ -2660,7 +2705,7 @@ mod tests {
 
         fn read(at: u64, utilization: f64) -> AccountState {
             let mut a = AccountState { read_at: Some(at), ..AccountState::default() };
-            a.meters.insert("five_hour".into(), Meter { utilization, resets_at: None });
+            a.meters.insert("five_hour".into(), Meter { utilization, resets_at: None, ..Meter::default() });
             a
         }
 

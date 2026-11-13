@@ -63,17 +63,160 @@ pub enum SignIn {
     As(Identity),
 }
 
-/// One quota window. `utilization` is a fraction; `resets_at` is unix seconds.
+/// How long a meter's window is. The boards give each its own column, shortest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Window {
+    FiveHours,
+    Week,
+    Month,
+    /// Any other: its length in hours when the harness says one.
+    Other(Option<u32>),
+}
+
+impl Default for Window {
+    fn default() -> Self {
+        Self::Other(None)
+    }
+}
+
+impl Window {
+    /// The window `hours` long: a named one when it is one of theirs.
+    pub fn of_hours(hours: u32) -> Self {
+        match hours {
+            5 => Self::FiveHours,
+            168 => Self::Week,
+            672..=744 => Self::Month,
+            h => Self::Other(Some(h)),
+        }
+    }
+
+    /// Its length in hours, when known (a month as thirty days).
+    pub fn hours(self) -> Option<u32> {
+        match self {
+            Self::FiveHours => Some(5),
+            Self::Week => Some(168),
+            Self::Month => Some(720),
+            Self::Other(h) => h,
+        }
+    }
+
+    /// As a column's heading: `5 hours`, `7 days`, `month`, `1 day`, `other`.
+    pub fn label(self) -> String {
+        match self {
+            Self::FiveHours => "5 hours".into(),
+            Self::Week => "7 days".into(),
+            Self::Month => "month".into(),
+            Self::Other(None) => "other".into(),
+            Self::Other(Some(h)) if h % 24 == 0 => {
+                let d = h / 24;
+                format!("{d} day{}", if d == 1 { "" } else { "s" })
+            }
+            Self::Other(Some(h)) => format!("{h} hour{}", if h == 1 { "" } else { "s" }),
+        }
+    }
+}
+
+impl Ord for Window {
+    /// Shortest first; one of unknown length last.
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let key = |w: &Self| (w.hours().is_none(), w.hours(), matches!(w, Self::Other(_)));
+        key(self).cmp(&key(other))
+    }
+}
+
+impl PartialOrd for Window {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// One quota window. `utilization` is a fraction; `resets_at` is unix seconds. What it measures
+/// is said by the harness that read it: its window, the provider within the account whose
+/// allowance it is, and the model or group within that allowance it counts alone.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Meter {
     #[serde(default)]
     pub utilization: f64,
     #[serde(default, rename = "resetsAt", alias = "resets_at")]
     pub resets_at: Option<i64>,
+    #[serde(default)]
+    pub window: Window,
+    /// The provider whose allowance it is, for a harness with one per provider (omp's
+    /// `openai-codex`); none where the account has one allowance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The model or group it counts alone, within that allowance (claude's `Fable`, antigravity's
+    /// `Gemini`); none for the whole allowance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
-/// Named meters of one home, such as `seven_day`, or `openai-codex/7 days`.
+impl Meter {
+    pub fn new(window: Window, utilization: f64, resets_at: Option<i64>) -> Self {
+        Self { utilization, resets_at, window, provider: None, scope: None }
+    }
+
+    #[must_use]
+    pub fn provider(self, provider: impl Into<String>) -> Self {
+        Self { provider: Some(provider.into()), ..self }
+    }
+
+    #[must_use]
+    pub fn scope(self, scope: impl Into<String>) -> Self {
+        Self { scope: Some(scope.into()), ..self }
+    }
+
+    /// A meter as a reading from before meters said their window names it ([`legacy`]), for tests
+    /// that fold such readings.
+    #[cfg(test)]
+    pub fn named(name: &str, utilization: f64, resets_at: Option<i64>) -> Self {
+        Self { utilization, resets_at, ..legacy(name) }
+    }
+}
+
+/// Named meters of one home, such as `seven_day`, or `openai-codex/7 days`. The name is the
+/// meter's identity; what it measures is in the meter.
 pub type Meters = BTreeMap<String, Meter>;
+
+/// What a meter named `name` measures, for a reading taken before meters said: the one place
+/// the names the harnesses used are read. claude's and puku's (`five_hour`, `seven_day`,
+/// `seven_day_opus`, `monthly`) and omp's (`provider/label`), each as its harness reads it now.
+pub fn legacy(name: &str) -> Meter {
+    match name.split_once('/') {
+        Some((provider, label)) => omp::window_of(label).provider(provider),
+        None => claude::window_of(name),
+    }
+}
+
+/// The meters `raw` names, each that does not say what it measures named by [`legacy`]: how
+/// readings already on the bus fold.
+pub fn deserialize_meters<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Meters, D::Error> {
+    #[derive(serde::Deserialize)]
+    struct Wire {
+        #[serde(default)]
+        utilization: f64,
+        #[serde(default, rename = "resetsAt", alias = "resets_at")]
+        resets_at: Option<i64>,
+        #[serde(default)]
+        window: Option<Window>,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        scope: Option<String>,
+    }
+    let raw: BTreeMap<String, Wire> = serde::Deserialize::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .map(|(name, w)| {
+            let m = match w.window {
+                Some(window) => Meter { window, provider: w.provider, scope: w.scope, ..Meter::default() },
+                None => legacy(&name),
+            };
+            (name, Meter { utilization: w.utilization, resets_at: w.resets_at, ..m })
+        })
+        .collect())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permissions {
@@ -372,6 +515,43 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Readings on the bus from before meters said what they measure fold as their harness reads
+    /// them now; a reading that says keeps what it says.
+    #[test]
+    fn an_old_readings_meters_are_named_once_as_they_fold() {
+        #[derive(serde::Deserialize)]
+        struct Reading {
+            #[serde(deserialize_with = "deserialize_meters")]
+            meters: Meters,
+        }
+        let old = r#"{"account":"x","meters":{"seven_day":{"utilization":0.3},"five_hour":{"utilization":0.1},"monthly":{"utilization":0.0},"openai-codex/7 days":{"utilization":0.2},"google-antigravity/Gemini (Weekly)":{"utilization":0.1},"requests":{"utilization":0.5}}}"#;
+        let m = serde_json::from_str::<Reading>(old).unwrap().meters;
+        let said = |n: &str| (m[n].window, m[n].provider.as_deref(), m[n].scope.as_deref());
+        assert_eq!(said("seven_day"), (Window::Week, None, None));
+        assert_eq!(said("five_hour"), (Window::FiveHours, None, None));
+        assert_eq!(said("monthly"), (Window::Month, None, None));
+        assert_eq!(said("requests"), (Window::Other(None), None, None));
+        assert_eq!(said("openai-codex/7 days"), (Window::Week, Some("openai-codex"), None));
+        assert_eq!(
+            said("google-antigravity/Gemini (Weekly)"),
+            (Window::Week, Some("google-antigravity"), Some("Gemini"))
+        );
+        assert!((m["seven_day"].utilization - 0.3).abs() < 1e-9);
+        // A new reading says what it measures, and that is kept, whatever its name.
+        let new = Meters::from([("odd".to_owned(), Meter::new(Window::Month, 0.4, Some(9)).scope("Fable"))]);
+        let text = serde_json::json!({ "meters": new }).to_string();
+        assert_eq!(serde_json::from_str::<Reading>(&text).unwrap().meters, new, "{text}");
+        assert!(text.contains(r#""window":"month""#), "{text}");
+    }
+
+    #[test]
+    fn windows_are_ordered_shortest_first() {
+        let mut w = vec![Window::Other(None), Window::Month, Window::of_hours(24), Window::Week, Window::FiveHours];
+        w.sort();
+        assert_eq!(w, [Window::FiveHours, Window::Other(Some(24)), Window::Week, Window::Month, Window::Other(None)]);
+        assert_eq!(w.iter().map(|w| w.label()).collect::<Vec<_>>(), ["5 hours", "1 day", "7 days", "month", "other"]);
+    }
 
     #[test]
     fn registry() {

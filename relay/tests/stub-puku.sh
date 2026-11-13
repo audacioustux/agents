@@ -3,6 +3,7 @@
 # end-to-end tests. Sessions run the claude stub on the puku home ($PUKU_CONFIG_DIR), after doing
 # what is puku's own. Files in the home:
 #   usage          printed for the quota script, as it prints puku's chat quota
+#   usage-live     run instead of `usage` when present: a slow or time-dependent reply
 #   sign-ins-seen  written by every session: the sign-in files it can see under ~/.config
 #   node-seen      written by every session: the `node` a `#!/usr/bin/env node` launcher would run
 # As the quota script, it reads the sign-in under $HOME as the real one does: none there is `lapsed`.
@@ -12,6 +13,7 @@ if [ "${1:-}" = -e ]; then
   # node -e SCRIPT URL PUKU_CLI
   [ "${3:-}" = "https://api-cli.puku.sh/puku/v1/subscription" ] || exit 1
   [ -f "$HOME/.config/${APP_NAME:-pukucode}/session.json" ] || { echo '{"lapsed":"not signed in"}'; exit 0; }
+  [ -f "$PUKU_CONFIG_DIR/usage-live" ] && exec sh "$PUKU_CONFIG_DIR/usage-live"
   cat "$PUKU_CONFIG_DIR/usage" 2>/dev/null || true
   exit 0
 fi

@@ -367,21 +367,21 @@ mod tests {
         assert_eq!(widths(&cols, &rows, 38, 2), [10, 1, 18, 3], "then the gauge");
     }
 
-    /// Review of #42: a meter's name is shown whole when the pane has room for it (omp's longest is
-    /// 49 columns), and cut only once the gauge is at its shortest.
+    /// Review of #42, with a column per window: an account's name, omp's longest with its
+    /// provider, is shown whole while the pane has room, the gauges giving way first.
     #[test]
-    fn the_accounts_meter_name_is_whole_while_there_is_room() {
-        let long = "google-antigravity/Claude & GPT (shared) (Weekly)";
-        let row = |meter: &str| {
-            ["omp:default", "ready", meter, &"g".repeat(super::super::board::ACCOUNTS[3].cap), "16%/d", "0"]
-                .map(String::from)
-                .to_vec()
-        };
-        let rows = vec![row(long), row("7 days")];
-        let w = widths(&super::super::board::ACCOUNTS, &rows, 120, 2);
-        assert_eq!(w[2], long.len(), "{w:?}");
-        let narrow = widths(&super::super::board::ACCOUNTS, &rows, 90, 2);
-        assert_eq!(narrow[3], super::super::board::ACCOUNTS[3].yields, "the gauge gives way first: {narrow:?}");
+    fn the_accounts_name_is_whole_while_the_gauges_give_way() {
+        use crate::harness::Window;
+        let cols = super::super::board::account_columns(&[Window::FiveHours, Window::Week, Window::Month], false);
+        let long = "  omp:default · google-antigravity";
+        let g = "g".repeat(cols[1].cap);
+        let row = |account: &str| [account, &g, &g, &g, "16%/d", "0", "ready"].map(String::from).to_vec();
+        let rows = vec![row(long), row("  claude:a")];
+        let w = widths(&cols, &rows, 140, 2);
+        assert_eq!((w[0], w[1]), (long.chars().count(), cols[1].cap), "{w:?}");
+        let narrow = widths(&cols, &rows, 125, 2);
+        assert_eq!(narrow[0], long.chars().count(), "{narrow:?}");
+        assert!(narrow[1..4].iter().all(|&g| g < cols[1].cap), "the gauges give way first: {narrow:?}");
     }
 
     #[test]

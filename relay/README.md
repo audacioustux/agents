@@ -237,18 +237,39 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   (`no account has room (claude:a busy (1 of 1 seat); claude:b reading is stale)`).
   A retried or requeued job has no account until its next start, so its account
   column says `-` and its model column lists every harness it may run on.
-- **Accounts.** A row per account with its state, the meter that decides, `room/day`
-  and the sessions it runs; then a row for each of its other meters, the closest to its
-  floor first (`openai-codex/5 hours`, `seven day overage included`), so the table is as
-  wide as the longest meter name however many there are. Each meter is a gauge: a bar in
-  eighths with `│` at that meter's floor, how full, and the time to its reset (`6d5h`).
-  The meter that decides is bold (`*` in `view status`, which is never coloured); on the
-  board a gauge is green, yellow within 10 points of its floor and red at it. `room/day`
-  is the account's room, which dispatch ranks shared among the sessions in `run` and
-  the next one, and `▸` the one the next start would take, also named
-  in the title with the floors. A stale reading says how old it is (`stale (read 3h ago)`), or, when the reads since gave nothing, why (`reading timed out after 180 s (3 tries since Nov 12 18:08 +06); read 3h ago`).
-  Who a home is signed in as is in `--json` (`identity`); twins say `same sign-in as`.
-  A narrow window shrinks the bars (to five cells) before it cuts a name.
+- **Accounts.** A row per account, and per provider for omp (`omp:default ·
+  openai-codex`, the one its configured model draws on first), with a column per
+  window, shortest first (`5 hours`, `7 days`, `month`; another length, or `other`,
+  when a harness reports one), so one window reads down across every account; a column
+  shows only when some row has a meter of it. Then `room/day`, `run` and the state,
+  last. A meter that counts one model or group alone (claude's `Fable` week,
+  antigravity's `Gemini`) is on a `└ Fable` sub-row under its account, in the same
+  columns; a window a row has no meter of is `—`.
+
+  ```
+                                      5 hours                   7 days                    month      room/day  run  state
+    ▸ claude:tj.pro                   █████▎░░░░│░  44%* 10m    ████▌░░░░░│░  38%  2d16h  —          23%/d     0    ready
+      claude:studyac17                —                         ███▍░░░░░░│░  28%* 5d14h  —          13%/d     0    ready
+        └ Fable                                                 █▍░░░░░░░░│░  11%  5d14h
+      omp:default · openai-codex      ░░░░░░░░░░│░   0%  5h     ██▎░░░░░░░│░  19%* 5d4h   —          16%/d     0    ready
+      omp:default · minimax-code      ▋░░░░░░░░░│░   5%  2h     ▌░░░░░░░░░│░   4%  5d     —
+  ```
+
+  Each meter is a gauge: a bar in eighths with `│` at that meter's floor, how full, and
+  the time to its reset (`6d5h`). The meter that decides is bold (`*` in `view status`,
+  which is never coloured); on the board a gauge is green, yellow within 10 points of
+  its floor and red at it. `room/day` is the account's room, which dispatch ranks
+  shared among the sessions in `run` and the next one, and `▸` the one the next start
+  would take, also named in the title with the floors. A stale reading says how old it
+  is (`stale (read 3h ago)`), or, when the reads since gave nothing, why (`reading timed
+  out after 180 s (3 tries since Nov 12 18:08 +06); read 3h ago`). Who a home is signed in as is in `--json` (`identity`);
+  twins say `same sign-in as`. Each meter in `--json` (`accounts[].meters`) says what
+  it measures beside its level: `window` (`fiveHours`, `week`, `month`, or `{"other":
+  hours}`), and `provider` and `scope` when it has them. A narrow window leaves the
+  emails out, then shrinks the bars (to five cells), then drops them and keeps the
+  numbers (`44%* 10m`), before it cuts a line; a row never wraps. `view watch` does the
+  same per column: a gauge with no room for a five-cell bar shows its numbers alone,
+  whole, before a name is cut.
 - **Readings.** Showing the accounts in a project (`view status`, `view watch`, `quota
   show`) starts a reading of each stale one in the background, and the accounts title
   says `refreshing claude:a, …` until it lands. `view status --json` does too, with the
@@ -725,8 +746,13 @@ one that resets soonest first, so the top row is the one to act on.
   being the floor, where dispatch stops. Where it does not: `~41% at reset: 59%
   unused`, the quota that will go to waste. No pace, no reset time, or a reset that has
   passed: `—`.
-- **The label** is the account, and the meter when it is not claude's 7-day one
-  (`omp:w openai-codex/7 days`).
+- **The label** is the account, its provider and the model or group its meter counts,
+  as `quota show` puts them (`omp:default · google-antigravity └ Gemini`, `claude:a └
+  Fable`), and the window when it is not the week's (`claude:a 5 hours`). Cut to fit,
+  the provider gives way first, then the account, then the model or group, so the end
+  that tells two rows apart stays; two meters never read alike. Two that would (claude's
+  `seven_day` and `seven_day_overage_included` are both the account's week) carry their
+  meter's name, `claude:a (seven_day)`, in the rows and the chart's legend alike.
 - **Narrow.** The bar shrinks first (to five cells), then the sparkline (to six); then
   each outlook moves to a line under its row, and past that a line is cut.
 - **`--chart`** prints the line chart instead: one line per account, time across
@@ -751,11 +777,11 @@ one that resets soonest first, so the top row is the one to act on.
   harnesses' accounts without `accounts.exclude`'s. The heading says so
   (`tickify's accounts, quota since ...`). A project that rarely dispatches
   still charts its accounts, from the readings other projects took of them.
-- **Which meter.** By default each account's weekly meters: those whose name, as
-  `view status` shows it, says a 7-day or weekly window (`7 days`,
-  `openai-codex/7 days`, `minimax-code/General 7 Day`, `google-antigravity/Gemini
-  (Weekly)`), one row each; `--meter NAME` picks another, by its name or as the
-  board shows it (`five_hour` or `5 hours`). A reading without that meter adds no
+- **Which meter.** By default every account's week meters, as the harness that read
+  them says (claude's all-models and Fable weeks, omp's `openai-codex/7 days`,
+  `minimax-code/General 7 Day`, `google-antigravity/Gemini (Weekly)`), one row each;
+  `--meter NAME` picks one by its name (`five_hour`), or every meter of a window by
+  its column's heading (`5 hours`, `month`). A reading without that meter adds no
   point.
 - **Which accounts and when.** `--account harness:label` (repeatable) and
   `--harness` (repeatable) narrow it; `--since` (`12h`, `7d`, `2w`; default `7d`)
@@ -769,7 +795,8 @@ one that resets soonest first, so the top row is the one to act on.
   `accounts.<account>.<meter>` is a list of `{t, utilization, resets_at}` (`t` in
   bus microseconds, `resets_at` in unix seconds, `utilization` a fraction), with
   `floor` and `floor_near_reset` beside it; and `rows`, one per row of the table in
-  its order: `account`, `meter`, `readings`, `utilization`, `floor`, `resets_at`,
+  its order: `account`, `meter`, `window`, `provider`, `scope`, `readings`,
+  `utilization`, `floor`, `resets_at`,
   `pace_per_day` (a fraction of the window), `projected_at_reset` (a fraction; null
   when it would be full first, or without a pace), `full_in_seconds` (null unless
   it would), `outlook` as printed and `sparkline`. `pace_window_hours` says how far
@@ -1034,7 +1061,7 @@ pairs `~/.puku-cli` with `~/.config/pukucode` and `~/.puku-cli.<label>` with
 with both variables set (Requirements). Who it is signed in as is a hash of that
 file's user id (`#3f2a1c`: puku keeps no plan there). Its quota is the chat quota
 puku's own Usage tab shows (`fiveHour`, `weekly` and `monthly` windows become the
-meters `five_hour`, `seven_day` and `monthly`); puku has no command that prints it, so
+meters `five_hour`, `seven_day` and `monthly`, in the 5 hours, 7 days and month columns); puku has no command that prints it, so
 relay runs a short `node` script that sends the home's access token to
 `https://api-cli.puku.sh/puku/v1/subscription` and prints only the quota. When the
 token has expired, the script first runs `puku-cli auth status`, since every puku-cli
@@ -1076,11 +1103,27 @@ in a row failed and since when. The board's state cell, `quota show --json` (`re
 queued job's reason say it instead of `stale` or `usage unreadable`: `reading timed out after 180 s
 (3 tries since Nov 12 18:08 +06)`. Any good reading ends it, however it came (the quota command, a session's rate events, another project's or a twin home's reading); a failure after it starts a count of its own. The stderr tail has terminal controls replaced. An account is used only when:
 
+A reset time is read against the meter's own window (5 hours, a week, a month): it counts when
+it lies in the hour before the reading (the CLI keeps printing a reset that just passed for a
+while, and it stays as printed: the meter is resetting now) and up to a window ahead. A time
+outside that range, such as `resets 7pm` read at 8:30pm for a 5-hour meter, is no reset time
+rather than a guess tomorrow or a year out. A stored reset further ahead than its meter's window
+is read as no reset time too, so an older reading on the bus no longer shows `resets 365d`.
+
 - it has a reading, and not a stale one (unread or stale is not the same as
   having room; a job waits while a fresh one is taken);
 - the meters that govern the job's model are below `limits.floor` (omp meters
   each provider, so its model must name one: `minimax-code/MiniMax-M3.1-Flash`),
-  or below `limits.floor_near_reset.floor` for a meter that resets soon (below);
+  or below `limits.floor_near_reset.floor` for a meter that resets soon (below). A
+  meter of one model's own governs only a job whose model it covers, beside the
+  account's (or provider's) whole ones. Which are declared, never read off a name:
+  claude's model families (`Opus`, `Sonnet`, `Haiku`, `Fable`, in `Current week (Fable)`
+  or `seven_day_opus`) cover a model whose id names them (`claude-fable-5-2`); any other
+  week (`seven_day_overage_included`) is the whole account's. omp's antigravity groups
+  are `Gemini` (models named `gemini`) and `Claude & GPT (shared)` (`claude` or `gpt`);
+  a group not declared governs every model of its provider, and a model no meter covers
+  is refused as blind. A claude job on the home's default model is judged by the whole
+  ones alone, since relay cannot tell which model that is;
 - it is not limited or signed out;
 - it has a free seat.
 

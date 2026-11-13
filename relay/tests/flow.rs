@@ -614,8 +614,14 @@ fn a_reset_with_no_zone_is_read_in_the_quota_commands_zone() {
     // UTC+6, whatever the caller's zone is.
     configure(&env, "", "[session.env]\nTZ = \"Etc/GMT-6\"\n");
     claude_account(&env.home, "solo", 40, false);
-    let usage =
-        "Current week (all models): 40% used · resets Jan 1, 12am (UTC)\nCurrent session: 61% used · resets 3pm\n";
+    // A five-hour reset must lie within five hours: the o'clock one to two hours ahead, in UTC+6.
+    let zone = jiff::tz::TimeZone::get("Etc/GMT-6").unwrap();
+    let ahead = jiff::Timestamp::now().checked_add(jiff::SignedDuration::from_hours(2)).unwrap().to_zoned(zone);
+    let (hour, pm) = (ahead.hour() % 12, ahead.hour() >= 12);
+    let at = format!("{}{}", if hour == 0 { 12 } else { hour }, if pm { "pm" } else { "am" });
+    let usage = format!(
+        "Current week (all models): 40% used · resets Jan 1, 12am (UTC)\nCurrent session: 61% used · resets {at}\n"
+    );
     std::fs::write(env.home.join(".claude.solo/usage"), usage).unwrap();
     let in_utc = |args: &[&str]| relay_cmd(&env, Command::new(env!("CARGO_BIN_EXE_relay")).args(args).env("TZ", "UTC"));
     ok(&in_utc(&["quota", "refresh"]), "refresh");
@@ -623,8 +629,8 @@ fn a_reset_with_no_zone_is_read_in_the_quota_commands_zone() {
     let account = &shown["accounts"][0];
     let read_s = account["readAt"].as_i64().expect("read") / 1_000_000;
     let reset = account["meters"]["five_hour"]["resetsAt"].as_i64().expect("a reset time");
-    assert!(reset > read_s && reset <= read_s + 86_400, "the next 3pm: {account}");
-    assert_eq!((reset + 6 * 3600) % 86_400, 15 * 3600, "3pm at UTC+6: {account}");
+    assert!(reset > read_s && reset <= read_s + 2 * 3600, "the next {at}: {account}");
+    assert_eq!((reset + 6 * 3600) % 86_400, i64::from(ahead.hour()) * 3600, "{at} at UTC+6: {account}");
 }
 
 /// Audit finding 16: a reading is taken when the accounts are shown, with no job waiting and no
@@ -1443,6 +1449,34 @@ fn a_puku_session_runs_on_its_own_home_and_sign_in_and_sees_no_other() {
     for secret in [SECRET_EMAIL, "puku-user-p", "\"fake\""] {
         assert!(!table.contains(secret) && !json.contains(secret), "{secret} leaked:\n{table}\n{json}");
     }
+}
+
+/// Review of #66: a quota command that takes a while still has its reset time judged at the moment
+/// it answered. This one prints, after 3 s, a five-hour reset 5 h less a second ahead of that moment:
+/// in range when it printed, but past five hours from when the batch began.
+#[test]
+fn a_slow_quota_commands_reset_is_judged_when_it_answered() {
+    let env = setup("slow-reset", false);
+    std::fs::create_dir_all(env.root.join("state/relay")).unwrap();
+    std::fs::write(
+        env.root.join("state/relay/programs.json"),
+        serde_json::json!({ "node": env.repo.join(".stub/node-bin/node") }).to_string(),
+    )
+    .unwrap();
+    let stub = env.repo.join(".stub/puku-cli");
+    configure(&env, "", &format!("[harness.puku]\nprogram = \"{}\"\n", stub.display()));
+    puku_account(&env.home, "p", 10);
+    std::fs::write(
+        env.home.join(".puku-cli.p/usage-live"),
+        "sleep 3\nr=$(( $(date +%s) + 5 * 3600 - 1 ))\n\
+         printf '{\"chat\":{\"windows\":{\"fiveHour\":{\"limit\":100,\"used\":10,\"resetsAt\":%s}}}}\\n' \"$r\"\n",
+    )
+    .unwrap();
+    ok(&relay(&env, &["quota", "refresh"]), "refresh");
+    let shown: serde_json::Value = serde_json::from_slice(&relay(&env, &["--json", "quota", "show"]).stdout).unwrap();
+    let account = shown["accounts"].as_array().unwrap().iter().find(|a| a["account"] == "puku:p").expect("puku:p");
+    let reset = account["meters"]["five_hour"]["resetsAt"].as_i64();
+    assert!(reset.is_some(), "the reset it printed is in range at the moment it answered: {account}");
 }
 
 /// Review of #40: on a first run, with nothing recorded, puku's `node` was looked up only by the quota

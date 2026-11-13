@@ -10,6 +10,7 @@ use std::process::Command;
 use anyhow::{Result, bail};
 
 use crate::accounts::{self, harness_of};
+use crate::config::CachePath;
 use crate::ctx::Ctx;
 use crate::harness::{Home, Invocation, Permissions, Session, Task};
 use crate::sandbox::{self, Mount, Mounts};
@@ -79,9 +80,12 @@ fn all(tests: impl IntoIterator<Item = String>) -> String {
     if t.is_empty() { "true".into() } else { t.join(" && ") }
 }
 
+/// The marker's name: [`MARKER`], then the probe's process id.
 fn cache_marker() -> String {
-    format!(".relay-probe-{}", std::process::id())
+    format!("{MARKER}{}", std::process::id())
 }
+
+const MARKER: &str = ".relay-probe-";
 
 struct Probe<'a> {
     ctx: &'a Ctx,
@@ -274,7 +278,8 @@ impl<'a> Probe<'a> {
         let user = accounts::home();
         let inv = self.invocation()?;
         std::fs::write(self.tmp.join(cache_marker()), "")?;
-        let markers = seed_markers(self.ctx, &user, self.home, &self.clone)?;
+        // Removed on every way out, by what owns them ([`Marks`]).
+        let mut marks = seed_markers(self.ctx, &user, self.home, &self.clone)?;
         // The clone is a session's: its linked caches are a copy in its `.git`, as a session's are.
         std::fs::create_dir_all(self.clone.join(".git"))?;
         let mounts = Mounts {
@@ -290,14 +295,8 @@ impl<'a> Probe<'a> {
         let rels = sandbox::linkable(self.ctx, &user, &mounts);
         let copy =
             sandbox::own_caches(self.ctx, &self.clone.join(".git"), sandbox::farm::IN_CLONE, &self.ctx.farms, &rels);
-        let copy = match copy {
-            Ok(copy) => copy,
-            Err(e) => {
-                unmark(self.ctx, &markers);
-                return Err(e.into());
-            }
-        };
-        let mounts = Mounts { caches: copy.as_ref().map(sandbox::farm::Farm::path), ..mounts };
+        marks.copy = copy?;
+        let mounts = Mounts { caches: marks.copy.as_ref().map(sandbox::farm::Farm::path), ..mounts };
         let plan = sandbox::plan(self.ctx, &user, &mounts);
         let args = sandbox::args(self.ctx, &user, &mounts, sandbox::session_env(self.ctx, &inv));
         let inside =
@@ -325,23 +324,38 @@ impl<'a> Probe<'a> {
             .filter(|k| deny.is_match(k) && !inv.env.iter().any(|(own, _)| own.as_os_str() == *k))
             .collect();
         report(leaked.is_empty(), "no secret-named variables", &leaked.join(" "));
-        // Out of the copy first, so it goes back to the pool without it.
-        if let Some(copy) = &copy {
-            for r in &self.ctx.cfg.sandbox.linked_caches {
-                let _ = std::fs::remove_file(copy.path().join(r).join(cache_marker()));
-            }
-        }
-        drop(copy);
-        unmark(self.ctx, &markers);
         Ok(outcomes)
+    }
+}
+
+/// The probe's markers, in each of relay's caches the plan mounts, and the clone's copy of the linked
+/// caches (which holds them too): dropped on any way out of the probe, it takes the markers out of the
+/// copy, gives the copy back (so it goes to the pool without them), then takes them out of relay's caches.
+struct Marks<'a> {
+    ctx: &'a Ctx,
+    marked: Vec<CachePath>,
+    copy: Option<sandbox::farm::Farm>,
+}
+
+impl Drop for Marks<'_> {
+    fn drop(&mut self) {
+        if let Some(copy) = self.copy.take() {
+            for rel in &self.marked {
+                let _ = std::fs::remove_file(copy.path().join(rel).join(cache_marker()));
+            }
+            drop(copy);
+        }
+        for rel in &self.marked {
+            let _ = sandbox::farm::remove_in_cache(&self.ctx.caches, rel, &cache_marker());
+        }
     }
 }
 
 /// Puts the marker in each of relay's caches the plan mounts, so a cache shown inside is known to be
 /// relay's; it is there before the clone takes its copy of the linked caches, so the copy has it too.
-/// Through handles from relay's caches' root that follow no symlink, never over a file there; on failure
-/// none is left. The caches marked, each relative to relay's caches.
-fn seed_markers(ctx: &Ctx, user: &Path, home: &Home, clone: &Path) -> std::io::Result<Vec<PathBuf>> {
+/// Through handles from relay's caches' root that follow no symlink, never over a file there. What it
+/// returns owns them; on failure, those put are gone already.
+fn seed_markers<'a>(ctx: &'a Ctx, user: &Path, home: &Home, clone: &Path) -> std::io::Result<Marks<'a>> {
     let (scratch, tmp) = (clone.join(".probe-scratch"), clone.join(".probe-tmp"));
     let mounts = Mounts {
         home,
@@ -353,29 +367,24 @@ fn seed_markers(ctx: &Ctx, user: &Path, home: &Home, clone: &Path) -> std::io::R
         account: true,
         caches: None,
     };
-    let mounted: Vec<PathBuf> = sandbox::plan(ctx, user, &mounts)
-        .into_iter()
-        .filter_map(|(_, k)| match k {
-            Mount::From(src) => src.strip_prefix(&ctx.caches).ok().map(Path::to_path_buf),
-            _ => None,
-        })
-        .collect();
-    let mut marked = Vec::new();
+    let plan = sandbox::plan(ctx, user, &mounts);
+    let mounted = ctx.cfg.sandbox.caches.iter().filter(|r| {
+        let src = ctx.caches.join(r);
+        plan.iter().any(|(_, k)| *k == Mount::From(src.clone()))
+    });
+    let mut marks = Marks { ctx, marked: Vec::new(), copy: None };
     for rel in mounted {
-        if let Err(e) = sandbox::farm::put_in_cache(&ctx.caches, &rel, &cache_marker()) {
-            unmark(ctx, &marked);
-            return Err(e);
+        // A probe that was killed removed nothing: its markers go now, once its process is gone.
+        for name in sandbox::farm::names_in_cache(&ctx.caches, rel).unwrap_or_default() {
+            let gone = name.strip_prefix(MARKER).is_some_and(|pid| !Path::new("/proc").join(pid).exists());
+            if gone {
+                let _ = sandbox::farm::remove_in_cache(&ctx.caches, rel, &name);
+            }
         }
-        marked.push(rel);
+        sandbox::farm::put_in_cache(&ctx.caches, rel, &cache_marker())?;
+        marks.marked.push(rel.clone());
     }
-    Ok(marked)
-}
-
-/// Removes the markers [`seed_markers`] put, following no symlink.
-fn unmark(ctx: &Ctx, marked: &[PathBuf]) {
-    for rel in marked {
-        let _ = sandbox::farm::remove_in_cache(&ctx.caches, rel, &cache_marker());
-    }
+    Ok(marks)
 }
 
 impl Drop for Probe<'_> {
@@ -397,6 +406,72 @@ mod tests {
     /// follow no symlink.
     #[test]
     fn markers_go_only_in_mounted_caches_and_through_no_symlink() {
+        markers_case();
+    }
+
+    /// PR #67 review 5: markers were removed only on the paths that reached the end of a probe, so an early
+    /// return (a `.git` that could not be made, a probe command that could not run) left them in relay's
+    /// caches. What seeding returns owns them: dropped, it removes them.
+    #[test]
+    fn markers_go_when_what_seeded_them_is_dropped() {
+        let d = Dir::new();
+        let root = d.path();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let user = root.join("user");
+        std::fs::create_dir_all(user.join(".cache")).unwrap();
+        let conf = "name = \"t\"\n[sandbox]\nhide = []\nhide_home = []\ncaches = [\".cache\"]\n";
+        let cfg = Config::parse(conf, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
+        let clone = root.join("clone");
+        std::fs::create_dir_all(&clone).unwrap();
+        let seeded = seed_markers(&ctx, &user, &home, &clone).unwrap();
+        assert!(ctx.caches.join(".cache").join(cache_marker()).exists());
+        drop(seeded);
+        assert!(!ctx.caches.join(".cache").join(cache_marker()).exists(), "a marker outlived the probe");
+    }
+
+    /// The markers go from the clone's copy of the linked caches before it is given back to the pool, and
+    /// from relay's caches; a killed probe's markers go at the next probe.
+    #[test]
+    fn markers_leave_the_copy_before_it_is_pooled_and_a_dead_probes_go_too() {
+        let d = Dir::new();
+        let root = d.path();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let user = root.join("user");
+        std::fs::create_dir_all(user.join(".bun/install/cache")).unwrap();
+        let conf = "name = \"t\"\n[sandbox]\nhide = []\nhide_home = []\ncaches = [\".bun/install/cache\"]\n\
+                    linked_caches = [\".bun/install/cache\"]\n";
+        let cfg = Config::parse(conf, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
+        let clone = root.join("clone");
+        std::fs::create_dir_all(clone.join(".git")).unwrap();
+        let rel = &ctx.cfg.sandbox.caches[0];
+        std::fs::create_dir_all(ctx.caches.join(rel)).unwrap();
+        // A marker of a probe whose process is gone (no process has id 0 here).
+        std::fs::write(ctx.caches.join(rel).join(format!("{MARKER}0")), "").unwrap();
+        let mut marks = seed_markers(&ctx, &user, &home, &clone).unwrap();
+        assert!(!ctx.caches.join(rel).join(format!("{MARKER}0")).exists(), "a dead probe's marker stays");
+        marks.copy = sandbox::own_caches(
+            &ctx,
+            &clone.join(".git"),
+            sandbox::farm::IN_CLONE,
+            &ctx.farms,
+            std::slice::from_ref(rel),
+        )
+        .unwrap();
+        assert!(marks.copy.as_ref().unwrap().path().join(rel).join(cache_marker()).exists(), "the copy has it");
+        drop(marks);
+        let pooled: Vec<_> = sandbox::farm::idle(&ctx.farms);
+        assert_eq!(pooled.len(), 1);
+        assert!(!ctx.farms.join(&pooled[0].0).join(rel).join(cache_marker()).exists(), "pooled with the marker");
+        assert!(!ctx.caches.join(rel).join(cache_marker()).exists(), "left in relay's cache");
+    }
+
+    fn markers_case() {
         let d = Dir::new();
         let root = d.path();
         let repo = root.join("repo");

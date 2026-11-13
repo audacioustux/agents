@@ -54,6 +54,7 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
+use crate::config::CachePath;
 use crate::ctx::Ctx;
 
 pub mod farm;
@@ -163,7 +164,7 @@ enum Stand {
 /// would show in the job's tree); when a later layer covers its path or a directory around it (the
 /// symlink would be hidden, the copy not); and when what holds its directory is a mount other than a
 /// hidden one.
-fn linking(cfg: &crate::config::Config, user_home: &Path, before: &Layer, after: &Layer) -> Vec<(PathBuf, Stand)> {
+fn linking(cfg: &crate::config::Config, user_home: &Path, before: &Layer, after: &Layer) -> Vec<(CachePath, Stand)> {
     let paths: Vec<PathBuf> = cfg.sandbox.caches.iter().map(|r| user_home.join(r)).collect();
     let mut out = Vec::new();
     for (r, p) in cfg.sandbox.caches.iter().zip(&paths) {
@@ -189,7 +190,7 @@ fn linking(cfg: &crate::config::Config, user_home: &Path, before: &Layer, after:
 
 /// The linked caches the plan would link for these mounts, whatever their `caches` says: what a job's copy
 /// of the caches is taken for ([`own_caches`]), so that it holds exactly what the plan links.
-pub fn linkable(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<PathBuf> {
+pub fn linkable(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<CachePath> {
     let (before, after, _) = layers(ctx, user_home, m);
     linking(&ctx.cfg, user_home, &before, &after).into_iter().map(|(r, _)| r).collect()
 }
@@ -254,7 +255,7 @@ pub fn own_caches(
     parent: &Path,
     name: &str,
     pool: &Path,
-    rels: &[PathBuf],
+    rels: &[CachePath],
 ) -> std::io::Result<Option<farm::Farm>> {
     if !ctx.cfg.sandbox.enabled {
         return Ok(None);
@@ -371,7 +372,7 @@ pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsS
             Mount::Writable => ("--bind", Some(p.as_path())),
             Mount::From(src) => {
                 // Made from relay's caches' root one directory at a time, following no symlink.
-                if let Ok(rel) = src.strip_prefix(&ctx.caches) {
+                if let Some(rel) = ctx.cfg.sandbox.caches.iter().find(|r| ctx.caches.join(r) == *src) {
                     let _ = farm::make_cache_dir(&ctx.caches, rel);
                 }
                 ("--bind", Some(src.as_path()))

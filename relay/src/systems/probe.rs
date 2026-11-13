@@ -161,7 +161,8 @@ impl<'a> Probe<'a> {
                     .filter(|e| !plan.iter().any(|(m, k)| m == e && matches!(k, Mount::Symlink(_))))
                     .take(3)
                     .collect();
-                let exist = all(shown.iter().map(|e| format!("test -e {}", q(e))));
+                // A symlink is there as itself, whatever it points at (a dangling one too).
+                let exist = all(shown.iter().map(|e| format!("{{ test -L {e} || test -e {e}; }}", e = q(e))));
                 (format!("{exist} && ! test -w {}", q(p)), exist)
             })
             .collect();

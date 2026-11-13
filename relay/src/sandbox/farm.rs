@@ -97,6 +97,11 @@ impl Farm {
             std::fs::create_dir_all(&from)?;
             let brought = open_path(&from).and_then(|from| {
                 let to = make_beneath(&farm.root, rel)?;
+                // Asked of the filesystems, not left to the first link: an empty cache makes none, and what
+                // the job then adds could not be linked back.
+                if rustix::fs::fstat(&from)?.st_dev != rustix::fs::fstat(&to)?.st_dev {
+                    return Err(Errno::XDEV.into());
+                }
                 link_tree(&from, &to, false, &mut tally)
             });
             if let Err(e) = brought {
@@ -200,15 +205,14 @@ pub fn idle(pool: &Path) -> Vec<(PathBuf, u64)> {
 }
 
 /// Removes the idle copy `name` from `pool`: first renamed out of the pool, so a run taking it at the
-/// same moment has either it whole or none; then emptied, never following a symlink a job left in it.
+/// same moment has either it whole or none; then removed whatever modes a job left in it (a directory
+/// it made mode 000), never following a symlink ([`crate::hostdir::remove_tree`]).
 /// Its files are the caches' own (hard links), so this frees directories, not data.
 pub fn remove_idle(pool: &Path, name: &Path) -> io::Result<()> {
     let pool_fd = open_path(pool)?;
     let gone = format!("gone-{}", uuid::Uuid::now_v7());
     rustix::fs::renameat(&pool_fd, name, &pool_fd, gone.as_str())?;
-    let copy = open_dir(&pool_fd, gone.as_str())?;
-    empty(&copy)?;
-    Ok(rustix::fs::unlinkat(&pool_fd, gone.as_str(), AtFlags::REMOVEDIR)?)
+    crate::hostdir::remove_tree(&pool.join(gone))
 }
 
 /// A directory of relay's own, by path: only its last component is not followed.
@@ -521,6 +525,44 @@ mod tests {
             t
         });
         timed("release", &mut || farm.as_mut().unwrap().release());
+    }
+
+    /// PR #67 review: a copy holding a directory a job made mode 000 could not be emptied once renamed
+    /// out of the pool, so it stayed as `gone-*`, which nothing lists again: a leak. It goes whole.
+    #[test]
+    fn an_idle_copy_holding_an_unreadable_directory_is_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = place();
+        let (farm, _) = take(&p);
+        std::fs::create_dir_all(farm.path().join(".cache/locked/inner")).unwrap();
+        std::fs::write(farm.path().join(".cache/locked/inner/f"), "x").unwrap();
+        std::fs::set_permissions(farm.path().join(".cache/locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        drop(farm);
+        let idle = idle(&p.pool);
+        assert_eq!(idle.len(), 1);
+        remove_idle(&p.pool, &idle[0].0).unwrap();
+        assert_eq!(pooled(&p), 0, "nothing left in the pool, not even renamed");
+    }
+
+    /// PR #67 review: an empty shared cache made no link, so a copy on another filesystem than the
+    /// shared caches was taken; what the job then added could not be linked back (EXDEV) and stayed in the
+    /// pool, where gc removes it. A copy on another filesystem is refused before anything is walked.
+    #[test]
+    fn a_copy_on_another_filesystem_is_refused_even_for_an_empty_cache() {
+        use std::os::unix::fs::MetadataExt;
+        let p = place();
+        let shm = Path::new("/dev/shm");
+        let dev = |q: &Path| q.metadata().map(|m| m.dev()).ok();
+        if dev(shm).is_none() || dev(shm) == dev(&p.job) {
+            eprintln!("SKIPPED: /dev/shm is not another filesystem here");
+            return;
+        }
+        let shared = shm.join(format!("relay-farm-test-{}", std::process::id()));
+        std::fs::create_dir_all(&shared).unwrap();
+        let taken = Farm::take(&p.job, "f", &p.pool, &shared, &rels());
+        let _ = std::fs::remove_dir_all(&shared);
+        assert_eq!(taken.err().and_then(|e| e.raw_os_error()), Some(Errno::XDEV.raw_os_error()));
+        assert!(!p.job.join("f").exists(), "no copy left");
     }
 
     /// An idle copy says when it was given back, and goes whole, read-only directories and all, while

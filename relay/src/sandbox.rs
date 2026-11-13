@@ -149,9 +149,11 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
             if !cfg.sandbox.linked_caches.contains(r) {
                 return bind;
             }
-            // Anything mounted at or under the cache path would land in the job's copy.
+            // Anything mounted at or under the cache path would land in the job's copy; and a cache around
+            // it is bound over the directory the symlink would stand in, so the symlink would be made in
+            // relay's own cache.
             let crowded = before.iter().chain(&after).any(|(q, _)| q.starts_with(p))
-                || paths.iter().any(|q| q != p && q.starts_with(p));
+                || paths.iter().any(|q| q != p && (q.starts_with(p) || p.starts_with(q)));
             if crowded || !p.exists() {
                 return bind;
             }
@@ -564,6 +566,38 @@ mod tests {
         let plan = super::plan(&ctx, &user, &m(None));
         assert!(plan.iter().all(|(_, k)| !matches!(k, Mount::Rebuilt | Mount::Symlink(_))), "{plan:#?}");
         assert!(matches!(mount_of(&plan, &user.join(".cache")), Some(Mount::From(_))));
+    }
+
+    /// PR #67 review: a linked cache inside another cache (`.cache/uv` in `.cache`) was made a symlink,
+    /// though the enclosing cache's bind covers its directory: the symlink was made inside relay's shared
+    /// cache, and failed where `uv` was there already. A linked cache with a cache around it is a bind.
+    #[test]
+    fn a_linked_cache_inside_another_cache_stays_a_bind() {
+        let d = Dir::new();
+        let root = d.path();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let user = root.join("user");
+        std::fs::create_dir_all(user.join(".cache/uv")).unwrap();
+        let conf = "name = \"t\"\n[sandbox]\nhide = []\nhide_home = []\ncaches = [\".cache\", \".cache/uv\"]\n\
+                    linked_caches = [\".cache/uv\"]\n";
+        let cfg = Config::parse(conf, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        let (scratch, tmp, farm) = (root.join("state/t/jobs/j.d"), root.join("data/t/scratch/j"), root.join("tree/f"));
+        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
+        let m = Mounts {
+            home: &home,
+            workdir: Some(&farm),
+            scratch: &scratch,
+            inbox: None,
+            tmp: &tmp,
+            cwd: &farm,
+            account: false,
+            caches: Some(&farm),
+        };
+        let plan = plan(&ctx, &user, &m);
+        assert!(matches!(mount_of(&plan, &user.join(".cache/uv")), Some(Mount::From(_))), "{plan:#?}");
+        assert!(plan.iter().all(|(_, k)| !matches!(k, Mount::Rebuilt | Mount::Symlink(_))), "{plan:#?}");
     }
 
     #[test]

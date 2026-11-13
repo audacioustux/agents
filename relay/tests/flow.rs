@@ -423,6 +423,8 @@ fn cache_link(tag: &str, home_shown: bool, declared: bool) {
     // Beside the cache: the directory a linked cache's symlink stands in.
     std::fs::create_dir_all(env.home.join(".bun/install")).unwrap();
     std::fs::write(env.home.join(".bun/install/visible"), "here").unwrap();
+    // A dangling symlink of the host's there is kept as itself, and the probe accepts it (PR #67 review).
+    std::os::unix::fs::symlink("nowhere", env.home.join(".bun/install/dangling")).unwrap();
     std::fs::create_dir_all(env.home.join(".ssh")).unwrap();
     std::fs::write(env.home.join(".ssh/id"), "key").unwrap();
     // The host's own caches, which a job never sees, and the project's, which it does.

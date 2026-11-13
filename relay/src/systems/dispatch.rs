@@ -1603,6 +1603,20 @@ mod tests {
         assert!(matches!(resume_due(&no_ceiling, &w, &[], Some(70.0), NOW_US), Some(Due::Resume { .. })));
     }
 
+    /// A job the project's own `limits.max_running` (or `limits.max_load`) holds is held as any other
+    /// is: with a reason, and among the jobs the `held` hook is asked about. It used to be passed
+    /// over in silence, so it never reached the hook.
+    #[test]
+    fn a_job_held_by_max_running_has_a_reason_and_reaches_the_held_hook() {
+        let (_d, cfg) = omp_config("max_running = 1\n");
+        let jobs = [("a", Status::Running, "minimax-code/M3"), ("b", Status::Queued, "openai-codex/gpt-6.1")];
+        let (world, found) = omp_world(&jobs, 0.1, 0.1);
+        let (out, held) = plan_omp(&cfg, &world, &found);
+        assert_eq!(out, [], "the project runs its one job");
+        assert_eq!(held.2, ["b"], "the held hook is asked about it: {:?}", held.0);
+        assert_eq!(held.0, ["b: 1 of 1 running in this project (limits.max_running)"]);
+    }
+
     #[test]
     fn admission_waits_for_the_floor_and_its_margin() {
         let l = floor(60.0, 3.0);

@@ -625,7 +625,7 @@ impl Room {
 /// policy. `None` when it is at or over the floor, when no floor is set, and when the memory could
 /// not be read.
 pub fn memory_hold(machine: &Machine, free_gb: Option<f64>) -> Option<String> {
-    let (floor, free) = (machine.min_free_mem_gb?, free_gb?);
+    let (floor, free) = (machine.min_free_mem_gb?.get(), free_gb?);
     (free < floor).then(|| {
         format!(
             "{free:.1} GiB of memory available, under the machine's {floor} GiB floor \

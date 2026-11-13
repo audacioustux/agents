@@ -1040,6 +1040,28 @@ fn a_disk_floor_the_owner_raises_while_a_session_runs_holds_it() {
     assert_eq!(wait_for(&env, "long")["status"], "done");
 }
 
+/// Copilot review of PR #70 (third round): a project's `limits.min_free_disk_gb = nan` loaded, and
+/// NaN compares false with everything, so the machine's floor was discarded and the floor read as
+/// off. A quantity that is not a finite number, zero or more, is a config error naming its key, in a
+/// project's config and in the owner's policy alike, and nothing runs under it.
+#[test]
+fn a_quantity_that_is_not_a_finite_number_is_refused_with_its_key_in_a_project_and_in_the_policy() {
+    let env = setup("nan-floor", false);
+    env.write_policy("[machine]\nmin_free_disk_gb = 30\n");
+    set_floor(&env, "nan", "0");
+    let out = relay(&env, &["config", "show"]);
+    assert!(!out.status.success(), "a NaN floor was taken: {}", out_of(&out));
+    assert!(stderr(&out).contains("limits.min_free_disk_gb must be a finite number"), "{}", stderr(&out));
+    let queued = relay(&env, &["queue", "add", "j", "--text", "Make a change."]);
+    assert!(!queued.status.success(), "a job was queued under a floor that is no number");
+    set_floor(&env, "0", "0");
+    ok(&relay(&env, &["config", "show"]), "a valid floor loads");
+    env.write_policy("[machine]\nmin_free_mem_gb = inf\n");
+    let out = relay(&env, &["config", "show"]);
+    assert!(!out.status.success(), "an infinite floor was taken: {}", out_of(&out));
+    assert!(stderr(&out).contains("machine.min_free_mem_gb must be a finite number"), "{}", stderr(&out));
+}
+
 /// Audit finding 6: a second checkout whose relay.toml has the same `name` would share the first's
 /// state directory, and the first's dispatcher would run its jobs from the first's repository. It is
 /// refused, naming both repositories, and the first's queue is untouched.

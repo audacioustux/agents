@@ -202,9 +202,9 @@ pub struct Machine {
     pub max_compiling: Option<usize>,
     /// No session and no acceptance check starts while the machine's available memory
     /// (`MemAvailable` in `/proc/meminfo`) is under this many GiB. What runs is never touched.
-    pub min_free_mem_gb: Option<f64>,
+    pub min_free_mem_gb: Option<Quantity>,
     /// The least `limits.min_free_disk_gb` of any project: one may raise its floor, never lower it.
-    pub min_free_disk_gb: Option<f64>,
+    pub min_free_disk_gb: Option<Quantity>,
 }
 
 /// A project's own disk floor, as its `relay.toml` wrote it (GB). It is half of a floor: the
@@ -212,17 +212,90 @@ pub struct Machine {
 /// cannot be compared with anything: a disk decision reads a [`Floor`], made of both at that moment.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(transparent)]
-pub struct OwnFloor(f64);
+pub struct OwnFloor(Quantity);
 
+/// A resource quantity of a config or the policy (GB of disk, GiB of memory): a number that is
+/// finite and zero or more, and can be nothing else. It is made in one place ([`Quantity::new`],
+/// which the parse goes through), so whatever compares one downstream can never meet NaN, which
+/// compares false with everything and would turn a floor off, nor an infinity or a negative.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Deserialize, serde::Serialize)]
+#[serde(try_from = "f64", into = "f64")]
+pub struct Quantity(f64);
+
+impl Quantity {
+    /// `x`, when it is a finite number, zero or more.
+    pub fn new(x: f64) -> Result<Self, String> {
+        if x.is_finite() && x >= 0.0 {
+            // `-0.0` is zero.
+            Ok(Self(x + 0.0))
+        } else {
+            Err(format!("a quantity must be a finite number, zero or more, not {x}"))
+        }
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
+
+    /// `x`, which a test knows to be valid.
+    #[cfg(test)]
+    pub fn of(x: f64) -> Self {
+        Self::new(x).unwrap()
+    }
+}
+
+impl TryFrom<f64> for Quantity {
+    type Error = String;
+
+    fn try_from(x: f64) -> Result<Self, String> {
+        Self::new(x)
+    }
+}
+
+impl From<Quantity> for f64 {
+    fn from(q: Quantity) -> Self {
+        q.0
+    }
+}
+
+impl std::fmt::Display for Quantity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// The one gate every float of a config or policy file passes, whatever key it is written under
+/// and whether or not relay knows the key: a float that is NaN, infinite or negative is an error
+/// naming its key. No setting of relay's is a negative number, so nothing valid is refused, and a
+/// float setting added later is covered without anyone remembering to check it.
+fn finite_quantities(text: &str) -> Result<()> {
+    fn walk(key: &str, v: &toml::Value) -> Result<()> {
+        match v {
+            toml::Value::Float(x) if !x.is_finite() || *x < 0.0 => {
+                bail!("{key} must be a finite number, zero or more (it is {x})")
+            }
+            toml::Value::Table(t) => {
+                t.iter().try_for_each(|(k, v)| walk(&if key.is_empty() { k.clone() } else { format!("{key}.{k}") }, v))
+            }
+            toml::Value::Array(a) => a.iter().try_for_each(|v| walk(key, v)),
+            _ => Ok(()),
+        }
+    }
+    // Text that is not TOML at all is the typed parse's to refuse, with its place in the file.
+    let Ok(table) = text.parse::<toml::Table>() else { return Ok(()) };
+    walk("", &toml::Value::Table(table))
+}
+
+#[cfg(test)]
 impl From<f64> for OwnFloor {
     fn from(gb: f64) -> Self {
-        Self(gb)
+        Self(Quantity::of(gb))
     }
 }
 
 impl PartialEq<f64> for OwnFloor {
     fn eq(&self, gb: &f64) -> bool {
-        self.0 == *gb
+        self.0.get() == *gb
     }
 }
 
@@ -243,8 +316,8 @@ impl Floor {
     /// The floor of a project with `limits` under the owner's caps `machine`: a project may raise
     /// the machine's floor, never lower it or turn it off.
     pub fn of(limits: &Limits, machine: &Machine) -> Self {
-        let own = limits.min_free_disk_gb.0;
-        let theirs = machine.min_free_disk_gb.filter(|m| *m > own);
+        let own = limits.min_free_disk_gb.0.get();
+        let theirs = machine.min_free_disk_gb.map(Quantity::get).filter(|m| *m > own);
         Self { gb: theirs.unwrap_or(own), margin_gb: limits.disk_resume_margin_gb, machines: theirs.is_some() }
     }
 
@@ -308,9 +381,6 @@ impl Machine {
 
     fn validate(&self) -> Result<()> {
         ensure!(self.max_compiling.is_none_or(|n| n >= 1), "machine.max_compiling must be at least 1");
-        let amount = |x: Option<f64>| x.is_none_or(|x| x.is_finite() && x >= 0.0);
-        ensure!(amount(self.min_free_mem_gb), "machine.min_free_mem_gb must be zero or a positive number");
-        ensure!(amount(self.min_free_disk_gb), "machine.min_free_disk_gb must be zero or a positive number");
         Ok(())
     }
 }
@@ -326,6 +396,7 @@ const POLICY_FILE: &str = ".config/relay/policy.toml";
 
 impl Policy {
     pub fn parse(text: &str) -> Result<Self> {
+        finite_quantities(text)?;
         Ok(toml::from_str(text)?)
     }
 
@@ -506,7 +577,7 @@ impl Default for Limits {
             budget_usd: 10.0,
             silent_minutes: 30,
             max_load: None,
-            min_free_disk_gb: OwnFloor(10.0),
+            min_free_disk_gb: OwnFloor(Quantity(10.0)),
             disk_resume_margin_gb: 3.0,
             job_disk_gb: 40.0,
             disk_sample_minutes: 3.0,
@@ -766,6 +837,7 @@ impl Config {
     /// The project's config over the owner's policy: a profile field the project
     /// sets replaces the policy's, one it leaves out stays; banned models add up.
     pub fn parse_with(text: &str, dir: &Path, policy: Option<(&Policy, &Path)>) -> Result<Self> {
+        finite_quantities(text)?;
         let mut cfg: Self = toml::from_str(text)?;
         cfg.repo = dir.join(&cfg.repo).canonicalize().with_context(|| format!("repo {}", cfg.repo.display()))?;
         // A relative `program` path is the config file's, as `repo` is, never the working
@@ -1594,7 +1666,7 @@ budget = 3
         write("[machine]\nmax_compiling = 6\n");
         let policy = Policy::parse("[machine]\nmax_compiling = 6\n").unwrap();
         let cfg = Config::parse_with("name = \"demo\"", d.path(), Some((&policy, &file))).unwrap();
-        let caps = |cfg: &Config| (cfg.machine().max_compiling, cfg.machine().min_free_mem_gb);
+        let caps = |cfg: &Config| (cfg.machine().max_compiling, cfg.machine().min_free_mem_gb.map(Quantity::get));
         assert_eq!(caps(&cfg), (Some(6), None));
         write("[machine]\nmax_compiling = 2\nmin_free_mem_gb = 4\n");
         assert_eq!(caps(&cfg), (Some(2), Some(4.0)), "the same config, loaded before the owner's edit");
@@ -1615,6 +1687,47 @@ budget = 3
         assert_eq!(caps(&cfg), (None, None), "the policy removed: no cap");
         // A config loaded with no policy file to read keeps what it was given.
         assert_eq!(Config::parse("name = \"demo\"", d.path()).unwrap().machine(), Machine::default());
+    }
+
+    /// Copilot review of PR #70 (third round): `limits.min_free_disk_gb = nan` passed validation, and
+    /// NaN compares false with everything: the machine's floor was discarded and the floor read as
+    /// off, so jobs started below the owner's floor. No quantity can hold such a value: it is refused
+    /// where the file is parsed, in a project's config and in the policy alike, naming its key.
+    #[test]
+    fn a_quantity_that_is_not_a_finite_number_zero_or_more_is_a_config_error_naming_its_key() {
+        let d = repo();
+        let project =
+            |section: &str, line: &str| Config::parse(&format!("name = \"demo\"\n[{section}]\n{line}\n"), d.path());
+        for bad in ["nan", "+nan", "inf", "-inf", "-1.5", "-1"] {
+            for key in ["min_free_disk_gb", "disk_resume_margin_gb", "job_disk_gb"] {
+                let err = format!("{:#}", project("limits", &format!("{key} = {bad}")).unwrap_err());
+                assert!(err.contains(key), "{key} = {bad}: {err}");
+            }
+            for key in ["min_free_mem_gb", "min_free_disk_gb"] {
+                let err = format!("{:#}", Policy::parse(&format!("[machine]\n{key} = {bad}\n")).unwrap_err());
+                assert!(err.contains(key), "machine.{key} = {bad}: {err}");
+            }
+        }
+        // The gate is on the file, not on a list of keys: any float, known to relay or not.
+        for (section, key) in [("limits", "budget_usd"), ("hooks", "held_after_minutes"), ("profiles.p", "budget")] {
+            let err = format!("{:#}", project(section, &format!("{key} = nan")).unwrap_err());
+            assert!(err.contains(&format!("{section}.{key} must be a finite number")), "{err}");
+        }
+        let err = format!("{:#}", Policy::parse("[profiles.p]\nbudget = inf\n").unwrap_err());
+        assert!(err.contains("profiles.p.budget must be a finite number"), "{err}");
+        let err = format!("{:#}", Policy::parse("[machine]\nmin_free_disk_gb = nan\n").unwrap_err());
+        assert!(err.contains("machine.min_free_disk_gb must be a finite number"), "{err}");
+        // And the type itself cannot be made to hold one, whoever makes it.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5] {
+            assert!(Quantity::new(bad).is_err(), "{bad}");
+        }
+        assert_eq!((Quantity::of(0.0).get(), Quantity::of(-0.0).get().is_sign_positive()), (0.0, true));
+        // What is valid still is: whole numbers and floats, and the machine's floor stands over the project's.
+        let cfg = project("limits", "min_free_disk_gb = 0.0\ndisk_resume_margin_gb = 2").unwrap();
+        let policy = Policy::parse("[machine]\nmin_free_disk_gb = 30\nmin_free_mem_gb = 4.5\n").unwrap();
+        let floor = Floor::of(&cfg.limits, &policy.machine);
+        assert_eq!((floor.gb, floor.on(), floor.resume_gb()), (30.0, true, 32.0));
+        assert_eq!(policy.machine.min_free_mem_gb.map(Quantity::get), Some(4.5));
     }
 
     /// A profile says whether its jobs compile; unset, they do. The project's field wins, as any other.
@@ -1639,7 +1752,8 @@ budget = 3
         let caps = "[machine]\nmax_compiling = 6\nmin_free_mem_gb = 4\nmin_free_disk_gb = 30\n";
         let cfg = merged_with(caps, "");
         let m = cfg.caps.at_load;
-        assert_eq!((m.max_compiling, m.min_free_mem_gb, m.min_free_disk_gb), (Some(6), Some(4.0), Some(30.0)));
+        let gb = |q: Option<Quantity>| q.map(Quantity::get);
+        assert_eq!((m.max_compiling, gb(m.min_free_mem_gb), gb(m.min_free_disk_gb)), (Some(6), Some(4.0), Some(30.0)));
         // Copilot review of PR #70 (second round), finding 4: nothing of the machine's floor is copied
         // into the project's limits, so no reader can hold an old one. A decision takes both, then.
         assert_eq!(cfg.limits.min_free_disk_gb, 10.0, "the project's own floor stays as written");
@@ -1664,7 +1778,11 @@ budget = 3
         let in_project = Config::parse("name = \"demo\"\n[machine]\nmax_compiling = 99\n", d.path());
         assert!(in_project.is_err(), "a project cannot set a machine cap");
         assert!(Policy::parse("[machine]\nmax_compilng = 6\n").is_err(), "a misspelt cap is refused, not ignored");
-        for bad in ["max_compiling = 0", "min_free_mem_gb = -1", "min_free_disk_gb = -1"] {
+        for bad in ["min_free_mem_gb = -1", "min_free_disk_gb = -1"] {
+            assert!(Policy::parse(&format!("[machine]\n{bad}\n")).is_err(), "{bad}: refused where it is parsed");
+        }
+        {
+            let bad = "max_compiling = 0";
             let policy = Policy::parse(&format!("[machine]\n{bad}\n")).unwrap();
             let cfg = Config::parse_with("name = \"demo\"", d.path(), Some((&policy, Path::new("/p.toml"))));
             assert!(cfg.is_err(), "{bad}");

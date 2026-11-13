@@ -375,6 +375,11 @@ min_free_mem_gb = 4     # no session and no check starts with less memory availa
 min_free_disk_gb = 30   # the least disk floor of any project (GB)
 ```
 
+Every quantity in a `relay.toml` or the policy (GB, GiB, minutes, USD) must be a
+finite number, zero or more: `nan`, `inf` or a negative value is a config error
+naming its key, wherever it is written, so no floor can be turned off by a value
+that compares false with everything.
+
 Each key is optional, and one left out does not apply: with no `[machine]` table
 relay behaves exactly as it does without one. The caps are read from the policy
 file again at every admission point (each dispatcher pass, the booking of a

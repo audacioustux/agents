@@ -648,7 +648,7 @@ mod tests {
     use super::room::{Gauges, LINGER_MICROS, LOOK_AGAIN_MICROS};
     use super::*;
     use crate::accounts;
-    use crate::config::Machine;
+    use crate::config::{Machine, Quantity};
     use crate::harness::Meter;
     use crate::world::Claim;
 
@@ -1933,7 +1933,7 @@ mod tests {
     #[test]
     fn the_memory_gate_holds_every_new_session_under_the_machines_floor() {
         let (_d, cfg) = burst_config();
-        let floor = Machine { min_free_mem_gb: Some(4.0), ..Machine::default() };
+        let floor = Machine { min_free_mem_gb: Some(Quantity::of(4.0)), ..Machine::default() };
         let (world, found) = machine_world(&[("build", Status::Queued, false, 5), ("read", Status::Queued, true, 6)]);
         let room =
             |machine, mem_gb| room_under(machine, &world, &[], &found).with_gauges(Gauges { load: None, mem_gb });
@@ -1968,7 +1968,7 @@ mod tests {
         std::fs::create_dir(d.path().join(".git")).unwrap();
         let text = "name = \"demo\"\n[limits]\nmin_free_disk_gb = 0\nper_account = 16\nmax_running = 20\n";
         let cfg = Config::parse(text, d.path()).unwrap();
-        let machine = Machine { min_free_disk_gb: Some(30.0), ..Machine::default() };
+        let machine = Machine { min_free_disk_gb: Some(Quantity::of(30.0)), ..Machine::default() };
         let (world, found) = machine_world(&[("build", Status::Queued, false, 5), ("read", Status::Queued, true, 6)]);
         let hold = |ok, job: &str| {
             room_under(machine, &world, &[], &found).with_disk(ok).hold(&cfg, &world.jobs()[job], NOW_US)
@@ -1987,7 +1987,8 @@ mod tests {
     #[test]
     fn a_hold_names_the_constraint_that_binds_first() {
         let (_d, mut cfg) = burst_config();
-        let mut machine = Machine { max_compiling: Some(1), min_free_mem_gb: Some(4.0), ..Machine::default() };
+        let mut machine =
+            Machine { max_compiling: Some(1), min_free_mem_gb: Some(Quantity::of(4.0)), ..Machine::default() };
         cfg.limits.max_load = Some(8.0);
         cfg.profiles.insert("solo".into(), profile(Some(1), None));
         cfg.profiles.insert("daily".into(), profile(None, Some(1)));

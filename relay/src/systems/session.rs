@@ -446,11 +446,12 @@ fn launch(
     // A package manager hard-links from its caches into the clone, so the linked ones are in the clone's
     // mount: a copy of exactly those the plan links.
     let rels = sandbox::linkable(ctx, &accounts::home(), &mounts);
-    let caches = work
-        .clone
-        .as_ref()
-        .and_then(|c| sandbox::farm::clone_git(c.path()))
-        .and_then(|git| sandbox::own_caches(ctx, &git, sandbox::farm::IN_CLONE, &ctx.farms, &rels));
+    // A copy an interrupted run left there goes even when this run links nothing; it must, or no session starts.
+    let caches = match work.clone.as_ref().and_then(|c| sandbox::farm::clone_git(c.path())) {
+        Some(git) => sandbox::own_caches(ctx, &git, sandbox::farm::IN_CLONE, &ctx.farms, &rels)
+            .context("removing the copy of the caches an interrupted run left in the clone")?,
+        None => None,
+    };
     let mounts = Mounts { caches: caches.as_ref().map(sandbox::farm::Farm::path), ..mounts };
     let cmd = supervised_command(ctx, &inv, &mounts)?;
     let tz = sandbox::session_env(ctx, &inv).into_iter().find(|(k, _)| k == "TZ").map(|(_, v)| v);

@@ -415,7 +415,8 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, phase: Phase, place:
         // Its own copy of the linked caches the plan links, beside its tree in its directory's mount, linked
         // back when it ends.
         let rels = crate::sandbox::linkable(ctx, &crate::accounts::home(), &mounts);
-        let caches = crate::sandbox::own_caches(ctx, place.work, "caches", &ctx.state.join("farms"), &rels);
+        let caches = crate::sandbox::own_caches(ctx, place.work, "caches", &ctx.state.join("farms"), &rels)
+            .context("removing a copy of the caches left in the check's directory")?;
         let mounts = Mounts { caches: caches.as_ref().map(crate::sandbox::farm::Farm::path), ..mounts };
         let mut c = self::command(ctx, &inv, &mounts);
         c.stdin(Stdio::null()).stdout(file.try_clone()?).stderr(file);

@@ -114,7 +114,7 @@ impl Farm {
                 let to = make_beneath(&farm.root, rel)?;
                 // A real link, made before anything is walked: two mounts of one filesystem share a device
                 // number but link() between them fails, and an empty cache would make no link to find out.
-                probe_link(&root, &from, &to)?;
+                probe_link(&from, &to)?;
                 link_tree(&from, &to, Dest::Copy, &mut tally)?;
             }
             Ok(())
@@ -143,6 +143,10 @@ impl Farm {
         let root = shared_root(&self.shared);
         let staging =
             root.as_ref().map_err(|e| io::Error::from(e.kind())).and_then(|r| make_shared(r, Path::new(STAGING)));
+        // What a release that never finished left being built: no run is building it any more.
+        if let Ok(staging) = &staging {
+            sweep(staging, NEW);
+        }
         for rel in &self.rels {
             let Ok(from) = open_beneath(&self.root, rel) else { continue };
             let to = root.as_ref().map_err(|e| io::Error::from(e.kind())).and_then(|r| make_shared(r, rel));
@@ -210,14 +214,28 @@ pub fn idle(pool: &Path) -> Vec<(PathBuf, u64)> {
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
-            let id = uuid::Uuid::parse_str(name.strip_prefix(IDLE)?).ok()?;
-            let (secs, nanos) = id.get_timestamp()?.to_unix();
-            Some((PathBuf::from(name), secs * 1_000_000 + u64::from(nanos) / 1000))
+            let at = made_at(&name, IDLE)?;
+            Some((PathBuf::from(name), at))
         })
         .collect();
     out.sort_by_key(|(_, at)| *at);
     out
 }
+
+/// Copies in `pool` whose removal began and did not finish (`gone-*`): nothing takes them, and gc
+/// removes them again.
+pub fn abandoned(pool: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(pool)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| PathBuf::from(e.file_name()))
+        .filter(|n| n.to_str().is_some_and(|n| n.starts_with(GONE)))
+        .collect()
+}
+
+/// The name a copy is renamed to in its pool while it is removed, then a v7 UUID.
+const GONE: &str = "gone-";
 
 /// Removes the idle copy `name` from `pool`: first renamed out of the pool, so a run taking it at the
 /// same moment has either it whole or none; then removed whatever modes a job left in it (a directory
@@ -225,7 +243,7 @@ pub fn idle(pool: &Path) -> Vec<(PathBuf, u64)> {
 /// Its files are the caches' own (hard links), so this frees directories, not data.
 pub fn remove_idle(pool: &Path, name: &Path) -> io::Result<()> {
     let pool_fd = open_path(pool)?;
-    let gone = format!("gone-{}", uuid::Uuid::now_v7());
+    let gone = format!("{GONE}{}", uuid::Uuid::now_v7());
     rustix::fs::renameat(&pool_fd, name, &pool_fd, gone.as_str())?;
     crate::hostdir::remove_tree(&pool.join(gone))
 }
@@ -278,6 +296,83 @@ fn make_beneath(at: &OwnedFd, rel: &Path) -> io::Result<OwnedFd> {
     Ok(fd)
 }
 
+/// Removes the copy `name` in `parent` (a directory only relay writes, or a `.git` reached from one
+/// without following a link), if one is there: one a run left that never ended, which nothing will take
+/// (this run links nothing). Through `parent`'s handle, never following a symlink, whatever modes a job
+/// left in it. An error when something is still there after.
+pub fn clear(parent: &Path, name: &str) -> io::Result<()> {
+    let parent_fd = match open_path(parent) {
+        Ok(fd) => fd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let cname = CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    match rustix::fs::statat(&parent_fd, &cname, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(Errno::NOENT) => return Ok(()),
+        Err(e) => return Err(e.into()),
+        Ok(_) => {}
+    }
+    crate::hostdir::remove_beneath(parent_fd.as_fd(), &cname)?;
+    match rustix::fs::statat(&parent_fd, &cname, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(Errno::NOENT) => Ok(()),
+        _ => Err(io::Error::other(format!("{} could not be removed", parent.join(name).display()))),
+    }
+}
+
+/// Makes the cache `rel` in relay's caches `shared`, from their root one directory at a time, following
+/// no symlink: what a cache bound into a sandbox is made with.
+pub fn make_cache_dir(shared: &Path, rel: &Path) -> io::Result<()> {
+    make_shared(&shared_root(shared)?, rel).map(drop)
+}
+
+/// Puts the empty file `name` in the cache `rel` of relay's caches `shared`, where nothing of that name is,
+/// following no symlink on the way or at it (the probe's marker).
+pub fn put_in_cache(shared: &Path, rel: &Path, name: &str) -> io::Result<()> {
+    let dir = make_shared(&shared_root(shared)?, rel)?;
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    rustix::fs::openat(&dir, name, flags, Mode::from_raw_mode(0o644)).map(drop).map_err(Into::into)
+}
+
+/// Removes the file `name` from the cache `rel` of relay's caches `shared`, following no symlink.
+pub fn remove_in_cache(shared: &Path, rel: &Path, name: &str) -> io::Result<()> {
+    let dir = open_beneath(&open_path(shared)?, rel)?;
+    rustix::fs::unlinkat(&dir, name, AtFlags::empty()).map_err(Into::into)
+}
+
+/// The name a link probe's file has while it is in a cache, then a v7 UUID; never linked in either direction.
+const PROBE: &str = ".relay-link-probe-";
+
+/// The name of a directory being built in [`STAGING`], then a v7 UUID.
+const NEW: &str = "new-";
+
+/// How old something a run makes for a moment (a probe, a directory being built) must be before another
+/// run takes it for one a run that never finished left: no run takes this long over it.
+const STALE_US: u64 = 3_600_000_000;
+
+/// When the entry `name` (`prefix`, then a v7 UUID) was made, in Unix microseconds.
+fn made_at(name: &str, prefix: &str) -> Option<u64> {
+    let id = uuid::Uuid::parse_str(name.strip_prefix(prefix)?).ok()?;
+    let (secs, nanos) = id.get_timestamp()?.to_unix();
+    Some(secs * 1_000_000 + u64::from(nanos) / 1000)
+}
+
+/// Removes from `dir` each entry named `prefix` and a v7 UUID older than [`STALE_US`], never following a
+/// symlink: what an interrupted run left, which would otherwise stay for ever.
+fn sweep(dir: &OwnedFd, prefix: &str) {
+    let now = crate::bus::now_micros();
+    for (name, _) in entries(dir).unwrap_or_default() {
+        let old =
+            name.to_str().ok().and_then(|n| made_at(n, prefix)).is_some_and(|at| now.saturating_sub(at) > STALE_US);
+        if old {
+            let _ = crate::hostdir::remove_beneath(dir.as_fd(), &name);
+        }
+    }
+}
+
+/// Tests only: the link probe takes its fallback, as on a filesystem with no `O_TMPFILE`.
+#[cfg(test)]
+static NO_TMPFILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The directory in relay's caches where a new directory is built before it is renamed into a cache whole;
 /// beside the caches, in no cache's mount.
 const STAGING: &str = ".relay-staging";
@@ -307,26 +402,32 @@ fn make_shared(root: &OwnedFd, rel: &Path) -> io::Result<OwnedFd> {
 
 /// Whether a file in the shared cache `shared` can be hard-linked into the copy `copy`: an unnamed file
 /// made there (`O_TMPFILE`, so no name ever shows in the shared cache) is linked into the copy and the link
-/// removed. Where the filesystem has no unnamed files, a file made in the copy is linked into the staging
-/// directory of relay's caches (`root`) instead, which no run reads. EXDEV when not.
-fn probe_link(root: &OwnedFd, shared: &OwnedFd, copy: &OwnedFd) -> io::Result<()> {
-    let name = format!(".relay-link-probe-{}", uuid::Uuid::now_v7());
+/// removed. Where the filesystem has no unnamed files, a file made in the copy is linked into the shared
+/// cache itself and removed at once (a run taking its copy meanwhile skips the name: [`PROBE`]). EXDEV
+/// when not.
+fn probe_link(shared: &OwnedFd, copy: &OwnedFd) -> io::Result<()> {
+    let name = format!("{PROBE}{}", uuid::Uuid::now_v7());
     let flags = OFlags::WRONLY | OFlags::TMPFILE | OFlags::CLOEXEC;
-    if let Ok(tmp) = rustix::fs::openat(shared, ".", flags, Mode::from_raw_mode(0o600)) {
+    #[cfg(test)]
+    let forced = NO_TMPFILE.load(std::sync::atomic::Ordering::SeqCst);
+    #[cfg(not(test))]
+    let forced = false;
+    if !forced && let Ok(tmp) = rustix::fs::openat(shared, ".", flags, Mode::from_raw_mode(0o600)) {
         let magic = format!("/proc/self/fd/{}", tmp.as_raw_fd());
         rustix::fs::linkat(CWD, magic.as_str(), copy, name.as_str(), AtFlags::SYMLINK_FOLLOW)?;
         let _ = rustix::fs::unlinkat(copy, name.as_str(), AtFlags::empty());
         return Ok(());
     }
+    // A probe a run that never finished left here (it is linked nowhere: every walk skips the name).
+    sweep(shared, PROBE);
     let made = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     drop(rustix::fs::openat(copy, name.as_str(), made, Mode::from_raw_mode(0o600))?);
-    let linked = make_shared(root, Path::new(STAGING)).and_then(|st| {
-        rustix::fs::linkat(copy, name.as_str(), &st, name.as_str(), AtFlags::empty())?;
-        let _ = rustix::fs::unlinkat(&st, name.as_str(), AtFlags::empty());
-        Ok(())
-    });
+    let linked = rustix::fs::linkat(copy, name.as_str(), shared, name.as_str(), AtFlags::empty());
+    if linked.is_ok() {
+        let _ = rustix::fs::unlinkat(shared, name.as_str(), AtFlags::empty());
+    }
     let _ = rustix::fs::unlinkat(copy, name.as_str(), AtFlags::empty());
-    linked
+    Ok(linked?)
 }
 
 /// Removes from a copy everything but the caches `rels` (whole) and the directories on the way to them.
@@ -389,6 +490,9 @@ fn link_tree(from: &OwnedFd, to: &OwnedFd, dest: Dest<'_>, tally: &mut Tally) ->
     let have: HashMap<CString, bool> = entries(to)?.into_iter().collect();
     for (name, is_dir) in entries(from)? {
         let name: &CStr = &name;
+        if name.to_bytes().starts_with(PROBE.as_bytes()) {
+            continue;
+        }
         let there = have.get(name).copied();
         if !is_dir {
             if there.is_some() {
@@ -453,15 +557,20 @@ fn publish(
     staging: &OwnedFd,
     tally: &mut Tally,
 ) -> io::Result<()> {
-    let stage = format!("new-{}", uuid::Uuid::now_v7());
+    let stage = format!("{NEW}{}", uuid::Uuid::now_v7());
     if rustix::fs::mkdirat(staging, stage.as_str(), Mode::from_raw_mode(0o700)).is_err() {
         tally.failed += 1;
         return Ok(());
     }
     tally.dirs += 1;
+    let failed_before = tally.failed;
     let built = open_dir(staging, stage.as_str()).and_then(|staged| {
         link_tree(from, &staged, Dest::Copy, tally)?;
         rustix::fs::fchmod(&staged, Mode::from_raw_mode(mode | 0o700))?;
+        // Anything left out (an entry the job made unreadable) and it is not the job's directory whole.
+        if tally.failed != failed_before {
+            return Err(io::Error::other("an entry could not be staged"));
+        }
         Ok(())
     });
     let placed = built.and_then(|()| {
@@ -809,6 +918,82 @@ mod tests {
             .arg(std::env::current_exe().unwrap())
             .args(["--exact", "sandbox::farm::tests::a_copy_on_another_mount_of_one_filesystem_is_refused"])
             .env("RELAY_FARM_INNER", dirs)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && text.contains("1 passed"), "{text}");
+    }
+
+    /// What an interrupted run left for a moment (a directory being built, a link probe) goes once it is
+    /// older than any run takes over it; what a run is making now stays.
+    #[test]
+    fn what_an_interrupted_run_left_is_swept_and_what_a_run_makes_now_is_not() {
+        let p = place();
+        let (farm, _) = take(&p);
+        drop(farm);
+        let staging = p.shared.join(STAGING);
+        let old = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, 1_000_000, 0));
+        std::fs::create_dir_all(staging.join(format!("{NEW}{old}/pkg"))).unwrap();
+        std::fs::write(staging.join(format!("{NEW}{old}/pkg/f")), "x").unwrap();
+        let fresh = format!("{NEW}{}", uuid::Uuid::now_v7());
+        std::fs::create_dir_all(staging.join(&fresh)).unwrap();
+        std::fs::write(p.shared.join(format!(".cache/{PROBE}{old}")), "").unwrap();
+        let (farm, _) = take(&p);
+        assert!(!farm.path().join(format!(".cache/{PROBE}{old}")).exists(), "a probe's name is never linked");
+        drop(farm);
+        assert!(!staging.join(format!("{NEW}{old}")).exists(), "an interrupted build stays for ever");
+        assert!(staging.join(&fresh).exists(), "a build under way is not taken for an interrupted one");
+        sweep(&open_path(&p.shared.join(".cache")).unwrap(), PROBE);
+        assert!(!p.shared.join(format!(".cache/{PROBE}{old}")).exists(), "an old probe stays for ever");
+    }
+
+    /// PR #67 review 4: a new directory whose staging failed for an entry (one the job made unreadable) was
+    /// published anyway, half-filled. A directory is published whole, or not at all.
+    #[test]
+    fn a_new_directory_that_could_not_be_staged_whole_is_not_published() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = place();
+        let (farm, _) = take(&p);
+        let pkg = farm.path().join(".cache/pkg");
+        std::fs::create_dir_all(pkg.join("locked")).unwrap();
+        std::fs::write(pkg.join("index.js"), "x").unwrap();
+        std::fs::write(pkg.join("locked/part.js"), "y").unwrap();
+        std::fs::set_permissions(pkg.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        drop(farm);
+        assert!(!p.shared.join(".cache/pkg").exists(), "a half-staged package was published");
+        assert_eq!(std::fs::read_dir(p.shared.join(STAGING)).map_or(0, Iterator::count), 0, "staging left behind");
+    }
+
+    /// PR #67 review 4: without `O_TMPFILE`, the link probe linked into the staging directory at the caches'
+    /// root, not into the cache: a cache on a mount of its own, empty, was taken though no link could be
+    /// made to it. The fallback probes the cache directory itself. Run in bubblewrap, with the cache (not
+    /// the root) a bind mount of its own, and the fallback forced.
+    #[test]
+    #[allow(clippy::disallowed_methods, reason = "the inner run is told its directories by the outer")]
+    fn without_tmpfile_the_probe_still_links_against_the_cache_itself() {
+        if let Some(dirs) = std::env::var_os("RELAY_FARM_INNER_CACHE") {
+            NO_TMPFILE.store(true, std::sync::atomic::Ordering::SeqCst);
+            let dirs = PathBuf::from(dirs);
+            let (shared, job, pool) = (dirs.join("caches"), dirs.join("job"), dirs.join("farms"));
+            let taken = Farm::take(&job, "f", &pool, &shared, &[PathBuf::from(".cache")]);
+            assert_eq!(taken.err().and_then(|e| e.raw_os_error()), Some(Errno::XDEV.raw_os_error()));
+            assert!(!job.join("f").exists(), "no copy left");
+            assert_eq!(std::fs::read_dir(shared.join(".cache")).unwrap().count(), 0, "no probe left in the cache");
+            return;
+        }
+        if std::process::Command::new("bwrap").arg("--version").output().is_err() {
+            eprintln!("SKIPPED: no bubblewrap");
+            return;
+        }
+        let p = place();
+        std::fs::create_dir_all(p.shared.join(".cache")).unwrap();
+        let cache = p.shared.join(".cache");
+        let out = std::process::Command::new("bwrap")
+            .args(["--dev-bind", "/", "/", "--bind"])
+            .args([&cache, &cache])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", "sandbox::farm::tests::without_tmpfile_the_probe_still_links_against_the_cache_itself"])
+            .env("RELAY_FARM_INNER_CACHE", p.job.parent().unwrap())
             .output()
             .unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);

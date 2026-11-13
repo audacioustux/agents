@@ -273,15 +273,8 @@ impl<'a> Probe<'a> {
     fn run(self) -> Result<Vec<Outcome>> {
         let user = accounts::home();
         let inv = self.invocation()?;
-        // Every cache of relay's holds the marker, so a cache shown inside is known to be relay's; it is
-        // there before the clone takes its copy of the linked caches, so the copy has it too.
-        let markers: Vec<PathBuf> =
-            self.ctx.cfg.sandbox.caches.iter().map(|r| self.ctx.caches.join(r).join(cache_marker())).collect();
         std::fs::write(self.tmp.join(cache_marker()), "")?;
-        for m in &markers {
-            std::fs::create_dir_all(m.parent().unwrap_or(m))?;
-            std::fs::write(m, "")?;
-        }
+        let markers = seed_markers(self.ctx, &user, self.home, &self.clone)?;
         // The clone is a session's: its linked caches are a copy in its `.git`, as a session's are.
         std::fs::create_dir_all(self.clone.join(".git"))?;
         let mounts = Mounts {
@@ -297,6 +290,13 @@ impl<'a> Probe<'a> {
         let rels = sandbox::linkable(self.ctx, &user, &mounts);
         let copy =
             sandbox::own_caches(self.ctx, &self.clone.join(".git"), sandbox::farm::IN_CLONE, &self.ctx.farms, &rels);
+        let copy = match copy {
+            Ok(copy) => copy,
+            Err(e) => {
+                unmark(self.ctx, &markers);
+                return Err(e.into());
+            }
+        };
         let mounts = Mounts { caches: copy.as_ref().map(sandbox::farm::Farm::path), ..mounts };
         let plan = sandbox::plan(self.ctx, &user, &mounts);
         let args = sandbox::args(self.ctx, &user, &mounts, sandbox::session_env(self.ctx, &inv));
@@ -332,10 +332,49 @@ impl<'a> Probe<'a> {
             }
         }
         drop(copy);
-        for m in &markers {
-            let _ = std::fs::remove_file(m);
-        }
+        unmark(self.ctx, &markers);
         Ok(outcomes)
+    }
+}
+
+/// Puts the marker in each of relay's caches the plan mounts, so a cache shown inside is known to be
+/// relay's; it is there before the clone takes its copy of the linked caches, so the copy has it too.
+/// Through handles from relay's caches' root that follow no symlink, never over a file there; on failure
+/// none is left. The caches marked, each relative to relay's caches.
+fn seed_markers(ctx: &Ctx, user: &Path, home: &Home, clone: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let (scratch, tmp) = (clone.join(".probe-scratch"), clone.join(".probe-tmp"));
+    let mounts = Mounts {
+        home,
+        workdir: Some(clone),
+        scratch: &scratch,
+        inbox: None,
+        tmp: &tmp,
+        cwd: clone,
+        account: true,
+        caches: None,
+    };
+    let mounted: Vec<PathBuf> = sandbox::plan(ctx, user, &mounts)
+        .into_iter()
+        .filter_map(|(_, k)| match k {
+            Mount::From(src) => src.strip_prefix(&ctx.caches).ok().map(Path::to_path_buf),
+            _ => None,
+        })
+        .collect();
+    let mut marked = Vec::new();
+    for rel in mounted {
+        if let Err(e) = sandbox::farm::put_in_cache(&ctx.caches, &rel, &cache_marker()) {
+            unmark(ctx, &marked);
+            return Err(e);
+        }
+        marked.push(rel);
+    }
+    Ok(marked)
+}
+
+/// Removes the markers [`seed_markers`] put, following no symlink.
+fn unmark(ctx: &Ctx, marked: &[PathBuf]) {
+    for rel in marked {
+        let _ = sandbox::farm::remove_in_cache(&ctx.caches, rel, &cache_marker());
     }
 }
 
@@ -344,5 +383,41 @@ impl Drop for Probe<'_> {
         for d in [&self.clone, &self.neighbour, &self.scratch, &self.inbox, &self.tmp] {
             let _ = crate::hostdir::remove_tree(d);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, tempdir::Dir};
+
+    /// PR #67 review 4: the probe put its marker in every configured cache by path, those the plan leaves
+    /// out included, following any symlink on the way: a link planted in relay's caches had it make
+    /// directories and files outside them. It marks only the caches the plan mounts, through handles that
+    /// follow no symlink.
+    #[test]
+    fn markers_go_only_in_mounted_caches_and_through_no_symlink() {
+        let d = Dir::new();
+        let root = d.path();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let user = root.join("user");
+        std::fs::create_dir_all(user.join(".cache")).unwrap();
+        std::fs::create_dir_all(user.join(".npm")).unwrap();
+        let conf = "name = \"t\"\n[sandbox]\nhide = []\nhide_home = []\ncaches = [\".cache\", \".npm\", \".absent\"]\n";
+        let cfg = Config::parse(conf, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&ctx.caches).unwrap();
+        std::os::unix::fs::symlink(&outside, ctx.caches.join(".npm")).unwrap();
+        let clone = root.join("clone");
+        std::fs::create_dir_all(&clone).unwrap();
+        let seeded = seed_markers(&ctx, &user, &home, &clone);
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "written through the planted link");
+        assert!(!ctx.caches.join(".absent").exists(), "a cache the plan leaves out was made");
+        assert!(seeded.is_err(), "a symlink in the way is refused");
+        assert!(!ctx.caches.join(".cache").join(cache_marker()).exists() || seeded.is_err());
     }
 }

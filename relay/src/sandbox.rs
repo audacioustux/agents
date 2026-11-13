@@ -25,9 +25,10 @@
 //! empty tmpfs with each of the host's entries bound back read-only (a symlink copied as itself), made
 //! read-only like a hidden one. Where the cache path's directory is hidden already, the symlink goes in
 //! that tmpfs. Where something else covers it, something else is mounted at or under the cache path
-//! (a hidden path included), or another cache is nested in it or around it, the cache stays a bind, as
-//! for a job with no tree, and is not copied: the copy is taken for what [`linkable`] says, the judge
-//! the plan asks too.
+//! (a hidden path included), the cache stays a bind, as for a job with no tree, and is not copied: the
+//! copy is taken for what [`linkable`] says, the judge the plan asks too. Caches nested in one another
+//! are refused when the config is loaded: a session could reach the inner one's directory through the
+//! outer one's bind and plant a symlink on relay's way to it.
 //!
 //! Layer 3 is one layer, ordered by depth, so a protected directory that holds other homes (omp's
 //! `profiles`) is mounted before they are hidden inside it.
@@ -245,12 +246,26 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
 /// that holds its tree, from the idle copies in `pool` (beside it, on its filesystem), of the caches
 /// `rels`: what [`linkable`] says for the job's mounts, and nothing else. None without the sandbox, with
 /// none, or when it cannot be made (`parent` on another mount than relay's caches): then each cache is a
-/// bind of the project's caches, as for a job with no tree.
-pub fn own_caches(ctx: &Ctx, parent: &Path, name: &str, pool: &Path, rels: &[PathBuf]) -> Option<farm::Farm> {
-    if !ctx.cfg.sandbox.enabled || rels.is_empty() {
-        return None;
+/// bind of the project's caches, as for a job with no tree, and a copy an interrupted run left at `name`
+/// is removed, since it would still be in the job's tree (with what a hide rule added since covers). An
+/// error when that removal fails: the job must not start beside it.
+pub fn own_caches(
+    ctx: &Ctx,
+    parent: &Path,
+    name: &str,
+    pool: &Path,
+    rels: &[PathBuf],
+) -> std::io::Result<Option<farm::Farm>> {
+    if !ctx.cfg.sandbox.enabled {
+        return Ok(None);
     }
-    farm::Farm::take(parent, name, pool, &ctx.caches, rels).ok().map(|(f, _)| f)
+    if !rels.is_empty()
+        && let Ok((copy, _)) = farm::Farm::take(parent, name, pool, &ctx.caches, rels)
+    {
+        return Ok(Some(copy));
+    }
+    farm::clear(parent, name)?;
+    Ok(None)
 }
 
 /// Makes the placeholder `p` exist on the host, empty: a directory, or a file (`{}` for JSON, so the
@@ -355,7 +370,10 @@ pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsS
             Mount::ReadOnly => ("--ro-bind", Some(p.as_path())),
             Mount::Writable => ("--bind", Some(p.as_path())),
             Mount::From(src) => {
-                let _ = std::fs::create_dir_all(src);
+                // Made from relay's caches' root one directory at a time, following no symlink.
+                if let Ok(rel) = src.strip_prefix(&ctx.caches) {
+                    let _ = farm::make_cache_dir(&ctx.caches, rel);
+                }
                 ("--bind", Some(src.as_path()))
             }
             // Made empty on the host, then mounted read-only like any protected path. Should that fail
@@ -616,36 +634,25 @@ mod tests {
         assert!(matches!(mount_of(&plan, &user.join(".cache")), Some(Mount::From(_))));
     }
 
-    /// PR #67 review: a linked cache inside another cache (`.cache/uv` in `.cache`) was made a symlink,
-    /// though the enclosing cache's bind covers its directory: the symlink was made inside relay's shared
-    /// cache, and failed where `uv` was there already. A linked cache with a cache around it is a bind.
+    /// PR #67 review 4: a copy an interrupted run left in the clone was handled only by taking a copy, so a
+    /// run that links nothing (a hide rule added since for its only linked cache) left it there, hidden
+    /// path included, readable in the job's tree. With no copy to take, one left in place is removed.
     #[test]
-    fn a_linked_cache_inside_another_cache_stays_a_bind() {
+    fn a_copy_left_in_place_goes_when_this_run_links_nothing() {
+        use std::os::unix::fs::PermissionsExt;
         let d = Dir::new();
-        let root = d.path();
-        let repo = root.join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        let user = root.join("user");
-        std::fs::create_dir_all(user.join(".cache/uv")).unwrap();
-        let conf = "name = \"t\"\n[sandbox]\nhide = []\nhide_home = []\ncaches = [\".cache\", \".cache/uv\"]\n\
-                    linked_caches = [\".cache/uv\"]\n";
-        let cfg = Config::parse(conf, &repo).unwrap();
-        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
-        let (scratch, tmp, farm) = (root.join("state/t/jobs/j.d"), root.join("data/t/scratch/j"), root.join("tree/f"));
-        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
-        let m = Mounts {
-            home: &home,
-            workdir: Some(&farm),
-            scratch: &scratch,
-            inbox: None,
-            tmp: &tmp,
-            cwd: &farm,
-            account: false,
-            caches: Some(&farm),
-        };
-        let plan = plan(&ctx, &user, &m);
-        assert!(matches!(mount_of(&plan, &user.join(".cache/uv")), Some(Mount::From(_))), "{plan:#?}");
-        assert!(plan.iter().all(|(_, k)| !matches!(k, Mount::Rebuilt | Mount::Symlink(_))), "{plan:#?}");
+        let ctx = ctx(d.path());
+        let git = d.path().join("clone/.git");
+        std::fs::create_dir_all(git.join("relay-caches/.cargo/git/secret")).unwrap();
+        std::fs::write(git.join("relay-caches/.cargo/git/secret/key"), "k").unwrap();
+        let _ = own_caches(&ctx, &git, farm::IN_CLONE, &d.path().join("farms"), &[]);
+        assert!(!git.join("relay-caches").exists(), "the abandoned copy is still in the clone");
+        // One that cannot be removed (its directory is not writable here) stops the job from starting.
+        std::fs::create_dir_all(git.join("relay-caches/.cargo")).unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let refused = own_caches(&ctx, &git, farm::IN_CLONE, &d.path().join("farms"), &[]);
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused.is_err(), "a copy left in place that cannot go must refuse the launch");
     }
 
     #[test]

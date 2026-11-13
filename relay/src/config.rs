@@ -851,6 +851,25 @@ impl Config {
                 bail!("{} must be a path inside $HOME, written relative to it", p.display());
             }
         }
+        // A cache nested in another could be reached through the outer one's bind, and a symlink planted on
+        // the way would take relay's own walks (making the inner cache's directory, binding it) out of its
+        // caches: so caches are apart, each relay's alone up to its own directory.
+        let caches = &self.sandbox.caches;
+        // Where relay builds what it adds to the caches, beside them: no cache may be it.
+        if let Some(p) =
+            caches.iter().find(|p| p.components().next().is_some_and(|c| c.as_os_str() == ".relay-staging"))
+        {
+            bail!("sandbox.caches {} is relay's own staging directory, not a cache", p.display());
+        }
+        for (i, a) in caches.iter().enumerate() {
+            if let Some(b) = caches[i + 1..].iter().find(|b| a.starts_with(b) || b.starts_with(a)) {
+                bail!(
+                    "sandbox.caches {} and {} are nested: a cache inside another is refused (keep the outer one)",
+                    a.display(),
+                    b.display()
+                );
+            }
+        }
         if let Some(p) = self.sandbox.linked_caches.iter().find(|p| !self.sandbox.caches.contains(p)) {
             bail!(
                 "sandbox.linked_caches names {}, which is not in sandbox.caches: a linked cache is one of the caches",
@@ -1388,6 +1407,9 @@ mod tests {
             "[gc]\nclones_after_days = -1",
             "[gc]\ncache_copies_idle_days = -1",
             "[sandbox]\nlinked_caches = [\".bun/install/cache\"]",
+            "[sandbox]\ncaches = [\".cache\", \".cache/uv\"]",
+            "[sandbox]\ncaches = [\".cache/uv\", \".cache/\"]",
+            "[sandbox]\ncaches = [\".relay-staging\"]",
             "[gc]\npass_seconds = 0",
             "[limits]\njob_disk_gb = -5",
             "[limits]\ndisk_resume_margin_gb = -1",

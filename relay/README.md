@@ -1349,7 +1349,34 @@ Each session runs under `bwrap`. It sees the machine read-only, except for:
   the same one), where something else is mounted at or under the cache path (a `hide_home` path
   inside it), or where another cache is nested in it or around it (`.cache` and `.cache/uv`), a
   linked cache is a bind as the others, the tool copies, and no copy is made: a cache relay leaves a
-  bind is never in a job's tree, and a copy from the pool is cut down to what this run links.
+  bind is never in a job's tree, and a copy from the pool is cut down to what this run links. A cache
+  nested in another (`.cache` and `.cache/uv`) is refused when the config is loaded: a session could
+  reach the inner one's directory through the outer one's bind and plant a symlink on relay's way to it.
+
+  **What holds when a run fails or is interrupted.** Four invariants, for every path below: (1)
+  nothing a hide rule covers becomes readable through relay; (2) relay writes nothing outside its
+  caches and the job's own copy, and links nothing from outside them; (3) no half-written directory is
+  published into a shared cache; (4) nothing relay leaves behind stays for ever. Tests are in
+  `src/sandbox/farm.rs`, `src/sandbox.rs`, `src/systems/probe.rs`, `src/systems/land/gc.rs` and
+  `tests/flow.rs`.
+
+  | path | what can go wrong | why it holds |
+  | --- | --- | --- |
+  | which caches are copied | a cache left a bind (a hide rule under it, a later layer over it) copied anyway | one judge, `sandbox::linkable`, decides both the plan and what the copy is taken for (1; test: a cache with a hidden path under it is never copied) |
+  | config change between runs | a pooled or left-behind copy holds a cache this run does not link | a copy is cut down to this run's caches when taken (1; test: a pooled copy holds only the caches it is taken for); with none to take, one left in the clone is removed, and the job does not start if it cannot be (1; test: a copy left in place goes when this run links nothing) |
+  | resume after a crash | the runner died with the copy in the clone | the next run takes it in place, cut down, or removes it as above; a check's directory is made fresh for each run, its copy with it (1, 4) |
+  | take | a directory on the way to a cache swapped for a symlink | every shared walk starts from an open handle of relay's caches and opens one directory at a time without following a link; anything else on the way is refused, never replaced (2; test: the way to a shared cache follows no symlink) |
+  | take | the copy on another filesystem, or on another mount of the same one | a real link (an unnamed `O_TMPFILE`, or a named probe linked into the cache itself) before anything is walked; on failure the cache is a bind (tests: a copy on another filesystem, on another mount of one filesystem, and without `O_TMPFILE`) |
+  | take fails halfway | a partly made copy stays in the job's tree | it is removed through its parent's handle, and the job does not start if it is still there (1) |
+  | release | the job moved or swapped the directories around its copy | the copy is walked through the handles opened when it was taken, after the sandbox's PID namespace has ended (2; test: a release follows nothing the job left) |
+  | release, a new directory | a run taking its copy meanwhile sees half of it | built in `.relay-staging` beside the caches, renamed into place with no replace (3; test: a take during a release sees each new package whole or not at all) |
+  | release, an entry cannot be staged | a partial package published | a directory with any entry left out of its staging is not published (3; test: a new directory that could not be staged whole is not published) |
+  | release interrupted | a directory left half-built in staging | staging is outside every cache; a release sweeps what is older than an hour (3, 4; test: what an interrupted run left is swept) |
+  | probe of the link, interrupted | its file left in a cache | its name is skipped by every walk and swept after an hour (4; same test) |
+  | gc prune | a run takes a copy as gc removes it | taking and removing both begin with a rename, so one of them gets it; a copy whose removal failed (`gone-*`) is removed again by the next pass (4; tests: idle cache copies go by age and past the most runs at once; an idle copy holding an unreadable directory is removed) |
+  | relay probe | a marker written through a planted link, or into a cache the plan leaves out | markers go only in the caches the plan mounts, through handles that follow no link, and are removed on failure (2; test: markers go only in mounted caches and through no symlink) |
+  | a cache's bind | a symlink on the way to its directory in relay's caches | caches are never nested, so nothing on the way is in any sandbox's bind, and the cache directory itself is a mount point in any sandbox that binds it; it is made through handles that follow no link (2) |
+  | what a job could read before | it renamed its old copy inside its clone, out of relay's reach | it keeps only what it could read when it did (it could equally have copied it); relay exposes nothing new (1) |
 
 What is left open, by design or by necessity:
 

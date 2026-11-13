@@ -195,6 +195,10 @@ fn cache_copies(ctx: &Ctx, gc: &Gc, now_us: u64) -> Vec<Item> {
     let stale = micros(gc.cache_copies_idle_days * 86_400.0);
     let mut items = Vec::new();
     for pool in pools(ctx) {
+        // One whose removal began and did not finish is removed again.
+        for name in crate::sandbox::farm::abandoned(&pool) {
+            items.push(Item { job: String::new(), kind: Kind::CacheCopy, path: pool.join(name) });
+        }
         let idle = crate::sandbox::farm::idle(&pool);
         let kept = ctx.cfg.limits.max_running;
         for (i, (name, used)) in idle.iter().rev().enumerate() {
@@ -606,8 +610,11 @@ mod tests {
         let [sessions, checks] = pools(&ctx);
         let (h0, h1, h2, h30) = (copy(&sessions, 0), copy(&sessions, 1), copy(&sessions, 2), copy(&sessions, 30));
         let fresh = copy(&checks, 3);
+        // One whose removal began and did not finish is named again, whatever its age.
+        let gone = checks.join("gone-left");
+        std::fs::create_dir_all(&gone).unwrap();
         let named: Vec<PathBuf> = cache_copies(&ctx, &ctx.cfg.gc, now).into_iter().map(|i| i.path).collect();
-        assert!(named.contains(&h2) && named.contains(&h30), "{named:?}");
+        assert!(named.contains(&h2) && named.contains(&h30) && named.contains(&gone), "{named:?}");
         assert!(!named.contains(&h0) && !named.contains(&h1) && !named.contains(&fresh), "{named:?}");
     }
 }

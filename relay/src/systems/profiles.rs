@@ -125,7 +125,7 @@ fn show(cfg: &Config, project: Option<&Path>, json: bool) -> Result<()> {
         let doc = json!({
             "policy": cfg.policy_path,
             "project": project,
-            "machine": cfg.machine,
+            "machine": cfg.machine(),
             "banned_models": banned,
             "profiles": profiles,
         });
@@ -133,13 +133,14 @@ fn show(cfg: &Config, project: Option<&Path>, json: bool) -> Result<()> {
     }
     out!("policy   {}", cfg.policy_path.as_ref().map_or_else(|| "none".into(), |p| p.display().to_string()));
     out!("project  {}", project.map_or_else(|| "none".into(), |p| p.display().to_string()));
-    let caps = cfg.machine.fields();
+    let machine = cfg.machine();
+    let caps = machine.fields();
     if !caps.is_empty() {
         out!("machine");
         for (field, value) in caps {
             out!("  {field} = {value}  [policy]");
         }
-        if project.is_some() && cfg.machine.min_free_disk_gb.is_some() {
+        if project.is_some() && machine.min_free_disk_gb.is_some() {
             let floor = cfg.limits.min_free_disk_gb;
             out!("  limits.min_free_disk_gb = {floor}  [{}]", from("limits.min_free_disk_gb"));
         }

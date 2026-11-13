@@ -141,6 +141,12 @@ pub struct Job {
     /// thing that puts a job outside the machine's `max_compiling` ([`Job::compiles`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_compile: bool,
+    /// Runner processes the fold moved on from with no word that they had exited: the one a hand
+    /// resume took a checking job from, and one a new dispatch replaced while it still had work (a
+    /// re-review after its `ended`). Each may be alive yet, and what it runs is still the job's
+    /// ([`Job::live_runners`]). The latest few: an older one has long exited.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_runners: Vec<(u32, u64)>,
     /// In line for a unit of a machine-wide pool, as its project's dispatcher last recorded
     /// (`DispatchEvent::InLine`): other projects' younger jobs wait behind it ([`Job::in_line_for`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -282,11 +288,38 @@ impl Job {
         !self.no_compile
     }
 
-    /// Whether the job holds a unit of the machine's `max_compiling`: it compiles, and a runner
-    /// holds it, from its dispatch until its runner lets go (its acceptance check, which the same
-    /// runner runs, included).
-    pub fn compiling(&self) -> bool {
-        self.status.has_runner() && self.compiles()
+    /// How many runner processes of the job are alive now, each judged by its pid and start time
+    /// as a seat's is: the one its latest dispatch started, and any the fold moved on from
+    /// (`left_runners`). Whatever the job's status says: a runner works on after its `ended` (a
+    /// re-review), and a hand resume of a checking job does not stop the check it interrupts.
+    pub fn live_runners(&self) -> usize {
+        let mut all: Vec<&(u32, u64)> = self.runner.iter().chain(&self.left_runners).collect();
+        all.sort_unstable();
+        all.dedup();
+        all.into_iter().filter(|(pid, started)| crate::os::same_process(*pid, *started)).count()
+    }
+
+    /// The units of the machine's `max_compiling` the job holds: one for each live runner process
+    /// of a job that compiles, from its dispatch until that process exits. The process is the
+    /// holder, never the job's status, so a unit can neither be lost while its work goes on nor
+    /// kept once it has died.
+    pub fn compiling_units(&self) -> usize {
+        if self.compiles() { self.live_runners() } else { 0 }
+    }
+
+    /// Whether a runner process of the job lives on past what the fold says of it: after its
+    /// `ended`, or set aside by a resume or a new dispatch. It exits with no event to say so.
+    pub fn lingers(&self) -> bool {
+        self.live_runners() > usize::from(self.status.has_runner() && self.runner_alive())
+    }
+
+    /// The fold moves on from the runner process `r` without knowing that it exited.
+    fn leave(&mut self, r: (u32, u64)) {
+        const KEPT: usize = 4;
+        self.left_runners.retain(|l| *l != r);
+        self.left_runners.push(r);
+        let extra = self.left_runners.len().saturating_sub(KEPT);
+        self.left_runners.drain(..extra);
     }
 
     /// Since when (bus time) it has waited in the queue: what orders the line for a machine-wide
@@ -620,7 +653,8 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// 17: a decision's `agent:` session holds a seat (`seated`, `unseated`), kept apart from the
 /// decisions (`seats`) so a job's cleanup keeps it.
 /// 18: a meter says its window, provider and scope; a stored reset past its window reads as none.
-/// 19: a queued job is in line for a machine-wide pool (`in-line`, `out-of-line`).
+/// 19: a queued job is in line for a machine-wide pool (`in-line`, `out-of-line`), says whether it
+/// compiles (`no_compile`), and keeps the runners the fold moved on from (`left_runners`).
 const FOLD_VERSION: u32 = 19;
 
 fn fold_version() -> String {
@@ -1095,8 +1129,11 @@ impl World {
             QueueEvent::Resumed { job, message, budget_usd, models } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     // Resumed by hand during its check: the checking runner no longer speaks for it.
-                    if j.status == Status::Checking {
-                        j.runner = None;
+                    if j.status == Status::Checking
+                        && let Some(r) = j.runner.take()
+                    {
+                        // Its process is not stopped by this: what it still runs stays the job's.
+                        j.leave(r);
                     }
                     j.requeue(t);
                     j.message = Some(message.clone());
@@ -1178,7 +1215,11 @@ impl World {
                     j.status = Status::Running;
                     j.account = Some(account.clone());
                     (j.model, j.provider) = (model.clone(), provider.clone());
-                    j.runner = Some((*runner_pid, *runner_started));
+                    let new = (*runner_pid, *runner_started);
+                    j.left_runners.retain(|l| *l != new);
+                    if let Some(old) = j.runner.replace(new).filter(|old| *old != new) {
+                        j.leave(old);
+                    }
                     j.started_at = Some(t);
                     j.attempts += 1;
                     j.reason = None;
@@ -1637,6 +1678,16 @@ mod tests {
         })
     }
 
+    /// `job` resumed by hand: back in the queue.
+    fn queued_again(job: &str) -> Event {
+        Event::Queue(QueueEvent::Resumed {
+            job: job.into(),
+            message: "again".into(),
+            budget_usd: None,
+            models: BTreeMap::new(),
+        })
+    }
+
     fn queued_after(job: &str, after: &[&str]) -> Event {
         let Event::Queue(QueueEvent::Queued {
             job,
@@ -1734,23 +1785,24 @@ mod tests {
         let a = &World::fold(&lined).jobs["a"];
         assert!(a.in_line_for("machine.max_compiling") && !a.in_line_for("another"), "{:?}", a.in_line);
         assert_eq!(a.waiting_since(), 1);
-        assert!(!a.compiling(), "it waits; it holds no unit");
+        assert_eq!(a.compiling_units(), 0, "it waits; it holds no unit");
         let with = |more: Vec<Stamped>| World::fold(&[lined.clone(), more].concat()).jobs["a"].clone();
         let out = Event::Dispatch(DispatchEvent::OutOfLine { job: "a".into() });
         assert_eq!(with(vec![st(3, out)]).in_line, None);
         let running = with(vec![st(3, dispatched("a"))]);
         assert_eq!(running.in_line, None, "a dispatch takes it out of the line");
-        assert!(running.compiling(), "and it holds a unit while its runner has it");
+        assert_eq!(running.runner, Some((9, 1)), "and its runner process is what holds a unit from here");
         let again = with(vec![st(3, dispatched("a")), st(4, ended("a", Outcome::Retry))]);
         assert_eq!((again.status, again.in_line.clone(), again.waiting_since()), (Status::Queued, None, 4));
-        assert!(!again.compiling(), "a runner that let go holds none");
         let late = with(vec![st(3, dispatched("a")), st(4, in_line(alive))]);
         assert_eq!(late.in_line, None, "only a queued job stands in line");
         let orphan = World::fold(&[st(1, queued("a")), st(2, in_line(alive + 1))]);
         assert!(!orphan.jobs["a"].in_line_for("machine.max_compiling"), "its dispatcher is gone");
-        let review = Job { kind: bus::Kind::Review, status: Status::Running, ..Job::default() };
-        assert!(review.compiling(), "a read-only job compiles like any: a review rebuilds and tests");
-        assert!(!Job { no_compile: true, ..review }.compiling(), "only one queued as compiling nothing does not");
+        let review =
+            Job { kind: bus::Kind::Review, status: Status::Running, runner: Some((me, alive)), ..Job::default() };
+        assert_eq!(review.compiling_units(), 1, "a read-only job compiles like any: a review rebuilds and tests");
+        let quiet_one = Job { no_compile: true, ..review };
+        assert_eq!(quiet_one.compiling_units(), 0, "only one queued as compiling nothing does not");
         let quiet = |compiles| {
             let Event::Queue(QueueEvent::Queued {
                 compiles: _,
@@ -1800,6 +1852,61 @@ mod tests {
         assert!(World::fold(&[st(1, Event::Queue(old))]).jobs["o"].compiles(), "an event from before it was recorded");
     }
 
+    /// Copilot review of PR #70, finding 2: a compiling unit followed the job's status, so a runner
+    /// still at work lost it: after its `ended` (the re-review comes after), and when a hand resume
+    /// took a checking job from it. The unit is the runner process's, by pid and start time, from
+    /// its dispatch until it exits; a dead one holds none, whatever the status says.
+    #[test]
+    fn a_compiling_unit_is_held_by_the_runner_process_until_it_exits_whatever_the_status() {
+        let me = std::process::id();
+        let alive = crate::os::start_time(me).unwrap();
+        let run = |t, runner: (u32, u64)| {
+            st(
+                t,
+                Event::Dispatch(DispatchEvent::Dispatched {
+                    job: "a".into(),
+                    account: "x".into(),
+                    model: None,
+                    provider: String::new(),
+                    runner_pid: runner.0,
+                    runner_started: runner.1,
+                }),
+            )
+        };
+        let (live, dead) = ((me, alive), (me, alive + 1));
+        let job = |events: &[Stamped]| World::fold(events).jobs["a"].clone();
+        let running = vec![st(1, queued("a")), run(2, live)];
+        assert_eq!(job(&running).compiling_units(), 1);
+        // Its run ended: the runner goes on (a re-review, waking the dispatcher) and keeps the unit.
+        let ended = [running.clone(), vec![st(3, ended("a", Outcome::Done))]].concat();
+        let j = job(&ended);
+        assert_eq!((j.status, j.compiling_units(), j.lingers()), (Status::Done, 1, true));
+        // Resumed by hand while it was being checked: the check it interrupts is not stopped.
+        let checking = Event::Session(SessionEvent::Checking { job: "a".into(), checkpoint: 1 });
+        let resumed = Event::Queue(QueueEvent::Resumed {
+            job: "a".into(),
+            message: "go on".into(),
+            budget_usd: None,
+            models: BTreeMap::new(),
+        });
+        let taken = [running.clone(), vec![st(3, checking), st(4, resumed)]].concat();
+        let j = job(&taken);
+        assert_eq!((j.status, j.runner, j.left_runners.clone()), (Status::Queued, None, vec![live]));
+        assert_eq!((j.compiling_units(), j.lingers()), (1, true), "the old runner's unit is still held");
+        // Dispatched again beside it: two processes of the job, two units, until the old one exits.
+        let again = [taken.clone(), vec![run(5, live)]].concat();
+        assert_eq!(job(&again).compiling_units(), 1, "the same process is one holder, not two");
+        let j = job(&[ended.clone(), vec![st(4, queued_again("a")), run(5, dead)]].concat());
+        assert_eq!((j.status, j.left_runners.clone()), (Status::Running, vec![live]));
+        assert_eq!((j.compiling_units(), j.lingers()), (1, true), "the new runner died; the old one works on");
+        // A dead runner holds nothing, though the fold still says `running`.
+        let j = job(&[st(1, queued("a")), run(2, dead)]);
+        assert_eq!((j.status, j.compiling_units(), j.lingers()), (Status::Running, 0, false));
+        // The fold keeps only the latest few it moved on from.
+        let many: Vec<Stamped> = (0..9).map(|i| run(10 + i, (7, i))).collect();
+        assert_eq!(job(&[running, many].concat()).left_runners, [(7, 4), (7, 5), (7, 6), (7, 7)]);
+    }
+
     #[test]
     fn the_fold_version_moves_with_the_fold() {
         const PINNED: &[(u32, u64)] = &[
@@ -1809,9 +1916,9 @@ mod tests {
             (16, 0x5351_e6de_0d8d_bfd8),
             (17, 0x2132_12e7_f06d_d32d),
             (18, 0x4bb9_80c4_5c80_027a),
-            (19, 0x13fa_cf1f_3e5c_6822),
+            (19, 0x12b9_f67a_0740_d8e1),
         ];
-        let dispatched = |t, model: Option<&str>| {
+        let dispatched = |t, model: Option<&str>, runner_pid| {
             st(
                 t,
                 Event::Dispatch(DispatchEvent::Dispatched {
@@ -1819,7 +1926,7 @@ mod tests {
                     account: "omp:w".into(),
                     model: model.map(Into::into),
                     provider: model.and_then(|m| m.split_once('/')).map_or("", |(p, _)| p).into(),
-                    runner_pid: 7,
+                    runner_pid,
                     runner_started: 1,
                 }),
             )
@@ -1841,10 +1948,10 @@ mod tests {
         let events = [
             st(1, queued("a")),
             st(2, queued("b")),
-            dispatched(3, Some("openai-codex/gpt-6.1")),
+            dispatched(3, Some("openai-codex/gpt-6.1"), 7),
             st(4, Event::Session(SessionEvent::Limited { account: "omp:w".into(), until: 50 })),
             st(5, ended("a", Outcome::Retry)),
-            dispatched(6, None),
+            dispatched(6, None, 7),
             st(7, ended("a", Outcome::Failed)),
             st(8, resumed),
             st(9, reading),
@@ -1888,6 +1995,7 @@ mod tests {
                     planner_started: 1,
                 }),
             ),
+            dispatched(15, None, 8), // beside its earlier run's runner, which the fold keeps
         ];
         let digest = fnv(serde_json::to_string(&World::fold(&events)).unwrap().as_bytes());
         let (version, pinned) = *PINNED.last().unwrap();

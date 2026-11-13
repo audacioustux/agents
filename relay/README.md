@@ -376,18 +376,31 @@ min_free_disk_gb = 30   # the least disk floor of any project (GB)
 ```
 
 Each key is optional, and one left out does not apply: with no `[machine]` table
-relay behaves exactly as it does without one. A project's own limits (`max_running`,
+relay behaves exactly as it does without one. The caps are read from the policy
+file again at every admission point (each dispatcher pass, the booking of a
+decision's `agent:` session, each run of an acceptance check), never kept from when
+a process started: a session that began hours ago is held by the floor the owner
+set a minute ago. A policy file that does not load at that moment (half-saved, or
+invalid) leaves the caps as the process first read them; one that is gone caps nothing. A project's own limits (`max_running`,
 a profile's `max_running`, `per_account`) stay, beneath these. There are no
 per-project shares: the caps are one ceiling over all projects.
 
-- `max_compiling` counts every project's jobs that compile (see `compiles` above)
-  from their dispatch until their runner lets go, the acceptance check included,
-  which runs under its job's unit. The count is kept where the seats are: under
-  the machine's one seat lock, from what every project's bus recorded, so two
-  dispatchers never both take the last unit. A unit is counted only while the
-  runner that holds it lives, so a runner that dies gives its unit back with
-  nobody having to reap it; a dispatcher that waits for one looks again within a
-  minute. Across projects the job that has waited longest starts first: a job that
+- `max_compiling` counts every project's jobs that compile (see `compiles` above).
+  A unit is held by the job's runner process itself, named by its pid and start
+  time as a seat's holder is, from its dispatch until that process exits, whatever
+  the job's status says meanwhile: through its acceptance check, through the work
+  a runner does after its `ended` (a re-review), and by a runner a hand resume
+  took a checking job from, which is not stopped by that. A runner that dies gives
+  its unit back with nobody having to reap it; a dispatcher that waits for a unit
+  looks again within a minute, and within seconds when the holder is a runner on
+  its way out. The count is kept where the seats are: under the machine's one seat
+  lock, from what every project's bus recorded, so two dispatchers never both take
+  the last unit. It is a count only when every project was read: while the state of
+  one cannot be read, its jobs are in nobody's sum, so nothing that compiles
+  starts, and the job says which project
+  (`the compiling jobs on this machine cannot be counted: the state of project tickify cannot be read (…)`).
+  There is one order, in a project's own queue and across projects: the job that
+  has waited longest (since it last went into the queue) starts first. A job that
   would start but for this cap is put in line (`in-line` on its project's bus,
   `out-of-line` when something of its own project holds it instead), and every
   other project leaves a unit for each job in line that has waited longer than its
@@ -397,8 +410,8 @@ per-project shares: the caps are one ceiling over all projects.
   `…, and 1 job of another project has waited longer for the rest`.
 - `min_free_mem_gb` is a gate on `MemAvailable` in `/proc/meminfo`: under it no
   queued job starts (read-only or not), no decision's `agent:` session starts, and
-  an acceptance check waits in its runner until the memory is back (its runner's
-  log says so). Nothing running is touched. Where the memory cannot be read, the
+  no run of an acceptance check starts, at the branch's tip or at its base commit:
+  it waits in its runner until the memory is back (its runner's log says so). Nothing running is touched. Where the memory cannot be read, the
   gate holds nothing.
 - `min_free_disk_gb` is the machine's disk floor. A project's
   `limits.min_free_disk_gb` may raise it, never lower it or turn it off: the

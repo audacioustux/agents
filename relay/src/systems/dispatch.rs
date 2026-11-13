@@ -200,9 +200,8 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
     // Accounts belong to the machine: what other projects learned of them, and
     // the seats their sessions hold, count here too. Their jobs stay theirs.
     let neighbours = ctx.neighbours();
-    let others: Vec<&World> = neighbours.iter().collect();
     let dev_shell = crate::systems::devshell::Gate::of(ctx, &world);
-    let mut room = Room::new(&ctx.cfg, &world, &others, disk_ok(&ctx.cfg.limits, &ctx.clones))
+    let mut room = Room::new(&ctx.cfg, &world, &neighbours.seen(), disk_ok(&ctx.cfg.limits, &ctx.clones))
         .with_load(&ctx.cfg)
         .with_dev_shell(dev_shell.clone());
     crate::systems::quota::start_refresh(ctx, &room, &world, true)?;
@@ -557,9 +556,8 @@ pub fn book_session(
     let Some(_seats) = Role::try_take(&ctx.state_root.join("seats.lock"))? else { return Ok(Booking::Busy) };
     let world = ctx.world()?;
     let neighbours = ctx.neighbours();
-    let others: Vec<&World> = neighbours.iter().collect();
     // A decision's session is read-only: free disk does not hold it, nor does the dev shell.
-    let mut room = Room::new(&ctx.cfg, &world, &others, true);
+    let mut room = Room::new(&ctx.cfg, &world, &neighbours.seen(), true);
     let start = match place_session(&ctx.cfg, &mut room, worker, harness, model, since, now_micros()) {
         Ok(start) => start,
         Err(hold) => return Ok(Booking::Held(hold)),
@@ -585,10 +583,13 @@ pub enum Booking {
     Busy,
 }
 
-/// The queued jobs, oldest first: the order [`plan`] judges them in.
+/// The queued jobs in the order [`plan`] judges them in: the one that has waited longest first
+/// ([`Job::waiting_since`]). It is the one order of every line: within the project here, and
+/// across projects for a unit of the machine's compiling pool, so a job is never first in one and
+/// behind in the other.
 fn queue(world: &World) -> Vec<&Job> {
     let mut queued: Vec<&Job> = world.jobs().values().filter(|j| j.status == Status::Queued).collect();
-    queued.sort_by_key(|j| j.created_at);
+    queued.sort_by_key(|j| j.waiting_since());
     queued
 }
 
@@ -642,7 +643,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    use super::room::{Gauges, LOOK_AGAIN_MICROS};
+    use super::room::{Gauges, LINGER_MICROS, LOOK_AGAIN_MICROS};
     use super::*;
     use crate::accounts;
     use crate::config::Machine;
@@ -1648,15 +1649,13 @@ mod tests {
         assert_eq!(held.0, ["b: 1 of 1 running in this project (limits.max_running)"]);
     }
 
-    /// A config that leaves a burst to the accounts' room ([`burst_config`]), under the owner's
-    /// `machine` caps.
-    fn machine_config(machine: Machine) -> (crate::config::tempdir::Dir, Config) {
-        let (d, cfg) = burst_config();
-        (d, Config { machine, ..cfg })
+    /// The owner's caps with this many compiling jobs at once, and no other.
+    fn capped(max_compiling: usize) -> Machine {
+        Machine { max_compiling: Some(max_compiling), ..Machine::default() }
     }
 
     /// One omp account with room ([`omp_world`]) and these jobs of ours, each `(name, status,
-    /// read-only, queued at)`, a running one held by this process as its runner.
+    /// read-only, waiting since)`, a running one held by this process as its runner.
     fn machine_world(jobs: &[(&str, Status, bool, u64)]) -> (World, Vec<Home>) {
         let (mut world, found) = omp_world(&[], 0.1, 0.1);
         let me = std::process::id();
@@ -1678,6 +1677,24 @@ mod tests {
         (world, found)
     }
 
+    /// The room of `world` among `others` under the owner's caps `machine`, with seats for a burst.
+    fn room_under(machine: Machine, world: &World, others: &[&World], found: &[Home]) -> Room {
+        Room::of(found.to_vec(), world.accounts.clone(), world, others, true).with_machine(machine)
+    }
+
+    /// The jobs a pass starts in `room`, in order, and why the rest are held ([`burst_config`]'s limits).
+    fn plan_in(mut room: Room, world: &World) -> (Vec<String>, Held) {
+        let (_d, cfg) = burst_config();
+        let mut held = Held::default();
+        let out = plan(&cfg, &mut room, world, NOW_US, &mut held);
+        (out.into_iter().map(|s| s.job).collect(), held)
+    }
+
+    /// As [`plan_in`], for `world` among `others` under the owner's caps `machine`.
+    fn plan_under(machine: Machine, world: &World, others: &[&World], found: &[Home]) -> (Vec<String>, Held) {
+        plan_in(room_under(machine, world, others, found), world)
+    }
+
     const CAP: &str = "machine.max_compiling in the owner's policy";
 
     /// The owner's ruling 1 (revised 2026-11-13): compiling jobs are capped over every project on the
@@ -1686,7 +1703,7 @@ mod tests {
     /// compiling nothing neither takes a unit nor waits for one.
     #[test]
     fn the_machines_compiling_cap_counts_every_projects_jobs_but_those_that_compile_nothing() {
-        let (_d, cfg) = machine_config(Machine { max_compiling: Some(1), ..Machine::default() });
+        let (_d, cfg) = burst_config();
         let jobs = [
             ("build", Status::Queued, false, 5),
             ("review", Status::Queued, true, 6),
@@ -1695,15 +1712,14 @@ mod tests {
         let (mut world, found) = machine_world(&jobs);
         world.jobs_mut().get_mut("design").unwrap().no_compile = true;
         let (theirs, _) = machine_world(&[("x", Status::Running, false, 1)]);
-        let names = |out: Vec<(String, String)>| out.into_iter().map(|(job, _)| job).collect::<Vec<_>>();
-        let (out, held) = plan_among(&cfg, &world, &[&theirs], &found);
-        assert_eq!(names(out), ["design"], "a job that compiles nothing starts regardless");
+        let (out, held) = plan_under(capped(1), &world, &[&theirs], &found);
+        assert_eq!(out, ["design"], "a job that compiles nothing starts regardless");
         let why = format!("1 of 1 compiling on this machine, over every project ({CAP})");
         assert_eq!(held.0, [format!("build: {why}"), format!("review: {why}")], "the reason names the machine cap");
         assert_eq!(held.2, ["build", "review"], "both reach the held hook");
         assert_eq!(held.3, ["build", "review"], "and both are in line for a unit");
         assert_eq!(held.1, Some(NOW_US + LOOK_AGAIN_MICROS), "a unit a dead runner held comes back with no event");
-        let room = Room::of(found.clone(), world.accounts.clone(), &world, &[&theirs], true);
+        let room = room_under(capped(1), &world, &[&theirs], &found);
         for job in ["build", "review"] {
             let hold = room.hold(&cfg, &world.jobs()[job], NOW_US).unwrap();
             assert_eq!(hold.by, Constraint::Pool(Pool::Compiling), "{job}: the binding constraint is named");
@@ -1713,40 +1729,139 @@ mod tests {
 
         // Their one job is a review: read-only, and it holds the unit all the same.
         let (their_review, _) = machine_world(&[("x", Status::Running, true, 1)]);
-        assert_eq!(names(plan_among(&cfg, &world, &[&their_review], &found).0), ["design"]);
+        assert_eq!(plan_under(capped(1), &world, &[&their_review], &found).0, ["design"]);
         // Their job was queued as compiling nothing: it holds no unit, so our oldest takes it.
         let mut quiet = theirs.clone();
         quiet.jobs_mut().get_mut("x").unwrap().no_compile = true;
-        assert_eq!(names(plan_among(&cfg, &world, &[&quiet], &found).0), ["build", "design"]);
+        assert_eq!(plan_under(capped(1), &world, &[&quiet], &found).0, ["build", "design"]);
         // Their runner died: nobody here reaps it, and its unit is free at once.
         let mut dead = theirs.clone();
         dead.jobs_mut().get_mut("x").unwrap().runner.as_mut().unwrap().1 += 1;
-        let (out, held) = plan_among(&cfg, &world, &[&dead], &found);
-        assert_eq!(names(out), ["build", "design"], "a dead runner holds no unit");
+        let (out, held) = plan_under(capped(1), &world, &[&dead], &found);
+        assert_eq!(out, ["build", "design"], "a dead runner holds no unit");
         assert_eq!(held.3, ["review"], "our own build has the unit now: each start is booked before the next");
-        // Theirs ended: the unit is back.
-        let mut ended = theirs.clone();
-        ended.jobs_mut().get_mut("x").unwrap().status = Status::Done;
-        assert_eq!(names(plan_among(&cfg, &world, &[&ended], &found).0), ["build", "design"]);
         // A job being checked at its cap still has its runner, and its acceptance check to come.
         let mut checking = theirs.clone();
         checking.jobs_mut().get_mut("x").unwrap().status = Status::Checking;
-        assert_eq!(names(plan_among(&cfg, &world, &[&checking], &found).0), ["design"]);
+        assert_eq!(plan_under(capped(1), &world, &[&checking], &found).0, ["design"]);
 
         // With two units, the build and the review both run, and a third compiling job waits.
-        let (_d, two) = machine_config(Machine { max_compiling: Some(2), ..Machine::default() });
-        assert_eq!(plan_omp(&two, &world, &found).0.len(), 3);
-        assert_eq!(names(plan_among(&two, &world, &[&theirs], &found).0), ["build", "design"]);
+        assert_eq!(plan_under(capped(2), &world, &[], &found).0.len(), 3);
+        assert_eq!(plan_under(capped(2), &world, &[&theirs], &found).0, ["build", "design"]);
         // With no cap in the policy, nothing of this holds anyone: exactly as before.
-        let (_d, uncapped) = machine_config(Machine::default());
-        assert_eq!(plan_among(&uncapped, &world, &[&theirs], &found).0.len(), 3);
+        assert_eq!(plan_under(Machine::default(), &world, &[&theirs], &found).0.len(), 3);
+    }
+
+    /// Copilot review of PR #70, finding 1: a project whose fold could not be read was dropped from
+    /// the neighbours in silence, so its compiling jobs were in nobody's count and the cap could be
+    /// passed unseen. A room that knows a project is unread admits nothing that compiles while the
+    /// owner caps compiling, and the hold names the project.
+    #[test]
+    fn a_project_that_cannot_be_read_holds_what_compiles_rather_than_being_left_out_of_the_count() {
+        let (_d, cfg) = burst_config();
+        let (mut world, found) =
+            machine_world(&[("build", Status::Queued, false, 5), ("design", Status::Queued, true, 6)]);
+        world.jobs_mut().get_mut("design").unwrap().no_compile = true;
+        let unread = |machine, names: &[&str]| {
+            room_under(machine, &world, &[], &found).with_unread(names.iter().map(|n| (*n).to_owned()).collect())
+        };
+        let (out, held) = plan_in(unread(capped(2), &["tickify"]), &world);
+        assert_eq!(out, ["design"], "nothing is free to count as free; what compiles nothing needs no count");
+        let why = format!(
+            "build: the compiling jobs on this machine cannot be counted: the state of project tickify cannot be read ({CAP})"
+        );
+        assert_eq!(held.0, [why]);
+        assert_eq!((held.2.clone(), held.3.len()), (vec!["build".to_owned()], 0), "held, for the hook; in no line");
+        assert_eq!(held.1, Some(NOW_US + LOOK_AGAIN_MICROS), "looked at again: nothing says when it can be read");
+        let hold = unread(capped(2), &["thegrid", "tickify"]).hold(&cfg, &world.jobs()["build"], NOW_US).unwrap();
+        assert_eq!(hold.by, Constraint::Uncounted);
+        assert!(hold.why.contains("projects thegrid, tickify cannot be read"), "{}", hold.why);
+        // Every project read: the count is whole. No cap: there is nothing to count.
+        assert_eq!(plan_in(unread(capped(2), &[]), &world).0.len(), 2);
+        assert_eq!(plan_in(unread(Machine::default(), &["tickify"]), &world).0.len(), 2);
+    }
+
+    /// Copilot review of PR #70, finding 2: the unit followed the job's status. It is the runner
+    /// process's: held past its job's `ended` and by a runner the fold set aside, while the process
+    /// lives, in our project as in another; and never by a status whose runner has died.
+    #[test]
+    fn a_compiling_unit_is_counted_by_its_live_runner_process_in_every_project() {
+        let (world, found) = machine_world(&[("b", Status::Queued, false, 9)]);
+        let me = std::process::id();
+        let live = (me, os::start_time(me).unwrap());
+        let (theirs, _) = machine_world(&[("x", Status::Running, false, 1)]);
+        let with = |edit: &dyn Fn(&mut Job)| {
+            let mut w = theirs.clone();
+            edit(w.jobs_mut().get_mut("x").unwrap());
+            w
+        };
+        // Ended, its runner still at work (the re-review comes after `ended`): the unit is held, and
+        // it comes back with no event, so the job is judged again in a moment.
+        let ended = with(&|x| x.status = Status::Done);
+        let (out, held) = plan_under(capped(1), &world, &[&ended], &found);
+        assert_eq!(out.len(), 0, "{:?}", held.0);
+        assert_eq!(held.1, Some(NOW_US + LINGER_MICROS));
+        // Resumed by hand during its check: the fold has no runner for it, and the check runs on.
+        let set_aside = with(&|x| (x.status, x.runner, x.left_runners) = (Status::Queued, None, vec![live]));
+        assert_eq!(plan_under(capped(1), &world, &[&set_aside], &found).0.len(), 0);
+        // Dispatched again beside the old process: two live processes of one job hold two units, a
+        // dead one none, and one process named twice is one holder.
+        let mut second = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let other = (second.id(), os::start_time(second.id()).unwrap());
+        let both = with(&|x| x.left_runners = vec![(live.0, live.1 + 1), live, other]);
+        let units = room_under(capped(4), &world, &[&both], &found).taken(&Pool::Compiling);
+        second.kill().unwrap();
+        #[allow(clippy::disallowed_methods, reason = "a test reaps the child it killed")]
+        second.wait().unwrap();
+        assert_eq!(units, 2);
+        // Once the process has exited, nothing is held, whatever the status says: in their project,
+        let gone = with(&|x| x.runner = Some((live.0, live.1 + 1)));
+        assert_eq!(plan_under(capped(1), &world, &[&gone], &found).0, ["b"]);
+        // and in ours, where the count used to follow the status (a board reads before any reap).
+        let (mut ours, found) = machine_world(&[("r", Status::Running, false, 1), ("b", Status::Queued, false, 9)]);
+        assert_eq!(plan_under(capped(1), &ours, &[], &found).0.len(), 0, "our live runner holds the unit");
+        ours.jobs_mut().get_mut("r").unwrap().runner = Some((live.0, live.1 + 1));
+        assert_eq!(plan_under(capped(1), &ours, &[], &found).0, ["b"]);
+        ours.jobs_mut().get_mut("r").unwrap().status = Status::Failed;
+        ours.jobs_mut().get_mut("r").unwrap().runner = Some(live);
+        assert_eq!(plan_under(capped(1), &ours, &[], &found).0.len(), 0, "ended in our fold, alive on the machine");
+    }
+
+    /// Copilot review of PR #70, finding 3: a pass walked the queue by creation while the line across
+    /// projects went by how long a job had waited, so a job could be first in one order and behind in
+    /// the other. There is one order: since when it has waited.
+    #[test]
+    fn the_queue_is_walked_in_the_order_the_line_across_projects_is_kept() {
+        let (mut world, found) =
+            machine_world(&[("early", Status::Queued, false, 1), ("late", Status::Queued, false, 2)]);
+        // `early` was created first, and went back into the queue (a retry, a resume) after `late` came.
+        world.jobs_mut().get_mut("early").unwrap().queued_at = 9;
+        let names: Vec<&str> = queue(&world).iter().map(|j| j.name.as_str()).collect();
+        assert_eq!(names, ["late", "early"], "the one that has waited longest is judged first");
+        let (out, held) = plan_under(capped(1), &world, &[], &found);
+        assert_eq!((out, held.3), (vec!["late".to_owned()], vec!["early".to_owned()]), "and takes the one unit");
+        // The same key orders the line across projects: theirs has waited since 5, between the two.
+        let (mut theirs, _) = machine_world(&[("old", Status::Queued, false, 5)]);
+        let me = std::process::id();
+        let planner = (me, os::start_time(me).unwrap());
+        theirs.jobs_mut().get_mut("old").unwrap().in_line =
+            Some(crate::world::InLine { pool: Pool::Compiling.key(), planner });
+        let (out, held) = plan_under(capped(2), &world, &[&theirs], &found);
+        assert_eq!(out, ["late"], "ahead of theirs in both orders");
+        assert!(
+            held.0[0].starts_with("early: 1 of 2 compiling") && held.0[0].contains("waited longer"),
+            "{:?}",
+            held.0
+        );
+        // A job recorded before queueing times were waits since its creation.
+        let old = Job { created_at: 4, ..Job::default() };
+        assert_eq!((old.waiting_since(), world.jobs()["early"].waiting_since()), (4, 9));
     }
 
     /// Older jobs start first across projects: a unit is left for each job of another project that
     /// has waited longer in the line, while the dispatcher that put it there lives.
     #[test]
     fn a_free_compiling_unit_is_left_for_another_projects_job_that_waited_longer() {
-        let (_d, cfg) = machine_config(Machine { max_compiling: Some(1), ..Machine::default() });
         let me = std::process::id();
         let planner = (me, os::start_time(me).unwrap());
         let theirs = |queued_at: u64, planner: (u32, u64)| {
@@ -1756,8 +1871,8 @@ mod tests {
             w
         };
         let (world, found) = machine_world(&[("b", Status::Queued, false, 9)]);
-        let (out, held) = plan_among(&cfg, &world, &[&theirs(5, planner)], &found);
-        assert_eq!(out, [], "theirs has waited since 5, ours since 9");
+        let (out, held) = plan_under(capped(1), &world, &[&theirs(5, planner)], &found);
+        assert_eq!(out.len(), 0, "theirs has waited since 5, ours since 9");
         let why = format!(
             "b: 0 of 1 compiling on this machine, over every project, \
              and 1 job of another project has waited longer for the rest ({CAP})"
@@ -1765,57 +1880,53 @@ mod tests {
         assert_eq!(held.0, [why]);
         assert_eq!(held.3, ["b"], "ours is in line too, behind it");
         // Ours is the older one: theirs waits for it, as their dispatcher judges by the same rule.
-        assert_eq!(plan_among(&cfg, &world, &[&theirs(12, planner)], &found).0.len(), 1);
-        assert_eq!(plan_among(&cfg, &world, &[&theirs(9, planner)], &found).0.len(), 1, "equal ages never deadlock");
+        assert_eq!(plan_under(capped(1), &world, &[&theirs(12, planner)], &found).0.len(), 1);
+        assert_eq!(
+            plan_under(capped(1), &world, &[&theirs(9, planner)], &found).0.len(),
+            1,
+            "equal ages never deadlock"
+        );
         // A line nobody tends holds nobody back: their dispatcher is gone, so nothing would start it.
-        assert_eq!(plan_among(&cfg, &world, &[&theirs(5, (me, planner.1 + 1))], &found).0.len(), 1);
+        assert_eq!(plan_under(capped(1), &world, &[&theirs(5, (me, planner.1 + 1))], &found).0.len(), 1);
         // Their job is no longer queued (it started, or was stopped): the record is void.
         let mut started = theirs(5, planner);
         started.jobs_mut().get_mut("old").unwrap().status = Status::Stopped;
-        assert_eq!(plan_among(&cfg, &world, &[&started], &found).0.len(), 1);
+        assert_eq!(plan_under(capped(1), &world, &[&started], &found).0.len(), 1);
         // With two units and one of them taken, the one left is the older job's.
-        let (_d, two) = machine_config(Machine { max_compiling: Some(2), ..Machine::default() });
         let (busy, _) = machine_world(&[("r", Status::Running, false, 1), ("b", Status::Queued, false, 9)]);
-        assert_eq!(plan_among(&two, &busy, &[&theirs(5, planner)], &found).0.len(), 0);
-        assert_eq!(plan_among(&two, &world, &[&theirs(5, planner)], &found).0.len(), 1, "a unit for each");
+        assert_eq!(plan_under(capped(2), &busy, &[&theirs(5, planner)], &found).0.len(), 0);
+        assert_eq!(plan_under(capped(2), &world, &[&theirs(5, planner)], &found).0.len(), 1, "a unit for each");
     }
 
     /// The owner's ruling 2: no session starts while the machine's available memory is under the
     /// floor, read-only or not, a decision's session included. Unmeasured, or no floor: no gate.
     #[test]
     fn the_memory_gate_holds_every_new_session_under_the_machines_floor() {
-        let (_d, cfg) = machine_config(Machine { min_free_mem_gb: Some(4.0), ..Machine::default() });
+        let (_d, cfg) = burst_config();
+        let floor = Machine { min_free_mem_gb: Some(4.0), ..Machine::default() };
         let (world, found) = machine_world(&[("build", Status::Queued, false, 5), ("read", Status::Queued, true, 6)]);
-        let room = |mem_gb| {
-            Room::of(found.clone(), world.accounts.clone(), &world, &[], true)
-                .with_gauges(Gauges { load: None, mem_gb })
-        };
-        let hold = |mem_gb, cfg: &Config, job: &str| room(mem_gb).hold(cfg, &world.jobs()[job], NOW_US);
+        let room =
+            |machine, mem_gb| room_under(machine, &world, &[], &found).with_gauges(Gauges { load: None, mem_gb });
+        let hold = |machine, mem_gb, job: &str| room(machine, mem_gb).hold(&cfg, &world.jobs()[job], NOW_US);
         let low = "3.2 GiB of memory available, under the machine's 4 GiB floor \
                    (machine.min_free_mem_gb in the owner's policy)";
         for job in ["build", "read"] {
-            let h = hold(Some(3.21), &cfg, job).unwrap();
+            let h = hold(floor, Some(3.21), job).unwrap();
             assert_eq!((h.why.as_str(), h.by.clone()), (low, Constraint::Memory), "{job}");
             assert_eq!(h.until, Some(NOW_US + LOOK_AGAIN_MICROS), "memory coming back is no event");
-            assert_eq!(hold(Some(4.0), &cfg, job), None, "at the floor is room");
-            assert_eq!(hold(None, &cfg, job), None, "memory that cannot be read holds nothing");
+            assert_eq!(hold(floor, Some(4.0), job), None, "at the floor is room");
+            assert_eq!(hold(floor, None, job), None, "memory that cannot be read holds nothing");
         }
-        let (_d, no_floor) = machine_config(Machine::default());
-        assert_eq!(hold(Some(0.1), &no_floor, "build"), None, "no floor in the policy: no gate");
-        assert_eq!(
-            memory_hold(&cfg, Some(3.21)).as_deref(),
-            Some(low),
-            "an acceptance check waits by the same judgment"
-        );
-        assert_eq!(memory_hold(&cfg, Some(5.0)), None);
+        assert_eq!(hold(Machine::default(), Some(0.1), "build"), None, "no floor in the policy: no gate");
+        assert_eq!(memory_hold(&floor, Some(3.21)).as_deref(), Some(low), "a check waits by the same judgment");
+        assert_eq!(memory_hold(&floor, Some(5.0)), None);
 
-        let mut held = Held::default();
-        let out = plan(&cfg, &mut room(Some(1.0)), &world, NOW_US, &mut held);
+        let (out, held) = plan_in(room(floor, Some(1.0)), &world);
         assert_eq!((out.len(), held.2.len(), held.3.len()), (0, 2, 0), "both held, and reach the held hook");
         // A decision's `agent:` session is a session too.
         let worker = Job { name: "w".into(), ..Job::default() };
         let model = Some("openai-codex/gpt-6.1");
-        let seat = |mem_gb| place_session(&cfg, &mut room(mem_gb), &worker, "omp", model, NOW_US, NOW_US);
+        let seat = |mem_gb| place_session(&cfg, &mut room(floor, mem_gb), &worker, "omp", model, NOW_US, NOW_US);
         assert_eq!(seat(Some(1.0)).unwrap_err().by, Constraint::Memory);
         assert_eq!(seat(Some(8.0)).unwrap().account, "omp:default");
     }
@@ -1844,8 +1955,8 @@ mod tests {
     /// asks them. A job held by something of its own project is not in line for the machine's pool.
     #[test]
     fn a_hold_names_the_constraint_that_binds_first() {
-        let machine = Machine { max_compiling: Some(1), min_free_mem_gb: Some(4.0), ..Machine::default() };
-        let (_d, mut cfg) = machine_config(machine);
+        let (_d, mut cfg) = burst_config();
+        let mut machine = Machine { max_compiling: Some(1), min_free_mem_gb: Some(4.0), ..Machine::default() };
         cfg.limits.max_load = Some(8.0);
         cfg.profiles.insert("solo".into(), profile(Some(1), None));
         cfg.profiles.insert("daily".into(), profile(None, Some(1)));
@@ -1855,40 +1966,40 @@ mod tests {
         world.jobs_mut().get_mut("r").unwrap().profile = Some("solo".into());
         world.profile_starts.insert("daily".into(), vec![NOW_US - 1]);
         let gauges = Gauges { load: Some(9.5), mem_gb: Some(1.0) };
-        let by = |cfg: &Config, profile: Option<&str>, disk_ok| {
+        let by = |cfg: &Config, machine: Machine, profile: Option<&str>, disk_ok| {
             let j = Job { profile: profile.map(Into::into), ..world.jobs()["q"].clone() };
-            let room = Room::of(found.clone(), world.accounts.clone(), &world, &[], disk_ok).with_gauges(gauges);
+            let room = Room::of(found.clone(), world.accounts.clone(), &world, &[], disk_ok)
+                .with_machine(machine)
+                .with_gauges(gauges);
             room.hold(cfg, &j, NOW_US).map(|h| (h.by, h.why))
         };
         let pool = |p: Pool| Some(Constraint::Pool(p));
-        let first = |cfg: &Config, profile, disk_ok| by(cfg, profile, disk_ok).map(|(by, _)| by);
+        let first = |cfg: &Config, machine, profile, disk_ok| by(cfg, machine, profile, disk_ok).map(|(by, _)| by);
         cfg.limits.max_running = 1;
         cfg.limits.per_account = 1;
-        assert_eq!(first(&cfg, Some("solo"), false), pool(Pool::Profile("solo".into())));
-        assert_eq!(first(&cfg, Some("daily"), false), Some(Constraint::PerDay));
-        let (running, why) = by(&cfg, None, false).unwrap();
+        assert_eq!(first(&cfg, machine, Some("solo"), false), pool(Pool::Profile("solo".into())));
+        assert_eq!(first(&cfg, machine, Some("daily"), false), Some(Constraint::PerDay));
+        let (running, why) = by(&cfg, machine, None, false).unwrap();
         assert_eq!(running, Constraint::Pool(Pool::Running));
         assert_eq!(why, "1 of 1 running in this project (limits.max_running)");
         cfg.limits.max_running = 20;
-        let (load, why) = by(&cfg, None, false).unwrap();
+        let (load, why) = by(&cfg, machine, None, false).unwrap();
         assert_eq!((load, why.as_str()), (Constraint::Load, "load 9.5 is above 8 (limits.max_load)"));
         cfg.limits.max_load = None;
-        assert_eq!(first(&cfg, None, false), Some(Constraint::Memory));
-        cfg.machine.min_free_mem_gb = None;
-        assert_eq!(first(&cfg, None, false), Some(Constraint::Disk));
-        assert_eq!(first(&cfg, None, true), Some(Constraint::Accounts));
+        assert_eq!(first(&cfg, machine, None, false), Some(Constraint::Memory));
+        machine.min_free_mem_gb = None;
+        assert_eq!(first(&cfg, machine, None, false), Some(Constraint::Disk));
+        assert_eq!(first(&cfg, machine, None, true), Some(Constraint::Accounts));
         cfg.limits.per_account = 16;
-        assert_eq!(first(&cfg, None, true), pool(Pool::Compiling), "asked last: the job would start but for it");
-        cfg.machine.max_compiling = Some(2);
-        assert_eq!(first(&cfg, None, true), None);
+        assert_eq!(first(&cfg, machine, None, true), pool(Pool::Compiling), "asked last: it would start but for it");
+        assert_eq!(first(&cfg, capped(2), None, true), None);
         assert_eq!(Pool::Compiling.key(), "machine.max_compiling");
         assert_eq!(Pool::Profile("solo".into()).key(), "profiles.solo.max_running");
 
         // Held by the project's own limit, the job is not in line for the machine's pool.
-        cfg.machine.max_compiling = Some(1);
         cfg.limits.max_running = 1;
         let mut held = Held::default();
-        let mut room = Room::of(found.clone(), world.accounts.clone(), &world, &[], true);
+        let mut room = room_under(capped(1), &world, &[], &found);
         assert_eq!(plan(&cfg, &mut room, &world, NOW_US, &mut held), []);
         assert_eq!((held.2.clone(), held.3.clone()), (vec!["q".to_owned()], Vec::new()));
     }

@@ -18,7 +18,8 @@
 use std::collections::BTreeMap;
 
 use crate::accounts::{self, Draws, Refusal};
-use crate::config::{Config, Limits};
+use crate::config::{Config, Limits, Machine};
+use crate::ctx::Others;
 use crate::harness::Home;
 use crate::world::{AccountState, Job, SessionSeat, Status, World};
 
@@ -33,6 +34,10 @@ pub const READING_WAIT_MICROS: u64 = 2 * 60 * 1_000_000;
 /// coming back (memory, load, free disk), or a unit of the machine's compiling pool whose runner
 /// died in another project, which nobody here reaps.
 pub const LOOK_AGAIN_MICROS: u64 = 60 * 1_000_000;
+
+/// How long until a job is judged again when a unit it waits for is held by a runner on its way
+/// out (past its job's `ended`, or set aside): it exits within moments, with no event.
+pub const LINGER_MICROS: u64 = 2 * 1_000_000;
 
 /// Something counted that sessions take whole units of, up to a capacity. A machine-wide pool
 /// (the compiling jobs, an account's seats) counts every project's live runs; a project's own
@@ -99,6 +104,12 @@ pub struct Room {
     disk_ok: bool,
     /// The load and the memory, as far as the caller measured them.
     gauges: Gauges,
+    /// The owner's machine caps, as the policy said when the room was read ([`Config::machine`]).
+    machine: Machine,
+    /// The projects whose state could not be read: what they run is in no count of this room.
+    unread: Vec<String>,
+    /// Whether a compiling unit is held by a runner on its way out ([`Job::lingers`]).
+    lingering: bool,
     /// The project's development environment, when it names one: no job starts until it is warm.
     dev_shell: Option<Gate>,
 }
@@ -139,6 +150,8 @@ pub enum Constraint {
     Load,
     /// The memory gate: `[machine] min_free_mem_gb` in the owner's policy.
     Memory,
+    /// A machine-wide count is incomplete: a project's state could not be read.
+    Uncounted,
     /// The disk gate: `limits.min_free_disk_gb`, which is at least the machine's.
     Disk,
     /// The project's development environment is not warm.
@@ -162,14 +175,20 @@ impl Room {
     /// The room for `world` (this project's fold; an empty one outside any project) among
     /// `others`, the other projects' folds on this machine: what they know of the accounts is
     /// heard, and their live runners' seats count; their jobs stay theirs. `disk_ok` is whether
-    /// free disk lets a build job start, as the caller measured it. The machine's available
-    /// memory is read here when the owner's policy sets a floor for it, so whoever starts a
-    /// session of any kind is held by it.
-    pub fn new(cfg: &Config, world: &World, others: &[&World], disk_ok: bool) -> Self {
+    /// free disk lets a build job start, as the caller measured it. The projects `others` could
+    /// not read come with the folds it did read, so a count over every project knows it is short.
+    /// The owner's machine caps are read from the policy here, each time ([`Config::machine`]), and
+    /// the machine's available memory when they set a floor for it, so whoever starts a session of
+    /// any kind is held by the caps as they are now.
+    pub fn new(cfg: &Config, world: &World, others: &Others<'_>, disk_ok: bool) -> Self {
         let found = accounts::discover(cfg);
-        let heard = heard(&found, world, others);
-        let mem_gb = cfg.machine.min_free_mem_gb.and_then(|_| crate::os::mem_available_gb());
-        Self::of(found, heard, world, others, disk_ok).with_gauges(Gauges { load: None, mem_gb })
+        let heard = heard(&found, world, &others.worlds);
+        let machine = cfg.machine();
+        let mem_gb = machine.min_free_mem_gb.and_then(|_| crate::os::mem_available_gb());
+        Self::of(found, heard, world, &others.worlds, disk_ok)
+            .with_machine(machine)
+            .with_unread(others.unreadable.clone())
+            .with_gauges(Gauges { load: None, mem_gb })
     }
 
     /// The room outside every project: every account on the machine (`accounts::discover_all`),
@@ -204,8 +223,12 @@ impl Room {
         for (account, draws) in sessions.filter_map(SessionSeat::held) {
             room.book(account, draws);
         }
-        for _ in world.jobs().values().chain(theirs()).filter(|j| j.compiling()) {
-            room.add(Pool::Compiling);
+        // A compiling unit is its runner process's, in every project alike and whatever the job's
+        // status says: held while that process lives, by the evidence a seat's is.
+        for j in world.jobs().values().chain(others.iter().flat_map(|w| w.jobs().values())) {
+            let units = j.compiling_units();
+            (0..units).for_each(|_| room.add(Pool::Compiling));
+            room.lingering |= units > 0 && j.lingers();
         }
         for j in world.jobs().values() {
             if j.status == Status::Running {
@@ -219,6 +242,20 @@ impl Room {
         let in_line = others.iter().flat_map(|w| w.jobs().values()).filter(|j| j.in_line_for(&compiling));
         room.line = in_line.map(Job::waiting_since).collect();
         room
+    }
+
+    /// The room under the owner's caps `machine`.
+    #[must_use]
+    pub fn with_machine(mut self, machine: Machine) -> Self {
+        self.machine = machine;
+        self
+    }
+
+    /// The room that could not read the state of the projects `unread`.
+    #[must_use]
+    pub fn with_unread(mut self, unread: Vec<String>) -> Self {
+        self.unread = unread;
+        self
     }
 
     /// The room with the machine as `gauges` read it.
@@ -392,7 +429,7 @@ impl Room {
     /// pool of jobs counts it (the machine's compiling pool neither: it judges a run from its
     /// record), and it is read-only, so the disk does not hold it.
     pub fn judge_session<'a>(&'a self, cfg: &Config, j: &Job, now_us: u64) -> Result<Vec<(&'a Home, f64)>, Hold> {
-        self.memory(cfg, now_us)?;
+        self.memory(now_us)?;
         self.accounts_for(cfg, j, now_us)
     }
 
@@ -416,7 +453,7 @@ impl Room {
                 return Err(Hold { why, until: None, by: Constraint::Pool(Pool::Running) });
             }
             self.load(cfg, now_us)?;
-            self.memory(cfg, now_us)?;
+            self.memory(now_us)?;
         }
         if !j.readonly() && !self.disk_ok {
             let (floor, need) = (cfg.limits.min_free_disk_gb, crate::systems::dispatch::resume_gb(&cfg.limits));
@@ -435,7 +472,7 @@ impl Room {
         }
         let fits = self.accounts_for(cfg, j, now_us)?;
         if when && j.compiles() {
-            self.compiling(cfg, j, now_us)?;
+            self.compiling(j, now_us)?;
         }
         Ok(fits)
     }
@@ -456,8 +493,8 @@ impl Room {
     /// The memory gate: no session starts while the machine's available memory is under the
     /// owner's floor. Memory that could not be read holds nothing: a machine that does not say is
     /// as it was before the gate.
-    fn memory(&self, cfg: &Config, now_us: u64) -> Result<(), Hold> {
-        match memory_hold(cfg, self.gauges.mem_gb) {
+    fn memory(&self, now_us: u64) -> Result<(), Hold> {
+        match memory_hold(&self.machine, self.gauges.mem_gb) {
             Some(why) => {
                 Err(Hold { why, until: Some(now_us.saturating_add(LOOK_AGAIN_MICROS)), by: Constraint::Memory })
             }
@@ -470,8 +507,24 @@ impl Room {
     /// longer in the same line. Only strictly older jobs are waited for, so two of one age never
     /// wait for each other. A unit whose runner died comes back with no event, so a job held here
     /// is judged again soon.
-    fn compiling(&self, cfg: &Config, j: &Job, now_us: u64) -> Result<(), Hold> {
-        let Some(capacity) = cfg.machine.max_compiling else { return Ok(()) };
+    ///
+    /// The count is over every project, so it is only a count when every project was read: with
+    /// one unreadable, its compiling jobs are in nobody's sum and the cap would be passed without
+    /// anyone seeing it. Then nothing that compiles starts, and the hold names the project.
+    fn compiling(&self, j: &Job, now_us: u64) -> Result<(), Hold> {
+        let Some(capacity) = self.machine.max_compiling else { return Ok(()) };
+        if !self.unread.is_empty() {
+            let s = if self.unread.len() == 1 { "" } else { "s" };
+            return Err(Hold {
+                why: format!(
+                    "the compiling jobs on this machine cannot be counted: the state of project{s} {} cannot be read \
+                     (machine.max_compiling in the owner's policy)",
+                    self.unread.join(", ")
+                ),
+                until: Some(now_us.saturating_add(LOOK_AGAIN_MICROS)),
+                by: Constraint::Uncounted,
+            });
+        }
         let taken = self.taken(&Pool::Compiling);
         let ahead = self.line.iter().filter(|&&since| since < j.waiting_since()).count();
         if taken + ahead < capacity {
@@ -482,9 +535,11 @@ impl Room {
             let s = if ahead == 1 { " of another project has" } else { "s of other projects have" };
             why = format!("{why}, and {ahead} job{s} waited longer for the rest");
         }
+        // A runner on its way out gives its unit back within moments, and says nothing.
+        let again = if self.lingering { LINGER_MICROS } else { LOOK_AGAIN_MICROS };
         Err(Hold {
             why: format!("{why} (machine.max_compiling in the owner's policy)"),
-            until: Some(now_us.saturating_add(LOOK_AGAIN_MICROS)),
+            until: Some(now_us.saturating_add(again)),
             by: Constraint::Pool(Pool::Compiling),
         })
     }
@@ -562,8 +617,8 @@ impl Room {
 /// starts with `free_gb` GiB of memory available (`MemAvailable`), by the floor in the owner's
 /// policy. `None` when it is at or over the floor, when no floor is set, and when the memory could
 /// not be read.
-pub fn memory_hold(cfg: &Config, free_gb: Option<f64>) -> Option<String> {
-    let (floor, free) = (cfg.machine.min_free_mem_gb?, free_gb?);
+pub fn memory_hold(machine: &Machine, free_gb: Option<f64>) -> Option<String> {
+    let (floor, free) = (machine.min_free_mem_gb?, free_gb?);
     (free < floor).then(|| {
         format!(
             "{free:.1} GiB of memory available, under the machine's {floor} GiB floor \

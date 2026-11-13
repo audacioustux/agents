@@ -38,9 +38,11 @@ pub struct Config {
     #[serde(default)]
     pub hooks: Hooks,
     /// The machine-wide caps of the owner's policy (`[machine]`): the same for every project on the
-    /// machine, and never read from a project's `relay.toml`.
+    /// machine, and never read from a project's `relay.toml`. Read through [`Config::machine`]
+    /// alone, which reads the policy again each time: a config is loaded once by a process that
+    /// may run for hours, and the owner's cap of a minute ago must hold its next admission.
     #[serde(skip)]
-    pub machine: Machine,
+    pub caps: Caps,
     /// The policy file this was merged with, when one was read.
     #[serde(skip)]
     pub policy_path: Option<PathBuf>,
@@ -203,6 +205,34 @@ pub struct Machine {
     pub min_free_mem_gb: Option<f64>,
     /// The least `limits.min_free_disk_gb` of any project: one may raise its floor, never lower it.
     pub min_free_disk_gb: Option<f64>,
+}
+
+/// Where a config reads the machine's caps from. It holds no value a caller could keep: the caps
+/// are whatever the policy file says when they are asked for ([`Caps::now`]).
+#[derive(Debug, Clone, Default)]
+pub struct Caps {
+    /// The caps as the policy had them when the config was loaded: what stands while the file is
+    /// there but does not load (half-saved, or invalid).
+    at_load: Machine,
+    /// The policy file, whether or not it existed at load. `None` for a config built with no
+    /// policy file to read (a test's): then the caps at load are all there is.
+    source: Option<PathBuf>,
+}
+
+impl Caps {
+    /// The caps as the policy file says now. A file that is gone caps nothing; one that cannot be
+    /// read or does not pass its checks leaves the caps as they were at load, never looser by an
+    /// accident of a half-saved file.
+    pub fn now(&self) -> Machine {
+        let Some(path) = &self.source else { return self.at_load };
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                Policy::parse(&text).ok().map(|p| p.machine).filter(|m| m.validate().is_ok()).unwrap_or(self.at_load)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Machine::default(),
+            Err(_) => self.at_load,
+        }
+    }
 }
 
 impl Machine {
@@ -722,7 +752,7 @@ impl Config {
             // The machine's caps are the policy's alone. Its disk floor is the least any project
             // has: every reader of `limits.min_free_disk_gb` (admission, gc, the floor that stops
             // a running job) then sees the higher of the two.
-            self.machine = policy.machine;
+            self.caps = Caps { at_load: policy.machine, source: Some(path.to_path_buf()) };
             if let Some(floor) = policy.machine.min_free_disk_gb.filter(|f| *f > self.limits.min_free_disk_gb) {
                 self.limits.min_free_disk_gb = floor;
                 origins.insert("limits.min_free_disk_gb".to_owned(), Origin::Policy);
@@ -754,6 +784,12 @@ impl Config {
             fail!(NotFound, "no profile named {name} ({known})");
         };
         Ok(p)
+    }
+
+    /// The owner's machine caps as the policy file says now ([`Caps::now`]): asked at every
+    /// admission point, never kept.
+    pub fn machine(&self) -> Machine {
+        self.caps.now()
     }
 
     /// Where a merged setting came from, `project` when unrecorded.
@@ -788,7 +824,9 @@ impl Config {
             policy.as_ref().map(|(p, from)| (p, from.as_path())),
         )
         .with_context(|| format!("in {}", path.display()))?;
-        let cfg = Self { programs: Some(crate::host::record_in(&crate::ctx::state_root())), ..cfg };
+        let mut cfg = Self { programs: Some(crate::host::record_in(&crate::ctx::state_root())), ..cfg };
+        // A policy written after this load is read at the next admission, as one edited is.
+        cfg.caps.source = Policy::path().map(|(p, _)| p);
         Ok((cfg, path))
     }
 
@@ -808,12 +846,13 @@ impl Config {
             gc: Gc::default(),
             profiles: BTreeMap::new(),
             hooks: Hooks::default(),
-            machine: Machine::default(),
+            caps: Caps::default(),
             policy_path: None,
             programs: Some(crate::host::record_in(&crate::ctx::state_root())),
             origins: BTreeMap::new(),
         };
         cfg.merge(policy.as_ref().map(|(p, from)| (p, from.as_path())));
+        cfg.caps.source = Policy::path().map(|(p, _)| p);
         if let Some((_, from)) = &policy {
             cfg.validate_policy().with_context(|| format!("in policy {}", from.display()))?;
         }
@@ -916,7 +955,7 @@ impl Config {
         for (name, p) in &self.profiles {
             p.validate(name)?;
         }
-        self.machine.validate()?;
+        self.caps.at_load.validate()?;
         self.validate_escalation()
     }
 
@@ -1483,6 +1522,33 @@ budget = 3
             .unwrap()
     }
 
+    /// Copilot review of PR #70, finding 5: a process that loaded its config before the owner set or
+    /// changed a cap went on with the caps it started with. The caps are read from the policy file
+    /// each time they are asked for; a file that does not load leaves them as they were at load.
+    #[test]
+    fn the_machines_caps_are_read_from_the_policy_again_each_time_they_are_asked_for() {
+        let d = repo();
+        let file = d.path().join("policy.toml");
+        let write = |text: &str| std::fs::write(&file, text).unwrap();
+        write("[machine]\nmax_compiling = 6\n");
+        let policy = Policy::parse("[machine]\nmax_compiling = 6\n").unwrap();
+        let cfg = Config::parse_with("name = \"demo\"", d.path(), Some((&policy, &file))).unwrap();
+        let caps = |cfg: &Config| (cfg.machine().max_compiling, cfg.machine().min_free_mem_gb);
+        assert_eq!(caps(&cfg), (Some(6), None));
+        write("[machine]\nmax_compiling = 2\nmin_free_mem_gb = 4\n");
+        assert_eq!(caps(&cfg), (Some(2), Some(4.0)), "the same config, loaded before the owner's edit");
+        write("[machine]\nmax_compiling = ");
+        assert_eq!(caps(&cfg), (Some(6), None), "half-saved: the caps at load stand, not none");
+        write("[machine]\nmax_compiling = 0\n");
+        assert_eq!(caps(&cfg), (Some(6), None), "invalid: likewise");
+        write("[profiles.p]\nnote = \"x\"\n");
+        assert_eq!(caps(&cfg), (None, None), "the table removed: no cap");
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(caps(&cfg), (None, None), "the policy removed: no cap");
+        // A config loaded with no policy file to read keeps what it was given.
+        assert_eq!(Config::parse("name = \"demo\"", d.path()).unwrap().machine(), Machine::default());
+    }
+
     /// A profile says whether its jobs compile; unset, they do. The project's field wins, as any other.
     #[test]
     fn a_profile_declares_whether_its_jobs_compile_and_the_default_is_that_they_do() {
@@ -1504,7 +1570,7 @@ budget = 3
     fn the_machines_caps_are_the_policys_and_a_project_only_raises_the_disk_floor() {
         let caps = "[machine]\nmax_compiling = 6\nmin_free_mem_gb = 4\nmin_free_disk_gb = 30\n";
         let cfg = merged_with(caps, "");
-        let m = cfg.machine;
+        let m = cfg.caps.at_load;
         assert_eq!((m.max_compiling, m.min_free_mem_gb, m.min_free_disk_gb), (Some(6), Some(4.0), Some(30.0)));
         assert_eq!(cfg.limits.min_free_disk_gb, 30.0, "the project's default of 10 is under the machine's floor");
         assert_eq!(cfg.origin("limits.min_free_disk_gb"), Origin::Policy);
@@ -1515,7 +1581,7 @@ budget = 3
         assert_eq!(higher.origin("limits.min_free_disk_gb"), Origin::Project);
 
         let none = merged("[limits]\nmin_free_disk_gb = 0\n");
-        assert_eq!(none.machine, Machine::default(), "no [machine] table: no cap");
+        assert_eq!(none.caps.at_load, Machine::default(), "no [machine] table: no cap");
         assert_eq!(none.limits.min_free_disk_gb, 0.0, "and the project's floor is its own, as before");
 
         let d = repo();

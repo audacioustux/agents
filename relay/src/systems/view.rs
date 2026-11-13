@@ -198,7 +198,9 @@ fn status(scope: Scope<'_>, json: bool, all: bool, everywhere: bool) -> Result<(
 /// window), and returns those whose reading was asked for. What every view of the accounts does,
 /// `view status --json` included: an orchestrator that only polls that still gets fresh readings.
 fn refresh_shown(ctx: &Ctx, world: &World, others: &[&World]) -> Result<Vec<String>> {
-    let room = crate::systems::quota::room_for(crate::systems::quota::Rules::Project(ctx), world, others);
+    // A room for the accounts' readings alone: nothing is admitted in it, so nothing is counted.
+    let others = crate::ctx::Others { worlds: others.to_vec(), unreadable: Vec::new() };
+    let room = crate::systems::quota::room_for(crate::systems::quota::Rules::Project(ctx), world, &others);
     crate::systems::quota::start_refresh(ctx, &room, world, false)
 }
 

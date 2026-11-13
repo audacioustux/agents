@@ -114,7 +114,6 @@ pub(super) fn run(
     dev: &[(OsString, Option<OsString>)],
 ) -> Result<CheckRun> {
     let command = job.check().context("a check was asked of a job that declares none")?.to_owned();
-    wait_for_memory(ctx, job);
     let tip = dir.rev("HEAD");
     let place = Place { job, inbox, work: &ctx.job_scratch(&format!("{}.bar", job.name)), dev };
     let head = match &tip {
@@ -185,20 +184,25 @@ pub(super) fn run(
     Ok(CheckRun { command, commit: tip, result, exit: head.code, base_exit, failing, no_progress, tail })
 }
 
-/// How often a check that the memory gate holds looks at the machine's memory again.
-const MEMORY_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+/// How often a check that the memory gate holds looks at the machine's memory, and at the owner's
+/// floor for it, again.
+const MEMORY_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The machine's memory gate, for a check as for a session: a check starts no sooner than the
+/// The machine's memory gate, for a run of a check as for a session: it starts no sooner than the
 /// machine's available memory is at the owner's floor (`[machine] min_free_mem_gb`,
-/// [`crate::systems::dispatch::memory_hold`]). It waits here, in its runner, which keeps its seat
-/// and its compiling unit meanwhile, and says why in the runner's log. Nothing running is touched;
-/// a stop ends the wait with the runner. With no floor in the policy it does not look.
+/// [`crate::systems::dispatch::memory_hold`]). The floor is the policy's as it is now, read again at
+/// every look ([`crate::config::Config::machine`]): this runner loaded its config when its session
+/// began, perhaps hours ago, and a floor the owner set since holds this run, as one lifted lets it go.
+/// It waits here, in its runner, which keeps its seat and its compiling unit meanwhile, and says why
+/// in the runner's log. Nothing running is touched; a stop ends the wait with the runner.
 fn wait_for_memory(ctx: &Ctx, job: &Job) {
-    if ctx.cfg.machine.min_free_mem_gb.is_none() {
-        return;
-    }
+    let held = || {
+        let machine = ctx.cfg.machine();
+        let free = machine.min_free_mem_gb.and_then(|_| crate::os::mem_available_gb());
+        crate::systems::dispatch::memory_hold(&machine, free)
+    };
     let mut said = false;
-    while let Some(why) = crate::systems::dispatch::memory_hold(&ctx.cfg, crate::os::mem_available_gb()) {
+    while let Some(why) = held() {
         if !said {
             eprintln!("{} {}: its acceptance check waits: {why}", crate::os::stamp(), job.name);
             said = true;
@@ -418,8 +422,12 @@ pub(super) fn invocation(
 
 /// Runs `sh -c command` in `tree`, bounded by `hooks.command_timeout_seconds` (killed 5 s later if it
 /// ignores the TERM), in the session's sandbox plan without the session's account or clone.
+///
+/// This is the one place a check command is launched, at the tip and at the base alike, so it is
+/// where the machine's memory gate stands ([`wait_for_memory`]): no run of a check starts past it.
 fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, phase: Phase, place: &Place<'_>) -> Ran {
     let go = || -> Result<Ran> {
+        wait_for_memory(ctx, place.job);
         let inv = invocation(ctx, place.job, phase, command, place.dev);
         let file = place.inbox.create("check.out")?;
         let tmp = place.work.join("tmp");

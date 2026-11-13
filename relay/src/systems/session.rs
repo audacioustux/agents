@@ -795,7 +795,7 @@ fn await_seat(
             && let Ok(world) = ctx.world()
         {
             let neighbours = ctx.neighbours();
-            let room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
+            let room = Room::new(&ctx.cfg, &world, &neighbours.seen(), true);
             if stale(&room, &agent.harness) {
                 asked = Some(Instant::now());
                 let _ = crate::systems::quota::start_refresh(ctx, &room, &world, false);

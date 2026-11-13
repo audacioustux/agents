@@ -300,10 +300,13 @@ pub fn clear(parent: &Path, name: &str, pool: &Path) -> io::Result<()> {
     }
 }
 
-/// Makes the cache `rel` in relay's caches `shared`, from their root one directory at a time, following
-/// no symlink: what a cache bound into a sandbox is made with.
-pub fn make_cache_dir(shared: &Path, rel: &CachePath) -> io::Result<()> {
-    make_shared(&shared_root(shared)?, rel).map(drop)
+/// The cache `rel` in relay's caches `shared`, opened (made if not there) from their root one directory
+/// at a time, following no symlink, and left open across `exec`: what a cache is bound into a sandbox by
+/// (`--bind-fd`), so bubblewrap binds this directory and resolves no path a session could have written.
+pub fn open_cache_dir(shared: &Path, rel: &CachePath) -> io::Result<OwnedFd> {
+    let fd = make_shared(&shared_root(shared)?, rel)?;
+    rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty())?;
+    Ok(fd)
 }
 
 /// Puts the empty file `name` in the cache `rel` of relay's caches `shared`, where nothing of that name is,

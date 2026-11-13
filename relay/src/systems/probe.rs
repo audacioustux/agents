@@ -322,7 +322,7 @@ impl<'a> Probe<'a> {
         marks.mark_copy()?;
         let mounts = Mounts { caches: marks.copy.as_ref().map(sandbox::farm::Farm::path), ..mounts };
         let plan = sandbox::plan(self.ctx, &user, &mounts);
-        let args = sandbox::args(self.ctx, &user, &mounts, sandbox::session_env(self.ctx, &inv));
+        let (args, _keep) = sandbox::args(self.ctx, &user, &mounts, sandbox::session_env(self.ctx, &inv))?;
         let inside =
             |sh: &str| Command::new("bwrap").args(&args).args([OsString::from("sh"), "-c".into(), sh.into()]).output();
         // Proof, for the copy, that each sandbox run on it ended: all of them, or none.

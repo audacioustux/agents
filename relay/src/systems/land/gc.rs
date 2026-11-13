@@ -406,11 +406,8 @@ pub fn run(ctx: &Ctx, dry_run: bool) -> Result<()> {
             left = items.len() - i;
             break;
         };
-        let (bytes, complete) = if matches!(item.kind, Kind::Log | Kind::ReviewRef) {
-            (item.path.metadata().map_or(0, |m| m.len()), true)
-        } else {
-            os::dir_size(&item.path, within)
-        };
+        // One measure for every place, which follows no link, its root included; a review ref is a name.
+        let (bytes, complete) = if item.kind == Kind::ReviewRef { (0, true) } else { os::dir_size(&item.path, within) };
         let mut a = Action {
             job: item.job.clone(),
             kind: item.kind,

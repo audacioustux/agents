@@ -7,6 +7,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Write};
 use std::ops::ControlFlow;
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -225,6 +226,8 @@ struct Workspace {
 /// A session ready to run.
 struct Launch {
     cmd: Command,
+    /// The directories its sandbox binds by open handle, open until it has run.
+    _keep: Vec<OwnedFd>,
     /// The zone the session keeps its clock in: its environment's `TZ`, which the config sets, never relay's.
     zone: jiff::tz::TimeZone,
     stdin: Option<String>,
@@ -456,10 +459,10 @@ fn launch(
         None => None,
     };
     let mounts = Mounts { caches: caches.as_ref().map(sandbox::farm::Farm::path), ..mounts };
-    let cmd = supervised_command(ctx, &inv, &mounts)?;
+    let (cmd, keep) = supervised_command(ctx, &inv, &mounts)?;
     let tz = sandbox::session_env(ctx, &inv).into_iter().find(|(k, _)| k == "TZ").map(|(_, v)| v);
     let zone = crate::harness::report::zone_of(tz.as_ref().map(|v| v.to_string_lossy()).as_deref());
-    Ok(ControlFlow::Continue(Launch { cmd, zone, stdin: inv.stdin, session_id, brief, reviewing, caches }))
+    Ok(ControlFlow::Continue(Launch { cmd, _keep: keep, zone, stdin: inv.stdin, session_id, brief, reviewing, caches }))
 }
 
 /// The harness's command line for the session, or why it refuses.
@@ -695,7 +698,7 @@ pub fn consult(
             account: true,
             caches: None,
         };
-        let mut cmd = build(ctx, &inv, &mounts, |p| crate::supervised::holding(p, hold.as_deref()))?;
+        let (mut cmd, _keep) = build(ctx, &inv, &mounts, |p| crate::supervised::holding(p, hold.as_deref()))?;
         let run = Run {
             session_id: None,
             budget_usd: agent.budget_usd,
@@ -923,36 +926,37 @@ fn stderr_tail(ctx: &Ctx, job: &Job) -> String {
     if read.is_err() || lines.is_empty() { String::new() } else { format!("; its stderr ends: {}", lines.join(" / ")) }
 }
 
-/// The invocation, niced, inside the sandbox when it is on.
-fn command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> Command {
-    let Ok(c) = build(ctx, inv, mounts, |p| Ok::<_, std::convert::Infallible>(Command::new(p)));
-    c
+/// The invocation, niced, inside the sandbox when it is on, with the directories it binds by open handle
+/// (keep them until it has started). An error when the sandbox cannot be prepared.
+fn command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<(Command, Vec<OwnedFd>)> {
+    build(ctx, inv, mounts, |p| Ok(Command::new(p)))
 }
 
 /// The same under `relay supervise`, for a session the runner drives: its whole process group ends
 /// with it, with the runner, or when it is stopped ([`crate::supervised`]).
-fn supervised_command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<Command> {
+fn supervised_command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<(Command, Vec<OwnedFd>)> {
     build(ctx, inv, mounts, |p| crate::supervised::command(p))
 }
 
-fn build<E>(
+fn build(
     ctx: &Ctx,
     inv: &Invocation,
     mounts: &Mounts<'_>,
-    new: impl FnOnce(&OsStr) -> Result<Command, E>,
-) -> Result<Command, E> {
+    new: impl FnOnce(&OsStr) -> std::io::Result<Command>,
+) -> std::io::Result<(Command, Vec<OwnedFd>)> {
     let mut argv: Vec<OsString> = vec!["nice".into(), "-n".into(), ctx.cfg.session.nice.to_string().into()];
     argv.push(inv.program.clone());
     argv.extend(inv.args.iter().cloned());
     let env = sandbox::session_env(ctx, inv);
     if ctx.cfg.sandbox.enabled {
+        let (args, keep) = sandbox::args(ctx, &accounts::home(), mounts, env)?;
         let mut c = new(OsStr::new("bwrap"))?;
-        c.args(sandbox::args(ctx, &accounts::home(), mounts, env)).args(argv);
-        Ok(c)
+        c.args(args).args(argv);
+        Ok((c, keep))
     } else {
         let mut c = new(&argv[0])?;
         c.args(&argv[1..]).env_clear().envs(env).current_dir(mounts.cwd);
-        Ok(c)
+        Ok((c, Vec::new()))
     }
 }
 

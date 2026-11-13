@@ -419,7 +419,8 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, phase: Phase, place:
         let caches = crate::sandbox::own_caches(ctx, place.work, "caches", &ctx.check_copies, &rels)
             .context("removing a copy of the caches left in the check's directory")?;
         let mounts = Mounts { caches: caches.as_ref().map(crate::sandbox::farm::Farm::path), ..mounts };
-        let mut c = self::command(ctx, &inv, &mounts);
+        // The sandbox is refused (not built) when a directory it binds cannot be prepared safely.
+        let (mut c, _keep) = self::command(ctx, &inv, &mounts).context("preparing the check's sandbox")?;
         c.stdin(Stdio::null()).stdout(file.try_clone()?).stderr(file);
         let status = c.status().context("running the acceptance check");
         // Back to the pool only if bwrap exited (it waits for its namespace to end); killed from outside, or

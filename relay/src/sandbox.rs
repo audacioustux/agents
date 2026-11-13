@@ -168,6 +168,9 @@ enum Stand {
 /// hidden one.
 fn linking(cfg: &crate::config::Config, user_home: &Path, before: &Layer, after: &Layer) -> Vec<(CachePath, Stand)> {
     let paths: Vec<PathBuf> = cfg.sandbox.caches.iter().map(|r| user_home.join(r)).collect();
+    let real_paths: Vec<PathBuf> = paths.iter().map(|p| real(p)).collect();
+    let real_layer = |layer: &Layer| layer.iter().map(|(q, k)| (real(q), k.clone())).collect::<Vec<_>>();
+    let (real_before, real_after) = (real_layer(before), real_layer(after));
     let mut out = Vec::new();
     for (r, p) in cfg.sandbox.caches.iter().zip(&paths) {
         let Some(parent) = p.parent() else { continue };
@@ -185,21 +188,17 @@ fn linking(cfg: &crate::config::Config, user_home: &Path, before: &Layer, after:
         if symlinked {
             continue;
         }
-        let nested = paths.iter().any(|q| q != p && (q.starts_with(p) || p.starts_with(q)));
-        let under = before.iter().chain(after).any(|(q, _)| q.starts_with(p));
-        let covered = after.iter().any(|(q, _)| p.starts_with(q));
-        // A mount whose path runs through a symlink lands where that leads: compared there, with the
-        // cache's own real path, so a hide rule reaching the cache by an alias keeps it a bind.
-        let real_p = real(p);
-        let aliased = before.iter().chain(after).any(|(q, _)| {
-            let real_q = real(q);
-            real_q != *q && (real_q.starts_with(&real_p) || real_p.starts_with(&real_q))
-        });
-        if nested || under || covered || aliased {
+        // Every comparison below is between real paths, both sides through [`real`]: an alias on either side
+        // (a symlinked home, a hide rule written by a symlink or by the real path) cannot hide an overlap.
+        let (real_p, real_parent) = (real(p), real(parent));
+        let nested = real_paths.iter().any(|q| *q != real_p && (q.starts_with(&real_p) || real_p.starts_with(q)));
+        let under = real_before.iter().chain(&real_after).any(|(q, _)| q.starts_with(&real_p));
+        let covered = real_after.iter().any(|(q, _)| real_p.starts_with(q));
+        if nested || under || covered {
             continue;
         }
         // What the cache path's directory is, once the layers before the caches are mounted.
-        match before.iter().rev().find(|(q, _)| parent.starts_with(q)).map(|(_, k)| k) {
+        match real_before.iter().rev().find(|(q, _)| real_parent.starts_with(q)).map(|(_, k)| k) {
             None => out.push((r.clone(), Stand::Rebuilt(parent.to_path_buf()))),
             Some(Mount::Hidden) => out.push((r.clone(), Stand::Hidden)),
             Some(_) => {}
@@ -209,7 +208,7 @@ fn linking(cfg: &crate::config::Config, user_home: &Path, before: &Layer, after:
 }
 
 /// Where `p` leads, every symlink on it resolved: its longest existing part made real, the rest (not there
-/// yet) appended as written.
+/// yet) appended as written. The one form every overlap between a cache and a mount is judged in.
 fn real(p: &Path) -> PathBuf {
     let mut missing = Vec::new();
     let mut at = p;
@@ -374,7 +373,15 @@ fn host_sockets() -> Vec<PathBuf> {
     out
 }
 
-pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsString)>) -> Vec<OsString> {
+/// Bubblewrap's arguments, and the directories it binds by open handle (`--bind-fd`), which must stay open
+/// until it has started. An error when a bind source cannot be prepared: the sandbox is refused.
+pub fn args(
+    ctx: &Ctx,
+    user_home: &Path,
+    m: &Mounts<'_>,
+    env: Vec<(OsString, OsString)>,
+) -> std::io::Result<(Vec<OsString>, Vec<std::os::fd::OwnedFd>)> {
+    let mut keep = Vec::new();
     let mut a: Vec<OsString> =
         ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--bind"].map(OsString::from).to_vec();
     a.extend([m.tmp.as_os_str().to_owned(), "/tmp".into()]);
@@ -395,44 +402,52 @@ pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsS
         plan.iter().filter(|(_, k)| matches!(k, Mount::Symlink(_))).map(|(p, _)| p.as_path()).collect();
     for (p, mount) in &plan {
         let p = p.clone();
-        let (flag, src) = match mount {
-            Mount::Rebuilt => {
-                a.extend(["--tmpfs".into(), p.clone().into()]);
-                a.extend(rebuilt(&p, &links));
-                sealed.push(p);
-                continue;
-            }
-            Mount::Symlink(target) => {
-                a.extend(["--dir".into(), p.parent().unwrap_or(&p).into()]);
-                a.extend(["--symlink".into(), target.into(), p.into()]);
-                continue;
-            }
-            Mount::Hidden if p.is_dir() => {
-                sealed.push(p.clone());
-                ("--tmpfs", None)
-            }
-            Mount::Hidden => ("--ro-bind", Some(Path::new("/dev/null"))),
-            Mount::ReadOnly => ("--ro-bind", Some(p.as_path())),
-            Mount::Writable => ("--bind", Some(p.as_path())),
-            Mount::From(src) => {
-                // Made from relay's caches' root one directory at a time, following no symlink.
-                if let Some(rel) = ctx.cfg.sandbox.caches.iter().find(|r| ctx.caches.join(r) == *src) {
-                    let _ = farm::make_cache_dir(&ctx.caches, rel);
+        let (flag, src) =
+            match mount {
+                Mount::Rebuilt => {
+                    a.extend(["--tmpfs".into(), p.clone().into()]);
+                    a.extend(rebuilt(&p, &links));
+                    sealed.push(p);
+                    continue;
                 }
-                ("--bind", Some(src.as_path()))
-            }
-            // Made empty on the host, then mounted read-only like any protected path. Should that fail
-            // (its parent is missing, or not a real directory), bubblewrap's own empty, read-only stand-in.
-            Mount::Placeholder { dir } => match seed(&p, *dir) {
-                Ok(()) => ("--ro-bind", Some(p.as_path())),
-                Err(_) if p.exists() => ("--ro-bind", Some(p.as_path())),
-                Err(_) if *dir => {
+                Mount::Symlink(target) => {
+                    a.extend(["--dir".into(), p.parent().unwrap_or(&p).into()]);
+                    a.extend(["--symlink".into(), target.into(), p.into()]);
+                    continue;
+                }
+                Mount::Hidden if p.is_dir() => {
                     sealed.push(p.clone());
                     ("--tmpfs", None)
                 }
-                Err(_) => ("--ro-bind", Some(Path::new("/dev/null"))),
-            },
-        };
+                Mount::Hidden => ("--ro-bind", Some(Path::new("/dev/null"))),
+                Mount::ReadOnly => ("--ro-bind", Some(p.as_path())),
+                Mount::Writable => ("--bind", Some(p.as_path())),
+                Mount::From(src) => {
+                    // Opened from relay's caches' root one directory at a time, following no symlink, and bound by
+                    // that handle: a link planted on the way refuses the sandbox rather than lead elsewhere.
+                    let rel =
+                        ctx.cfg.sandbox.caches.iter().find(|r| ctx.caches.join(r) == *src).ok_or_else(|| {
+                            std::io::Error::other(format!("{} is none of relay's caches", src.display()))
+                        })?;
+                    let fd = farm::open_cache_dir(&ctx.caches, rel).map_err(|e| {
+                        std::io::Error::new(e.kind(), format!("preparing the cache {}: {e}", rel.display()))
+                    })?;
+                    a.extend(["--bind-fd".into(), std::os::fd::AsRawFd::as_raw_fd(&fd).to_string().into(), p.into()]);
+                    keep.push(fd);
+                    continue;
+                }
+                // Made empty on the host, then mounted read-only like any protected path. Should that fail
+                // (its parent is missing, or not a real directory), bubblewrap's own empty, read-only stand-in.
+                Mount::Placeholder { dir } => match seed(&p, *dir) {
+                    Ok(()) => ("--ro-bind", Some(p.as_path())),
+                    Err(_) if p.exists() => ("--ro-bind", Some(p.as_path())),
+                    Err(_) if *dir => {
+                        sealed.push(p.clone());
+                        ("--tmpfs", None)
+                    }
+                    Err(_) => ("--ro-bind", Some(Path::new("/dev/null"))),
+                },
+            };
         a.push(flag.into());
         a.extend(src.map(OsString::from));
         a.push(p.into());
@@ -448,7 +463,7 @@ pub fn args(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>, env: Vec<(OsString, OsS
         a.extend(["--setenv".into(), k, v]);
     }
     a.extend(["--chdir".into(), m.cwd.into()]);
-    a
+    Ok((a, keep))
 }
 
 /// The variables that say where a process on the host stands (its working and temporary
@@ -663,7 +678,7 @@ mod tests {
         assert!(mount_of(&plan, &user.join(".absent")).is_none());
         assert!(matches!(mount_of(&plan, &user.join(".rustup")), Some(Mount::From(_))), "not declared linked");
 
-        let args = args(&ctx, &user, &m(Some(&farm)), Vec::new());
+        let (args, _keep) = args(&ctx, &user, &m(Some(&farm)), Vec::new()).unwrap();
         let s = |p: &Path| OsString::from(p);
         let has = |w: &[OsString]| args.windows(w.len()).any(|x| x == w);
         assert!(has(&["--tmpfs".into(), s(&user)]) && has(&["--remount-ro".into(), s(&user)]), "{args:?}");
@@ -689,6 +704,85 @@ mod tests {
     /// under the cache, so the cache was linked, and a copy reused from the pool holding `secret` was bound
     /// over the hide mount. Hide rules are compared by where they lead, and a cache one leads into or
     /// around is not linked; the pooled copy is then not taken at all.
+    /// Copilot at fdbf183: a cache's directory in relay's caches could be a symlink a session planted
+    /// (through `.cache`, bound before a config named only `.cache/uv`); its preparation failed, the error
+    /// was dropped, and bubblewrap followed the path, binding the link's target writable. A bind source is
+    /// opened from relay's caches' root following no link, and passed to bubblewrap as that open
+    /// directory; one that cannot be refuses the sandbox.
+    #[test]
+    fn a_cache_whose_source_is_a_planted_symlink_is_never_bound() {
+        let d = Dir::new();
+        let root = d.path();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let user = root.join("user");
+        std::fs::create_dir_all(user.join(".cache/uv")).unwrap();
+        let conf = "name = \"t\"\n[sandbox]\nhide = []\nhide_home = []\ncaches = [\".cache/uv\"]\n";
+        let cfg = Config::parse(conf, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        let outside = root.join("host-dir");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(ctx.caches.join(".cache")).unwrap();
+        std::os::unix::fs::symlink(&outside, ctx.caches.join(".cache/uv")).unwrap();
+        let (scratch, tmp) = (root.join("state/t/jobs/j.d"), root.join("data/t/scratch/j"));
+        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
+        let m = Mounts {
+            home: &home,
+            workdir: None,
+            scratch: &scratch,
+            inbox: None,
+            tmp: &tmp,
+            cwd: &repo,
+            account: false,
+            caches: None,
+        };
+        let built = args(&ctx, &user, &m, Vec::new());
+        assert!(built.is_err(), "a sandbox was built over the planted link: {built:?}");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "nothing made through the link");
+        // Its own directory, there and whole, is bound by an open handle, not by a path.
+        std::fs::remove_file(ctx.caches.join(".cache/uv")).unwrap();
+        let (built, keep) = args(&ctx, &user, &m, Vec::new()).unwrap();
+        let dest = OsString::from(user.join(".cache/uv"));
+        assert!(built.windows(3).any(|w| w[0] == "--bind-fd" && w[2] == dest) && keep.len() == 1, "{built:?}");
+        let source = ctx.caches.join(".cache/uv");
+        assert!(!built.iter().any(|a| Path::new(a) == source), "bound by path");
+    }
+
+    /// Copilot at fdbf183: with the home itself a symlink (`/home/me -> /srv/me`) and a hide rule written by
+    /// the real path (`/srv/me/.cargo/git/secret`), only the hide side was compared resolved, so the overlap
+    /// was missed. Both sides are compared in one canonical form.
+    #[test]
+    fn a_hide_rule_written_by_the_real_path_of_a_symlinked_home_keeps_the_cache_a_bind() {
+        let d = Dir::new();
+        let root = d.path();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let real_home = root.join("srv-me");
+        std::fs::create_dir_all(real_home.join(".cargo/git/secret")).unwrap();
+        let user = root.join("me");
+        std::os::unix::fs::symlink(&real_home, &user).unwrap();
+        let conf = format!(
+            "name = \"t\"\n[sandbox]\nhide = [{:?}]\nhide_home = []\ncaches = [\".cargo/git\"]\nlinked_caches = [\".cargo/git\"]\n",
+            real_home.join(".cargo/git/secret")
+        );
+        let cfg = Config::parse(&conf, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        let (scratch, tmp, clone) = (root.join("state/t/jobs/j.d"), root.join("data/t/scratch/j"), root.join("clone"));
+        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
+        let m = Mounts {
+            home: &home,
+            workdir: Some(&clone),
+            scratch: &scratch,
+            inbox: None,
+            tmp: &tmp,
+            cwd: &clone,
+            account: false,
+            caches: None,
+        };
+        let rels = linkable(&ctx, &user, &m);
+        assert!(rels.is_empty(), "{rels:?}");
+    }
+
     #[test]
     fn a_hide_rule_reaching_a_cache_through_a_symlink_keeps_it_a_bind() {
         let d = Dir::new();

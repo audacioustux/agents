@@ -257,6 +257,13 @@ pub fn job_work_size(path: &Path, within: Duration) -> (u64, bool) {
 
 fn size(path: &Path, within: Duration, job_work: bool) -> (u64, bool) {
     use std::os::unix::fs::MetadataExt;
+    // The root too is looked at as itself: a symlink (or a file) there is its own size, never what it
+    // leads to, which removing it would not free.
+    match path.symlink_metadata() {
+        Ok(meta) if !meta.is_dir() => return (meta.blocks() * 512, true),
+        Err(_) => return (0, true),
+        Ok(_) => {}
+    }
     let end = std::time::Instant::now() + within;
     let mut seen = std::collections::HashSet::new();
     let mut total = 0;
@@ -325,6 +332,24 @@ mod tests {
     /// Copilot on (e): the skip of a clone's copy of the caches was in `dir_size` itself, so gc's sizes left
     /// it out too, and a dead probe's warmed copy freed "nothing". A whole tree is counted whole; only a
     /// live job's disk accounting leaves its copy out, by asking for that.
+    /// Copilot at fdbf183: a retired entry can be a symlink (one left where a copy was), and the size walk
+    /// followed its root, so gc reported its target's bytes freed though removal unlinks only the link.
+    /// No link is followed at any depth, the root included.
+    #[test]
+    fn a_symlink_is_sized_as_itself_never_as_what_it_points_at() {
+        let d = Dir::new();
+        let target = d.path().join("big");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("data"), vec![1u8; 1 << 20]).unwrap();
+        let link = d.path().join("gone-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (bytes, whole) = dir_size(&link, Duration::from_secs(10));
+        assert!(whole && bytes < 1 << 20, "the link's target was counted: {bytes}");
+        let file = d.path().join("gone-file");
+        std::fs::write(&file, vec![1u8; 1 << 16]).unwrap();
+        assert!(dir_size(&file, Duration::from_secs(10)).0 >= 1 << 16, "a file is counted as itself");
+    }
+
     #[test]
     fn a_whole_tree_counts_a_copy_of_the_caches_in_it() {
         let d = Dir::new();

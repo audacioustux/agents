@@ -29,6 +29,7 @@ use crate::supervised::Supervised;
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request, Reviewing};
 use crate::systems::dispatch::{self, Room};
+use crate::systems::graph::Change;
 use crate::world::{Job, World};
 
 mod bar;
@@ -108,28 +109,7 @@ pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
     let mut spend = (0.0, 0);
     let (outcome, reason) =
         attempt(ctx, &job, &mut spend).unwrap_or_else(|e| (Outcome::Failed, Some(format!("{e:#}"))));
-    // The tip as the run leaves it, from the clone the run may have made: what an accept must name.
-    let world = ctx.world().ok();
-    let head = world.as_ref().and_then(|w| w.jobs().get(&name).and_then(review::tip));
-    let ended = |outcome, reason| SessionEvent::Ended {
-        job: name.clone(),
-        outcome,
-        cost_usd: spend.0,
-        turns: spend.1,
-        reason,
-        head: head.clone(),
-    };
-    // Back in the queue (a retry, a rerun, a follow-up, a requeue under another profile, or held by the floor)
-    // it waits again: not where that would make it wait for itself.
-    let revived = matches!(outcome, Outcome::Retry | Outcome::Rerun | Outcome::Held);
-    let cycle = world
-        .filter(|_| revived)
-        .and_then(|w| w.closes_cycle([crate::bus::Event::Session(ended(outcome, reason.clone()))], &name));
-    let (outcome, reason) = match cycle {
-        Some(c) => (Outcome::Failed, Some(format!("requeuing it would make it wait for itself: {c}"))),
-        None => (outcome, reason),
-    };
-    port.emit(ended(outcome, reason))?;
+    let outcome = record_end(ctx, &port, &name, outcome, reason, spend)?;
     // A reviewed job that answered a reject is judged again, on its new tip.
     if outcome == Outcome::Done {
         let _ = review::rereview(ctx, &name);
@@ -137,6 +117,38 @@ pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
         let _ = review::rereview_if_overtaken(ctx, &name);
     }
     ctx.wake_dispatch()
+}
+
+/// Records how the run ended, as one [`Change`] under the jobs lock: on the world as it is then, the tip the
+/// run leaves (what an accept must name), and a run back in the queue (a retry, a rerun, a follow-up, a
+/// requeue under another profile, or held by the floor), which waits again, ends `failed` instead where that
+/// would make it wait for itself. Returns the outcome recorded. The lock is released on return, before the
+/// re-review that may follow takes it.
+fn record_end(
+    ctx: &Ctx,
+    port: &crate::bus::Port<SessionEvent>,
+    name: &str,
+    outcome: Outcome,
+    reason: Option<String>,
+    (cost_usd, turns): (f64, u32),
+) -> Result<Outcome> {
+    let mut change = Change::take(ctx)?;
+    let head = change.world().jobs().get(name).and_then(review::tip);
+    let ended = |outcome, reason| SessionEvent::Ended {
+        job: name.to_owned(),
+        outcome,
+        cost_usd,
+        turns,
+        reason,
+        head: head.clone(),
+    };
+    let revived = matches!(outcome, Outcome::Retry | Outcome::Rerun | Outcome::Held);
+    let (outcome, reason) = match change.cycle(&[ended(outcome, reason.clone())], name).filter(|_| revived) {
+        Some(c) => (Outcome::Failed, Some(format!("requeuing it would make it wait for itself: {c}"))),
+        None => (outcome, reason),
+    };
+    change.record(port, vec![ended(outcome, reason)])?;
+    Ok(outcome)
 }
 
 type Ended = (Outcome, Option<String>);
@@ -1595,5 +1607,86 @@ mod env_tests {
                 .map(|(_, v)| v.to_string_lossy().into_owned());
             assert_eq!(got.as_deref(), Some(want.as_str()), "the {who}'s environment");
         }
+    }
+}
+
+#[cfg(test)]
+mod change_tests {
+    use super::*;
+    use crate::bus::DispatchEvent;
+    use crate::config::Config;
+
+    fn put(ctx: &Ctx, file: &str, t: u64, event: serde_json::Value) {
+        use std::io::Write as _;
+        let mut v = event;
+        v["t"] = t.into();
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(ctx.bus.join(file)).unwrap();
+        writeln!(f, "{v}").unwrap();
+    }
+
+    /// Copilot on PR #69 (session.rs:132): b runs `--after a`; while it runs, another process queues ra, a review
+    /// of a `--after b` (b is not waiting, so that closes no cycle then). b's end puts it back in the queue,
+    /// where it would wait on a's review, ra, which waits on b. The end is checked on the world as it is when
+    /// it is recorded, under the jobs lock, so it sees ra and ends b failed, naming the cycle.
+    #[test]
+    fn a_run_back_in_the_queue_is_checked_against_the_graph_as_it_is_when_recorded() {
+        let dir = crate::config::tempdir::Dir::new();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let cfg = Config::parse("name = \"demo\"\n", root).unwrap();
+        let ctx = Ctx::unclaimed(cfg, root.join("relay.toml"), root.join("state"), root.join("data"));
+        std::fs::create_dir_all(ctx.bus.join("session")).unwrap();
+        std::fs::create_dir_all(&ctx.jobs).unwrap();
+        let queued = |job: &str, after: &[&str], review: Option<&str>| {
+            let mut v = serde_json::json!({"type": "queued", "job": job, "task": "x", "readonly": review.is_some(),
+                "effort": null, "budget_usd": 1.0, "pinned": null, "after": after});
+            if let Some(of) = review {
+                v["acceptance"] = serde_json::json!({ "review-of": of });
+            }
+            v
+        };
+        let dispatched = |job: &str| {
+            serde_json::to_value(DispatchEvent::Dispatched {
+                job: job.into(),
+                account: "c:w".into(),
+                model: None,
+                provider: String::new(),
+                runner_pid: 7,
+                runner_started: 1,
+            })
+            .unwrap()
+        };
+        let ended = |outcome| {
+            let e = SessionEvent::Ended { job: "a".into(), outcome, cost_usd: 0.0, turns: 1, reason: None, head: None };
+            serde_json::to_value(e).unwrap()
+        };
+        put(&ctx, "queue.ndjson", 1, queued("a", &[], None));
+        put(&ctx, "dispatch.ndjson", 2, dispatched("a"));
+        put(&ctx, "session/a.1.1.ndjson", 3, ended(Outcome::Done));
+        put(&ctx, "queue.ndjson", 4, queued("b", &["a"], None));
+        put(&ctx, "dispatch.ndjson", 5, dispatched("b"));
+        let b = ctx.world().unwrap().jobs()["b"].clone();
+        // Another process, while b runs.
+        put(&ctx, "queue.ndjson", 6, queued("ra", &["a", "b"], Some("a")));
+
+        let recorded = record_end(&ctx, &port(&ctx, &b), "b", Outcome::Retry, None, (0.0, 1)).unwrap();
+        assert_eq!(recorded, Outcome::Failed);
+        let w = ctx.world().unwrap();
+        let reason = w.jobs()["b"].reason.clone().unwrap_or_default();
+        assert!(
+            reason.contains("would make it wait for itself: b → ra → b (b waits for a, which ra reviews)"),
+            "{reason}"
+        );
+        assert_eq!(w.jobs()["b"].status, crate::world::Status::Failed);
+
+        let plain = port(&ctx, &b).emit(SessionEvent::Ended {
+            job: "b".into(),
+            outcome: Outcome::Done,
+            cost_usd: 0.0,
+            turns: 1,
+            reason: None,
+            head: None,
+        });
+        assert!(plain.is_err(), "a run's end is recorded only by a Change");
     }
 }

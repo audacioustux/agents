@@ -198,7 +198,7 @@ pub(super) fn verdict(answer: &str, marker: &str) -> Option<(Verdict, Option<Rea
 /// Records a review's verdict on the reviewed job, and for a reject resumes the builder's session
 /// with the findings, within `hooks.max_decisions`. Returns the line for the review's own record.
 pub(super) fn carry_out(
-    ctx: &Ctx,
+    change: &mut crate::systems::graph::Change<'_>,
     job: &Job,
     run: &Ran<'_>,
     verdict: Verdict,
@@ -208,9 +208,9 @@ pub(super) fn carry_out(
     let (Some(of), Some(seen)) = (job.review_of(), run.reviewing) else {
         return Ok(format!("verdict {}, but this job reviews no branch", verdict.as_str()));
     };
-    let family = run.model.map(model_family);
-    // Who this review is, and where the branch is, now: both can have changed since the review started.
-    let world = ctx.world()?;
+    let (ctx, family) = (change.ctx(), run.model.map(model_family));
+    // Who this review is, and where the branch is, now (under the lock): both can have changed since it started.
+    let world = change.world();
     let unchained = world.jobs().get(&job.name).and_then(|r| r.unchained.clone());
     let stale_head = world.jobs().get(of).and_then(tip).filter(|t| *t != seen.commit);
     let event = SessionEvent::Reviewed {
@@ -222,7 +222,8 @@ pub(super) fn carry_out(
         family,
         stale_head: stale_head.clone(),
     };
-    port(ctx, job).emit(event)?;
+    // Recorded in the change, so the reject is among the verdicts the builder's resume counts.
+    change.record(&port(ctx, job), vec![event])?;
     let said = match reason {
         Some(r) => format!("review of {of}: {} ({})", verdict.as_str(), r.as_str()),
         None => format!("review of {of}: {}", verdict.as_str()),
@@ -250,7 +251,7 @@ pub(super) fn carry_out(
         reason.map_or("other", Reason::as_str),
         checkpoint::bounded(findings.trim(), 4096)
     );
-    Ok(match crate::systems::queue::resume_reviewed(ctx, of, &job.name, message)? {
+    Ok(match crate::systems::queue::resume_reviewed(change, of, &job.name, message)? {
         None => format!("{said}; {of} resumed with the findings"),
         Some(why) => format!("{said}; {of} not resumed: {why}"),
     })

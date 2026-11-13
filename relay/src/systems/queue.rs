@@ -13,7 +13,8 @@ use crate::bus::{ACCEPTANCE_GATE, Fork, QueueEvent};
 use crate::config::{Profile, valid_name};
 use crate::ctx::Ctx;
 use crate::os;
-use crate::world::{Job, Status, World};
+use crate::systems::graph::Change;
+use crate::world::{Job, Status};
 
 /// The capability to write queue's port; only this module can make one.
 #[derive(Debug)]
@@ -117,9 +118,10 @@ fn usd(s: &str) -> Result<f64, String> {
 }
 
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
-    // From the check to the record, so two adds of one name cannot both pass.
-    let _lock = ctx.jobs_lock()?;
-    let world = ctx.world()?;
+    // From the check to the record, under the jobs lock, so two adds of one name cannot both pass and no
+    // other change to the graph comes between this one's check and its record.
+    let mut change = Change::take(ctx)?;
+    let world = change.world().clone();
     let name = match &cmd {
         Cmd::Add(add) => add.name.clone(),
         Cmd::Resume { name, .. }
@@ -154,7 +156,6 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                     .filter(|r| *r != name)
                     .map(|job| QueueEvent::Unchained { job, by: Some(name.clone()) }),
             );
-            refuse_cycle(&world, &events, &queued, &name, "queuing")?;
             (queued, None)
         }
         Cmd::Unreview { .. } => {
@@ -190,9 +191,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                     briefs.push((reviewer, brief.clone()));
                 }
             }
-            let resumed = QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget, models };
-            refuse_cycle(&world, &events, &resumed, &name, "resuming")?;
-            (resumed, None)
+            (QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget, models }, None)
         }
         Cmd::Release { from, .. } => (release(job, &name, from)?, None),
         Cmd::Dequeue { .. } => {
@@ -202,28 +201,21 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Stop { .. } => (QueueEvent::StopRequested { job: name.clone() }, stop_target(job, &name)?),
     };
     let recorded = serde_json::to_value(&event)?["type"].clone();
-    // A reviewer started afresh reads the new brief as its own.
+    let what = if matches!(event, QueueEvent::Resumed { .. }) { "resuming" } else { "queuing" };
+    events.push(event);
+    if let Err(cycle) = change.try_record(&ctx.port(&Source(())), events, &name)? {
+        fail!(Conflict, "{what} {name} would make it wait for itself: {cycle}, so none of them would ever start");
+    }
+    // A reviewer started afresh reads the new brief as its own: written before the lock lets a dispatch in.
     for (reviewer, brief) in &briefs {
         Ctx::write_private(&ctx.job_file(reviewer, "prompt.md"), brief.as_bytes())?;
     }
-    let port = ctx.port(&Source(()));
-    for before in events {
-        port.emit(before)?;
-    }
-    port.emit(event)?;
+    drop(change);
     if let Some(runner) = runner {
         stop_runner(runner)?;
     }
     ctx.wake_dispatch()?;
     ctx.reply(&serde_json::json!({ "job": name, "recorded": recorded }), &format!("{name}: recorded"))
-}
-
-/// Refuses the transition `before` then `last` when it would close a cycle through `name`, the job it adds or revives
-/// ([`World::closes_cycle`]): neither it nor what it waits on would ever start. `what` says what it was.
-fn refuse_cycle(world: &World, before: &[QueueEvent], last: &QueueEvent, name: &str, what: &str) -> Result<()> {
-    let events = before.iter().chain([last]).map(|e| crate::bus::Event::Queue(e.clone()));
-    let Some(cycle) = world.closes_cycle(events, name) else { return Ok(()) };
-    fail!(Conflict, "{what} {name} would make it wait for itself: {cycle}, so none of them would ever start");
 }
 
 /// What `queue release` records for `job`: it stops waiting for `from` (all of its `--after` jobs when empty).
@@ -379,9 +371,10 @@ pub struct FollowUp {
 }
 
 /// Queues `f` as `queue add` would, and returns its name. Only a decision queues a follow-up, so this
-/// runs inside `Decided::carry`: `world` was read under the jobs lock carry holds, after it checked that
-/// `parent` is still at the attempt the decision was about.
-pub fn follow_up(ctx: &Ctx, world: &World, parent: &Job, f: FollowUp) -> Result<String> {
+/// runs inside `Decided::carry`, whose `change` holds the jobs lock and read the world under it, after it
+/// checked that `parent` is still at the attempt the decision was about.
+pub fn follow_up(change: &mut Change<'_>, parent: &Job, f: FollowUp) -> Result<String> {
+    let (ctx, world) = (change.ctx(), change.world());
     let base = f.name.unwrap_or_else(|| format!("{}-next", parent.name));
     let name = (1..1000)
         .map(|i| if i == 1 { base.clone() } else { format!("{base}-{i}") })
@@ -409,8 +402,9 @@ pub fn follow_up(ctx: &Ctx, world: &World, parent: &Job, f: FollowUp) -> Result<
     if let QueueEvent::Queued { parent: of, depth, .. } = &mut event {
         (*of, *depth) = (Some(parent.name.clone()), parent.depth + 1);
     }
-    refuse_cycle(world, &[], &event, &name, "queuing")?;
-    ctx.port(&Source(())).emit(event)?;
+    if let Err(cycle) = change.try_record(&ctx.port(&Source(())), vec![event], &name)? {
+        fail!(Conflict, "queuing {name} would make it wait for itself: {cycle}, so none of them would ever start");
+    }
     ctx.wake_dispatch()?;
     Ok(name)
 }
@@ -419,28 +413,34 @@ pub fn follow_up(ctx: &Ctx, world: &World, parent: &Job, f: FollowUp) -> Result<
 /// on any account with room. Not while it works, not once `hooks.max_decisions` reviews have rejected it,
 /// and not on a banned model. `None` when resumed, else why not.
 /// Only a review's decision does this, so it runs inside `Decided::carry`, which holds the jobs lock.
-pub fn resume_reviewed(ctx: &Ctx, builder: &str, reviewer: &str, message: String) -> Result<Option<String>> {
-    let world = ctx.world()?;
-    let Some(j) = world.jobs().get(builder) else { return Ok(Some(format!("{builder} is gone"))) };
+pub fn resume_reviewed(
+    change: &mut Change<'_>,
+    builder: &str,
+    reviewer: &str,
+    message: String,
+) -> Result<Option<String>> {
+    let Some(j) = change.world().jobs().get(builder).cloned() else { return Ok(Some(format!("{builder} is gone"))) };
     // This reject is already among the verdicts: `hooks.max_decisions` of them resume the builder.
     let rejected =
         j.verdicts.iter().filter(|v| v.verdict == crate::bus::Verdict::Reject && v.stale_head.is_none()).count();
-    resume_by_review(ctx, j, rejected, message).and_then(|why| halted(ctx, (builder, reviewer), builder, why))
+    let why = resume_by_review(change, &j, rejected, message)?;
+    halted(change, (builder, reviewer), builder, why)
 }
 
 /// Records that the review chain `(builder, reviewer)` stopped short of an accept, when the resume of `turn`
 /// (one of the two) that it needed was refused for good (`why`), so a job waiting on the chain is blocked
 /// rather than left waiting. A refusal because `turn` is at work, or gone, is not one: its end moves the
 /// chain on, and a job waiting on one that is gone is blocked as it is.
-fn halted(ctx: &Ctx, (builder, reviewer): (&str, &str), turn: &str, why: Option<String>) -> Result<Option<String>> {
+fn halted(
+    change: &mut Change<'_>,
+    (builder, reviewer): (&str, &str),
+    turn: &str,
+    why: Option<String>,
+) -> Result<Option<String>> {
     let Some(why) = why else { return Ok(None) };
-    let world = ctx.world()?;
-    if world.jobs().get(turn).is_some_and(|j| !j.status.is_live()) {
-        ctx.port(&Source(())).emit(QueueEvent::ReviewHalted {
-            job: builder.to_owned(),
-            review: reviewer.to_owned(),
-            why: why.clone(),
-        })?;
+    if change.world().jobs().get(turn).is_some_and(|j| !j.status.is_live()) {
+        let halt = QueueEvent::ReviewHalted { job: builder.to_owned(), review: reviewer.to_owned(), why: why.clone() };
+        change.record(&change.ctx().port(&Source(())), vec![halt])?;
     }
     Ok(Some(why))
 }
@@ -448,11 +448,11 @@ fn halted(ctx: &Ctx, (builder, reviewer): (&str, &str), turn: &str, why: Option<
 /// Resumes the reviewer `reviewer` of a branch whose builder has answered its reject, so its verdict is
 /// for the new tip. Held to the same bounds as the builder's resume: at most `hooks.max_decisions` rejects
 /// by this reviewer already, a reviewer that can no longer have a decision act on it, the job's ceiling,
-/// and a banned model. `None` when resumed, else why not.
+/// and a banned model. `None` when resumed, else why not. Takes the jobs lock: never call it holding one.
 pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String) -> Result<Option<String>> {
-    let _lock = ctx.jobs_lock()?;
-    let world = ctx.world()?;
-    let Some(j) = world.jobs().get(reviewer) else { return Ok(Some(format!("{reviewer} is gone"))) };
+    let mut change = Change::take(ctx)?;
+    let world = change.world();
+    let Some(j) = world.jobs().get(reviewer).cloned() else { return Ok(Some(format!("{reviewer} is gone"))) };
     if let Some(u) = &j.unchained {
         return Ok(Some(format!("{reviewer} is no longer {builder}'s reviewer ({})", u.summary())));
     }
@@ -461,9 +461,9 @@ pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String
         return Ok(Some(format!("{builder} is at work again; its end asks for the review")));
     }
     // A run that could not record its verdict (the cap on decisions per job) would leave the stale one.
-    if !crate::systems::decide::can_decide(&ctx.cfg, &world, j) {
+    if !crate::systems::decide::can_decide(&ctx.cfg, world, &j) {
         let why = format!("{reviewer} has had {} decisions already (hooks.max_decisions)", ctx.cfg.hooks.max_decisions);
-        return halted(ctx, (builder, reviewer), reviewer, Some(why));
+        return halted(&mut change, (builder, reviewer), reviewer, Some(why));
     }
     let rejected = world.jobs().get(builder).map_or(0, |b| {
         b.verdicts
@@ -471,12 +471,21 @@ pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String
             .filter(|v| v.reviewer == reviewer && v.verdict == crate::bus::Verdict::Reject && v.stale_head.is_none())
             .count()
     });
-    resume_by_review(ctx, j, rejected, message).and_then(|why| halted(ctx, (builder, reviewer), reviewer, why))
+    let why = resume_by_review(&mut change, &j, rejected, message)?;
+    halted(&mut change, (builder, reviewer), reviewer, why)
 }
 
 /// The shared bounds of a resume that a review causes: `j` is not live, `rejected` is within
-/// `hooks.max_decisions`, another run fits its ceiling, and its model is not banned.
-fn resume_by_review(ctx: &Ctx, j: &crate::world::Job, rejected: usize, message: String) -> Result<Option<String>> {
+/// `hooks.max_decisions`, another run fits its ceiling, its model is not banned, and back in the queue it
+/// would not wait for itself (a builder requeued behind its review, a review revived behind what it waits on).
+/// Checked and recorded in `change`, under the jobs lock.
+fn resume_by_review(
+    change: &mut Change<'_>,
+    j: &crate::world::Job,
+    rejected: usize,
+    message: String,
+) -> Result<Option<String>> {
+    let ctx = change.ctx();
     let builder = j.name.as_str();
     if j.status.is_live() {
         return Ok(Some(format!("{builder} is {}", j.status.as_str())));
@@ -492,12 +501,9 @@ fn resume_by_review(ctx: &Ctx, j: &crate::world::Job, rejected: usize, message: 
         return Ok(Some(format!("model {m} is banned: {why}")));
     }
     let resumed = QueueEvent::Resumed { job: builder.to_owned(), message, budget_usd: None, models: BTreeMap::new() };
-    // A builder requeued behind its review, or a review revived behind what it waits on, may close a cycle.
-    let world = ctx.world()?;
-    if let Some(cycle) = world.closes_cycle([crate::bus::Event::Queue(resumed.clone())], builder) {
+    if let Err(cycle) = change.try_record(&ctx.port(&Source(())), vec![resumed], builder)? {
         return Ok(Some(format!("resuming it would make it wait for itself: {cycle}")));
     }
-    ctx.port(&Source(())).emit(resumed)?;
     ctx.wake_dispatch()?;
     Ok(None)
 }
@@ -688,6 +694,27 @@ mod tests {
     use super::*;
     use crate::bus::{Event, Stamped};
     use crate::world::World;
+
+    /// Copilot on PR #69 (session.rs:132): a change to the dependency graph checked outside the jobs lock can
+    /// be overtaken by another before it is recorded. So no event that adds an edge or revives a job is
+    /// recorded by a plain emit: only a `systems::graph::Change`, which checks and records it under the lock.
+    #[test]
+    fn a_change_to_the_graph_is_never_recorded_by_a_plain_emit() {
+        let dir = crate::config::tempdir::Dir::new();
+        let port: crate::bus::Port<QueueEvent> = crate::bus::Port::new(dir.path(), &Source(()));
+        let queued =
+            r#"{"type":"queued","job":"x","task":"t","readonly":false,"effort":null,"budget_usd":1.0,"pinned":null}"#;
+        let resumed =
+            QueueEvent::Resumed { job: "x".into(), message: "m".into(), budget_usd: None, models: BTreeMap::new() };
+        let unchained = QueueEvent::Unchained { job: "r".into(), by: Some("r2".into()) };
+        for e in [serde_json::from_str(queued).unwrap(), resumed, unchained] {
+            let kind = serde_json::to_value(&e).unwrap()["type"].clone();
+            let refused = port.emit(e).expect_err("a graph change by a plain emit");
+            assert!(refused.to_string().contains("only by systems::graph::Change"), "{kind}: {refused}");
+        }
+        assert!(!dir.path().join("queue.ndjson").exists(), "nothing was written");
+        port.emit(QueueEvent::Dequeued { job: "x".into() }).expect("what takes an edge away needs no check");
+    }
 
     fn key(brief: &str, models: &[(&str, &str)], commit: &str) -> String {
         let models = models.iter().map(|(h, m)| ((*h).to_owned(), (*m).to_owned())).collect();

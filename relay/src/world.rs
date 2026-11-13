@@ -778,8 +778,9 @@ impl<'w> Graph<'w> {
     }
 
     /// What `j` waits on. For each `--after` entry `a`:
-    /// - `a` a review: every review that replaced it, in turn (`Replaced`), and the one the replacements end at
-    ///   (`Accept`); while that one is done without an accept of its builder's tip, the builder too (`Answer`);
+    /// - `a` a review: every review that replaced it, in turn (`Replaced`), the one the replacements end at
+    ///   (`Accept`), and its builder, always: `Answer` while that review is done without an accept of the
+    ///   builder's tip, else `Done`;
     /// - else `a` (`Done`), and unless `j` reviews `a`, each review chained to `a` (`Accept`) with, while it has
     ///   not accepted, `a` again (`Answer`).
     ///
@@ -806,9 +807,10 @@ impl<'w> Graph<'w> {
                 }
                 let via = if at.name == *a { Via::Direct } else { Via::Superseded };
                 out.push(dep(a, &at.name, Need::Accept { builder: builder.to_owned(), via }));
-                if self.unresolved(at) {
-                    out.push(dep(a, builder, Need::Answer { review: at.name.clone() }));
-                }
+                // The builder, through the review's whole life: an accept is of its tip, so the wait needs it
+                // whatever the review is doing (`Answer` while the review wants it to run again).
+                let need = if self.unresolved(at) { Need::Answer { review: at.name.clone() } } else { Need::Done };
+                out.push(dep(a, builder, need));
                 continue;
             }
             out.push(dep(a, a, Need::Done));
@@ -1100,7 +1102,9 @@ impl<'w> Walk<'w> {
     /// What `job` waits for: per `--after` entry, the most pressing of its edges (blocked, then queued, then
     /// live), read off the settled blocking of every queued job.
     fn waits(&mut self, job: &'w Job) -> Vec<Wait> {
+        // One slot per `--after` entry, in the order the entries come, found by name in one step.
         let mut out: Vec<(Wait, u8)> = Vec::new();
+        let mut slots: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for (after, edge) in self.edges(job) {
             self.steps += 1;
             let wait = |state: &str, blocked, review| Wait { job: after.clone(), state: state.into(), blocked, review };
@@ -1118,10 +1122,15 @@ impl<'w> Walk<'w> {
                 Edge::Blocked(state, review) => Some((wait(&state, true, review), 3)),
             };
             let Some((w, rank)) = w else { continue };
-            match out.iter_mut().find(|(o, _)| o.job == w.job) {
-                Some(o) if rank > o.1 => *o = (w, rank),
+            // The slot lookup is a step of its own: every comparison a pass makes is counted.
+            self.steps += 1;
+            match slots.get(&w.job) {
+                Some(&i) if rank > out[i].1 => out[i] = (w, rank),
                 Some(_) => {}
-                None => out.push((w, rank)),
+                None => {
+                    slots.insert(w.job.clone(), out.len());
+                    out.push((w, rank));
+                }
             }
         }
         out.into_iter().map(|(w, _)| w).collect()
@@ -2575,6 +2584,50 @@ mod tests {
         assert!(w.blocked(&w.jobs()["ra"]) && w.blocked(&w.jobs()["b"]), "readiness says the same");
     }
 
+    /// Copilot on PR #69 (world.rs:811): a wait on a review needs its builder through the review's whole life,
+    /// not only while the review wants it to run again. With the review accepted, the builder is still what the
+    /// wait stands on, so it is not cleaned away; with the review still running, a builder resumed by its reject
+    /// would close the cycle a review after that review makes, before the review's end shows it.
+    #[test]
+    fn a_wait_on_a_review_needs_its_builder_while_the_review_runs_and_after_it_accepts() {
+        use bus::Verdict::{Accept, Reject};
+        let accepted = World::fold(&[
+            st(1, queued("build")),
+            st(2, ended("build", Outcome::Done)),
+            st(3, queued_review("rev", "build")),
+            st(4, reviewed("rev", "build", Accept)),
+            st(5, ended("rev", Outcome::Done)),
+            st(6, queued_after("next", &["rev", "gate"])),
+            st(7, queued("gate")),
+        ]);
+        assert_eq!(accepted.waiters("build"), ["next"], "next stands on build's accepted tip");
+
+        let dispatched = |job: &str| {
+            Event::Dispatch(DispatchEvent::Dispatched {
+                job: job.into(),
+                account: "c:w".into(),
+                model: None,
+                provider: String::new(),
+                runner_pid: 7,
+                runner_started: 1,
+            })
+        };
+        let mut running = World::fold(&[
+            st(1, queued("a")),
+            st(2, ended("a", Outcome::Done)),
+            st(3, queued_after("b", &["a"])),
+            st(4, ended("b", Outcome::Done)),
+            st(5, queued_review("rb", "b")),
+            st(6, dispatched("rb")),
+            st(7, reviewed("rb", "b", Reject)),
+            st(8, queued_review("ra", "a")),
+        ]);
+        // RA is queued `--review-of a --after rb` while rb still runs.
+        running.jobs_mut().get_mut("ra").unwrap().after.push("rb".into());
+        let cycle = running.closes_cycle([resumed("b")], "b");
+        assert_eq!(cycle.as_deref(), Some("b → ra → b (b waits for a, which ra reviews)"), "rb's reject resuming b");
+    }
+
     #[test]
     fn a_dependency_that_ended_otherwise_or_vanished_blocks() {
         let events = [
@@ -3177,9 +3230,9 @@ mod tests {
     }
 
     /// PR #39 reviews 2 and 3: the dependency analysis is built once per state of the jobs and shared by
-    /// every query, in work linear in the jobs and their `after` lists. Bounded for a whole status pass
-    /// (every query the board, dispatch and the wait make, for every job) over a long chain and a dense
-    /// graph, counting every step of every build, not wall time.
+    /// every query, in work linear in the jobs and their `after` lists (a step per job, at most three per
+    /// edge). Bounded for a whole status pass (every query the board, dispatch and the wait make, for every
+    /// job) over a long chain, a dense graph and a fan-in, counting every step of every build, not wall time.
     #[test]
     fn a_whole_pass_of_dependency_queries_costs_one_linear_walk() {
         let pass = |w: &World| {
@@ -3214,7 +3267,7 @@ mod tests {
             }
             let w = World::fold(&evs);
             let steps = pass(&w);
-            assert!(steps <= 2 * (jobs + edges), "a chain of {jobs}: {steps} steps");
+            assert!(steps <= 3 * (jobs + edges), "a chain of {jobs}: {steps} steps");
             assert_eq!(w.blocked(&w.jobs()[&names[299]]), failed);
         }
         // Twenty, each after every earlier one: 2^19 paths from the last to the first.
@@ -3228,14 +3281,29 @@ mod tests {
         fail_first(&mut evs, &names[0]);
         let w = World::fold(&evs);
         let steps = pass(&w);
-        assert!(steps <= 2 * (jobs + edges), "a dense graph of {jobs}: {steps} steps");
+        assert!(steps <= 3 * (jobs + edges), "a dense graph of {jobs}: {steps} steps");
         assert!(w.jobs().values().skip(1).all(|j| w.blocked(j)));
         // A change drops the analysis; the next query builds it again, once.
         let mut w = w;
         w.jobs_mut().remove(&names[0]);
         let steps = pass(&w);
-        assert!(steps <= 2 * (jobs + edges), "{steps} steps after a change");
+        assert!(steps <= 3 * (jobs + edges), "{steps} steps after a change");
         assert_eq!(Wait::summary(&w.waits(&w.jobs()[&names[1]])).as_deref(), Some("waits for m00 (gone)"));
+
+        // Copilot on PR #69 (world.rs:1124): one job after k unfinished ones. Grouping its waits by `--after`
+        // entry must not search what it has grouped so far (k(k-1)/2 comparisons): each edge's slot is found
+        // in one counted step. Exactly: one per job settled (k + 1), one per edge settled (k), one per edge
+        // waited on (k), one per slot found (k).
+        let k = 300;
+        let names: Vec<String> = (0..k).map(|i| format!("p{i:03}")).collect();
+        let mut evs: Vec<Stamped> = names.iter().enumerate().map(|(i, n)| st(1 + i as u64, queued(n))).collect();
+        let after: Vec<&str> = names.iter().map(String::as_str).collect();
+        evs.push(st(1_000, queued_after("sink", &after)));
+        let w = World::fold(&evs);
+        let steps = pass(&w);
+        assert_eq!(steps, 4 * k + 1, "a fan-in of {k}: every comparison counted, one per edge");
+        let waits = w.waits(&w.jobs()["sink"]);
+        assert_eq!(waits.iter().map(|w| w.job.as_str()).collect::<Vec<_>>(), after, "in the order they were named");
     }
 
     #[test]

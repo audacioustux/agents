@@ -81,8 +81,9 @@ names. relay computes **one dependency graph** from the event log, and everythin
 reads it: whether a job may start, the cycle check, and `land clean`. A job's edges
 are its `--after` jobs; for one that is a build with a review chain, the chain's
 review too; for one that is a review, every review that replaced it and the one they
-end at; and while that review has not accepted its builder's tip, the builder, which
-is requeued behind it. A job's edges count while it waits: queued, held by the disk
+end at, and that review's builder, through the review's whole life (an accept is of
+the builder's tip; while the review has not accepted it, the builder is requeued
+behind it). A job's edges count while it waits: queued, held by the disk
 floor, or a review done without an accept (its builder's next end revives it). Every
 transition that adds an edge or revives a job is refused if it would close a cycle,
 naming it (exit 4: `queuing rev would make it wait for itself: rev → test → rev (test
@@ -90,7 +91,9 @@ waits for build, which rev reviews)`). Those transitions are `queue add` (a revi
 replacing a chain included), `queue resume`, a decision's follow-up, a builder resumed
 by a reject or a reviewer resumed to judge again (the chain halts instead, saying
 why), and a run that ends back in the queue (a retry, rerun, requeue or hold, which
-then ends `failed` instead).
+then ends `failed` instead). Each is checked and recorded in one step under the jobs
+lock, on the event log as it is then, so no other command can change the graph between
+the check and the record; relay records such an event no other way.
 
 **Where a build job starts.** A build job starts from the repository's `HEAD`,
 unless it waits for build jobs (`--after`) or forks one (`--fork`): then its

@@ -24,6 +24,7 @@ use crate::bus::{Action, BarResult, DecideEvent, Point, Reason, Verdict, now_mic
 use crate::config::Config;
 use crate::ctx::Ctx;
 use crate::systems::checkpoint::bounded as bounded_text;
+use crate::systems::graph::Change;
 use crate::world::{Decision, Job, Status, World};
 
 /// The capability to write decide's port; only this module can make one.
@@ -727,15 +728,19 @@ impl Decided {
     /// Carries the decided action out with `act`: under the jobs lock, and only while the decision still
     /// asks about its job as the job is (`World::asks_now`), so a `queue resume` (which takes the same
     /// lock) either comes first and nothing is done, or comes after. The one way a decision's action
-    /// reaches anything. `act` is given the world read under the lock, and the action and why, and must
-    /// not take the lock itself. `Ok(None)`: the job moved on, and nothing was done.
-    pub fn carry<R>(&self, ctx: &Ctx, act: impl FnOnce(&World, Action, &str) -> Result<R>) -> Result<Option<R>> {
-        let _lock = ctx.jobs_lock()?;
-        let world = ctx.world()?;
-        if !world.still_asks(&self.id) {
+    /// reaches anything. `act` is given the [`Change`] that holds the lock and read the world under it (a
+    /// change to the dependency graph it makes is checked and recorded there), and the action and why, and
+    /// must not take the lock itself. `Ok(None)`: the job moved on, and nothing was done.
+    pub fn carry<R>(
+        &self,
+        ctx: &Ctx,
+        act: impl FnOnce(&mut Change<'_>, Action, &str) -> Result<R>,
+    ) -> Result<Option<R>> {
+        let mut change = Change::take(ctx)?;
+        if !change.world().still_asks(&self.id) {
             return Ok(None);
         }
-        act(&world, self.action.clone(), &self.why).map(Some)
+        act(&mut change, self.action.clone(), &self.why).map(Some)
     }
 }
 
@@ -1092,8 +1097,8 @@ fn held(ctx: &Ctx, name: &str, why: &str) -> Result<()> {
         j.status == Status::Queued
             && (j.created_at, j.attempts, j.queued_at) == (job.created_at, job.attempts, job.queued_at)
     };
-    d.carry(ctx, |now, action, _| {
-        let Some(job) = now.jobs().get(name).filter(same) else { return Ok(()) };
+    d.carry(ctx, |change, action, _| {
+        let Some(job) = change.world().jobs().get(name).filter(same) else { return Ok(()) };
         match action {
             Action::Reroute { harness, model, profile } => {
                 crate::systems::queue::reroute(ctx, job, harness.as_deref(), model.as_deref(), profile.as_deref())
@@ -1198,7 +1203,8 @@ mod tests {
             account: None,
             cost_usd: 0.0,
         };
-        let carried = d.carry(&ctx, |w, action, why| Ok((w.jobs()["a"].status, action, why.to_owned()))).unwrap();
+        let carried =
+            d.carry(&ctx, |c, action, why| Ok((c.world().jobs()["a"].status, action, why.to_owned()))).unwrap();
         assert_eq!(carried, Some((Status::Checking, follow_up, "w".into())), "current: carried out under the lock");
 
         let resumed = QueueEvent::Resumed {

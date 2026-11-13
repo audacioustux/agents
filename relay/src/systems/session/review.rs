@@ -256,11 +256,6 @@ pub(super) fn carry_out(
     })
 }
 
-/// An accept by `v` of a commit other than the tip `b`'s latest run ended at: not an accept of its work.
-fn moved_past(b: &Job, v: &crate::world::Reviewed) -> bool {
-    !v.wants_again() && b.head.as_ref().is_some_and(|h| *h != v.commit)
-}
-
 /// The commit a build job's branch is at in its clone, when it still has one.
 pub(super) fn tip(b: &Job) -> Option<String> {
     let dir = b.workdir.as_ref().filter(|d| d.path().exists())?;
@@ -286,8 +281,8 @@ pub(super) fn rereview_if_overtaken(ctx: &Ctx, reviewer: &str) -> Result<Vec<Str
     resume_rejecting(ctx, of, Some(reviewer))
 }
 
-/// The reviewers of `builder` (just `only`, when named) whose last verdict is not an accept of its tip, and can
-/// be asked again. With `only`, the builder must be done and past the commit judged.
+/// The reviewers of `builder` (just `only`, when named) whose last verdict does not stand for what it ended
+/// with ([`crate::world::Reviewed::due_again`]), and can be asked again.
 fn resume_rejecting(ctx: &Ctx, builder: &str, only: Option<&str>) -> Result<Vec<String>> {
     let world = ctx.world()?;
     let Some(b) = world.jobs().get(builder) else { return Ok(Vec::new()) };
@@ -297,15 +292,8 @@ fn resume_rejecting(ctx: &Ctx, builder: &str, only: Option<&str>) -> Result<Vec<
         .filter(|r| r.review_of() == Some(builder) && r.unchained.is_none() && only.is_none_or(|o| o == r.name))
         .filter(|r| {
             let last = b.verdicts.iter().rev().find(|v| v.reviewer == r.name);
-            last.is_some_and(|v| match only {
-                None => v.wants_again() || moved_past(b, v),
-                // The builder ended while this review was still ending (so its end could not resume it): a reject
-                // it answered, or an accept of a commit its run then went past, asks again all the same.
-                Some(_) => {
-                    b.status == crate::world::Status::Done
-                        && (moved_past(b, v) || v.wants_again() && tip(b).is_some_and(|t| t != v.commit))
-                }
-            })
+            // The builder's end and the review's ask by the same test, so neither order of the two loses it.
+            last.is_some_and(|v| v.due_again(b))
         })
         .map(|r| r.name.as_str())
         .collect();
@@ -447,6 +435,69 @@ mod tests {
         rereview(&ctx, "build").unwrap();
         assert!(!asked_again(&ctx), "a running review is not resumed");
         ended_rev(&ctx);
+        rereview_if_overtaken(&ctx, "rev").unwrap();
+        assert!(asked_again(&ctx), "the review's end: {:?}", ctx.world().unwrap().jobs()["build"]);
+    }
+
+    /// Copilot on PR #69 (review.rs:306): a rejected builder that answers without a commit, and ends before the
+    /// review it answered is marked ended, ends on the tip that was rejected. It answered all the same: the
+    /// review's end asks for the re-review, or what waits on the chain stays at "re-review due" for ever.
+    #[test]
+    fn a_reject_answered_on_the_same_tip_before_the_review_ended_is_judged_again() {
+        use crate::bus::{DispatchEvent, Outcome, QueueEvent};
+        let dir = crate::config::tempdir::Dir::new();
+        let ctx = project(&dir);
+        let dispatched = |job: &str| {
+            json(DispatchEvent::Dispatched {
+                job: job.into(),
+                account: "c:w".into(),
+                model: None,
+                provider: String::new(),
+                runner_pid: 7,
+                runner_started: 1,
+            })
+        };
+        let ended = |job: &str, head: Option<&str>| {
+            let head = head.map(str::to_owned);
+            json(SessionEvent::Ended {
+                job: job.into(),
+                outcome: Outcome::Done,
+                cost_usd: 0.0,
+                turns: 1,
+                reason: None,
+                head,
+            })
+        };
+        let queued = r#"{"type":"queued","job":"build","task":"x","readonly":false,"effort":null,"budget_usd":1.0,"pinned":null}"#;
+        put(&ctx, "queue.ndjson", 1, serde_json::from_str(queued).unwrap());
+        put(&ctx, "dispatch.ndjson", 2, dispatched("build"));
+        put(&ctx, "session/build.1.1.ndjson", 3, ended("build", Some("c1")));
+        let review = r#"{"type":"queued","job":"rev","task":"x","readonly":true,"effort":null,"budget_usd":1.0,"pinned":null,"after":["build"],"acceptance":{"review-of":"build"}}"#;
+        put(&ctx, "queue.ndjson", 4, serde_json::from_str(review).unwrap());
+        put(&ctx, "dispatch.ndjson", 5, dispatched("rev"));
+        let reject = SessionEvent::Reviewed {
+            job: "rev".into(),
+            of: "build".into(),
+            commit: "c1".into(),
+            verdict: Verdict::Reject,
+            reason: Some(Reason::TestFailure),
+            family: None,
+            stale_head: None,
+        };
+        put(&ctx, "session/rev.4.1.ndjson", 6, json(reject));
+        let resumed = QueueEvent::Resumed {
+            job: "build".into(),
+            message: "findings".into(),
+            budget_usd: None,
+            models: std::collections::BTreeMap::new(),
+        };
+        put(&ctx, "queue.ndjson", 7, json(resumed));
+        put(&ctx, "dispatch.ndjson", 8, dispatched("build"));
+        // It answered with no commit: the same tip.
+        put(&ctx, "session/build.1.2.ndjson", 9, ended("build", Some("c1")));
+        rereview(&ctx, "build").unwrap();
+        assert!(!asked_again(&ctx), "the review is still running: its own end asks");
+        put(&ctx, "session/rev.4.1.ndjson", 10, ended("rev", None));
         rereview_if_overtaken(&ctx, "rev").unwrap();
         assert!(asked_again(&ctx), "the review's end: {:?}", ctx.world().unwrap().jobs()["build"]);
     }

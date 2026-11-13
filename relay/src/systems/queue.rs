@@ -154,7 +154,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                     .filter(|r| *r != name)
                     .map(|job| QueueEvent::Unchained { job, by: Some(name.clone()) }),
             );
-            refuse_cycle(&world, &events, &queued, &name)?;
+            refuse_cycle(&world, &events, &queued, &name, "queuing")?;
             (queued, None)
         }
         Cmd::Unreview { .. } => {
@@ -190,7 +190,9 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                     briefs.push((reviewer, brief.clone()));
                 }
             }
-            (QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget, models }, None)
+            let resumed = QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget, models };
+            refuse_cycle(&world, &events, &resumed, &name, "resuming")?;
+            (resumed, None)
         }
         Cmd::Release { from, .. } => (release(job, &name, from)?, None),
         Cmd::Dequeue { .. } => {
@@ -216,34 +218,12 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     ctx.reply(&serde_json::json!({ "job": name, "recorded": recorded }), &format!("{name}: recorded"))
 }
 
-/// Refuses `name` when, queued as `queued` after `before`, it would wait for itself: through its `--after`
-/// jobs and the edges review chains imply (a job after a build waits for the build's chained review, and a
-/// new review is that chain), neither it nor what it waits on would ever start. A cycle a new line makes runs
-/// through it, since every edge the line adds touches it.
-fn refuse_cycle(world: &World, before: &[QueueEvent], queued: &QueueEvent, name: &str) -> Result<()> {
-    let mut next = world.clone();
-    let t = crate::bus::now_micros();
-    for e in before.iter().chain([queued]) {
-        next.apply(&crate::bus::Stamped { t, event: crate::bus::Event::Queue(e.clone()), from: None });
-    }
-    let Some(cycle) = next.cycle_through(name) else { return Ok(()) };
-    let path: Vec<&str> = cycle.iter().map(|(j, _)| j.as_str()).collect();
-    let why: Vec<String> = cycle
-        .windows(2)
-        .filter_map(|w| {
-            let (from, (to, via)) = (&w[0].0, &w[1]);
-            let via = via.as_ref()?;
-            let how =
-                if next.jobs().get(via).is_some_and(|v| v.review_of().is_some()) { "replaced" } else { "reviews" };
-            Some(format!("{from} waits for {via}, which {to} {how}"))
-        })
-        .collect();
-    let why = if why.is_empty() { String::new() } else { format!(" ({})", why.join("; ")) };
-    fail!(
-        Conflict,
-        "{name} would wait for itself: {}{why}, so none of them would ever start; queue it after other jobs",
-        path.join(" → ")
-    );
+/// Refuses the transition `before` then `last` when it would close a cycle through `name`, the job it adds or revives
+/// ([`World::closes_cycle`]): neither it nor what it waits on would ever start. `what` says what it was.
+fn refuse_cycle(world: &World, before: &[QueueEvent], last: &QueueEvent, name: &str, what: &str) -> Result<()> {
+    let events = before.iter().chain([last]).map(|e| crate::bus::Event::Queue(e.clone()));
+    let Some(cycle) = world.closes_cycle(events, name) else { return Ok(()) };
+    fail!(Conflict, "{what} {name} would make it wait for itself: {cycle}, so none of them would ever start");
 }
 
 /// What `queue release` records for `job`: it stops waiting for `from` (all of its `--after` jobs when empty).
@@ -429,6 +409,7 @@ pub fn follow_up(ctx: &Ctx, world: &World, parent: &Job, f: FollowUp) -> Result<
     if let QueueEvent::Queued { parent: of, depth, .. } = &mut event {
         (*of, *depth) = (Some(parent.name.clone()), parent.depth + 1);
     }
+    refuse_cycle(world, &[], &event, &name, "queuing")?;
     ctx.port(&Source(())).emit(event)?;
     ctx.wake_dispatch()?;
     Ok(name)
@@ -510,12 +491,13 @@ fn resume_by_review(ctx: &Ctx, j: &crate::world::Job, rejected: usize, message: 
     if let Some((_, m, why)) = j.models.iter().find_map(|(h, m)| ctx.cfg.session.banned(m).map(|r| (h, m, r))) {
         return Ok(Some(format!("model {m} is banned: {why}")));
     }
-    ctx.port(&Source(())).emit(QueueEvent::Resumed {
-        job: builder.to_owned(),
-        message,
-        budget_usd: None,
-        models: BTreeMap::new(),
-    })?;
+    let resumed = QueueEvent::Resumed { job: builder.to_owned(), message, budget_usd: None, models: BTreeMap::new() };
+    // A builder requeued behind its review, or a review revived behind what it waits on, may close a cycle.
+    let world = ctx.world()?;
+    if let Some(cycle) = world.closes_cycle([crate::bus::Event::Queue(resumed.clone())], builder) {
+        return Ok(Some(format!("resuming it would make it wait for itself: {cycle}")));
+    }
+    ctx.port(&Source(())).emit(resumed)?;
     ctx.wake_dispatch()?;
     Ok(None)
 }

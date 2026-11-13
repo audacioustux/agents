@@ -109,8 +109,27 @@ pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
     let (outcome, reason) =
         attempt(ctx, &job, &mut spend).unwrap_or_else(|e| (Outcome::Failed, Some(format!("{e:#}"))));
     // The tip as the run leaves it, from the clone the run may have made: what an accept must name.
-    let head = ctx.world().ok().and_then(|w| w.jobs().get(&name).and_then(review::tip));
-    port.emit(SessionEvent::Ended { job: name.clone(), outcome, cost_usd: spend.0, turns: spend.1, reason, head })?;
+    let world = ctx.world().ok();
+    let head = world.as_ref().and_then(|w| w.jobs().get(&name).and_then(review::tip));
+    let ended = |outcome, reason| SessionEvent::Ended {
+        job: name.clone(),
+        outcome,
+        cost_usd: spend.0,
+        turns: spend.1,
+        reason,
+        head: head.clone(),
+    };
+    // Back in the queue (a retry, a rerun, a follow-up, a requeue under another profile, or held by the floor)
+    // it waits again: not where that would make it wait for itself.
+    let revived = matches!(outcome, Outcome::Retry | Outcome::Rerun | Outcome::Held);
+    let cycle = world
+        .filter(|_| revived)
+        .and_then(|w| w.closes_cycle([crate::bus::Event::Session(ended(outcome, reason.clone()))], &name));
+    let (outcome, reason) = match cycle {
+        Some(c) => (Outcome::Failed, Some(format!("requeuing it would make it wait for itself: {c}"))),
+        None => (outcome, reason),
+    };
+    port.emit(ended(outcome, reason))?;
     // A reviewed job that answered a reject is judged again, on its new tip.
     if outcome == Outcome::Done {
         let _ = review::rereview(ctx, &name);

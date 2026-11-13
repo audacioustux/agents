@@ -103,14 +103,15 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             if j.status.is_live() {
                 fail!(Conflict, "{name} is {}; stop it first", j.status.as_str());
             }
-            // Its verdicts are what holds them: gone with it, they would start on work no review accepted.
-            let held = world.held_by_review(&name);
-            if !held.is_empty() {
+            // What waits on it, through any edge of the dependency graph, would lose what it waits on.
+            let waiters = world.waiters(&name);
+            if !waiters.is_empty() {
                 fail!(
                     Conflict,
-                    "{} wait for the review chain {name} is part of to accept; clean {name} once they have started, or \
-                     release them first (relay queue release NAME)",
-                    held.join(", ")
+                    "{} wait on {name} (relay view status says how): cleaning it would release them onto work no \
+                     review accepted, or block them for good; clean {name} once they have started, or release \
+                     them first (relay queue release NAME), or detach its review (relay queue unreview)",
+                    waiters.join(", ")
                 );
             }
             if let Some(dir) = j.workdir.as_ref().map(crate::ctx::SessionRepo::path).filter(|d| d.exists()) {

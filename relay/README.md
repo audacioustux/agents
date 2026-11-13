@@ -77,10 +77,20 @@ than wait forever. Queue the dependency again (or `queue resume` it), or
 drops the waits and does not cancel anything. To withdraw the job instead, `relay queue dequeue NAME`.
 Only existing jobs can be named. A dependency that is reviewed counts as done only
 once its review accepts ([below](#reviews)), so a review adds waits no `--after`
-names: a job after BUILD waits for BUILD's review. `queue add` refuses a line that
-would close a cycle through those (exit 4, naming it: `rev would wait for itself:
-rev → test → rev (test waits for build, which rev reviews)`), as for `queue add rev
---review-of build --after test` where test is queued `--after build`.
+names. relay computes **one dependency graph** from the event log, and everything
+reads it: whether a job may start, the cycle check, and `land clean`. A job's edges
+are its `--after` jobs; for one that is a build with a review chain, the chain's
+review too; for one that is a review, every review that replaced it and the one they
+end at; and while that review has not accepted its builder's tip, the builder, which
+is requeued behind it. A job's edges count while it waits: queued, held by the disk
+floor, or a review done without an accept (its builder's next end revives it). Every
+transition that adds an edge or revives a job is refused if it would close a cycle,
+naming it (exit 4: `queuing rev would make it wait for itself: rev → test → rev (test
+waits for build, which rev reviews)`). Those transitions are `queue add` (a review
+replacing a chain included), `queue resume`, a decision's follow-up, a builder resumed
+by a reject or a reviewer resumed to judge again (the chain halts instead, saying
+why), and a run that ends back in the queue (a retry, rerun, requeue or hold, which
+then ends `failed` instead).
 
 **Where a build job starts.** A build job starts from the repository's `HEAD`,
 unless it waits for build jobs (`--after`) or forks one (`--fork`): then its
@@ -727,15 +737,18 @@ so an earlier commit's reject is history, not the state.
   (`after rev (accept; build running)`); when it ends on a new tip, relay resumes the
   chained review on that tip, as after a reject (`accept of an earlier tip; re-review
   due`), and the new accept releases them. A run that ends on the accepted commit
-  leaves the accept standing. If BUILD ends while the review is still ending (so it
-  cannot be resumed yet), the review's own end asks again, for an accept as for a
-  reject.
-- **Cleaning keeps the chain's word.** The verdicts that hold the jobs waiting on a
-  chain go with its review (or its build) on `land clean`, and a forgotten job that
-  was done counts as waited for, so cleaning would start them on work no review
-  accepted. `land clean` refuses (exit 4) a review or a build while a queued job
-  waits on its chain to accept, naming them: let the chain accept, or `queue
-  release` them first.
+  leaves the accept standing. Either end, BUILD's or the review's when it was still
+  ending (so it could not be resumed yet), asks for the re-review by one test: BUILD
+  is done, and the verdict is a reject BUILD ran after (with a commit or without), a
+  stale verdict, or an accept of a tip other than the one BUILD ended at.
+- **Cleaning keeps what waits.** `land clean NAME` refuses (exit 4) while any job
+  waits on NAME in the dependency graph, directly or through others, and names them.
+  That covers a successor of BUILD while BUILD answers a reject (its board line reads
+  only `after build`), jobs queued after a review that was replaced since, and a
+  review whose builder is requeued behind it. Cleaning would take the verdicts or
+  the branch they wait on with it, and a forgotten job that was done counts as waited
+  for, so they would start on work no review accepted. Let them start, `queue
+  release` them, or `queue unreview` the chain first.
 - **The reviewer reads the builder's last result.** Before every start and resume of
   the review, relay writes BUILD's last result (what its latest run ended with: its
   FINAL section, always whole, and as much of the summary just above it as fits in

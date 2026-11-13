@@ -3459,7 +3459,7 @@ fn a_review_whose_chain_holds_jobs_back_is_not_cleaned_away() {
         let out = relay(&env, &["land", "clean", name]);
         assert_eq!(out.status.code(), Some(4), "{name}: {}", out_of(&out));
         let said = stderr(&out);
-        assert!(said.contains("wait for the review chain") && said.contains("follow"), "{said}");
+        assert!(said.contains(&format!("wait on {name}")) && said.contains("follow"), "{said}");
     }
     std::thread::sleep(Duration::from_secs(1));
     for name in ["next", "follow"] {
@@ -3487,7 +3487,9 @@ fn a_review_that_would_wait_for_itself_is_refused_at_queue_time() {
     assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
     let said = stderr(&out);
     assert!(
-        said.contains("rev would wait for itself: rev → test → rev (test waits for build, which rev reviews)"),
+        said.contains(
+            "queuing rev would make it wait for itself: rev → test → rev (test waits for build, which rev reviews)"
+        ),
         "{said}"
     );
     assert!(job(&env, "rev").is_null(), "nothing was queued");
@@ -3499,6 +3501,71 @@ fn a_review_that_would_wait_for_itself_is_refused_at_queue_time() {
     assert!(stderr(&out).contains("rev2 → test → rev2"), "{}", stderr(&out));
     assert!(board(&env).contains("rev1") && !board(&env).contains("superseded by rev2"), "the chain is as it was");
     std::fs::remove_file(&hold).unwrap();
+}
+
+/// Copilot on PR #69 (queue.rs:157): a cycle can close on any transition that revives a job, not only on
+/// add. build and test (after build) are done; rev, a review of build after test (and after a job still at
+/// work), is queued. Resuming test makes it wait on build's review, rev, which waits on test.
+#[test]
+fn resuming_a_job_into_a_cycle_through_a_review_is_refused() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-resume-cycle", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    build(&env, "test", &["--after", "build"]);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "slow", "--text", "Take your time."]), "queue a job at work");
+    wait_status(&env, "slow", "running");
+    let out =
+        relay(&env, &["queue", "add", "rev", "--review-of", "build", "--after", "test,slow", "--text", "Review."]);
+    ok(&out, "the review: nothing waits on it yet");
+    let out = relay(&env, &["queue", "resume", "test", "--message", "Again."]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    let said = stderr(&out);
+    assert!(
+        said.contains(
+            "resuming test would make it wait for itself: test → rev → test (test waits for build, which rev reviews)"
+        ),
+        "{said}"
+    );
+    assert_eq!(job(&env, "test")["status"], "done", "nothing was resumed");
+    std::fs::remove_file(&hold).unwrap();
+}
+
+/// Copilot on PR #69 (world.rs:1010): what waits on a review's chain is in the graph however its board line
+/// reads. rev rejects build and resumes it; while build works, a job after build reads `after build`, yet it
+/// waits on rev's verdict, so rev is not cleaned away. A review replaced since still holds what waits on it.
+#[test]
+fn a_review_anything_waits_on_through_the_graph_is_not_cleaned_away() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-clean-graph", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    let text = "[verdict-reject] [hold-after] Review the change.";
+    ok(&relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", text]), "queue the review");
+    wait_status(&env, "build", "running");
+    ok(&relay(&env, &["queue", "add", "succ", "--after", "build", "--text", "Build on it."]), "queue the successor");
+    let out = relay(&env, &["land", "clean", "rev"]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    assert!(stderr(&out).contains("succ wait on rev"), "{}", stderr(&out));
+
+    // Replaced, it still holds what was queued after it.
+    ok(&relay(&env, &["queue", "add", "next", "--after", "rev", "--text", "Build on it."]), "queue after rev");
+    ok(&relay(&env, &["queue", "add", "rev2", "--review-of", "build", "--text", "Review it."]), "replace rev");
+    let out = relay(&env, &["land", "clean", "rev"]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    assert!(stderr(&out).contains("next wait on rev"), "{}", stderr(&out));
+    for name in ["succ", "next"] {
+        assert_eq!(job(&env, name)["status"], "queued", "{}", board(&env));
+    }
+    std::fs::remove_file(env.home.join(".claude.a/hold")).unwrap();
 }
 
 #[test]

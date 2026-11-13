@@ -139,7 +139,8 @@ case "$prompt" in *"[cache-link]"*)
 esac
 case "$prompt" in *"[farm-peek]"*)
   find .git/relay-caches >"$acct/farm-ls" 2>&1 || true
-  if cat "$HOME/.cargo/git/secret/key" >/dev/null 2>&1; then echo read; else echo hidden; fi >"$acct/farm-secret" ;;
+  if cat "$HOME/.cargo/git/secret/key" >/dev/null 2>&1; then echo read; else echo hidden; fi >"$acct/farm-secret.part"
+  mv "$acct/farm-secret.part" "$acct/farm-secret" ;;
 esac
 case "$prompt" in *"[idle]"*) ;; *)
 if [ -w . ] && [ -e .git ] && [ ! -f "$acct/once.done" ]; then

@@ -758,6 +758,7 @@ mod tests {
                         cost_usd: 0.1,
                         turns: 1,
                         reason: None,
+                        head: None,
                     }),
                 });
             }

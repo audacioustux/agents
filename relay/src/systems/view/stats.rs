@@ -513,7 +513,14 @@ mod tests {
             })
         };
         let ended = |job: &str, outcome| {
-            Event::Session(SessionEvent::Ended { job: job.into(), outcome, cost_usd: 0.5, turns: 1, reason: None })
+            Event::Session(SessionEvent::Ended {
+                job: job.into(),
+                outcome,
+                cost_usd: 0.5,
+                turns: 1,
+                reason: None,
+                head: None,
+            })
         };
         let s = 1_000_000;
         let events = [

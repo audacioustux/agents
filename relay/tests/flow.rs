@@ -3223,6 +3223,68 @@ fn a_job_after_a_review_or_its_build_waits_for_the_accept_and_starts_on_the_answ
     }
 }
 
+/// Copilot on PR #69: an accept is of the tip it judged. A builder a person resumes after the accept has work
+/// no review accepted: what waits on the review, or on the build, waits while it works, the chain judges its new
+/// tip without being asked, and that accept releases them, onto the new tip.
+#[test]
+fn a_builder_resumed_after_an_accept_is_judged_again_before_anything_after_it_starts() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-tip", false);
+    configure(&env, "job_ceiling_usd = 100.0\nmax_running = 4\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &["--model", "claude=claude-opus-5-5"]);
+    let out = relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "[verdict-accept] Review it."]);
+    ok(&out, "queue the review");
+    let b = wait_verdicts(&env, "build", 1);
+    let tip = rev_parse(&workdir(&env, "build"), "HEAD");
+    assert_eq!(
+        (b["verdicts"][0]["verdict"].as_str(), b["verdicts"][0]["commit"].as_str()),
+        (Some("accept"), Some(tip.as_str()))
+    );
+    assert_eq!(wait_for(&env, "rev")["status"], "done");
+
+    // A person resumes the builder; it works on, held, while a second account (held too) has a free seat.
+    let holds = [env.home.join(".claude.a/hold"), env.home.join(".claude.b/hold")];
+    std::fs::write(&holds[0], "").unwrap();
+    ok(&relay(&env, &["queue", "resume", "build", "--message", "[status-done] One more thing."]), "resume");
+    wait_status(&env, "build", "running");
+    claude_account(&env.home, "b", 10, false);
+    std::fs::write(&holds[1], "").unwrap();
+    for (name, after) in [("next", "rev"), ("follow", "build")] {
+        let out = relay(&env, &["queue", "add", name, "--after", after, "--text", "[status-done] Build on it."]);
+        ok(&out, "queue the dependent");
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    let shown = board(&env);
+    for name in ["next", "follow"] {
+        assert_eq!(job(&env, name)["status"], "queued", "{name} must not start on unreviewed work: {shown}");
+    }
+    assert!(shown.contains("after rev (accept; build running)"), "{shown}");
+    for h in &holds {
+        std::fs::remove_file(h).unwrap();
+    }
+
+    for name in ["next", "follow"] {
+        assert_eq!(wait_for(&env, name)["status"], "done", "{}", board(&env));
+    }
+    let new_tip = rev_parse(&workdir(&env, "build"), "HEAD");
+    assert_ne!(new_tip, tip, "the resumed builder committed");
+    assert_eq!(job(&env, "rev")["attempts"], 2, "nobody asked: the review judged the new tip");
+    let logged = events(&env);
+    let at = |pred: &dyn Fn(&serde_json::Value) -> bool| logged.iter().position(pred);
+    let accepted = at(&|e| e["type"] == "reviewed" && e["verdict"] == "accept" && e["commit"] == new_tip.as_str())
+        .unwrap_or_else(|| panic!("no accept of {new_tip}: {}", board(&env)));
+    for name in ["next", "follow"] {
+        let started = at(&|e| e["type"] == "started" && e["job"] == name).unwrap();
+        assert!(started > accepted, "{name} started before the accept of the new tip: {}", board(&env));
+        assert_eq!(job(&env, name)["base"].as_str(), Some(new_tip.as_str()), "{name} starts on the accepted tip");
+    }
+    let told = prompts(&env, "a") + &prompts(&env, "b");
+    assert!(told.contains("so your accept is not for its tip"), "the re-review is told why");
+}
+
 /// w2r-beam-u2b judged from commit messages: "the builder's FINAL was not readable here". A review reads its
 /// builder's last result in its own inbox, named in its preamble, and a re-review reads the answer to its reject.
 #[test]

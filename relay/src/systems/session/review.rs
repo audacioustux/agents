@@ -107,17 +107,47 @@ fn builder_result(job: &str, result: Option<&str>, marker: &str) -> String {
              branch by its commits and its diff alone.\n"
         );
     };
-    let text = checkpoint::bounded(text, BUILDER_RESULT_MAX);
-    if !marker.is_empty() && text.contains(marker) {
-        format!(
-            "{head}What {job}'s latest run ended with: its {marker} section and what it wrote above it.\n\n{text}\n"
-        )
-    } else {
-        format!(
+    // Whether there is a final section is read from the whole message, never from what is kept of it.
+    let Some(at) = final_section(text, marker) else {
+        let text = checkpoint::bounded(text, BUILDER_RESULT_MAX);
+        return format!(
             "{head}{job}'s latest run ended without a {marker} section. This is its last message as relay read it; \
              do not take it for a report, and judge the branch by its commits and its diff.\n\n{text}\n"
-        )
+        );
+    };
+    // The final section whole, and as much of the summary just above it as there is room for.
+    let (summary, section) = text.split_at(at);
+    let summary = tail(summary, BUILDER_RESULT_MAX.saturating_sub(section.len()));
+    format!(
+        "{head}What {job}'s latest run ended with: its {marker} section and what it wrote above it.\n\n{summary}{section}\n"
+    )
+}
+
+/// Where the final section of `text` starts: its last line that begins with `marker`, else the last place
+/// `marker` appears at all (as `Report::choose` finds it). `None` when it appears nowhere.
+fn final_section(text: &str, marker: &str) -> Option<usize> {
+    if marker.is_empty() {
+        return None;
     }
+    let mut start = 0;
+    let mut found = None;
+    for line in text.split_inclusive('\n') {
+        let indent = line.len() - line.trim_start().len();
+        if line.trim_start().starts_with(marker) {
+            found = Some(start + indent);
+        }
+        start += line.len();
+    }
+    found.or_else(|| text.rfind(marker))
+}
+
+/// The end of `text` in at most `max` bytes, saying how much came before it.
+fn tail(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let cut = (text.len() - max..=text.len()).find(|&i| text.is_char_boundary(i)).unwrap_or(text.len());
+    format!("… ({cut} earlier bytes left out)\n{}", &text[cut..])
 }
 
 /// What a review is told before anything else, on every start and every resume: the commit it is to
@@ -226,14 +256,21 @@ pub(super) fn carry_out(
     })
 }
 
+/// An accept by `v` of a commit other than the tip `b`'s latest run ended at: not an accept of its work.
+fn moved_past(b: &Job, v: &crate::world::Reviewed) -> bool {
+    !v.wants_again() && b.head.as_ref().is_some_and(|h| *h != v.commit)
+}
+
 /// The commit a build job's branch is at in its clone, when it still has one.
-fn tip(b: &Job) -> Option<String> {
+pub(super) fn tip(b: &Job) -> Option<String> {
     let dir = b.workdir.as_ref().filter(|d| d.path().exists())?;
     dir.rev(&format!("refs/heads/{}", b.branch.as_ref()?))
 }
 
-/// After a reviewed job's run ended done: resumes the chained reviewer whose latest verdict on it was a reject
-/// or was for a head the branch had left, so the board's verdict is for the new tip. The reviewer's ref is fetched again when it starts, and its
+/// After a reviewed job's run ended done: resumes the chained reviewer whose latest verdict on it was a reject,
+/// was for a head the branch had left, or accepted a commit that is not the tip the run ended at (`Job::head`:
+/// a person resumed the builder after the accept), so the board's verdict is for the new tip and what waits on
+/// the chain is released by an accept of it. The reviewer's ref is fetched again when it starts, and its
 /// preamble names the new commit. Bounded as the builder's own resume is. Returns who was resumed.
 pub(super) fn rereview(ctx: &Ctx, builder: &str) -> Result<Vec<String>> {
     resume_rejecting(ctx, builder, None)
@@ -248,8 +285,8 @@ pub(super) fn rereview_if_overtaken(ctx: &Ctx, reviewer: &str) -> Result<Vec<Str
     resume_rejecting(ctx, of, Some(reviewer))
 }
 
-/// The reviewers of `builder` (just `only`, when named) that rejected it last and can be asked again.
-/// With `only`, the builder must be done and past the commit judged.
+/// The reviewers of `builder` (just `only`, when named) whose last verdict is not an accept of its tip, and can
+/// be asked again. With `only`, the builder must be done and past the commit judged.
 fn resume_rejecting(ctx: &Ctx, builder: &str, only: Option<&str>) -> Result<Vec<String>> {
     let world = ctx.world()?;
     let Some(b) = world.jobs().get(builder) else { return Ok(Vec::new()) };
@@ -259,21 +296,27 @@ fn resume_rejecting(ctx: &Ctx, builder: &str, only: Option<&str>) -> Result<Vec<
         .filter(|r| r.review_of() == Some(builder) && r.unchained.is_none() && only.is_none_or(|o| o == r.name))
         .filter(|r| {
             let last = b.verdicts.iter().rev().find(|v| v.reviewer == r.name);
-            last.is_some_and(|v| {
-                v.wants_again()
-                    && (only.is_none()
-                        || (b.status == crate::world::Status::Done && tip(b).is_some_and(|t| t != v.commit)))
+            last.is_some_and(|v| match only {
+                None => v.wants_again() || moved_past(b, v),
+                Some(_) => {
+                    v.wants_again() && b.status == crate::world::Status::Done && tip(b).is_some_and(|t| t != v.commit)
+                }
             })
         })
         .map(|r| r.name.as_str())
         .collect();
     let mut resumed = Vec::new();
     for reviewer in rejecting {
-        let stale = b.verdicts.iter().rev().find(|v| v.reviewer == reviewer).is_some_and(|v| v.stale_head.is_some());
-        let why = if stale {
-            format!("{builder}'s branch moved while you were judging it, so that verdict is not for its head.")
-        } else {
-            format!("{builder} has answered your findings and ended its run.")
+        let last = b.verdicts.iter().rev().find(|v| v.reviewer == reviewer);
+        let why = match last {
+            Some(v) if v.stale_head.is_some() => {
+                format!("{builder}'s branch moved while you were judging it, so that verdict is not for its head.")
+            }
+            Some(v) if !v.wants_again() => format!(
+                "{builder} worked on after you accepted {}, so your accept is not for its tip.",
+                v.commit.get(..12).unwrap_or(&v.commit)
+            ),
+            _ => format!("{builder} has answered your findings and ended its run."),
         };
         let message = format!(
             "{why} Judge its branch again, now at the commit named above, and end with your FINAL section and a verdict."
@@ -336,6 +379,24 @@ mod tests {
             let none = builder_result("b", none, "FINAL");
             assert!(none.contains("left no final message, so there is no FINAL section"), "{none}");
         }
+        // Copilot on PR #69: a summary past the bound must not take the final section with it.
+        let section = "FINAL\nstatus: done\nnotes: all of it";
+        let summary = "é".repeat(BUILDER_RESULT_MAX);
+        let big = builder_result("b", Some(&format!("{summary}\n{section}")), "FINAL");
+        assert!(
+            big.contains("its FINAL section and what it wrote above it") && big.ends_with(&format!("{section}\n")),
+            "kept"
+        );
+        assert!(
+            big.len() < BUILDER_RESULT_MAX + 512 && big.contains("earlier bytes left out)\néé"),
+            "the summary's end"
+        );
+        let whole = format!("FINAL\n{}", "y".repeat(BUILDER_RESULT_MAX + 10));
+        let huge = builder_result("b", Some(&format!("summary\n{whole}")), "FINAL");
+        assert!(
+            huge.ends_with(&format!("{whole}\n")) && !huge.contains("summary\n"),
+            "a final section past the bound is whole"
+        );
         let long = builder_result("b", Some(&"x".repeat(BUILDER_RESULT_MAX + 10)), "FINAL");
         assert!(long.len() < BUILDER_RESULT_MAX + 512 && long.contains("(10 more bytes)"), "bounded");
     }

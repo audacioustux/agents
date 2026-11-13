@@ -108,7 +108,9 @@ pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
     let mut spend = (0.0, 0);
     let (outcome, reason) =
         attempt(ctx, &job, &mut spend).unwrap_or_else(|e| (Outcome::Failed, Some(format!("{e:#}"))));
-    port.emit(SessionEvent::Ended { job: name.clone(), outcome, cost_usd: spend.0, turns: spend.1, reason })?;
+    // The tip as the run leaves it, from the clone the run may have made: what an accept must name.
+    let head = ctx.world().ok().and_then(|w| w.jobs().get(&name).and_then(review::tip));
+    port.emit(SessionEvent::Ended { job: name.clone(), outcome, cost_usd: spend.0, turns: spend.1, reason, head })?;
     // A reviewed job that answered a reject is judged again, on its new tip.
     if outcome == Outcome::Done {
         let _ = review::rereview(ctx, &name);

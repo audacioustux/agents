@@ -713,11 +713,21 @@ so an earlier commit's reject is history, not the state.
   detached REV (`waits for rev (review detached)`; a job after BUILD then has no chain
   to wait for and starts). A blocked job does not start or keep the dispatcher awake,
   `view result --wait` on it exits 4, and `queue release` starts it anyway, as for any
-  dependency. Resuming BUILD or REV by hand clears a halt. When REV is replaced
-  (`superseded by rev2`), its dependents wait for the replacement's accept.
+  dependency. Resuming BUILD or its chained review by hand clears a halt; resuming a
+  review that was replaced or detached does not. When REV is replaced (`superseded by
+  rev2`, and rev2 perhaps by rev3), its dependents follow the replacements, whether or
+  not the replaced reviews ever ran, and wait for the last one's accept.
+- **An accept is of the tip it judged.** relay records a build job's tip as each run
+  ends (`ended {head}`), and only an accept of that commit releases what waits on the
+  chain. If a person resumes BUILD after the accept, its dependents wait while it works
+  (`after rev (accept; build running)`); when it ends on a new tip, relay resumes the
+  chained review on that tip, as after a reject (`accept of an earlier tip; re-review
+  due`), and the new accept releases them. A run that ends on the accepted commit
+  leaves the accept standing.
 - **The reviewer reads the builder's last result.** Before every start and resume of
   the review, relay writes BUILD's last result (what its latest run ended with: its
-  FINAL section and the summary above it, up to 64 KiB) to `builder-result.md` in the
+  FINAL section, always whole, and as much of the summary just above it as fits in
+  64 KiB) to `builder-result.md` in the
   review's inbox, which the session reads but cannot write (BUILD's own record lives in
   relay's state, which no session sees), and the preamble names the file. A re-review
   after a resume reads the builder's answer to the reject. When that run ended without

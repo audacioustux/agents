@@ -298,6 +298,10 @@ pub enum SessionEvent {
         cost_usd: f64,
         turns: u32,
         reason: Option<String>,
+        /// For a build job: its branch's tip in its clone as the run ended, the commit a review's accept must
+        /// name for what waits on the review to start.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head: Option<String>,
     },
     /// The job's clone was measured while it ran: `bytes` allocated.
     Disk {

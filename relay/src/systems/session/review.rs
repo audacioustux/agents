@@ -276,9 +276,10 @@ pub(super) fn rereview(ctx: &Ctx, builder: &str) -> Result<Vec<String>> {
     resume_rejecting(ctx, builder, None)
 }
 
-/// After a review ended: when the builder it rejected (or whose head moved under the review) answered and ended
-/// before this review was marked ended (so `rereview` found it still running), the builder's tip has moved past
-/// the commit the review judged and nobody else will ask for the new one: resume it now.
+/// After a review ended: when the builder it rejected (or whose head moved under the review, or whose tip it
+/// accepted) ran on and ended before this review was marked ended (so `rereview` found it still running), the
+/// builder's tip has moved past the commit the review judged and nobody else will ask for the new one: resume
+/// it now.
 pub(super) fn rereview_if_overtaken(ctx: &Ctx, reviewer: &str) -> Result<Vec<String>> {
     let world = ctx.world()?;
     let Some(of) = world.jobs().get(reviewer).and_then(|r| r.review_of()) else { return Ok(Vec::new()) };
@@ -298,8 +299,11 @@ fn resume_rejecting(ctx: &Ctx, builder: &str, only: Option<&str>) -> Result<Vec<
             let last = b.verdicts.iter().rev().find(|v| v.reviewer == r.name);
             last.is_some_and(|v| match only {
                 None => v.wants_again() || moved_past(b, v),
+                // The builder ended while this review was still ending (so its end could not resume it): a reject
+                // it answered, or an accept of a commit its run then went past, asks again all the same.
                 Some(_) => {
-                    v.wants_again() && b.status == crate::world::Status::Done && tip(b).is_some_and(|t| t != v.commit)
+                    b.status == crate::world::Status::Done
+                        && (moved_past(b, v) || v.wants_again() && tip(b).is_some_and(|t| t != v.commit))
                 }
             })
         })
@@ -331,6 +335,121 @@ fn resume_rejecting(ctx: &Ctx, builder: &str, only: Option<&str>) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A project in a scratch directory whose job ceiling refuses every resume a review asks for, so a re-review
+    /// that is due shows as the chain's halt and starts nothing.
+    fn project(dir: &crate::config::tempdir::Dir) -> Ctx {
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let cfg = crate::config::Config::parse("name = \"demo\"\n[limits]\njob_ceiling_usd = 0.5\n", root).unwrap();
+        let ctx = Ctx::unclaimed(cfg, root.join("relay.toml"), root.join("state"), root.join("data"));
+        std::fs::create_dir_all(ctx.bus.join("session")).unwrap();
+        std::fs::create_dir_all(&ctx.jobs).unwrap();
+        ctx
+    }
+
+    fn put(ctx: &Ctx, file: &str, t: u64, event: serde_json::Value) {
+        use std::io::Write as _;
+        let mut v = event;
+        v["t"] = t.into();
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(ctx.bus.join(file)).unwrap();
+        writeln!(f, "{v}").unwrap();
+    }
+
+    fn json(e: impl serde::Serialize) -> serde_json::Value {
+        serde_json::to_value(e).unwrap()
+    }
+
+    /// The bus up to the builder ending on a tip past the one `rev` accepted, while `rev` has not ended yet.
+    fn accepted_then_overtaken(ctx: &Ctx) {
+        use crate::bus::{DispatchEvent, Outcome, QueueEvent};
+        let dispatched = |job: &str| {
+            json(DispatchEvent::Dispatched {
+                job: job.into(),
+                account: "c:w".into(),
+                model: None,
+                provider: String::new(),
+                runner_pid: 7,
+                runner_started: 1,
+            })
+        };
+        let ended = |job: &str, head: &str| {
+            let head = Some(head.to_owned()).filter(|h| !h.is_empty());
+            json(SessionEvent::Ended {
+                job: job.into(),
+                outcome: Outcome::Done,
+                cost_usd: 0.0,
+                turns: 1,
+                reason: None,
+                head,
+            })
+        };
+        let queued = r#"{"type":"queued","job":"build","task":"x","readonly":false,"effort":null,"budget_usd":1.0,"pinned":null}"#;
+        put(ctx, "queue.ndjson", 1, serde_json::from_str(queued).unwrap());
+        put(ctx, "dispatch.ndjson", 2, dispatched("build"));
+        put(ctx, "session/build.1.1.ndjson", 3, ended("build", "c1"));
+        let review = r#"{"type":"queued","job":"rev","task":"x","readonly":true,"effort":null,"budget_usd":1.0,"pinned":null,"after":["build"],"acceptance":{"review-of":"build"}}"#;
+        put(ctx, "queue.ndjson", 4, serde_json::from_str(review).unwrap());
+        put(ctx, "dispatch.ndjson", 5, dispatched("rev"));
+        let accept = SessionEvent::Reviewed {
+            job: "rev".into(),
+            of: "build".into(),
+            commit: "c1".into(),
+            verdict: Verdict::Accept,
+            reason: None,
+            family: None,
+            stale_head: None,
+        };
+        put(ctx, "session/rev.4.1.ndjson", 6, json(accept));
+        let resumed = QueueEvent::Resumed {
+            job: "build".into(),
+            message: "more".into(),
+            budget_usd: None,
+            models: std::collections::BTreeMap::new(),
+        };
+        put(ctx, "queue.ndjson", 7, json(resumed));
+        put(ctx, "dispatch.ndjson", 8, dispatched("build"));
+        put(ctx, "session/build.1.2.ndjson", 9, ended("build", "c2"));
+    }
+
+    /// Whether the chain asked `rev` to judge again: the project's ceiling refuses it, which the bus records.
+    fn asked_again(ctx: &Ctx) -> bool {
+        ctx.world().unwrap().jobs()["build"].review_halted.as_deref().is_some_and(|h| h.contains("ceiling"))
+    }
+
+    /// Copilot on PR #69: an accept the builder went past is judged again whichever end comes last, the builder's
+    /// (it resumes the review) or the review's (it was still running when the builder ended, so it asks itself).
+    #[test]
+    fn an_accept_the_builder_went_past_is_judged_again_in_either_order() {
+        let ended_rev = |ctx: &Ctx| {
+            let e = SessionEvent::Ended {
+                job: "rev".into(),
+                outcome: crate::bus::Outcome::Done,
+                cost_usd: 0.0,
+                turns: 1,
+                reason: None,
+                head: None,
+            };
+            put(ctx, "session/rev.4.1.ndjson", 10, json(e));
+        };
+        // The review ends first; the builder's end asks.
+        let dir = crate::config::tempdir::Dir::new();
+        let ctx = project(&dir);
+        accepted_then_overtaken(&ctx);
+        ended_rev(&ctx);
+        rereview(&ctx, "build").unwrap();
+        assert!(asked_again(&ctx), "the builder's end: {:?}", ctx.world().unwrap().jobs()["build"]);
+
+        // The builder ends first, while the review still runs: its end cannot resume it; the review's end asks.
+        let dir = crate::config::tempdir::Dir::new();
+        let ctx = project(&dir);
+        accepted_then_overtaken(&ctx);
+        rereview(&ctx, "build").unwrap();
+        assert!(!asked_again(&ctx), "a running review is not resumed");
+        ended_rev(&ctx);
+        rereview_if_overtaken(&ctx, "rev").unwrap();
+        assert!(asked_again(&ctx), "the review's end: {:?}", ctx.world().unwrap().jobs()["build"]);
+    }
 
     #[test]
     fn a_verdict_is_read_from_the_final_section_only() {

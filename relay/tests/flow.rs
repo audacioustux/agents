@@ -3434,6 +3434,73 @@ fn a_ceiling_stops_a_reject_from_resuming_a_builder() {
     assert_eq!(job(&env, "build")["attempts"], 1);
 }
 
+/// Copilot on PR #69: the chain's verdicts are what hold the jobs after a rejected build and its review.
+/// Cleaning the review (or the build) away would release them onto the rejected tip, so it is refused.
+#[test]
+fn a_review_whose_chain_holds_jobs_back_is_not_cleaned_away() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-clean", false);
+    configure(&env, "job_ceiling_usd = 5.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    ok(
+        &relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "[verdict-reject] Review the change."]),
+        "queue",
+    );
+    let r = wait_for(&env, "rev");
+    assert!(r["reason"].as_str().unwrap_or_default().contains("ceiling"), "the builder was not resumed: {r}");
+    for (name, after) in [("next", "rev"), ("follow", "build")] {
+        let out = relay(&env, &["queue", "add", name, "--after", after, "--text", "[status-done] Build on it."]);
+        ok(&out, "queue the dependent");
+    }
+    for name in ["rev", "build"] {
+        let out = relay(&env, &["land", "clean", name]);
+        assert_eq!(out.status.code(), Some(4), "{name}: {}", out_of(&out));
+        let said = stderr(&out);
+        assert!(said.contains("wait for the review chain") && said.contains("follow"), "{said}");
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    for name in ["next", "follow"] {
+        assert_eq!(job(&env, name)["status"], "queued", "{name} stays held: {}", board(&env));
+    }
+    assert!(board(&env).contains("waits for rev (reject: test-failure; rev's chain halted"), "{}", board(&env));
+}
+
+/// Copilot on PR #69: a review's implied edges can close a cycle no `--after` names: test waits for build's
+/// review, and a review queued after test is that review. Refused when queued, naming the cycle.
+#[test]
+fn a_review_that_would_wait_for_itself_is_refused_at_queue_time() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-cycle", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "build", "--text", "[status-done] Make a change."]), "queue the build");
+    wait_status(&env, "build", "running");
+    ok(&relay(&env, &["queue", "add", "test", "--after", "build", "--text", "Test it."]), "queue the test");
+    let out = relay(&env, &["queue", "add", "rev", "--review-of", "build", "--after", "test", "--text", "Review it."]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    let said = stderr(&out);
+    assert!(
+        said.contains("rev would wait for itself: rev → test → rev (test waits for build, which rev reviews)"),
+        "{said}"
+    );
+    assert!(job(&env, "rev").is_null(), "nothing was queued");
+
+    // A replacement review is the chain too.
+    ok(&relay(&env, &["queue", "add", "rev1", "--review-of", "build", "--text", "Review it."]), "the first review");
+    let out = relay(&env, &["queue", "add", "rev2", "--review-of", "build", "--after", "test", "--text", "Again."]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    assert!(stderr(&out).contains("rev2 → test → rev2"), "{}", stderr(&out));
+    assert!(board(&env).contains("rev1") && !board(&env).contains("superseded by rev2"), "the chain is as it was");
+    std::fs::remove_file(&hold).unwrap();
+}
+
 #[test]
 fn a_profile_that_asks_for_an_independent_family_refuses_a_same_family_reviewer() {
     if !have_bwrap() {

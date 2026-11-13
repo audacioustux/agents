@@ -996,6 +996,89 @@ impl World {
         job.status == Status::Queued && self.waits(job).is_empty()
     }
 
+    /// The queued (or held) jobs whose wait on a review chain `name` stands in, not yet accepted: they wait on
+    /// `name` itself, a review or a reviewed build, or on the build `name` is the chained review of. Cleaning
+    /// `name` away would take the verdicts that hold them with it, and release them onto work no review
+    /// accepted (a forgotten job that was done has been waited for), so `land clean` refuses while there are any.
+    pub fn held_by_review(&self, name: &str) -> Vec<String> {
+        let Some(j) = self.jobs.get(name) else { return Vec::new() };
+        let chained = j.review_of().filter(|_| j.unchained.is_none());
+        let mut out: Vec<String> = self
+            .jobs
+            .values()
+            .filter(|q| q.status == Status::Queued || q.held)
+            .filter(|q| self.waits(q).iter().any(|w| w.review && (w.job == name || Some(w.job.as_str()) == chained)))
+            .map(|q| q.name.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// A cycle through `start` in what jobs that have yet to start wait for, the edges a review chain implies
+    /// included: a job after a build waits for the build's chained reviews, and one after a review waits for
+    /// the review that replaced it, if any. Each step is `(job, why)`, `why` naming the build whose review the
+    /// step waits for when the edge is implied. `None` when there is none.
+    pub fn cycle_through(&self, start: &str) -> Option<Vec<(String, Option<String>)>> {
+        let mut chains: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for r in self.jobs.values().filter(|r| r.unchained.is_none()) {
+            if let Some(b) = r.review_of() {
+                chains.entry(b).or_default().push(&r.name);
+            }
+        }
+        let edges = |j: &Job| -> Vec<(String, Option<String>)> {
+            if !(j.status == Status::Queued || j.held) {
+                return Vec::new();
+            }
+            let mut out = Vec::new();
+            for a in &j.after {
+                let Some(d) = self.jobs.get(a) else { continue };
+                if d.review_of().is_some() {
+                    // The end of its chain of replacements, bounded by the jobs.
+                    let mut at = d;
+                    for _ in 0..self.jobs.len() {
+                        match at.unchained.as_ref().and_then(|u| u.by.as_ref()).and_then(|n| self.jobs.get(n)) {
+                            Some(n) => at = n,
+                            None => break,
+                        }
+                    }
+                    out.push((at.name.clone(), (at.name != *a).then(|| a.clone())));
+                    continue;
+                }
+                out.push((a.clone(), None));
+                if j.review_of() != Some(a) {
+                    let reviews = chains.get(a.as_str()).map_or(&[][..], Vec::as_slice);
+                    out.extend(reviews.iter().map(|r| ((*r).to_owned(), Some(a.clone()))));
+                }
+            }
+            out
+        };
+        // Breadth first from `start`, so the cycle named is a shortest one.
+        let mut parent: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
+        let mut queue = std::collections::VecDeque::from([start.to_owned()]);
+        while let Some(at) = queue.pop_front() {
+            let Some(j) = self.jobs.get(&at) else { continue };
+            for (next, why) in edges(j) {
+                if next == start {
+                    let mut steps = vec![(start.to_owned(), why)];
+                    let mut cur = at.clone();
+                    while cur != start {
+                        let (prev, why) = parent[&cur].clone();
+                        steps.push((cur, why));
+                        cur = prev;
+                    }
+                    steps.push((start.to_owned(), None));
+                    steps.reverse();
+                    return Some(steps);
+                }
+                if !parent.contains_key(&next) {
+                    parent.insert(next.clone(), (at.clone(), why));
+                    queue.push_back(next);
+                }
+            }
+        }
+        None
+    }
+
     /// Whether `job` is queued, or held by the disk floor, and can never start on its own until released or its
     /// dependency is queued again.
     pub fn blocked(&self, job: &Job) -> bool {

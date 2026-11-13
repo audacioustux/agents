@@ -103,6 +103,16 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             if j.status.is_live() {
                 fail!(Conflict, "{name} is {}; stop it first", j.status.as_str());
             }
+            // Its verdicts are what holds them: gone with it, they would start on work no review accepted.
+            let held = world.held_by_review(&name);
+            if !held.is_empty() {
+                fail!(
+                    Conflict,
+                    "{} wait for the review chain {name} is part of to accept; clean {name} once they have started, or \
+                     release them first (relay queue release NAME)",
+                    held.join(", ")
+                );
+            }
             if let Some(dir) = j.workdir.as_ref().map(crate::ctx::SessionRepo::path).filter(|d| d.exists()) {
                 // Only ever a directory relay made.
                 if !dir.starts_with(&ctx.clones) || dir == ctx.clones {

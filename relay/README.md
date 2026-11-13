@@ -75,8 +75,12 @@ the dispatcher awake. So does every job queued behind it, however deep the chain
 than wait forever. Queue the dependency again (or `queue resume` it), or
 `relay queue release NAME [--from a]`, which **starts the job now** (once a seat is free): it
 drops the waits and does not cancel anything. To withdraw the job instead, `relay queue dequeue NAME`.
-Only existing jobs can be named, so there are no cycles. A dependency that is
-reviewed counts as done only once its review accepts ([below](#reviews)).
+Only existing jobs can be named. A dependency that is reviewed counts as done only
+once its review accepts ([below](#reviews)), so a review adds waits no `--after`
+names: a job after BUILD waits for BUILD's review. `queue add` refuses a line that
+would close a cycle through those (exit 4, naming it: `rev would wait for itself:
+rev → test → rev (test waits for build, which rev reviews)`), as for `queue add rev
+--review-of build --after test` where test is queued `--after build`.
 
 **Where a build job starts.** A build job starts from the repository's `HEAD`,
 unless it waits for build jobs (`--after`) or forks one (`--fork`): then its
@@ -723,7 +727,15 @@ so an earlier commit's reject is history, not the state.
   (`after rev (accept; build running)`); when it ends on a new tip, relay resumes the
   chained review on that tip, as after a reject (`accept of an earlier tip; re-review
   due`), and the new accept releases them. A run that ends on the accepted commit
-  leaves the accept standing.
+  leaves the accept standing. If BUILD ends while the review is still ending (so it
+  cannot be resumed yet), the review's own end asks again, for an accept as for a
+  reject.
+- **Cleaning keeps the chain's word.** The verdicts that hold the jobs waiting on a
+  chain go with its review (or its build) on `land clean`, and a forgotten job that
+  was done counts as waited for, so cleaning would start them on work no review
+  accepted. `land clean` refuses (exit 4) a review or a build while a queued job
+  waits on its chain to accept, naming them: let the chain accept, or `queue
+  release` them first.
 - **The reviewer reads the builder's last result.** Before every start and resume of
   the review, relay writes BUILD's last result (what its latest run ended with: its
   FINAL section, always whole, and as much of the summary just above it as fits in

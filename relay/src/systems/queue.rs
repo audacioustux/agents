@@ -154,6 +154,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                     .filter(|r| *r != name)
                     .map(|job| QueueEvent::Unchained { job, by: Some(name.clone()) }),
             );
+            refuse_cycle(&world, &events, &queued, &name)?;
             (queued, None)
         }
         Cmd::Unreview { .. } => {
@@ -213,6 +214,36 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     }
     ctx.wake_dispatch()?;
     ctx.reply(&serde_json::json!({ "job": name, "recorded": recorded }), &format!("{name}: recorded"))
+}
+
+/// Refuses `name` when, queued as `queued` after `before`, it would wait for itself: through its `--after`
+/// jobs and the edges review chains imply (a job after a build waits for the build's chained review, and a
+/// new review is that chain), neither it nor what it waits on would ever start. A cycle a new line makes runs
+/// through it, since every edge the line adds touches it.
+fn refuse_cycle(world: &World, before: &[QueueEvent], queued: &QueueEvent, name: &str) -> Result<()> {
+    let mut next = world.clone();
+    let t = crate::bus::now_micros();
+    for e in before.iter().chain([queued]) {
+        next.apply(&crate::bus::Stamped { t, event: crate::bus::Event::Queue(e.clone()), from: None });
+    }
+    let Some(cycle) = next.cycle_through(name) else { return Ok(()) };
+    let path: Vec<&str> = cycle.iter().map(|(j, _)| j.as_str()).collect();
+    let why: Vec<String> = cycle
+        .windows(2)
+        .filter_map(|w| {
+            let (from, (to, via)) = (&w[0].0, &w[1]);
+            let via = via.as_ref()?;
+            let how =
+                if next.jobs().get(via).is_some_and(|v| v.review_of().is_some()) { "replaced" } else { "reviews" };
+            Some(format!("{from} waits for {via}, which {to} {how}"))
+        })
+        .collect();
+    let why = if why.is_empty() { String::new() } else { format!(" ({})", why.join("; ")) };
+    fail!(
+        Conflict,
+        "{name} would wait for itself: {}{why}, so none of them would ever start; queue it after other jobs",
+        path.join(" → ")
+    );
 }
 
 /// What `queue release` records for `job`: it stops waiting for `from` (all of its `--after` jobs when empty).

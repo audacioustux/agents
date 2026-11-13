@@ -37,6 +37,8 @@ pub fn list(cfg: &Config, json: bool) -> Result<()> {
             .iter()
             .map(|(name, p)| {
                 let mut v = serde_json::to_value(p).unwrap_or_default();
+                // Resolved: unset, a profile's jobs compile.
+                v["compiles"] = p.compiles.unwrap_or(true).into();
                 v["banned"] = ban(cfg, p).into();
                 (name.clone(), v)
             })
@@ -64,6 +66,7 @@ pub fn list(cfg: &Config, json: bool) -> Result<()> {
                     Some(false) => "build".into(),
                     None => String::new(),
                 },
+                if p.compiles == Some(false) { "no compile".into() } else { "compiles".into() },
                 limits.into_iter().flatten().collect::<Vec<_>>().join(", "),
             ]
         })
@@ -122,6 +125,7 @@ fn show(cfg: &Config, project: Option<&Path>, json: bool) -> Result<()> {
         let doc = json!({
             "policy": cfg.policy_path,
             "project": project,
+            "machine": cfg.machine,
             "banned_models": banned,
             "profiles": profiles,
         });
@@ -129,6 +133,17 @@ fn show(cfg: &Config, project: Option<&Path>, json: bool) -> Result<()> {
     }
     out!("policy   {}", cfg.policy_path.as_ref().map_or_else(|| "none".into(), |p| p.display().to_string()));
     out!("project  {}", project.map_or_else(|| "none".into(), |p| p.display().to_string()));
+    let caps = cfg.machine.fields();
+    if !caps.is_empty() {
+        out!("machine");
+        for (field, value) in caps {
+            out!("  {field} = {value}  [policy]");
+        }
+        if project.is_some() && cfg.machine.min_free_disk_gb.is_some() {
+            let floor = cfg.limits.min_free_disk_gb;
+            out!("  limits.min_free_disk_gb = {floor}  [{}]", from("limits.min_free_disk_gb"));
+        }
+    }
     if !cfg.session.banned_models.is_empty() {
         out!("banned models");
         for (re, why) in &cfg.session.banned_models {

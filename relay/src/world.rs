@@ -56,6 +56,7 @@ fn is_zero(n: &u64) -> bool {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools, reason = "each is a fact of its own about the job, recorded by its own event")]
 pub struct Job {
     pub name: String,
     pub task: String,
@@ -136,6 +137,14 @@ pub struct Job {
     /// A decision let it past its profile's limits.
     #[serde(default)]
     pub forced: bool,
+    /// Queued as compiling nothing (its profile's `compiles = false`, or `--compiles false`): the one
+    /// thing that puts a job outside the machine's `max_compiling` ([`Job::compiles`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_compile: bool,
+    /// In line for a unit of a machine-wide pool, as its project's dispatcher last recorded
+    /// (`DispatchEvent::InLine`): other projects' younger jobs wait behind it ([`Job::in_line_for`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_line: Option<InLine>,
     /// The clone's size when it was last measured while the job ran, in bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_bytes: Option<u64>,
@@ -253,9 +262,48 @@ impl Reviewed {
     }
 }
 
+/// A queued job's place in the line for a machine-wide pool, and the dispatcher that vouches for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InLine {
+    /// The pool, as `Pool::key` names it.
+    pub pool: String,
+    /// The pid and start time of the dispatcher that judged it, together naming one process.
+    pub planner: (u32, u64),
+}
+
 impl Job {
     pub fn readonly(&self) -> bool {
         self.kind.readonly()
+    }
+
+    /// Whether the job compiles: every job does, a read-only review too (it rebuilds the branch and
+    /// runs its tests), unless it was queued as compiling nothing. Never inferred from its kind.
+    pub fn compiles(&self) -> bool {
+        !self.no_compile
+    }
+
+    /// Whether the job holds a unit of the machine's `max_compiling`: it compiles, and a runner
+    /// holds it, from its dispatch until its runner lets go (its acceptance check, which the same
+    /// runner runs, included).
+    pub fn compiling(&self) -> bool {
+        self.status.has_runner() && self.compiles()
+    }
+
+    /// Since when (bus time) it has waited in the queue: what orders the line for a machine-wide
+    /// pool across projects. Its creation, for a job recorded before queueing times were.
+    pub fn waiting_since(&self) -> u64 {
+        if self.queued_at > 0 { self.queued_at } else { self.created_at }
+    }
+
+    /// Whether the job is in line for `pool` now, whatever its own project's fold last heard: still
+    /// queued, and the dispatcher that put it in line still alive, since nobody else would start it
+    /// or take it out of the line.
+    pub fn in_line_for(&self, pool: &str) -> bool {
+        self.status == Status::Queued
+            && self
+                .in_line
+                .as_ref()
+                .is_some_and(|l| l.pool == pool && crate::os::same_process(l.planner.0, l.planner.1))
     }
 
     /// The acceptance check, if the job declares one.
@@ -289,9 +337,9 @@ impl Job {
         Some((account, crate::accounts::draws(model, &self.provider, harness)))
     }
 
-    /// Back in the queue at `t`: no account until a dispatch gives it one.
+    /// Back in the queue at `t`: no account until a dispatch gives it one, and at the end of any line.
     fn requeue(&mut self, t: u64) {
-        (self.status, self.queued_at, self.account) = (Status::Queued, t, None);
+        (self.status, self.queued_at, self.account, self.in_line) = (Status::Queued, t, None, None);
     }
 
     /// Resumed by hand during its check: what its runner still says changes
@@ -572,7 +620,8 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// 17: a decision's `agent:` session holds a seat (`seated`, `unseated`), kept apart from the
 /// decisions (`seats`) so a job's cleanup keeps it.
 /// 18: a meter says its window, provider and scope; a stored reset past its window reads as none.
-const FOLD_VERSION: u32 = 18;
+/// 19: a queued job is in line for a machine-wide pool (`in-line`, `out-of-line`).
+const FOLD_VERSION: u32 = 19;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -1012,8 +1061,10 @@ impl World {
                 parent,
                 depth,
                 acceptance,
+                compiles,
             } => {
                 let j = Job {
+                    no_compile: !compiles,
                     name: job.clone(),
                     task: task.clone(),
                     kind: acceptance.kind(*readonly),
@@ -1132,6 +1183,17 @@ impl World {
                     j.attempts += 1;
                     j.reason = None;
                     j.forced = false;
+                    j.in_line = None;
+                }
+            }
+            DispatchEvent::InLine { job, pool, planner_pid, planner_started } => {
+                if let Some(j) = self.jobs.get_mut(job).filter(|j| j.status == Status::Queued) {
+                    j.in_line = Some(InLine { pool: pool.clone(), planner: (*planner_pid, *planner_started) });
+                }
+            }
+            DispatchEvent::OutOfLine { job } => {
+                if let Some(j) = self.jobs.get_mut(job) {
+                    j.in_line = None;
                 }
             }
             DispatchEvent::Unheld { job, message, settle_us, budget_usd } => {
@@ -1535,6 +1597,7 @@ mod tests {
                 parent: None,
                 depth: 0,
                 acceptance,
+                compiles: true,
             })
         };
         let kind = |a: Acceptance, ro| World::fold(&[st(1, with(a, ro))]).jobs["j"].clone();
@@ -1570,6 +1633,7 @@ mod tests {
             parent: None,
             depth: 0,
             acceptance: bus::Acceptance::None,
+            compiles: true,
         })
     }
 
@@ -1606,6 +1670,7 @@ mod tests {
             parent: None,
             depth: 0,
             acceptance: bus::Acceptance::None,
+            compiles: true,
         })
     }
 
@@ -1651,6 +1716,90 @@ mod tests {
         );
     }
 
+    /// A queued job is in line for a machine-wide pool from its dispatcher's `in-line` until it is
+    /// dispatched, taken out, or queued again; and only while that dispatcher lives.
+    #[test]
+    fn a_queued_job_is_in_line_until_it_starts_leaves_or_is_queued_again() {
+        let me = std::process::id();
+        let alive = crate::os::start_time(me).unwrap();
+        let in_line = |started| {
+            Event::Dispatch(DispatchEvent::InLine {
+                job: "a".into(),
+                pool: "machine.max_compiling".into(),
+                planner_pid: me,
+                planner_started: started,
+            })
+        };
+        let lined = vec![st(1, queued("a")), st(2, in_line(alive))];
+        let a = &World::fold(&lined).jobs["a"];
+        assert!(a.in_line_for("machine.max_compiling") && !a.in_line_for("another"), "{:?}", a.in_line);
+        assert_eq!(a.waiting_since(), 1);
+        assert!(!a.compiling(), "it waits; it holds no unit");
+        let with = |more: Vec<Stamped>| World::fold(&[lined.clone(), more].concat()).jobs["a"].clone();
+        let out = Event::Dispatch(DispatchEvent::OutOfLine { job: "a".into() });
+        assert_eq!(with(vec![st(3, out)]).in_line, None);
+        let running = with(vec![st(3, dispatched("a"))]);
+        assert_eq!(running.in_line, None, "a dispatch takes it out of the line");
+        assert!(running.compiling(), "and it holds a unit while its runner has it");
+        let again = with(vec![st(3, dispatched("a")), st(4, ended("a", Outcome::Retry))]);
+        assert_eq!((again.status, again.in_line.clone(), again.waiting_since()), (Status::Queued, None, 4));
+        assert!(!again.compiling(), "a runner that let go holds none");
+        let late = with(vec![st(3, dispatched("a")), st(4, in_line(alive))]);
+        assert_eq!(late.in_line, None, "only a queued job stands in line");
+        let orphan = World::fold(&[st(1, queued("a")), st(2, in_line(alive + 1))]);
+        assert!(!orphan.jobs["a"].in_line_for("machine.max_compiling"), "its dispatcher is gone");
+        let review = Job { kind: bus::Kind::Review, status: Status::Running, ..Job::default() };
+        assert!(review.compiling(), "a read-only job compiles like any: a review rebuilds and tests");
+        assert!(!Job { no_compile: true, ..review }.compiling(), "only one queued as compiling nothing does not");
+        let quiet = |compiles| {
+            let Event::Queue(QueueEvent::Queued {
+                compiles: _,
+                job,
+                task,
+                readonly,
+                harnesses,
+                models,
+                effort,
+                budget_usd,
+                pinned,
+                reuse_key,
+                after,
+                profile,
+                fork,
+                parent,
+                depth,
+                acceptance,
+            }) = queued("d")
+            else {
+                unreachable!()
+            };
+            Event::Queue(QueueEvent::Queued {
+                compiles,
+                job,
+                task,
+                readonly,
+                harnesses,
+                models,
+                effort,
+                budget_usd,
+                pinned,
+                reuse_key,
+                after,
+                profile,
+                fork,
+                parent,
+                depth,
+                acceptance,
+            })
+        };
+        assert!(World::fold(&[st(1, quiet(true))]).jobs["d"].compiles());
+        assert!(!World::fold(&[st(1, quiet(false))]).jobs["d"].compiles(), "as it was queued");
+        let old =
+            r#"{"type":"queued","job":"o","task":"t","readonly":true,"effort":null,"budget_usd":1.0,"pinned":null}"#;
+        let old: QueueEvent = serde_json::from_str(old).unwrap();
+        assert!(World::fold(&[st(1, Event::Queue(old))]).jobs["o"].compiles(), "an event from before it was recorded");
+    }
+
     #[test]
     fn the_fold_version_moves_with_the_fold() {
         const PINNED: &[(u32, u64)] = &[
@@ -1660,6 +1809,7 @@ mod tests {
             (16, 0x5351_e6de_0d8d_bfd8),
             (17, 0x2132_12e7_f06d_d32d),
             (18, 0x4bb9_80c4_5c80_027a),
+            (19, 0x13fa_cf1f_3e5c_6822),
         ];
         let dispatched = |t, model: Option<&str>| {
             st(
@@ -1727,6 +1877,15 @@ mod tests {
                     model: Some("minimax-code/M3".into()),
                     provider: "minimax-code".into(),
                     lock: None,
+                }),
+            ),
+            st(
+                14,
+                Event::Dispatch(DispatchEvent::InLine {
+                    job: "b".into(),
+                    pool: "machine.max_compiling".into(),
+                    planner_pid: 7,
+                    planner_started: 1,
                 }),
             ),
         ];

@@ -114,6 +114,7 @@ pub(super) fn run(
     dev: &[(OsString, Option<OsString>)],
 ) -> Result<CheckRun> {
     let command = job.check().context("a check was asked of a job that declares none")?.to_owned();
+    wait_for_memory(ctx, job);
     let tip = dir.rev("HEAD");
     let place = Place { job, inbox, work: &ctx.job_scratch(&format!("{}.bar", job.name)), dev };
     let head = match &tip {
@@ -182,6 +183,28 @@ pub(super) fn run(
     };
     port(ctx, job).emit(event)?;
     Ok(CheckRun { command, commit: tip, result, exit: head.code, base_exit, failing, no_progress, tail })
+}
+
+/// How often a check that the memory gate holds looks at the machine's memory again.
+const MEMORY_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The machine's memory gate, for a check as for a session: a check starts no sooner than the
+/// machine's available memory is at the owner's floor (`[machine] min_free_mem_gb`,
+/// [`crate::systems::dispatch::memory_hold`]). It waits here, in its runner, which keeps its seat
+/// and its compiling unit meanwhile, and says why in the runner's log. Nothing running is touched;
+/// a stop ends the wait with the runner. With no floor in the policy it does not look.
+fn wait_for_memory(ctx: &Ctx, job: &Job) {
+    if ctx.cfg.machine.min_free_mem_gb.is_none() {
+        return;
+    }
+    let mut said = false;
+    while let Some(why) = crate::systems::dispatch::memory_hold(&ctx.cfg, crate::os::mem_available_gb()) {
+        if !said {
+            eprintln!("{} {}: its acceptance check waits: {why}", crate::os::stamp(), job.name);
+            said = true;
+        }
+        std::thread::sleep(MEMORY_POLL);
+    }
 }
 
 /// A check's failure, as far as two runs of it are compared.

@@ -37,6 +37,10 @@ pub struct Config {
     /// Who decides at each decision point, in order.
     #[serde(default)]
     pub hooks: Hooks,
+    /// The machine-wide caps of the owner's policy (`[machine]`): the same for every project on the
+    /// machine, and never read from a project's `relay.toml`.
+    #[serde(skip)]
+    pub machine: Machine,
     /// The policy file this was merged with, when one was read.
     #[serde(skip)]
     pub policy_path: Option<PathBuf>,
@@ -81,6 +85,10 @@ pub struct Profile {
     /// Spend cap per attempt, in USD.
     pub budget: Option<f64>,
     pub readonly: Option<bool>,
+    /// Whether a job of the profile compiles: builds a branch or runs a test suite, a review that
+    /// does so too. Unset is `true`. Only `false` (a design, research, an ask that builds
+    /// nothing) puts a job outside the machine's `max_compiling`.
+    pub compiles: Option<bool>,
     /// What the profile is for, shown by `relay profiles`.
     pub note: Option<String>,
     /// No more than this many jobs of the profile run at once.
@@ -109,6 +117,7 @@ impl Profile {
         put("effort", self.effort.clone());
         put("budget", self.budget.map(|b| b.to_string()));
         put("readonly", self.readonly.map(|b| b.to_string()));
+        put("compiles", self.compiles.map(|b| b.to_string()));
         put("max_running", self.max_running.map(|n| n.to_string()));
         put("max_per_day", self.max_per_day.map(|n| n.to_string()));
         put("check", self.check.clone());
@@ -128,6 +137,7 @@ impl Profile {
             effort: self.effort.clone().or_else(|| base.effort.clone()),
             budget: self.budget.or(base.budget),
             readonly: self.readonly.or(base.readonly),
+            compiles: self.compiles.or(base.compiles),
             note: self.note.clone().or_else(|| base.note.clone()),
             max_running: self.max_running.or(base.max_running),
             max_per_day: self.max_per_day.or(base.max_per_day),
@@ -148,6 +158,10 @@ impl Profile {
         ensure!(self.max_running.is_none_or(|n| n >= 1), "profiles.{name}.max_running must be at least 1");
         ensure!(self.max_per_day.is_none_or(|n| n >= 1), "profiles.{name}.max_per_day must be at least 1");
         ensure!(self.check.as_deref().is_none_or(|c| !c.trim().is_empty()), "profiles.{name}.check is empty");
+        ensure!(
+            self.compiles != Some(false) || self.check.is_none(),
+            "profiles.{name}: compiles = false with a check: an acceptance check builds, so its job compiles"
+        );
         ensure!(
             self.check_red_first != Some(true) || self.check.is_some(),
             "profiles.{name}.check_red_first needs a check"
@@ -171,6 +185,46 @@ impl Profile {
 pub struct Policy {
     session: PolicySession,
     profiles: BTreeMap<String, Profile>,
+    machine: Machine,
+}
+
+/// The owner's caps on what every project's relay on this machine does together (`[machine]` in the
+/// policy file). A project's own limits stay, under these; a project cannot set or lift one. A cap
+/// left out does not apply, so a policy with no `[machine]` table changes nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Machine {
+    /// Compiling jobs running at once, over every project. Every job compiles, a review too (it
+    /// rebuilds the branch and runs its tests), unless its profile says `compiles = false` or it
+    /// was queued with `--compiles false`. A job's acceptance check runs under the job's own unit.
+    pub max_compiling: Option<usize>,
+    /// No session and no acceptance check starts while the machine's available memory
+    /// (`MemAvailable` in `/proc/meminfo`) is under this many GiB. What runs is never touched.
+    pub min_free_mem_gb: Option<f64>,
+    /// The least `limits.min_free_disk_gb` of any project: one may raise its floor, never lower it.
+    pub min_free_disk_gb: Option<f64>,
+}
+
+impl Machine {
+    /// Each cap that is set, as `relay config show` prints it.
+    pub fn fields(&self) -> Vec<(&'static str, String)> {
+        [
+            ("max_compiling", self.max_compiling.map(|n| n.to_string())),
+            ("min_free_mem_gb", self.min_free_mem_gb.map(|n| n.to_string())),
+            ("min_free_disk_gb", self.min_free_disk_gb.map(|n| n.to_string())),
+        ]
+        .into_iter()
+        .filter_map(|(k, v)| Some((k, v?)))
+        .collect()
+    }
+
+    fn validate(&self) -> Result<()> {
+        ensure!(self.max_compiling.is_none_or(|n| n >= 1), "machine.max_compiling must be at least 1");
+        let amount = |x: Option<f64>| x.is_none_or(|x| x.is_finite() && x >= 0.0);
+        ensure!(amount(self.min_free_mem_gb), "machine.min_free_mem_gb must be zero or a positive number");
+        ensure!(amount(self.min_free_disk_gb), "machine.min_free_disk_gb must be zero or a positive number");
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -238,7 +292,8 @@ pub struct Limits {
     pub max_load: Option<f64>,
     /// No new build session (each makes a clone) starts below this much free
     /// disk; a gc pass runs at once below it, and the largest running clone's
-    /// job reaches the `disk` decision point.
+    /// job reaches the `disk` decision point. Never under the policy's
+    /// `[machine] min_free_disk_gb`: merged, it is the higher of the two.
     #[serde(alias = "min_free_gb")]
     pub min_free_disk_gb: f64,
     /// Free disk must be this many GB above `min_free_disk_gb` before a job the floor held resumes and
@@ -664,6 +719,14 @@ impl Config {
             }
             self.profiles = merged;
             self.policy_path = Some(path.to_path_buf());
+            // The machine's caps are the policy's alone. Its disk floor is the least any project
+            // has: every reader of `limits.min_free_disk_gb` (admission, gc, the floor that stops
+            // a running job) then sees the higher of the two.
+            self.machine = policy.machine;
+            if let Some(floor) = policy.machine.min_free_disk_gb.filter(|f| *f > self.limits.min_free_disk_gb) {
+                self.limits.min_free_disk_gb = floor;
+                origins.insert("limits.min_free_disk_gb".to_owned(), Origin::Policy);
+            }
         }
         self.origins = origins;
     }
@@ -745,6 +808,7 @@ impl Config {
             gc: Gc::default(),
             profiles: BTreeMap::new(),
             hooks: Hooks::default(),
+            machine: Machine::default(),
             policy_path: None,
             programs: Some(crate::host::record_in(&crate::ctx::state_root())),
             origins: BTreeMap::new(),
@@ -843,7 +907,7 @@ impl Config {
         Ok(())
     }
 
-    /// What the policy can set, the bans and the profiles, checked alike inside a project
+    /// What the policy can set, the bans, the profiles and the machine's caps, checked alike inside a project
     /// and outside one ([`Config::policy_only`]).
     fn validate_policy(&self) -> Result<()> {
         for re in self.session.banned_models.keys() {
@@ -852,6 +916,7 @@ impl Config {
         for (name, p) in &self.profiles {
             p.validate(name)?;
         }
+        self.machine.validate()?;
         self.validate_escalation()
     }
 
@@ -1418,6 +1483,52 @@ budget = 3
             .unwrap()
     }
 
+    /// A profile says whether its jobs compile; unset, they do. The project's field wins, as any other.
+    #[test]
+    fn a_profile_declares_whether_its_jobs_compile_and_the_default_is_that_they_do() {
+        let policy = "[profiles.design]\nreadonly = true\ncompiles = false\n[profiles.review]\nreadonly = true\n";
+        let cfg = merged_with(policy, "[profiles.design]\nnote = \"x\"\n[profiles.review]\ncompiles = true\n");
+        let compiles = |name: &str| cfg.profile(name).unwrap().compiles;
+        assert_eq!((compiles("design"), compiles("review")), (Some(false), Some(true)));
+        assert_eq!(cfg.origin("profiles.design.compiles"), Origin::Policy);
+        assert_eq!(merged_with(policy, "").profile("review").unwrap().compiles, None, "unset: it compiles");
+        assert!(cfg.profile("design").unwrap().fields().contains(&("compiles", "false".to_owned())));
+        let d = repo();
+        let checked = "name = \"demo\"\n[profiles.p]\ncompiles = false\ncheck = \"cargo test\"\n";
+        assert!(Config::parse(checked, d.path()).is_err(), "a check builds, so its job compiles");
+    }
+
+    /// The machine's caps are the owner's: read from the policy's `[machine]`, refused in a project's
+    /// `relay.toml`, and absent they change nothing. The disk floor is the higher of the two files'.
+    #[test]
+    fn the_machines_caps_are_the_policys_and_a_project_only_raises_the_disk_floor() {
+        let caps = "[machine]\nmax_compiling = 6\nmin_free_mem_gb = 4\nmin_free_disk_gb = 30\n";
+        let cfg = merged_with(caps, "");
+        let m = cfg.machine;
+        assert_eq!((m.max_compiling, m.min_free_mem_gb, m.min_free_disk_gb), (Some(6), Some(4.0), Some(30.0)));
+        assert_eq!(cfg.limits.min_free_disk_gb, 30.0, "the project's default of 10 is under the machine's floor");
+        assert_eq!(cfg.origin("limits.min_free_disk_gb"), Origin::Policy);
+        let lower = merged_with(caps, "[limits]\nmin_free_disk_gb = 0\n");
+        assert_eq!(lower.limits.min_free_disk_gb, 30.0, "a project cannot lower it, nor turn it off");
+        let higher = merged_with(caps, "[limits]\nmin_free_disk_gb = 60\n");
+        assert_eq!(higher.limits.min_free_disk_gb, 60.0, "a project may raise it");
+        assert_eq!(higher.origin("limits.min_free_disk_gb"), Origin::Project);
+
+        let none = merged("[limits]\nmin_free_disk_gb = 0\n");
+        assert_eq!(none.machine, Machine::default(), "no [machine] table: no cap");
+        assert_eq!(none.limits.min_free_disk_gb, 0.0, "and the project's floor is its own, as before");
+
+        let d = repo();
+        let in_project = Config::parse("name = \"demo\"\n[machine]\nmax_compiling = 99\n", d.path());
+        assert!(in_project.is_err(), "a project cannot set a machine cap");
+        assert!(Policy::parse("[machine]\nmax_compilng = 6\n").is_err(), "a misspelt cap is refused, not ignored");
+        for bad in ["max_compiling = 0", "min_free_mem_gb = -1", "min_free_disk_gb = -1"] {
+            let policy = Policy::parse(&format!("[machine]\n{bad}\n")).unwrap();
+            let cfg = Config::parse_with("name = \"demo\"", d.path(), Some((&policy, Path::new("/p.toml"))));
+            assert!(cfg.is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn a_project_profile_overrides_the_policy_field_by_field() {
         let cfg = merged("[profiles.bug-hunt]\neffort = \"low\"\nmax_running = 1\n");
@@ -1483,7 +1594,10 @@ budget = 3
             assert!(Config::parse(&text, d.path()).is_err(), "{bad}");
         }
         assert!(Config::parse("name = \"demo\"\n[profiles.Bad]\nnote = \"x\"", d.path()).is_err());
-        assert!(Policy::parse("[limits]\nfloor = 0.5").is_err(), "the policy holds only bans and profiles");
+        assert!(
+            Policy::parse("[limits]\nfloor = 0.5").is_err(),
+            "the policy holds only bans, profiles and the machine's caps"
+        );
     }
 
     #[test]

@@ -771,6 +771,8 @@ fn await_seat(
     // A wait that cannot be had has had its turn at a reading under way already.
     let since = if wait.is_zero() { now_micros().saturating_sub(dispatch::READING_WAIT_MICROS) } else { now_micros() };
     let mut asked: Option<Instant> = None;
+    // What held the last try, to say so when the wait runs out.
+    let mut held: Option<dispatch::Hold> = None;
     loop {
         let id = seat.id;
         let record = |s: &dispatch::Start| seat.book(s);
@@ -785,7 +787,8 @@ fn await_seat(
                 std::thread::sleep(SEAT_LOCK_POLL);
                 continue;
             }
-            Ok(dispatch::Booking::Held | dispatch::Booking::Busy) => {}
+            Ok(dispatch::Booking::Held(hold)) => held = Some(hold),
+            Ok(dispatch::Booking::Busy) => {}
             Err(e) => return Err(format!("agent:{} found no seat: {e:#}", agent.label)),
         }
         if asked.is_none_or(|t| t.elapsed() >= SEAT_REREAD)
@@ -804,6 +807,10 @@ fn await_seat(
         }
         if left.is_zero() {
             let (harness, label) = (&agent.harness, &agent.label);
+            // The memory gate holds a session whatever the accounts have: say that, not "no account".
+            if let Some(h) = held.filter(|h| h.by == dispatch::Constraint::Memory) {
+                return Err(format!("agent:{label} did not start: {}", h.why));
+            }
             return Err(if wait.is_zero() {
                 format!("no {harness} account is free for agent:{label}")
             } else {

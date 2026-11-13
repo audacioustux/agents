@@ -66,6 +66,10 @@ pub enum QueueEvent {
         /// How the job's result is accepted. Part of the record, so changing it means queuing a new job.
         #[serde(default, skip_serializing_if = "Acceptance::is_none")]
         acceptance: Acceptance,
+        /// Whether the job compiles, as its profile or `--compiles` said when it was queued: `false`
+        /// alone puts it outside the machine's `max_compiling`. Absent (and before it was recorded): it does.
+        #[serde(default = "yes", skip_serializing_if = "is_yes")]
+        compiles: bool,
     },
     /// A held job sent elsewhere by a decision: where it may run from now on.
     Rerouted {
@@ -157,6 +161,14 @@ pub enum DispatchEvent {
     },
     /// A held job is held no longer and is not resumed: it stays stopped, for `why`, until a person acts.
     HoldEnded { job: String, why: String },
+    /// A queued job would start but for a machine-wide pool (`pool`, as `Pool::key` names it) that
+    /// every project's jobs share: it is in line for a unit, behind the jobs of other projects that
+    /// have waited longer, and ahead of the younger ones. The line stands while the dispatcher that
+    /// wrote it lives (`planner_pid` and `planner_started`, together one process) and the job stays
+    /// queued, so a project whose dispatcher died holds nobody back.
+    InLine { job: String, pool: String, planner_pid: u32, planner_started: u64 },
+    /// The job is in line no longer though still queued: something of its own project holds it now.
+    OutOfLine { job: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -628,6 +640,11 @@ impl Point {
 
 fn yes() -> bool {
     true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "serde's skip_serializing_if takes a reference")]
+fn is_yes(b: &bool) -> bool {
+    *b
 }
 
 /// What a handler may answer: one of a closed set, which relay validates before acting.

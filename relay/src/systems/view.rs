@@ -147,6 +147,7 @@ fn world_json(world: &World) -> Result<serde_json::Value> {
     for j in world.jobs().values() {
         v["jobs"][&j.name]["pending"] = serde_json::to_value(world.waits(j))?;
         v["jobs"][&j.name]["readonly"] = j.readonly().into();
+        v["jobs"][&j.name]["compiles"] = j.compiles().into();
     }
     Ok(v)
 }
@@ -385,6 +386,8 @@ pub fn notes(j: &Job) -> Vec<String> {
     let mut notes: Vec<String> = j.checkpoints.last().map(crate::bus::Check::summary).into_iter().collect();
     notes.extend(overran(j));
     notes.extend(declared(j));
+    // The default (it compiles) goes unsaid; the exception is what a reader needs to see.
+    notes.extend((!j.compiles()).then(|| "compiles nothing".to_owned()));
     notes.extend(collected(j).map(str::to_owned));
     notes
 }
@@ -575,6 +578,7 @@ fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
     if ctx.json {
         let mut v = serde_json::to_value(j)?;
         v["readonly"] = j.readonly().into();
+        v["compiles"] = j.compiles().into();
         v["answer"] = answer.as_deref().map(str::trim_end).into();
         v["log"] = log.display().to_string().into();
         v["logs"] = logs.iter().map(|l| l.display().to_string()).collect::<Vec<_>>().into();

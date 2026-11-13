@@ -692,6 +692,163 @@ fn the_board_shows_every_project_with_everywhere_and_outside_any_project() {
     assert!(text.contains("our task") && text.contains("their task"), "every project: {text}");
 }
 
+/// A second project, `other`, on the same machine as `flow`: its own config and state, the same
+/// accounts and the same owner's policy. Returns how to run relay in it.
+fn other_project(env: &Env) -> impl Fn(&[&str]) -> Output + '_ {
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(env.repo.join("other.toml"), conf.replace("name = \"flow\"", "name = \"other\"")).unwrap();
+    let state = env.root.join("state/relay/other");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&state).unwrap();
+    std::fs::write(state.join("gc.last"), "").unwrap();
+    move |args: &[&str]| relay(env, &[&["--config", "other.toml"], args].concat())
+}
+
+/// The job `name` as the project `run` runs relay in has it.
+fn job_in(run: &impl Fn(&[&str]) -> Output, name: &str) -> serde_json::Value {
+    let world: serde_json::Value = serde_json::from_slice(&run(&["view", "status", "--json"]).stdout).unwrap();
+    world["jobs"][name].clone()
+}
+
+/// Waits, for at most `seconds`, until the job `name` of that project is `want`.
+fn until_in(run: &impl Fn(&[&str]) -> Output, name: &str, want: &str, seconds: u64) {
+    for _ in 0..seconds * 10 {
+        if job_in(run, name)["status"] == want {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("{name} never became {want}: {}", job_in(run, name));
+}
+
+/// Two projects under the owner's machine-wide caps: one account with seats for all, and one
+/// compiling job at a time over both projects. A `review` compiles, as every job does unless its
+/// profile says otherwise; a `design` says it compiles nothing.
+fn two_projects_one_compiling(tag: &str) -> Env {
+    let env = setup(tag, false);
+    env.write_policy(
+        "[machine]\nmax_compiling = 1\n\
+         [profiles.review]\nreadonly = true\n\
+         [profiles.design]\nreadonly = true\ncompiles = false\n",
+    );
+    configure(&env, "per_account = 8\nmax_running = 8\n", "");
+    claude_account(&env.home, "a", 10, false);
+    std::fs::write(env.home.join(".claude.a/hold"), "").unwrap();
+    env
+}
+
+/// The owner's rulings of 2026-11-13: compiling jobs are capped machine-wide, over every project's
+/// relay, and what compiles is declared, not read off the read-only flag. With `max_compiling = 1`,
+/// a second project's review (read-only, and it compiles: it rebuilds the branch and runs its tests)
+/// is held, with a reason that names the machine cap, while the first project's build runs, and
+/// starts when it ends. A job whose profile says `compiles = false`, or queued with
+/// `--compiles false`, starts in either project regardless.
+#[test]
+fn a_second_projects_review_waits_for_the_machines_one_compiling_unit() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = two_projects_one_compiling("machine-cap");
+    let other = other_project(&env);
+    ok(&relay(&env, &["queue", "add", "first", "--text", "Make a change."]), "flow queues its build");
+    until(&env, "first", "running");
+    ok(&other(&["queue", "add", "second", "--text", "Review it.", "--profile", "review"]), "other queues a review");
+    ok(
+        &relay(&env, &["queue", "add", "sketch", "--text", "Design it.", "--profile", "design"]),
+        "flow queues a design",
+    );
+    let ask = ["queue", "add", "ask", "--text", "Look around.", "--readonly", "--compiles", "false"];
+    ok(&other(&ask), "other queues an ask that builds nothing");
+    until(&env, "sketch", "running");
+    until_in(&other, "ask", "running", 30);
+    let second = job_in(&other, "second");
+    assert_eq!(second["status"], "queued", "the machine's one unit is the first project's: {second}");
+    assert_eq!((&second["readonly"], &second["compiles"]), (&true.into(), &true.into()), "a review compiles");
+    assert_eq!(job(&env, "sketch")["compiles"], false, "its profile says so");
+    assert_eq!(job_in(&other, "ask")["compiles"], false, "its line says so");
+    assert_eq!(job(&env, "first")["compiles"], true);
+    let board = String::from_utf8_lossy(&other(&["view", "status"]).stdout).into_owned();
+    let why = "1 of 1 compiling on this machine, over every project (machine.max_compiling in the owner's policy)";
+    assert!(board.contains(why), "the reason names the machine cap: {board}");
+    assert!(board.contains("compiles nothing"), "the board says which job is outside the cap: {board}");
+    // Its dispatcher put it in line, for the other projects' dispatchers to see.
+    let line = env.root.join("state/relay/other/bus/dispatch.ndjson");
+    let in_line = || std::fs::read_to_string(&line).unwrap_or_default().contains("\"in-line\"");
+    for _ in 0..100 {
+        if in_line() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(in_line(), "no in-line event in {}", line.display());
+    assert_eq!(job_in(&other, "second")["status"], "queued", "still held while the first runs");
+    // `relay profiles` shows what each profile declares, resolved.
+    let profiles: serde_json::Value = serde_json::from_slice(&relay(&env, &["profiles", "--json"]).stdout).unwrap();
+    let compiles = |name: &str| profiles["profiles"][name]["compiles"].clone();
+    assert_eq!((compiles("review"), compiles("design")), (true.into(), false.into()), "{profiles}");
+    let listed = String::from_utf8_lossy(&relay(&env, &["profiles"]).stdout).into_owned();
+    let row = |name: &str| listed.lines().find(|l| l.starts_with(name)).unwrap_or_default().to_owned();
+    assert!(row("design").contains("no compile") && !row("review").contains("no compile"), "{listed}");
+
+    std::fs::remove_file(env.home.join(".claude.a/hold")).unwrap();
+    assert_eq!(wait_for(&env, "first")["status"], "done");
+    // The first project's end rings every dispatcher's doorbell: the unit goes to the second's review.
+    until_in(&other, "second", "done", 90);
+    assert_eq!(wait_for(&env, "sketch")["status"], "done");
+    until_in(&other, "ask", "done", 30);
+}
+
+/// The parent of the process `pid`, and its command line.
+fn parent_of(pid: u64) -> (u64, String) {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let after = &stat[stat.rfind(')').unwrap() + 2..];
+    let parent: u64 = after.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let cmdline = std::fs::read(format!("/proc/{parent}/cmdline")).unwrap_or_default();
+    (parent, String::from_utf8_lossy(&cmdline).replace('\0', " "))
+}
+
+/// A runner that dies holding the machine's one compiling unit gives it back, by the evidence the
+/// seats use: every other project counts a unit only while the runner that holds it lives. Here
+/// the first project's dispatcher is dead too, so nobody reaps its job, its fold says `running`
+/// for good, and no event announces anything: the second project's dispatcher looks again within
+/// a minute, finds the unit's runner gone, and starts its own build.
+#[test]
+fn a_dead_runners_compiling_unit_comes_back_to_the_other_project() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = two_projects_one_compiling("machine-cap-dead");
+    let other = other_project(&env);
+    ok(&relay(&env, &["queue", "add", "first", "--text", "Make a change."]), "flow queues its build");
+    until(&env, "first", "running");
+    ok(&other(&["queue", "add", "second", "--text", "Make a change."]), "other queues its build");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(job_in(&other, "second")["status"], "queued", "held by the machine cap");
+    let runner = job(&env, "first")["runner"].clone();
+    let (pid, started) = (runner[0].as_u64().unwrap(), runner[1].as_u64().unwrap());
+    // The first project's dispatcher goes first, so that nothing of that project reaps the runner.
+    let (dispatcher, cmdline) = parent_of(pid);
+    assert!(cmdline.contains("dispatch serve"), "the runner's parent is its dispatcher: {cmdline}");
+    let kill = |pid: u64| Command::new("kill").args(["-9", &pid.to_string()]).status().unwrap().success();
+    assert!(kill(dispatcher));
+    let lock = env.root.join("state/relay/flow/dispatch.lock");
+    for _ in 0..100 {
+        if !locked(&lock) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!locked(&lock), "the first project's dispatcher did not die");
+    assert!(alive(pid, started), "its runner outlives it, still holding the unit");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(job_in(&other, "second")["status"], "queued", "a live runner keeps its unit, dispatcher or none");
+    assert!(kill(pid));
+    dies(pid, started);
+    until_in(&other, "second", "running", 90);
+    assert_eq!(job(&env, "first")["status"], "running", "nobody reaped it: its dead runner alone freed the unit");
+    std::fs::remove_file(env.home.join(".claude.a/hold")).unwrap();
+    until_in(&other, "second", "done", 90);
+}
+
 /// Audit finding 6: a second checkout whose relay.toml has the same `name` would share the first's
 /// state directory, and the first's dispatcher would run its jobs from the first's repository. It is
 /// refused, naming both repositories, and the first's queue is untouched.

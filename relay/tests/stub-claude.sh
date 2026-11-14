@@ -27,6 +27,14 @@
 # [plant-check] plants, like a hostile session, symlinks in every relay job directory it can write: where the
 # acceptance check's output went (check.out, to $acct/victim) and its /tmp (check-tmp, to $HOME).
 # [plant-config] tries to create, in its own account, config the host would obey: a settings.json with a hook and a hooks/ script.
+# [cache-link] works on the cache $HOME/<rel>, <rel> read from $acct/cache-rel (default .cache): hard-links its
+# `seed` (made there first if the cache is cold) into its clone, as a package manager links from its store, and records in $acct/cache-link `linked` or why
+# link() failed; records in $acct/cache-mount the mount (findmnt TARGET) the cache is on, then the one ~/.cache is on;
+# adds from-session to the cache; and records in $acct/cache-view what it sees around the cache: whether the host's
+# own cache file (host-only) shows, whether the host's `visible` beside the cache is readable, whether it can create
+# a file there, whether ~/.ssh's key shows, and whether relay's own caches directory shows.
+# [farm-peek] records in $acct/farm-ls every path under its clone's copy of the linked caches (.git/relay-caches),
+# and in $acct/farm-secret whether it could read $HOME/.cargo/git/secret/key.
 # [fsmonitor] leaves a core.fsmonitor in the clone's own configuration that touches $acct/fsmonitor-ran if anything ever runs it.
 set -eu
 acct=$CLAUDE_CONFIG_DIR
@@ -114,6 +122,27 @@ case "$prompt" in
 esac
 printf '%s\n--\n' "$prompt" >>"$acct/prompts"
 case "$prompt" in *"[env]"*) env | sort >"$acct/env" ;; esac
+case "$prompt" in *"[cache-link]"*)
+  cache="$HOME/$(cat "$acct/cache-rel" 2>/dev/null || echo .cache)"
+  [ -e "$cache/seed" ] || echo package >"$cache/seed" 2>/dev/null || true
+  if ln "$cache/seed" cache-linked 2>"$acct/cache-link"; then echo linked >"$acct/cache-link"; fi
+  rm -f cache-linked
+  { findmnt -n -o TARGET -T "$cache/seed"; findmnt -n -o TARGET -T "$HOME/.cache"; } >"$acct/cache-mount" 2>&1 || true
+  echo session >"$cache/from-session" || true
+  {
+    if [ -e "$cache/host-only" ]; then echo host-cache-shown; else echo host-cache-hidden; fi
+    if [ "$(cat "$(dirname "$cache")/visible" 2>/dev/null)" = here ]; then echo home-readable; else echo home-unreadable; fi
+    if touch "$(dirname "$cache")/created" 2>/dev/null; then echo home-writable; else echo home-read-only; fi
+    if [ -s "$HOME/.ssh/id" ]; then echo ssh-shown; else echo ssh-hidden; fi
+    if ls -d "$XDG_DATA_HOME"/relay/*/caches >/dev/null 2>&1; then echo relay-caches-shown; else echo relay-caches-hidden; fi
+  } >"$acct/cache-view.part"
+  mv "$acct/cache-view.part" "$acct/cache-view" ;;
+esac
+case "$prompt" in *"[farm-peek]"*)
+  find .git/relay-caches >"$acct/farm-ls" 2>&1 || true
+  if cat "$HOME/.cargo/git/secret/key" >/dev/null 2>&1; then echo read; else echo hidden; fi >"$acct/farm-secret.part"
+  mv "$acct/farm-secret.part" "$acct/farm-secret" ;;
+esac
 case "$prompt" in *"[idle]"*) ;; *)
 if [ -w . ] && [ -e .git ] && [ ! -f "$acct/once.done" ]; then
   echo "work $sid $turns" >relay-output.txt

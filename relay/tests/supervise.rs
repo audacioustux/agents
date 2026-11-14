@@ -230,6 +230,35 @@ fn a_setsid_grandchild_holds_the_seat_until_it_has_ended_and_never_outlives_the_
 }
 
 /// Whether a live process has `arg` among its arguments.
+/// Copilot on PR #67 at a6b6099: a directory a sandbox binds by open handle was left open across `exec`
+/// in the runner, so every child the runner started had it. The runner's handle is close-on-exec; the
+/// supervisor opens the directory through it and gives the program a handle of its own, its number in
+/// the argument the runner named. Another child of the runner has no such handle.
+#[test]
+fn a_directory_is_passed_to_the_program_by_a_handle_no_other_child_has() {
+    use std::os::fd::AsRawFd as _;
+    let d = Dir::new("pass");
+    std::fs::write(d.join("inside"), "here\n").unwrap();
+    // Opened as the runner opens a bound cache: close-on-exec.
+    let dir = std::fs::File::open(&d.0).unwrap();
+    let handle = dir.as_raw_fd().to_string();
+    let out = Command::new(RELAY)
+        .args(["supervise", "--parent", &std::process::id().to_string(), "--pass", "2", &handle, "--"])
+        .args(["sh", "-c", "cat \"/proc/self/fd/$0/inside\"", "handle"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "here\n", "{}", String::from_utf8_lossy(&out.stderr));
+    let other = Command::new("sh").args(["-c", "test -e /proc/self/fd/$0", &handle]).status().unwrap();
+    assert!(!other.success(), "another child of the runner has the handle");
+    // A handle the runner does not have is refused, and the program not started.
+    let none = Command::new(RELAY)
+        .args(["supervise", "--parent", &std::process::id().to_string(), "--pass", "2", "999999", "--"])
+        .args(["sh", "-c", "echo started", "handle"])
+        .output()
+        .unwrap();
+    assert_eq!((none.status.code(), none.stdout.as_slice()), (Some(127), &b""[..]), "{none:?}");
+}
+
 fn running_with_arg(arg: &str) -> bool {
     std::fs::read_dir("/proc").unwrap().filter_map(Result::ok).any(|e| {
         let name = e.file_name();

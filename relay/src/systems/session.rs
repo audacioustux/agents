@@ -4,7 +4,7 @@
 //! dispatch. Nothing here names a harness: the account's harness builds the
 //! command and reads the output, and the limits are enforced here for all.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ use crate::harness::{Harness, Home, Invocation, Permissions, Reader, Session, Ta
 use crate::hostdir::HostDir;
 use crate::os;
 use crate::sandbox::{self, Mounts};
-use crate::supervised::Supervised;
+use crate::supervised::{Passed, Supervised};
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request, Reviewing};
 use crate::systems::dispatch::{self, Room};
@@ -225,12 +225,18 @@ struct Workspace {
 /// A session ready to run.
 struct Launch {
     cmd: Command,
+    /// The directories its sandbox binds by open handle, close-on-exec here and given to the sandbox by
+    /// its supervisor alone ([`Passed`]): nothing else this runner starts (a decision's agent, a check)
+    /// has them. Open until it has run.
+    _keep: Vec<Passed>,
     /// The zone the session keeps its clock in: its environment's `TZ`, which the config sets, never relay's.
     zone: jiff::tz::TimeZone,
     stdin: Option<String>,
     session_id: String,
     brief: String,
     reviewing: Option<Reviewing>,
+    /// The session's own copy of the linked caches, in its clone: given back to the pool when dropped.
+    caches: Option<sandbox::farm::Farm>,
 }
 
 /// Either the next step's input, or how the attempt ends here.
@@ -269,9 +275,15 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         log: "log.ndjson",
         stderr: "stderr.log",
         measure: work.clone.iter().map(SessionRepo::path).chain([work.tmp.as_path()]).collect(),
+        apart: launch.caches.as_ref().map(sandbox::farm::Farm::path),
     };
     let (mut report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
+    // Its copy of the linked caches goes back to the pool for another run only with proof its sandbox has
+    // ended; without (its supervisor was killed, or this returned early), it is retired when dropped.
+    if let (Some(copy), Some(ended)) = (launch.caches.take(), ending.ended) {
+        copy.give_back(ended);
+    }
     let marker = &ctx.cfg.session.final_marker;
     report.zone = Some(launch.zone.clone());
     report.choose(marker);
@@ -448,11 +460,29 @@ fn launch(
         tmp: &work.tmp,
         cwd: &work.cwd,
         account: true,
+        caches: None,
     };
-    let cmd = supervised_command(ctx, &inv, &mounts)?;
+    // A package manager hard-links from its caches into the clone, so the linked ones are in the clone's
+    // mount: a copy of exactly those the plan links.
+    let rels = sandbox::linkable(ctx, &accounts::home(), &mounts);
+    // A copy an interrupted run left there goes even when this run links nothing; it must, or no session starts.
+    let caches = match work.clone.as_ref().and_then(|c| sandbox::farm::clone_git(c.path())) {
+        Some(git) => {
+            // It is used again only once nothing an earlier runner of this job started is left: a killed
+            // runner's sandbox may still write in it, and this run's end would not say when that stopped.
+            let me = std::process::id();
+            let me = (me, os::start_time(me).unwrap_or(0));
+            let left = sandbox::farm::Ended::earlier_runs(&ctx.world()?.claims, &job.name, me);
+            sandbox::own_caches(ctx, &git, sandbox::farm::IN_CLONE, &ctx.session_copies, &rels, left)
+                .context("removing the copy of the caches an interrupted run left in the clone")?
+        }
+        None => None,
+    };
+    let mounts = Mounts { caches: caches.as_ref().map(sandbox::farm::Farm::path), ..mounts };
+    let (cmd, keep) = supervised_command(ctx, &inv, &mounts)?;
     let tz = sandbox::session_env(ctx, &inv).into_iter().find(|(k, _)| k == "TZ").map(|(_, v)| v);
     let zone = crate::harness::report::zone_of(tz.as_ref().map(|v| v.to_string_lossy()).as_deref());
-    Ok(ControlFlow::Continue(Launch { cmd, zone, stdin: inv.stdin, session_id, brief, reviewing }))
+    Ok(ControlFlow::Continue(Launch { cmd, _keep: keep, zone, stdin: inv.stdin, session_id, brief, reviewing, caches }))
 }
 
 /// The harness's command line for the session, or why it refuses.
@@ -692,14 +722,16 @@ pub fn consult(
             tmp: &tmp,
             cwd: &ctx.cfg.repo,
             account: true,
+            caches: None,
         };
-        let mut cmd = build(ctx, &inv, &mounts, |p| crate::supervised::holding(p, hold.as_deref()))?;
+        let (mut cmd, _keep) = build(ctx, &inv, &mounts, hold.as_deref())?;
         let run = Run {
             session_id: None,
             budget_usd: agent.budget_usd,
             log: "check.ndjson",
             stderr: "check-stderr.log",
             measure: Vec::new(),
+            apart: None,
         };
         let ran = drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader(), live)
             .map(|(report, ending, _)| (report, ending));
@@ -932,10 +964,10 @@ fn stderr_tail(ctx: &Ctx, job: &Job) -> String {
 /// runner starts anything, its session and each run of its acceptance check alike: the whole process group ends with it, with the runner, or when it is stopped
 /// ([`crate::supervised`]). The supervisor holds this runner's claim lock ([`own_claim`]) until the
 /// last process of its tree is reaped, so the runner's claim on the machine outlasts a runner that
-/// is killed outright for exactly as long as anything it started still runs.
-fn supervised_command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<Command> {
-    let hold = own_claim();
-    build(ctx, inv, mounts, |p| crate::supervised::holding(p, Some(&hold)))
+/// is killed outright for exactly as long as anything it started still runs. With the directories
+/// it binds by open handle (keep them until it has ended); an error when the sandbox cannot be prepared.
+fn supervised_command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<(Command, Vec<Passed>)> {
+    build(ctx, inv, mounts, Some(&own_claim()))
 }
 
 /// This runner's claim lock ([`crate::world::claim_lock`]), in a directory that is there.
@@ -949,24 +981,28 @@ fn own_claim() -> PathBuf {
     lock
 }
 
-fn build<E>(
+/// The command for `inv` under the supervisor, which holds `hold` (a seat's or a claim's lock): in the
+/// sandbox, which the supervisor alone gives the directories it binds by open handle, or as it is.
+fn build(
     ctx: &Ctx,
     inv: &Invocation,
     mounts: &Mounts<'_>,
-    new: impl FnOnce(&OsStr) -> Result<Command, E>,
-) -> Result<Command, E> {
+    hold: Option<&Path>,
+) -> std::io::Result<(Command, Vec<Passed>)> {
     let mut argv: Vec<OsString> = vec!["nice".into(), "-n".into(), ctx.cfg.session.nice.to_string().into()];
     argv.push(inv.program.clone());
     argv.extend(inv.args.iter().cloned());
     let env = sandbox::session_env(ctx, inv);
     if ctx.cfg.sandbox.enabled {
-        let mut c = new(OsStr::new("bwrap"))?;
-        c.args(sandbox::args(ctx, &accounts::home(), mounts, env)).args(argv);
-        Ok(c)
+        // The handles' arguments are counted from bubblewrap's first: its own come first.
+        let (args, keep) = sandbox::args(ctx, &accounts::home(), mounts, env)?;
+        let mut c = crate::supervised::holding("bwrap", hold, &keep)?;
+        c.args(args).args(argv);
+        Ok((c, keep))
     } else {
-        let mut c = new(&argv[0])?;
+        let mut c = crate::supervised::holding(&argv[0], hold, &[])?;
         c.args(&argv[1..]).env_clear().envs(env).current_dir(mounts.cwd);
-        Ok(c)
+        Ok((c, Vec::new()))
     }
 }
 
@@ -980,6 +1016,9 @@ struct Run<'a> {
     stderr: &'a str,
     /// What to measure while it runs, for a job's worker: its clone (a build job) and its `/tmp`.
     measure: Vec<&'a Path>,
+    /// The copy of the linked caches this run was given in its clone, which is not its work: left out of
+    /// what is measured. None where it was given none: then nothing is.
+    apart: Option<&'a Path>,
 }
 
 /// What the runner hears while it drives a session: a line of output, the
@@ -1115,11 +1154,12 @@ fn listen(
     let (stop, stopped) = mpsc::channel::<()>();
     if !run.measure.is_empty() {
         let dirs: Vec<PathBuf> = run.measure.iter().map(|p| (*p).to_path_buf()).collect();
+        let apart = run.apart.map(Path::to_path_buf);
         let every = Duration::from_secs_f64(ctx.cfg.limits.disk_sample_minutes * 60.0);
         let sizes = tx.clone();
         std::thread::spawn(move || {
             loop {
-                if sizes.send(Heard::Disk(os::dirs_size(&dirs, DISK_WALK))).is_err() {
+                if sizes.send(Heard::Disk(os::dirs_size(&dirs, apart.as_deref(), DISK_WALK))).is_err() {
                     return;
                 }
                 if !matches!(stopped.recv_timeout(every), Err(mpsc::RecvTimeoutError::Timeout)) {
@@ -1293,6 +1333,7 @@ fn drive(
         Ok(())
     })?;
     settle(&mut child, &mut ending, live, deadline, heard_at, silent_after)?;
+    ending.ended = crate::sandbox::farm::Ended::reaped(&child);
     Ok((reader.report().clone(), ending, disk))
 }
 

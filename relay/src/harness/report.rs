@@ -77,6 +77,9 @@ pub struct Ending {
     pub silent: bool,
     /// The runner ended it for spending past its cap.
     pub over_budget: bool,
+    /// Proof that everything it started has ended ([`crate::sandbox::farm::Ended::reaped`]): what its copy of
+    /// the linked caches is given back to the pool with. None, and the copy is retired.
+    pub ended: Option<crate::sandbox::farm::Ended>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -265,7 +268,7 @@ mod tests {
 
     // 2026-11-02T15:00:00Z
     const NOW: i64 = 1_793_631_600;
-    const OK: Ending = Ending { exit_ok: true, timed_out: false, silent: false, over_budget: false };
+    const OK: Ending = Ending { exit_ok: true, timed_out: false, silent: false, over_budget: false, ended: None };
 
     fn done(answer: &str) -> Report {
         Report { lines: 1, ended: true, answer: answer.into(), ..Default::default() }

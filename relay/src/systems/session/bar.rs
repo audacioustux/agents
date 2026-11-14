@@ -6,7 +6,8 @@
 //! session's sandbox plan, with the clone and the session's account out of sight, and a development
 //! environment entered from the project's repository, not from files the session could have changed.
 //!
-//! Its working directory (`<job>.bar.d`: the checkout and its `/tmp`) is made fresh for each run, outside
+//! Its working directory (`<job>.bar.d`: the checkout, its `/tmp` and its copy of the caches, in one mount
+//! with the checkout so a package manager can hard-link from them) is made fresh for each run, outside
 //! anything the session could write, and its output goes to the job's inbox, which the check cannot write.
 //! A session that planted a symlink in its own directories has nothing relay follows.
 
@@ -433,15 +434,36 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, phase: Phase, place:
         let file = place.inbox.create("check.out")?;
         let tmp = place.work.join("tmp");
         std::fs::create_dir(&tmp)?;
-        let mounts =
-            Mounts { home, workdir: None, scratch: place.work, inbox: None, tmp: &tmp, cwd: tree, account: false };
+        let mounts = Mounts {
+            home,
+            workdir: None,
+            scratch: place.work,
+            inbox: None,
+            tmp: &tmp,
+            cwd: tree,
+            account: false,
+            caches: None,
+        };
+        // Its own copy of the linked caches the plan links, beside its tree in its directory's mount, given
+        // back to the check pool when it ends (the check's sandbox has ended whole by then: the supervisor
+        // exits with a code only once it has reaped its whole tree).
+        let rels = crate::sandbox::linkable(ctx, &crate::accounts::home(), &mounts);
+        let caches = crate::sandbox::own_caches(ctx, place.work, "caches", &ctx.check_copies, &rels, None)
+            .context("removing a copy of the caches left in the check's directory")?;
+        let mounts = Mounts { caches: caches.as_ref().map(crate::sandbox::farm::Farm::path), ..mounts };
         // Under the supervisor, as the session was: whatever the check starts (the compilers under
         // it) ends with it or with this runner, sandbox or none, and holds the runner's claim till then.
-        let mut c = super::supervised_command(ctx, &inv, &mounts).context("running the acceptance check")?;
+        // The sandbox is refused (not built) when a directory it binds cannot be prepared safely.
+        let (mut c, _keep) = super::supervised_command(ctx, &inv, &mounts).context("preparing the check's sandbox")?;
         c.stdin(Stdio::null()).stdout(file.try_clone()?).stderr(file);
         let mut child = Supervised::spawn(&mut c).context("running the acceptance check")?;
         // Its output is a file, so there is no pipe to see closed; its own `timeout` bounds it.
         let ended = child.finish(|| true, || None::<std::convert::Infallible>);
+        // Back to the pool only if the supervisor reaped the check's whole tree; killed from outside, or
+        // not run at all, the copy is retired when dropped.
+        if let (Some(copy), Some(ended)) = (caches, crate::sandbox::farm::Ended::reaped(&child)) {
+            copy.give_back(ended);
+        }
         let status = match ended.context("running the acceptance check")? {
             Ok(status) => status,
             Err(never) => match never {},

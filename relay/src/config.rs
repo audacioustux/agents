@@ -608,6 +608,10 @@ pub struct Gc {
     pub interval_minutes: f64,
     /// A pass stops after this long, and the next one goes on.
     pub pass_seconds: u64,
+    /// An idle copy of the linked caches (`sandbox.linked_caches`) goes once no run has taken it for
+    /// this many days; and a pool keeps no more idle copies than `limits.max_running`. A copy is a whole
+    /// cache, warmed by the runs that held it: one removed costs the next run a cold install.
+    pub cache_copies_idle_days: f64,
 }
 
 impl Default for Gc {
@@ -620,6 +624,7 @@ impl Default for Gc {
             logs_gzip_after_days: 3.0,
             interval_minutes: 60.0,
             pass_seconds: 300,
+            cache_copies_idle_days: 7.0,
         }
     }
 }
@@ -752,7 +757,13 @@ pub struct Sandbox {
     /// Paths under `$HOME` sessions get as writable caches. Each is relay's own
     /// directory for the project, mounted there, never the host's: a session
     /// that could write the host's `~/.cargo` could replace what the host runs.
-    pub caches: Vec<PathBuf>,
+    pub caches: Vec<CachePath>,
+    /// Those of `caches` a job with a tree gets as a symlink into a private copy of its own, on its
+    /// tree's mount, so a tool that hard-links from its store into the tree (bun, pnpm, uv) can: across
+    /// two mounts `link()` fails and it copies instead. Copies are pooled and warm on their own: a new
+    /// one is cold, and a package new to the project is fetched once per copy, so only a cache a tool
+    /// links from is worth declaring. Every other cache stays a bind of relay's directory for it.
+    pub linked_caches: Vec<CachePath>,
     /// Environment variables whose names match this regex are not passed in.
     pub env_deny: String,
     /// `/dev/shm`: a RAM tmpfs of at most this many MiB per session, for what wants one (POSIX
@@ -787,10 +798,56 @@ impl Default for Sandbox {
             ]
             .map(PathBuf::from)
             .to_vec(),
-            caches: [".cache", ".cargo/registry", ".cargo/git"].map(PathBuf::from).to_vec(),
+            caches: [".cache", ".cargo/registry", ".cargo/git"]
+                .map(|c| CachePath::new(c).expect("a default cache path is plain"))
+                .to_vec(),
+            linked_caches: Vec::new(),
             env_deny: DEFAULT_ENV_DENY.into(),
             shm_mb: 256,
         }
+    }
+}
+
+/// A cache's path under `$HOME`, the one form relay compares, everywhere: made once, when the config is
+/// read, of plain names only (no `.`, `..`, root or empty one; a trailing `/` is dropped), so two
+/// spellings of one directory are one value and `starts_with` between two of them is nesting. The config,
+/// the plan, the copies and the probe all take this, never a raw spelling.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+#[serde(try_from = "String")]
+pub struct CachePath(PathBuf);
+
+impl CachePath {
+    pub fn new(spelled: &str) -> Result<Self, String> {
+        let trimmed = spelled.strip_suffix('/').unwrap_or(spelled);
+        let plain = !trimmed.is_empty()
+            && !trimmed.starts_with('/')
+            && trimmed.split('/').all(|n| !n.is_empty() && n != "." && n != "..");
+        if !plain {
+            return Err(format!(
+                "cache path {spelled:?} must be a path inside $HOME of plain names, such as \".cache\" (no ., .. or empty name)"
+            ));
+        }
+        Ok(Self(PathBuf::from(trimmed)))
+    }
+}
+
+impl TryFrom<String> for CachePath {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, String> {
+        Self::new(&s)
+    }
+}
+
+impl std::ops::Deref for CachePath {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for CachePath {
+    fn as_ref(&self) -> &Path {
+        &self.0
     }
 }
 
@@ -1070,10 +1127,35 @@ impl Config {
                 );
             }
         }
-        for p in self.sandbox.hide_home.iter().chain(&self.sandbox.caches) {
+        self.validate_sandbox()
+    }
+
+    /// The sandbox's paths: each inside $HOME, caches apart from one another, and linked caches among them.
+    fn validate_sandbox(&self) -> Result<()> {
+        // A cache's path was checked when it was read ([`CachePath`]).
+        for p in &self.sandbox.hide_home {
             if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
                 bail!("{} must be a path inside $HOME, written relative to it", p.display());
             }
+        }
+        // A cache nested in another could be reached through the outer one's bind, and a symlink planted on
+        // the way would take relay's own walks (making the inner cache's directory, binding it) out of its
+        // caches: so caches are apart, each relay's alone up to its own directory.
+        let caches = &self.sandbox.caches;
+        for (i, a) in caches.iter().enumerate() {
+            if let Some(b) = caches[i + 1..].iter().find(|b| a.starts_with(b) || b.starts_with(a)) {
+                bail!(
+                    "sandbox.caches {} and {} are nested: a cache inside another is refused (keep the outer one)",
+                    a.display(),
+                    b.display()
+                );
+            }
+        }
+        if let Some(p) = self.sandbox.linked_caches.iter().find(|p| !self.sandbox.caches.contains(p)) {
+            bail!(
+                "sandbox.linked_caches names {}, which is not in sandbox.caches: a linked cache is one of the caches",
+                p.display()
+            );
         }
         Ok(())
     }
@@ -1123,6 +1205,7 @@ impl Config {
             ("clones_after_days", g.clones_after_days),
             ("waiting_retain_days", g.waiting_retain_days),
             ("logs_gzip_after_days", g.logs_gzip_after_days),
+            ("cache_copies_idle_days", g.cache_copies_idle_days),
         ] {
             ensure!(v.is_finite() && v >= 0.0, "gc.{key} must not be negative");
         }
@@ -1605,6 +1688,14 @@ mod tests {
             "[gc]\nbuild_outputs = [\".\"]",
             "[gc]\nbuild_outputs = [\"\"]",
             "[gc]\nclones_after_days = -1",
+            "[gc]\ncache_copies_idle_days = -1",
+            "[sandbox]\nlinked_caches = [\".bun/install/cache\"]",
+            "[sandbox]\ncaches = [\".cache\", \".cache/uv\"]",
+            "[sandbox]\ncaches = [\".cache/uv\", \".cache/\"]",
+            // Spelled otherwise, the same (PR #67 review 5): nested, and relay's staging.
+            "[sandbox]\ncaches = [\"./.cache\", \".cache/redirect/hooks\"]",
+            "[sandbox]\ncaches = [\"\"]",
+            "[sandbox]\ncaches = [\".\"]",
             "[gc]\npass_seconds = 0",
             "[limits]\njob_disk_gb = -5",
             "[limits]\ndisk_resume_margin_gb = -1",

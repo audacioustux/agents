@@ -377,6 +377,287 @@ fn a_check_follows_nothing_the_session_planted() {
     assert!(!env.home.join("escaped").exists(), "the check's /tmp was the home the session linked to");
 }
 
+/// Tickify, 2026-11-12: each cache was a bind of its own, apart from the bind of the job's tree, so `link()`
+/// from the cache into the tree failed with EXDEV (one filesystem, but two mounts) and bun, pnpm and uv copied
+/// every package instead: a frozen install that takes 4 s on the host did not finish in 1800 s in a check.
+/// A project that declares bun's cache in `sandbox.linked_caches` now has the session, the check at the tip
+/// and the check at the base each hard-link from it into their tree; what each adds to the cache is there for
+/// the next; the home around the cache shows what it showed before, read-only, with the host's own cache and
+/// what `hide_home` hides still out of sight; and a cache it does not declare is a bind as before.
+#[test]
+fn a_cache_and_the_tree_share_a_mount_so_a_package_manager_hard_links() {
+    // The home is not a hidden sibling of the repository here, as on a real machine: the cache sits among the
+    // host's own files, in a home rebuilt from them.
+    cache_link("cache-link", true, true);
+}
+
+/// The same where the home is hidden (here, a sibling of the repository): the cache is a symlink in the
+/// hidden home's empty tmpfs.
+#[test]
+fn a_cache_in_a_hidden_home_shares_a_mount_with_the_tree() {
+    cache_link("cache-link-hidden", false, true);
+}
+
+/// A project that declares no linked cache keeps the layout it had: each cache a bind of its own (its own
+/// mount, by findmnt), so `link()` from it into the tree fails with EXDEV, and no copy is made.
+#[test]
+fn an_undeclared_cache_stays_a_bind_of_its_own() {
+    cache_link("cache-bind", true, false);
+}
+
+/// Waits (bounded: a minute) until `path` is there.
+fn wait_until_there(path: &Path) {
+    for _ in 0..600 {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The entries named `name…` in the cache `rel` of every copy in the pool `pool` (under the test's root).
+fn in_pool(env: &Env, pool: &str, rel: &str, name: &str) -> Vec<PathBuf> {
+    std::fs::read_dir(env.root.join(pool))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|copy| std::fs::read_dir(copy.path().join(rel)).into_iter().flatten().flatten())
+        .map(|e| e.path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(name))
+        .collect()
+}
+
+fn cache_link(tag: &str, home_shown: bool, declared: bool) {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup(tag, false);
+    let rel = ".bun/install/cache";
+    let sandbox = format!(
+        "[sandbox]\n{}caches = [\".cache\", \"{rel}\"]\nlinked_caches = [{}]\n",
+        if home_shown { "hide = []\n" } else { "" },
+        if declared { format!("\"{rel}\"") } else { String::new() }
+    );
+    configure(&env, "job_ceiling_usd = 100.0\n", &sandbox);
+    claude_account(&env.home, "a", 10, false);
+    let acct = env.home.join(".claude.a");
+    std::fs::write(acct.join("cache-rel"), rel).unwrap();
+    // Beside the cache: the directory a linked cache's symlink stands in.
+    std::fs::create_dir_all(env.home.join(".bun/install")).unwrap();
+    std::fs::write(env.home.join(".bun/install/visible"), "here").unwrap();
+    // A dangling symlink of the host's there is kept as itself, and the probe accepts it (PR #67 review).
+    std::os::unix::fs::symlink("nowhere", env.home.join(".bun/install/dangling")).unwrap();
+    std::fs::create_dir_all(env.home.join(".ssh")).unwrap();
+    std::fs::write(env.home.join(".ssh/id"), "key").unwrap();
+    // The host's own caches, which a job never sees, and the project's, which it does.
+    for r in [rel, ".cache"] {
+        std::fs::create_dir_all(env.home.join(r)).unwrap();
+        std::fs::write(env.home.join(r).join("host-only"), "host").unwrap();
+    }
+    let shared = env.root.join("data/relay/flow/caches").join(rel);
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(shared.join("seed"), "a package").unwrap();
+    // Red at the base (no output file there yet), green at the tip. Each run hard-links from the cache (filled
+    // first if cold) into its tree, then leaves a mark in the cache named after its commit.
+    let check = format!(
+        r#"{{ [ -e "$HOME/{rel}/seed" ] || echo package >"$HOME/{rel}/seed"; }} && ln "$HOME/{rel}/seed" linked && : >"$HOME/{rel}/linked-$(git rev-parse HEAD)" && test -f relay-output.txt"#
+    );
+    // The probe checks the layout from inside: the linked cache on the clone's mount, its directory the host's.
+    let probe = relay(&env, &["probe", "--account", "claude:a"]);
+    ok(&probe, "probe");
+    let p = out_of(&probe);
+    if declared {
+        assert!(p.contains("PASS  linked caches share the tree's mount"), "{p}");
+        assert!(p.contains("PASS  a directory holding a linked cache shows the host's entries, read-only"), "{p}");
+        // It took a copy for its clone (the check was not vacuous), and gave it back to the pool.
+        let farms = std::fs::read_dir(env.root.join("data/relay/flow/copies-for-sessions")).map_or(0, Iterator::count);
+        assert_eq!(farms, 1, "the probe's copy, idle");
+    }
+    assert!(!env.root.join("data/relay/flow/caches").join(rel).join(".relay-probe-link").exists());
+    let text = "[cache-link][status-done] Make a change.";
+    let mut add = vec!["queue", "add", "linker", "--text", text];
+    if declared {
+        add.extend(["--check", &check, "--check-red-first"]);
+    }
+    ok(&relay(&env, &add), "queue");
+    let said = |f: &str| std::fs::read_to_string(acct.join(f)).unwrap_or_default();
+    wait_until_there(&acct.join("cache-view"));
+    let clone = workdir(&env, "linker");
+    let mounts: Vec<String> = said("cache-mount").lines().map(str::to_owned).collect();
+    let home = |r: &str| env.home.join(r).display().to_string();
+    if declared {
+        assert_eq!(said("cache-link").trim(), "linked", "link() from the cache into the session's clone");
+        assert_eq!(
+            mounts,
+            [clone.display().to_string(), home(".cache")],
+            "the cache on the clone's mount; .cache its own"
+        );
+    } else {
+        assert!(said("cache-link").contains("Invalid cross-device link"), "{}", said("cache-link"));
+        assert_eq!(mounts, [home(rel), home(".cache")], "each cache a mount of its own, as before");
+        assert!(!clone.join(".git/relay-caches").exists(), "no copy is made");
+    }
+    // (The test's home is under the system /tmp, which a sandbox replaces with the job's own: only what is
+    // mounted in it shows. So what is around the cache is looked at where the plan rebuilt it.)
+    if declared {
+        assert_eq!(
+            said("cache-view").lines().collect::<Vec<_>>(),
+            [
+                "host-cache-hidden",
+                if home_shown { "home-readable" } else { "home-unreadable" },
+                "home-read-only",
+                "ssh-hidden",
+                "relay-caches-hidden"
+            ],
+            "what the session sees around its cache"
+        );
+    }
+    let j = wait_for(&env, "linker");
+    assert_eq!(j["status"], "done", "{j}");
+    assert!(!env.home.join(rel).join("from-session").exists(), "the host's own cache");
+    assert!(!env.home.join(".bun/install/created").exists(), "the host's own directory");
+    if !declared {
+        assert_eq!(std::fs::read_to_string(shared.join("from-session")).unwrap(), "session\n", "relay's cache, bound");
+        let farms = env.root.join("data/relay/flow/copies-for-sessions");
+        assert!(std::fs::read_dir(&farms).map_or(true, |mut d| d.next().is_none()), "no copy in a pool");
+        return;
+    }
+    // A linked cache is the copy's own: what the session fetched stays in it, and relay's cache is not written.
+    assert!(!shared.join("from-session").exists(), "a copy wrote into relay's shared cache");
+    assert_eq!(
+        in_pool(&env, "data/relay/flow/copies-for-sessions", rel, "from-session").len(),
+        1,
+        "the session's copy, pooled with it"
+    );
+    assert_eq!((j["bars"][0]["result"].as_str(), j["bars"][0]["base_exit"].as_i64()), (Some("pass"), Some(1)), "{j}");
+    assert_eq!(
+        in_pool(&env, "state/relay/flow/copies-for-checks", rel, "linked-").len(),
+        2,
+        "the checks at the tip and at the base both linked, in one copy taken from one to the other"
+    );
+}
+
+/// PR #67 review 3: a declared cache with a hidden path under it (`hide_home` names `.cargo/git/secret`) was
+/// rightly a bind in the plan, with `secret` hidden; but the copy was made of it anyway, whole, in the clone's
+/// `.git/relay-caches` and the check's `caches/`, where the session and the check read `secret`. A cache the
+/// plan does not link is never copied, and neither is anything a hide rule covers.
+#[test]
+fn a_cache_with_a_hidden_path_under_it_is_never_copied() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("farm-hidden", false);
+    configure(
+        &env,
+        "job_ceiling_usd = 100.0\n",
+        "[sandbox]\nhide = []\ncaches = [\".cargo/git\"]\nlinked_caches = [\".cargo/git\"]\n\
+         hide_home = [\".cargo/git/secret\"]\n",
+    );
+    claude_account(&env.home, "a", 10, false);
+    std::fs::create_dir_all(env.home.join(".cargo/git/secret")).unwrap();
+    let shared = env.root.join("data/relay/flow/caches/.cargo/git");
+    std::fs::create_dir_all(shared.join("secret")).unwrap();
+    std::fs::write(shared.join("secret/key"), "k").unwrap();
+    std::fs::write(shared.join("plain"), "p").unwrap();
+    // The check fails wherever its directory holds a copy with the secret in it.
+    let check = "test -z \"$(find ../caches -name secret 2>/dev/null)\"";
+    let text = "[farm-peek][status-done] Make a change.";
+    ok(&relay(&env, &["queue", "add", "peek", "--text", text, "--check", check]), "queue");
+    let acct = env.home.join(".claude.a");
+    for _ in 0..600 {
+        if acct.join("farm-secret").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let said = |f: &str| std::fs::read_to_string(acct.join(f)).unwrap_or_default();
+    assert!(!said("farm-ls").contains("secret"), "the session's copy holds the hidden path: {}", said("farm-ls"));
+    assert_eq!(said("farm-secret").trim(), "hidden");
+    let j = wait_for(&env, "peek");
+    assert_eq!((j["status"].as_str(), j["bars"][0]["result"].as_str()), (Some("done"), Some("pass")), "{j}");
+}
+
+/// Copilot at a6b6099: the probe ran bubblewrap itself and took its exit with a code as proof that its
+/// sandbox had ended. Bubblewrap reports its command's exit before the rest of its pid namespace has
+/// gone, so the probe's copy of the linked caches went back to the pool on no proof. The probe's
+/// sandboxes run under the supervisor, as a session's and a check's do: the one witness of a whole tree's end.
+#[test]
+fn the_probes_sandboxes_run_under_the_supervisor() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("probe-supervised", false);
+    claude_account(&env.home, "a", 10, false);
+    // A bubblewrap of the test's own, first on the probe's PATH: it notes who started it, then is the real one.
+    let (bin, log) = (env.root.join("bin"), env.root.join("started-by"));
+    std::fs::create_dir_all(&bin).unwrap();
+    let found = Command::new("sh").args(["-c", "command -v bwrap"]).output().unwrap();
+    let real = String::from_utf8_lossy(&found.stdout).trim().to_owned();
+    write_executable(
+        &bin.join("bwrap"),
+        &format!(
+            "#!/bin/sh\n{{ tr '\\0' ' ' </proc/$PPID/cmdline; echo; }} >>'{}'\nexec '{real}' \"$@\"\n",
+            log.display()
+        ),
+    );
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let mut probe = Command::new(env!("CARGO_BIN_EXE_relay"));
+    probe.args(["probe", "--account", "claude:a"]).env("PATH", path);
+    let probe = relay_cmd(&env, &mut probe);
+    ok(&probe, "probe");
+    let started_by = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(!started_by.is_empty(), "the probe ran no sandbox");
+    for by in started_by.lines() {
+        assert!(by.contains(" supervise "), "a probe's sandbox was started by `{by}`, not by a supervisor");
+    }
+}
+
+/// Copilot at a6b6099: gc sized a copy of the linked caches by all it holds and said that much was freed.
+/// A copy's packages are hard-linked into the trees installed from it, and a file's blocks go only with
+/// its last link: what a kept tree still links is not freed by removing the copy.
+#[test]
+fn gc_says_freed_only_what_no_kept_tree_still_links() {
+    let env = setup("gc-links", false);
+    let copy = env.root.join("data/relay/flow/copies-for-sessions/gone-left");
+    std::fs::create_dir_all(copy.join(".cache")).unwrap();
+    std::fs::write(copy.join(".cache/pkg"), vec![1u8; 1 << 20]).unwrap();
+    std::fs::write(copy.join(".cache/own"), vec![1u8; 1 << 18]).unwrap();
+    // A tree installed from the copy, which stays.
+    let kept = env.root.join("data/relay/flow/kept-tree");
+    std::fs::create_dir_all(&kept).unwrap();
+    std::fs::hard_link(copy.join(".cache/pkg"), kept.join("pkg")).unwrap();
+    let pass = relay(&env, &["land", "gc", "--json"]);
+    ok(&pass, "gc");
+    let report: serde_json::Value = serde_json::from_slice(&pass.stdout).unwrap();
+    assert!(!copy.exists() && kept.join("pkg").exists(), "{report}");
+    let freed = report["freed_bytes"].as_u64().unwrap();
+    assert!(freed >= 1 << 18, "what only the copy held is freed: {report}");
+    assert!(freed < 1 << 20, "a package a kept tree still links was said to be freed: {report}");
+}
+
+/// Copilot at 7fe4805: with a package linked in two copies a pass removes and in a tree that stays, the
+/// first removal lowered the link count the second measurement read, and the first copy's link was counted
+/// against it again: the second copy was said to free the package. A removed link counts once.
+#[test]
+fn gc_counts_a_link_it_really_removed_once() {
+    let env = setup("gc-links-twice", false);
+    let pool = env.root.join("data/relay/flow/copies-for-sessions");
+    let (one, two) = (pool.join("gone-one"), pool.join("gone-two"));
+    let kept = env.root.join("data/relay/flow/kept-tree");
+    for dir in [&one, &two, &kept] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(one.join("pkg"), vec![1u8; 1 << 20]).unwrap();
+    std::fs::hard_link(one.join("pkg"), two.join("pkg")).unwrap();
+    std::fs::hard_link(one.join("pkg"), kept.join("pkg")).unwrap();
+    let pass = relay(&env, &["land", "gc", "--json"]);
+    ok(&pass, "gc");
+    let report: serde_json::Value = serde_json::from_slice(&pass.stdout).unwrap();
+    assert!(!one.exists() && !two.exists() && kept.join("pkg").exists(), "{report}");
+    let freed = report["freed_bytes"].as_u64().unwrap();
+    assert!(freed < 1 << 20, "a package a kept tree still links was said to be freed: {report}");
+}
+
 /// Audit finding 4: protected config an account does not have yet was not mounted at all, so its
 /// session could create it: a `settings.json` with a hook, a `hooks/` script, or a new omp profile that
 /// relay would then discover as an account. Each now gets a read-only placeholder.

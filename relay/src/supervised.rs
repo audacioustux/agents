@@ -15,6 +15,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::fd::OwnedFd;
 use std::process::{Child, Command, ExitCode, ExitStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,26 +39,81 @@ const SUPERVISOR_LOOK: Duration = Duration::from_millis(25);
 /// the runner's side, which needs no relay executable. The supervisor itself is the real binary's,
 /// and tested as that (`tests/supervise.rs`, and end to end in `tests/flow.rs`).
 pub fn command(program: impl AsRef<OsStr>) -> io::Result<Command> {
-    holding(program, None)
+    holding(program, None, &[])
 }
 
-/// As [`command`], with the supervisor holding the seat lock `hold` (`--hold`), shared, in a way its
-/// child and everything it starts inherit: the lock is held until that whole tree has ended.
+/// A directory a supervised program is given by open handle, which one of its arguments names
+/// (bubblewrap's `--bind-fd <n> <dest>`).
+///
+/// The handle is close-on-exec in the runner for its whole life, so nothing the runner starts
+/// inherits it: not a decision's agent, not a check, not a hook. The supervisor, which starts the
+/// program and nothing else, opens the directory through this handle (`--pass`, [`pass`]) and gives
+/// the program a handle of its own. Keep it until the supervised program has ended.
+#[derive(Debug)]
+pub struct Passed {
+    /// Which of the program's arguments (the first is 0) the supervisor replaces with its handle's number.
+    pub arg: usize,
+    pub dir: OwnedFd,
+}
+
+/// What stands in a program's argument until the supervisor puts a passed handle's number there: no
+/// number, so a program started without its supervisor refuses it rather than take some other handle.
+pub const HANDLE: &str = "handle";
+
+/// As [`command`], with the supervisor holding the seat lock `hold` (`--hold`), shared, for its whole
+/// life, which ends only once that whole tree has; and giving the program each of `passed` (`--pass`).
 #[cfg_attr(test, allow(clippy::unnecessary_wraps, reason = "only the real supervisor can fail to be found"))]
 #[cfg_attr(test, allow(unused_variables, reason = "no supervisor in unit tests"))]
-pub fn holding(program: impl AsRef<OsStr>, hold: Option<&std::path::Path>) -> io::Result<Command> {
+pub fn holding(program: impl AsRef<OsStr>, hold: Option<&std::path::Path>, passed: &[Passed]) -> io::Result<Command> {
     #[cfg(not(test))]
     {
+        use std::os::fd::AsRawFd as _;
         let mut c = Command::new(crate::os::own_binary()?);
         c.args(["supervise", "--parent", &std::process::id().to_string()]);
         if let Some(path) = hold {
             c.arg("--hold").arg(path);
+        }
+        for p in passed {
+            c.args(["--pass", &p.arg.to_string(), &p.dir.as_raw_fd().to_string()]);
         }
         c.arg("--").arg(program);
         Ok(c)
     }
     #[cfg(test)]
     Ok(Command::new(program))
+}
+
+/// What a supervised command wrote, and how it ended.
+#[derive(Debug)]
+pub struct Output {
+    pub status: ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Runs `cmd`, made by [`command`], to its end with no input, and collects what it wrote: the output,
+/// and the child, reaped, for what it saw of its tree ([`Supervised::tree_ended`]).
+pub fn output(cmd: &mut Command) -> io::Result<(Output, Supervised)> {
+    use std::process::Stdio;
+    fn drain(pipe: Option<impl io::Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut all = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut all);
+            }
+            all
+        })
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = Supervised::spawn(cmd)?;
+    let (out, err) = (drain(child.child().stdout.take()), drain(child.child().stderr.take()));
+    let ended = child.finish(|| out.is_finished() && err.is_finished(), || None::<std::convert::Infallible>)?;
+    let status = match ended {
+        Ok(status) => status,
+        Err(never) => match never {},
+    };
+    let (stdout, stderr) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    Ok((Output { status, stdout, stderr }, child))
 }
 
 #[derive(Debug)]
@@ -111,6 +167,15 @@ impl Supervised {
         Ok(ended.is_some())
     }
 
+    /// Whether everything the child started was seen to end: the supervisor exited (with a code) only
+    /// after it had reaped its whole tree, sandboxed processes included. Killed instead (its
+    /// [`STOP_GRACE`] ran out, or it gave up on its tree), it ended by a signal, and a process of the tree
+    /// may outlive it for a moment: its sandbox's processes are not in its group, and end only as their
+    /// namespace is torn down. False until it has been reaped.
+    pub fn tree_ended(&self) -> bool {
+        self.exited.is_some_and(|status| status.code().is_some())
+    }
+
     /// Waits until the child has exited and `closed` says its output has closed, asking `stop` every
     /// [`LOOK`]. `Ok(Err(why))`: `stop` answered first, and the child's group was killed.
     /// `Ok(Ok(status))`: it ended, however it ended, and whatever it left in its group was killed.
@@ -146,8 +211,8 @@ impl Drop for Supervised {
     }
 }
 
-/// `relay supervise --parent <runner> [--hold <lock>] -- <argv>`: runs `argv` in this process's own
-/// group, which it leads, and ends everything `argv` started with it:
+/// `relay supervise --parent <runner> [--hold <lock>] [--pass <arg> <handle>]... -- <argv>`: runs `argv`
+/// in this process's own group, which it leads, and ends everything `argv` started with it:
 /// - `argv` exits: everything it left is ended, and this exits as it did;
 /// - the runner is gone (this process's parent is no longer `runner`, looked at before `argv` starts
 ///   and every [`SUPERVISOR_LOOK`], so a runner that dies at any moment is seen), or this is sent
@@ -160,9 +225,12 @@ impl Drop for Supervised {
 /// until the last process of its tree has ended. Only a tree that will not empty (forking as fast as
 /// it is killed), or a signal that cannot be caught, takes its group and it at once.
 ///
+/// With `passed` (pairs: an argument of `argv`, a handle of the runner's) it gives `argv` each of those
+/// directories by a handle of its own ([`pass`]), closed here once `argv` has started.
+///
 /// It polls its parent rather than relying on `PR_SET_PDEATHSIG`, which fires when the *thread* that
 /// started it ends, and would need a handler to clean up after.
-pub fn supervise(runner: u32, hold: Option<&std::path::Path>, argv: &[OsString]) -> ExitCode {
+pub fn supervise(runner: u32, hold: Option<&std::path::Path>, passed: &[usize], argv: &[OsString]) -> ExitCode {
     let me = rustix::process::getpid();
     if rustix::process::getpgrp() != me && rustix::process::setpgid(None, None).is_err() {
         // Never signal a group it does not lead: it could be the runner's, or a shell's.
@@ -187,9 +255,19 @@ pub fn supervise(runner: u32, hold: Option<&std::path::Path>, argv: &[OsString])
         }
     };
     let runner_gone = || rustix::process::getppid().map(|p| p.as_raw_nonzero().get().cast_unsigned()) != Some(runner);
+    let mut argv = argv.to_vec();
+    let handles = pass(runner, passed, &mut argv);
+    // Looked at after the handles were opened: they were its runner's, not those of a process that has its pid since.
     if runner_gone() {
         return ExitCode::from(137);
     }
+    let handles = match handles {
+        Ok(handles) => handles,
+        Err(e) => {
+            eprintln!("relay supervise: passing a directory by its handle: {e}");
+            return ExitCode::from(127);
+        }
+    };
     let Some((program, args)) = argv.split_first() else {
         eprintln!("relay supervise: nothing to run");
         return ExitCode::from(127);
@@ -202,6 +280,8 @@ pub fn supervise(runner: u32, hold: Option<&std::path::Path>, argv: &[OsString])
             return ExitCode::from(127);
         }
     };
+    // The program has its own; nothing else is started here.
+    drop(handles);
     let mut status = None;
     loop {
         if runner_gone() || told.load(Ordering::Relaxed) {
@@ -215,6 +295,27 @@ pub fn supervise(runner: u32, hold: Option<&std::path::Path>, argv: &[OsString])
         }
         std::thread::sleep(SUPERVISOR_LOOK);
     }
+}
+
+/// Opens each directory the runner passes (`passed`: pairs of an argument of the program, the first
+/// being 0, and the number of the runner's handle) through that handle, `/proc/<runner>/fd/<n>`: the
+/// directory the runner opened, whatever a path to it leads to by now. Each is left open across `exec`
+/// here, in the one process that starts the program and nothing else, and its number put in the
+/// program's argument. The handles, to close once the program has started.
+fn pass(runner: u32, passed: &[usize], argv: &mut [OsString]) -> io::Result<Vec<OwnedFd>> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::fd::AsRawFd as _;
+    let mut handles = Vec::new();
+    for pair in passed.chunks(2) {
+        let &[arg, handle] = pair else { return Err(io::ErrorKind::InvalidInput.into()) };
+        let slot = argv.get_mut(arg + 1).ok_or(io::ErrorKind::InvalidInput)?;
+        let theirs = format!("/proc/{runner}/fd/{handle}");
+        let dir = rustix::fs::open(&theirs, OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty())
+            .map_err(|e| io::Error::new(e.kind(), format!("{theirs}: {e}")))?;
+        *slot = dir.as_raw_fd().to_string().into();
+        handles.push(dir);
+    }
+    Ok(handles)
 }
 
 /// Reaps every child that has ended (an orphan of the tree too), noting `main`'s status in `status`.
@@ -278,6 +379,20 @@ fn exit_code(status: rustix::process::WaitStatus) -> ExitCode {
 mod tests {
     //! The runner's side, with `sh` standing in for the supervisor as the leader of its group
     //! ([`command`]); the supervisor itself is tested in `tests/supervise.rs`.
+
+    /// A child that exits on its own was seen to end whole; one killed when stopped was not, so what it
+    /// held (a session's copy of the linked caches) is not handed on.
+    #[test]
+    fn a_tree_is_seen_ended_only_when_its_leader_exits_on_its_own() {
+        let mut done = Supervised::spawn(Command::new("sh").args(["-c", "exit 3"])).unwrap();
+        let ended = done.finish(|| true, || None::<()>).unwrap();
+        assert_eq!(ended.map(|s| s.code()), Ok(Some(3)));
+        assert!(done.tree_ended());
+        let mut stopped = Supervised::spawn(Command::new("sleep").arg("30")).unwrap();
+        assert!(!stopped.tree_ended(), "not before it is reaped");
+        assert_eq!(stopped.finish(|| true, || Some(())).unwrap(), Err(()));
+        assert!(!stopped.tree_ended(), "killed: a process of its tree may outlive it");
+    }
 
     use super::*;
 

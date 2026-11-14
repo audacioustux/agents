@@ -154,18 +154,29 @@ pub(super) fn preamble(r: &Reviewing, result: &Path) -> String {
     )
 }
 
+/// A report's final section, as the one parse of a report reads it ([`crate::harness::report::final_section`]):
+/// every reader of a report (a run's status, a review's verdict, the findings sent back to a builder) takes
+/// this same section. None: the report has none.
+pub(super) fn final_section<'a>(answer: &'a str, marker: &str) -> Option<&'a str> {
+    crate::harness::report::final_section(answer, marker).map(|f| f.section)
+}
+
+/// A field of a report's final section, `name: value` (a list bullet allowed before it), the last one
+/// given, its value trimmed and lowercased. The one parser of a report: a review's verdict and a run's
+/// `status:` are both read by it. A line is split at its first `:`, never cut at a byte count, so no
+/// text in a report (a multibyte character where the name would end) can make it panic.
+pub(super) fn final_field(section: &str, name: &str) -> Option<String> {
+    section.lines().rev().find_map(|l| {
+        let (key, value) = l.trim().trim_start_matches(['-', '*', ' ']).split_once(':')?;
+        key.eq_ignore_ascii_case(name).then(|| value.trim().to_ascii_lowercase())
+    })
+}
+
 /// A review's verdict from its report's final section: a `verdict: accept|reject` line, and for a
 /// reject a `reason:` line naming a code (`other` when it names none that exists).
 pub(super) fn verdict(answer: &str, marker: &str) -> Option<(Verdict, Option<Reason>)> {
-    let tail = crate::harness::report::final_section(answer, marker)?.section;
-    let field = |name: &str| {
-        tail.lines().rev().find_map(|l| {
-            let l = l.trim().trim_start_matches(['-', '*', ' ']);
-            l.get(..name.len() + 1)
-                .filter(|h| h[..name.len()].eq_ignore_ascii_case(name) && h.ends_with(':'))
-                .map(|_| l[name.len() + 1..].trim().to_ascii_lowercase())
-        })
-    };
+    let tail = final_section(answer, marker)?;
+    let field = |name: &str| final_field(tail, name);
     let verdict = match field("verdict")?.split_whitespace().next()? {
         "accept" | "accepted" => Verdict::Accept,
         "reject" | "rejected" => Verdict::Reject,

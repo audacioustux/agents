@@ -256,14 +256,69 @@ fn check_message(c: &CheckRun) -> String {
     )
 }
 
+/// What a run's report says in its final section, read by the parser a review's verdict is read by
+/// ([`review::final_field`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Final {
+    /// The report has no final section.
+    Missing,
+    /// The section's `status:` value, lowercased; empty when it gives none.
+    Status(String),
+}
+
+impl Final {
+    pub(super) fn of(answer: &str, marker: &str) -> Self {
+        review::final_section(answer, marker)
+            .map_or(Self::Missing, |s| Self::Status(review::final_field(s, "status").unwrap_or_default()))
+    }
+
+    /// The report says its work is done.
+    pub(super) fn done(&self) -> bool {
+        matches!(self, Self::Status(s) if s.starts_with("done"))
+    }
+
+    /// What the report says, in plain words.
+    fn said(&self, marker: &str) -> String {
+        let section = if marker.is_empty() { "report".to_owned() } else { format!("{marker} section") };
+        match self {
+            Self::Missing => format!("its report has no {section}"),
+            Self::Status(s) if s.is_empty() => format!("its {section} gives no status"),
+            Self::Status(s) => format!("its {section} says status: {s}"),
+        }
+    }
+}
+
 /// Whether the report's final section says `status: done`.
 pub(super) fn final_status_done(answer: &str, marker: &str) -> bool {
-    crate::harness::report::final_section(answer, marker).map(|f| f.section).is_some_and(|t| {
-        t.lines().any(|l| {
-            let l = l.trim().to_ascii_lowercase();
-            l.strip_prefix("status:").is_some_and(|v| v.trim().starts_with("done"))
-        })
-    })
+    Final::of(answer, marker).done()
+}
+
+/// A checkpoint at a spend cap that stopped the run: which one, and its words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Halt {
+    pub checkpoint: u32,
+    pub why: String,
+}
+
+/// A job's terminal state, decided in this one place from how its run ended (`ended`), what its own
+/// report says (`report`), and the checkpoint that stopped it, if one did (`halt`). Without a halt the
+/// run ends as it ended. A halt after a report whose status is done ends the job done, the checkpoint's
+/// words kept as its note: the work was finished, and more spend would not help. A halt without one
+/// is a stop that waits for a human, and its reason says so, with what the report said.
+pub(super) fn terminal(ended: Ended, report: &Final, halt: Option<&Halt>, marker: &str) -> Ended {
+    let Some(h) = halt else { return ended };
+    let words = if h.why.is_empty() { String::new() } else { format!(" ({})", h.why) };
+    if report.done() {
+        return (Outcome::Done, Some(format!("finished; stopped at checkpoint {}{words}", h.checkpoint)));
+    }
+    let said = report.said(marker);
+    (
+        Outcome::Failed,
+        Some(format!(
+            "held for a human: stopped at checkpoint {}{words} and {said}; resume with --budget to go on",
+            h.checkpoint
+        )),
+    )
 }
 
 #[cfg(test)]
@@ -415,7 +470,66 @@ mod tests {
     #[test]
     fn a_report_saying_done_is_recognised() {
         assert!(final_status_done("work\nFINAL\nstatus: done\ncommits: x", "FINAL"));
+        assert!(final_status_done("FINAL\n- Status: Done | partial", "FINAL"), "as a review's fields are read");
         assert!(!final_status_done("FINAL\nstatus: partial", "FINAL"));
         assert!(!final_status_done("status: done\nno marker", "FINAL"));
+        assert_eq!(Final::of("no marker", "FINAL"), Final::Missing);
+        // A last line whose seventh byte ends inside a character, where `status:` would end: never a panic.
+        assert!(final_status_done("FINAL\nstatus: done\n🏁完", "FINAL"));
+        assert!(final_status_done("работа 🏁\nFINAL\n完了: да\nstatus: done — 完成\n🏁完\nverdict完: x", "FINAL"));
+        assert_eq!(Final::of("FINAL\nstätus: done\n🏁完", "FINAL"), Final::Status(String::new()));
+        assert_eq!(
+            review::verdict("FINAL\nverdict: accept\n🏁完完", "FINAL"),
+            Some((crate::bus::Verdict::Accept, None))
+        );
+        assert_eq!(
+            review::verdict("FINAL\nverdict: reject\nreason🏁完: x", "FINAL"),
+            Some((crate::bus::Verdict::Reject, Some(crate::bus::Reason::Other)))
+        );
+        assert_eq!(Final::of("FINAL\nnotes: x", "FINAL"), Final::Status(String::new()));
+    }
+
+    fn halt() -> Halt {
+        Halt { checkpoint: 2, why: "the unit is done; more spend wouldn't help".into() }
+    }
+
+    #[test]
+    fn a_checkpoint_stop_after_a_done_report_ends_done_with_its_words() {
+        let report = Final::of("work\nFINAL\nstatus: done\ncommits: abc", "FINAL");
+        let (outcome, reason) = terminal((Outcome::Failed, None), &report, Some(&halt()), "FINAL");
+        assert_eq!(outcome, Outcome::Done);
+        assert_eq!(
+            reason.as_deref(),
+            Some("finished; stopped at checkpoint 2 (the unit is done; more spend wouldn't help)")
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_stop_without_a_done_report_is_held_for_a_human() {
+        let held =
+            |answer: &str| terminal((Outcome::Failed, None), &Final::of(answer, "FINAL"), Some(&halt()), "FINAL");
+        let (outcome, reason) = held("still working on it");
+        assert_eq!(outcome, Outcome::Failed);
+        let reason = reason.unwrap_or_default();
+        assert!(reason.starts_with("held for a human: stopped at checkpoint 2 (the unit is done"), "{reason}");
+        assert!(reason.contains("its report has no FINAL section"), "{reason}");
+        assert!(reason.ends_with("resume with --budget to go on"), "{reason}");
+        for status in ["partial", "stopped", "blocked"] {
+            let (outcome, reason) = held(&format!("FINAL\nstatus: {status}"));
+            assert_eq!(outcome, Outcome::Failed, "{status}");
+            let reason = reason.unwrap_or_default();
+            assert!(reason.contains(&format!("its FINAL section says status: {status}")), "{reason}");
+        }
+        let (_, reason) = held("FINAL\ncommits: none");
+        assert!(reason.unwrap_or_default().contains("its FINAL section gives no status"));
+    }
+
+    #[test]
+    fn without_a_checkpoint_stop_a_run_ends_as_it_ended() {
+        let done = Final::of("FINAL\nstatus: done", "FINAL");
+        let failed: Ended = (Outcome::Failed, Some("boom".into()));
+        assert_eq!(terminal(failed.clone(), &done, None, "FINAL"), failed);
+        let ok: Ended = (Outcome::Done, None);
+        assert_eq!(terminal(ok.clone(), &Final::Missing, None, "FINAL"), ok);
     }
 }

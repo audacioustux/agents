@@ -125,7 +125,7 @@ prepend it to your briefs, or have each brief point to it.
 | Command | |
 | --- | --- |
 | `relay queue add NAME (--prompt FILE \| --text TEXT) [--readonly] [--harness H,...] [--model H=M] [--effort E] [--budget USD] [--account H:L] [--task TITLE] [--again]` | Queue a job. `--harness` limits where it may run; `--account` pins it, and it waits for that account |
-| `relay queue add NAME ... --profile P [--no-readonly]` | Fill what the line leaves unset from `[profiles.P]`; explicit flags win. An unknown profile is refused (exit 3, listing the names) |
+| `relay queue add NAME ... --profile P [--no-readonly] [--compiles true\|false]` | Fill what the line leaves unset from `[profiles.P]`; explicit flags win. An unknown profile is refused (exit 3, listing the names). `--compiles false` puts this one job outside [the machine's](#the-machines-caps) `max_compiling` |
 | `relay profiles` / `relay config show` | The resolved profiles with their notes / the merged policy and project config, and which file each part came from |
 | `relay queue resume NAME --message TEXT [--budget USD] [--model H=M]` | Continue an ended or checking session, on any account with room. `--budget` caps that run alone, not the job's total; `--model` moves the job to another model from this run on |
 | `relay queue add NAME ... --after A[,B]` | Start only once every named job is `done` (repeat or comma-separate; unknown names are refused, exit 3) |
@@ -305,7 +305,10 @@ is optional (a `$RELAY_POLICY` that names no file is an error). It is read first
 and the project's `relay.toml` overrides it:
 
 - a project's `[profiles.X]` replaces only the fields it sets;
-- a project's `session.banned_models` adds to the policy's and cannot lift a ban.
+- a project's `session.banned_models` adds to the policy's and cannot lift a ban;
+- the `[machine]` caps are the policy's alone: a project's `relay.toml` cannot set
+  one (a `[machine]` table there is refused), and can only raise the disk floor
+  (see [the machine's caps](#the-machines-caps)).
 
 ```toml
 [session]
@@ -328,7 +331,7 @@ max_per_day = 3
 note = "second-family bug hunt or review of critical code and plans only; costly"
 ```
 
-A profile has `harness`, `model`, `effort`, `budget`, `readonly`, `note`,
+A profile has `harness`, `model`, `effort`, `budget`, `readonly`, `compiles`, `note`,
 `max_running` and `max_per_day`, all optional; and declares the bar, the review
 independence and the escalation of its jobs (`check`, `check_red_first`,
 `independent`, `escalate_to`, `escalate_after`, below). `relay queue add NAME --profile P`
@@ -345,6 +348,105 @@ stays queued with the reason on the board and in the dispatcher's log:
 `profile bug-hunt: 3 started in 24h (max 3), next slot 20:02 +06`. A job no account
 can take is held with every account's cause:
 `no account has room (omp:default busy (1 of 1 seat on openai-codex), at floor: 100% openai-codex/5 hours, resets 19:36 +06)`.
+
+`compiles` says whether the profile's jobs build or run tests, and so load the
+machine as a compiler does. It is `true` unless the profile says `compiles = false`,
+and it is never read off `readonly`: a review rebuilds the branch and runs its test
+suite, so it compiles. Say `compiles = false` only for work that builds nothing (a
+design, research, a question about the code); a profile with a `check` cannot say
+it, since the check builds. `relay queue add NAME --compiles false` (or `true`)
+overrides the profile for that one job; with no profile and no flag a job compiles.
+The value is fixed when the job is queued and stays with it. `relay profiles` shows
+it for each profile (`compiles` or `no compile`; `--json`: `compiles`, resolved), a
+job's status carries it (`--json`: `compiles`), and the board marks the exception
+(`compiles nothing`). It decides one thing: whether the job counts against the
+machine's `max_compiling`.
+
+### The machine's caps
+
+Every project on a machine runs its own relay, under its own `[limits]`, and none
+of those limits sees the other projects: their sum can be more than the machine
+has. The owner's policy file caps what all of them do together, under `[machine]`:
+
+```toml
+[machine]
+max_compiling = 2       # compiling jobs running at once, over every project
+min_free_mem_gb = 4     # no session and no check starts with less memory available (GiB)
+min_free_disk_gb = 30   # the least disk floor of any project (GB)
+```
+
+Every quantity in a `relay.toml` or the policy (GB, GiB, minutes, USD) must be a
+finite number, zero or more: `nan`, `inf` or a negative value is a config error
+naming its key, wherever it is written, so no floor can be turned off by a value
+that compares false with everything.
+
+Each key is optional, and one left out does not apply: with no `[machine]` table
+relay behaves exactly as it does without one. The caps are read from the policy
+file again at every admission point (each dispatcher pass, the booking of a
+decision's `agent:` session, each run of an acceptance check), never kept from when
+a process started: a session that began hours ago is held by the floor the owner
+set a minute ago. A policy file that does not load at that moment (half-saved, or
+invalid) leaves the caps as the process first read them; one that is gone caps nothing. A project's own limits (`max_running`,
+a profile's `max_running`, `per_account`) stay, beneath these. There are no
+per-project shares: the caps are one ceiling over all projects.
+
+- `max_compiling` counts every project's jobs that compile (see `compiles` above).
+  A unit is held by the job's runner process itself, named by its pid and start
+  time as a seat's holder is, from its dispatch until that process and everything
+  it started have ended, whatever the job's status says meanwhile: through its
+  acceptance check, through the work a runner does after its `ended` (a re-review),
+  and by a runner a hand resume took a checking job from, which is not stopped by
+  that. The claim is recorded with the dispatch, apart from the job (`claims` in
+  `view status --json`), so nothing that happens to the job, `land clean` and
+  `queue dequeue` included, can erase the claim of a process that still runs. A
+  runner's session and each run of its check go through `relay supervise`, which
+  holds the runner's claim lock (`<state root>/claims/<pid>-<start>.lock`) until
+  the last process of its tree is reaped: a runner killed outright keeps its unit
+  for exactly as long as a compiler it started is still there, sandbox or none.
+  Once the process is gone and its lock free, the unit is free at once, with
+  nobody having to reap it, and its project's dispatcher records the exit
+  (`runner-exited`), the one thing that removes a claim. A dispatcher that waits
+  for a unit looks again within a minute, and within seconds when the holder is a
+  runner on its way out. The count is kept where the seats are: under the machine's one seat
+  lock, from what every project's bus recorded, so two dispatchers never both take
+  the last unit. It is a count only when every project was read: while the state of
+  one cannot be read, its jobs are in nobody's sum, so nothing that compiles
+  starts, and the job says which project
+  (`the compiling jobs on this machine cannot be counted: the state of project tickify cannot be read (…)`).
+  There is one order, in a project's own queue and across projects: the job that
+  has waited longest (since it last went into the queue) starts first. A job that
+  would start but for this cap is put in line (`in-line` on its project's bus,
+  `out-of-line` when something of its own project holds it instead), and every
+  other project leaves a unit for each job in line that has waited longer than its
+  own, while the dispatcher that put it there lives. A job it holds says
+  `1 of 2 compiling on this machine, over every project (machine.max_compiling in the owner's policy)`,
+  or, where a unit is free but owed,
+  `…, and 1 job of another project has waited longer for the rest`.
+- `min_free_mem_gb` is a gate on `MemAvailable` in `/proc/meminfo`: under it no
+  queued job starts (read-only or not), no decision's `agent:` session starts, and
+  no run of an acceptance check starts, at the branch's tip or at its base commit:
+  it waits in its runner until the memory is back (its runner's log says so). Nothing running is touched. Where the memory cannot be read, the
+  gate holds nothing.
+- `min_free_disk_gb` is the machine's disk floor. A project's
+  `limits.min_free_disk_gb` may raise it, never lower it or turn it off. Nothing is
+  copied between the two: the project's own floor stays as written, and each disk
+  decision (a start, a held job's resume, the gc pass, every sample of a running
+  clone) takes the higher of it and the machine's as the policy says at that
+  moment, so a session that began under 30 GB is held by the 50 GB the owner set
+  since. `relay config show` prints the caps, and the floor a decision would take
+  now with the file it comes from.
+
+A job any of these holds stays queued like one held by a project limit: its
+reason is on the board and in the dispatcher's log, it is judged again within a
+minute, and it reaches the [`held` hook](#hooks) once it has waited
+`held_after_minutes`. `force` lets a job past its profile's limits only, never past
+the machine's caps. A job held by the project's own `limits.max_running`
+(`2 of 2 running in this project (limits.max_running)`) or by `limits.max_load`
+(`load 31.0 is above 24 (limits.max_load)`) is held the same way, with its reason
+and its turn at the `held` hook. Internally each counted limit is a pool (an
+account's seats, a profile's running jobs, the project's running jobs, the
+machine's compiling jobs) asked through one test, and each measured one (load,
+memory, disk, the development environment) a gate; a hold names the first that binds.
 
 Every time relay shows or logs is local time with its zone: `TZ` if set, else
 `/etc/localtime` (a container's is often UTC, so set `TZ` there, e.g. `TZ=Etc/GMT-6`).
@@ -856,7 +958,7 @@ cache_copies_idle_days = 7   # an idle copy of the linked caches goes after this
 
 [limits]
 job_disk_gb = 40             # a running clone over this reaches the `disk` point (0: off)
-min_free_disk_gb = 10        # also: a pass runs at once below this, and holds new starts
+min_free_disk_gb = 10        # also: a pass runs at once below this, and holds new starts; never under the policy's [machine] min_free_disk_gb
 disk_resume_margin_gb = 3    # a held job resumes, and a queued one starts, this far over the floor
 disk_sample_minutes = 3      # how often a running clone is measured
 
@@ -1200,7 +1302,8 @@ job that names no model counts on the provider its own config chose, not this
 project's default. One machine-wide lock keeps two dispatchers from giving out the
 same seat. Each dispatcher's doorbell rings for every project's events.
 Whether an account is used at all (`relay quota enable` and `disable`) and
-`limits.max_running` stay per project.
+`limits.max_running` stay per project; the owner's `[machine]` caps in the policy
+file are over all projects ([the machine's caps](#the-machines-caps)).
 
 When a session hits a limit, its account is closed until two minutes after the
 stated reset (or for 15 minutes if none is stated), and the job goes back in
@@ -1233,7 +1336,13 @@ The check reads the brief, every earlier verdict, `git log --stat` since the
 last checkpoint (with the diff when it is small) and the worker's last message,
 and answers `continue`, `redirect` (with a correction the worker reads next) or
 `stop`. On `continue` or `redirect` the same session resumes with the cap
-times the growth; on `stop` the job is left `failed` for you. No new commit and
+times the growth. A `stop` is settled by the run's own report, read as a
+review's verdict is: when its FINAL section says `status: done`, the work was
+finished and the job ends `done` (after its acceptance check and `ended` chain,
+as any done run), the checkpoint's words kept in its reason, and what waits for
+it starts. Otherwise the job is left `failed` for you, its reason saying it is
+held for a human and what the report said (`status: partial`, no FINAL
+section). No new commit and
 no changed file since the last checkpoint is a `stop` that asks no model, and so
 is a clone that still stands exactly at the commit its acceptance check last
 failed at (a run resumed with that failure that changed nothing): however much

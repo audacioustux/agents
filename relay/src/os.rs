@@ -230,6 +230,19 @@ pub fn load_average() -> Option<f64> {
     std::fs::read_to_string("/proc/loadavg").ok()?.split_whitespace().next()?.parse().ok()
 }
 
+/// The memory the kernel says a new workload could have without swapping (`MemAvailable` in
+/// `/proc/meminfo`), in GiB. `None` where it cannot be read.
+pub fn mem_available_gb() -> Option<f64> {
+    mem_available_of(&std::fs::read_to_string("/proc/meminfo").ok()?)
+}
+
+/// `MemAvailable` of a `/proc/meminfo` text (`MemAvailable:    8123456 kB`), in GiB.
+fn mem_available_of(meminfo: &str) -> Option<f64> {
+    let rest = meminfo.lines().find_map(|l| l.strip_prefix("MemAvailable:"))?;
+    let kib: f64 = rest.trim().strip_suffix("kB")?.trim().parse().ok()?;
+    Some(kib / (1024.0 * 1024.0))
+}
+
 /// Free space for unprivileged users on the filesystem that holds, or will
 /// hold, `path` (its nearest existing ancestor), in GB.
 pub fn free_disk_gb(path: &Path) -> Option<f64> {
@@ -426,6 +439,10 @@ mod tests {
         assert!(same_process(me, t));
         assert!(!same_process(me, t + 1));
         assert!(load_average().is_some());
+        assert!(mem_available_gb().is_some_and(|gb| gb > 0.0));
+        let text = "MemTotal:       16000000 kB\nMemFree:  1 kB\nMemAvailable:    6291456 kB\nBuffers: 2 kB\n";
+        assert_eq!(mem_available_of(text), Some(6.0), "kB there are KiB");
+        assert_eq!(mem_available_of("MemTotal: 5 kB\n"), None, "a kernel that does not say");
         assert!(own_binary().unwrap().exists());
         assert!(free_disk_gb(Path::new("/")).is_some());
         assert!(free_disk_gb(Path::new("/nonexistent/not/yet")).is_some(), "measured where it will be made");

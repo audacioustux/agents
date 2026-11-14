@@ -188,6 +188,57 @@ pub fn try_project_dirs(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
+/// The other projects on a machine as one reader found them: the folds it read, and the name of
+/// each project it could not read. The two travel together ([`Neighbours::seen`]), so nothing that
+/// counts across projects can take the folds and lose the fact that some are missing.
+#[derive(Debug, Default)]
+pub struct Neighbours {
+    worlds: Vec<World>,
+    unreadable: Vec<String>,
+}
+
+/// [`Neighbours`] by reference, for whoever judges with them: every fold read, and every project
+/// that could not be.
+#[derive(Debug, Default)]
+pub struct Others<'a> {
+    pub worlds: Vec<&'a World>,
+    /// The projects whose state could not be read, by name.
+    pub unreadable: Vec<String>,
+}
+
+impl Neighbours {
+    /// Every project under `root` but the one whose state is `own`. A root that cannot be listed
+    /// is itself unreadable: there may be projects under it.
+    pub fn read(root: &Path, own: &Path) -> Self {
+        let mut n = Self::default();
+        let Ok(mut dirs) = try_project_dirs(root) else {
+            n.unreadable.push(format!("any under {}", root.display()));
+            return n;
+        };
+        dirs.retain(|d| d != own);
+        dirs.sort();
+        for d in dirs {
+            match World::peek(&d.join("bus"), &d.join("world.json")) {
+                Ok(world) => n.worlds.push(world),
+                Err(_) => {
+                    n.unreadable.push(d.file_name().map_or_else(String::new, |f| f.to_string_lossy().into_owned()));
+                }
+            }
+        }
+        n
+    }
+
+    /// The folds that could be read.
+    pub fn iter(&self) -> std::slice::Iter<'_, World> {
+        self.worlds.iter()
+    }
+
+    /// Both, for a judgment across projects.
+    pub fn seen(&self) -> Others<'_> {
+        Others { worlds: self.worlds.iter().collect(), unreadable: self.unreadable.clone() }
+    }
+}
+
 /// Every project's event directories under `root`, for a doorbell.
 pub fn buses_in(root: &Path) -> Vec<PathBuf> {
     project_dirs(root).flat_map(|d| [d.join("bus"), d.join("bus/session")]).filter(|d| d.is_dir()).collect()
@@ -274,18 +325,12 @@ impl Ctx {
 
     /// The other projects on this machine, as their own folds say: every
     /// directory under `state_root` with a bus, other than ours. Their
-    /// checkpoints are theirs, so they are read, never written; one that
-    /// cannot be read is left out.
-    pub fn neighbours(&self) -> Vec<World> {
-        self.projects()
-            .filter(|d| *d != self.state)
-            .filter_map(|d| World::peek(&d.join("bus"), &d.join("world.json")).ok())
-            .collect()
-    }
-
-    /// Every project's state directory on this machine, ours included.
-    fn projects(&self) -> impl Iterator<Item = PathBuf> {
-        project_dirs(&self.state_root)
+    /// checkpoints are theirs, so they are read, never written. One that
+    /// cannot be read is not left out in silence: it is named
+    /// ([`Neighbours::seen`]), since whatever counts the machine's jobs
+    /// has then not counted them all.
+    pub fn neighbours(&self) -> Neighbours {
+        Neighbours::read(&self.state_root, &self.state)
     }
 
     /// Every project's event directories, for a doorbell.
@@ -742,5 +787,45 @@ mod claim_tests {
         std::os::unix::fs::symlink(&target, state.join(REPO_FILE)).unwrap();
         assert!(Claim::take(&state, &a).is_err());
         assert!(!target.exists(), "the claim was written through a symlink");
+    }
+}
+
+#[cfg(test)]
+mod neighbour_tests {
+    use super::*;
+
+    /// Copilot review of PR #70, finding 1: a project whose fold could not be read was left out of
+    /// the neighbours in silence, and with it whatever it runs. It is named instead, beside the
+    /// folds that were read, for whoever counts across projects.
+    #[test]
+    fn a_project_whose_state_cannot_be_read_is_named_beside_those_that_were() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = crate::config::tempdir::Dir::new();
+        let (own, open, shut) = (d.path().join("own"), d.path().join("open"), d.path().join("shut"));
+        for p in [&own, &open, &shut] {
+            std::fs::create_dir_all(p.join("bus")).unwrap();
+        }
+        std::fs::create_dir_all(d.path().join("not-a-project")).unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads through any permission; the case is then not one this test can make.
+        let denied = std::fs::metadata(shut.join("bus")).is_err();
+        let n = Neighbours::read(d.path(), &own);
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if denied {
+            let seen = n.seen();
+            assert_eq!((seen.worlds.len(), seen.unreadable), (1, vec!["shut".to_owned()]), "ours is no neighbour");
+        }
+        let n = Neighbours::read(d.path(), &own);
+        assert_eq!((n.iter().count(), n.seen().unreadable.len()), (2, 0), "every project read: none named");
+        // A state root that cannot be listed may hold projects: that is not "no neighbours" either.
+        let file = d.path().join("not-a-dir");
+        std::fs::write(&file, "").unwrap();
+        let n = Neighbours::read(&file, &own);
+        assert_eq!((n.iter().count(), n.seen().unreadable.len()), (0, 1));
+        assert_eq!(
+            Neighbours::read(&d.path().join("none"), &own).seen().unreadable.len(),
+            0,
+            "no root yet: no projects"
+        );
     }
 }

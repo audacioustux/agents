@@ -59,7 +59,7 @@ At minimum, inspect:
 - dark theme,
 - long labels or realistic content.
 
-Look for wrapping, overflow, clipped controls, unstable shells, hidden primary actions, unreadable muted text, and fallbacks that arrive too late.
+Look for wrapping, overflow, clipped controls, unstable shells, hidden primary actions, unreadable muted text, fallbacks that arrive too late, and visual frames that drew nothing: a blank or half-loaded ground where an image, video, canvas or effect belongs, at each width in turn, since a frame that draws at one width can be empty at another.
 
 ### 4. Walk the interaction path
 
@@ -105,6 +105,8 @@ For each finding, include:
 - verification step.
 
 Use screenshots or concise textual observations when possible.
+
+Close with what the review could not check, and with every assumption or stand-in the work ships (a placeholder image, a value the brief never gave), so nobody reads the pass as covering them.
 
 ## Acceptance gate
 

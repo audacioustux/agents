@@ -80,7 +80,9 @@ impl Machine {
     /// all the projects know them, and every project's seats. Outside every project, every account
     /// on the machine, judged by none.
     pub fn room(&self, home: Option<&Ctx>) -> Room {
-        room_for(Rules::of(home), self.own(), &self.others())
+        // Each unreadable project is recorded as `name: why`; the room wants the names.
+        let unreadable = self.unreadable.iter().map(|u| u.split(':').next().unwrap_or(u).to_owned()).collect();
+        room_for(Rules::of(home), self.own(), &crate::ctx::Others { worlds: self.others(), unreadable })
     }
 
     /// Every account's room, as all the projects know it, for every model their jobs ask for: judged

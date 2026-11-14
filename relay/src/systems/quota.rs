@@ -232,7 +232,7 @@ fn read_accounts(ctx: &Ctx, select: &Select<'_>) -> Result<Taken> {
     // A reading another project took recently is as good as one of ours.
     let world = ctx.world()?;
     let neighbours = ctx.neighbours();
-    let room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
+    let room = Room::new(&ctx.cfg, &world, &neighbours.seen(), true);
     let now = now_micros();
     let meanwhile = |a: &Home| room.account(&a.key()).and_then(|s| s.read_at).is_some_and(|t| t >= asked);
     let (taken, todo): (Vec<Home>, Vec<Home>) = to_read(&room, &world, select, now).into_iter().partition(meanwhile);
@@ -599,9 +599,9 @@ pub fn wanted(world: &World, account: &Home) -> bool {
 /// Every account's room; with `refresh`, a reading of each stale one is started first, and the view says so.
 pub fn show(ctx: &Ctx, world: &World, refresh: bool) -> Result<()> {
     let neighbours = ctx.neighbours();
-    let others: Vec<&World> = neighbours.iter().collect();
+    let others = neighbours.seen();
     let room = room_for(Rules::Project(ctx), world, &others);
-    let mut v = accounts_in(Rules::Project(ctx), &room, world, &others);
+    let mut v = accounts_in(Rules::Project(ctx), &room, world, &others.worlds);
     if refresh {
         v.refreshing(start_refresh(ctx, &room, world, false)?);
     }
@@ -759,13 +759,14 @@ impl<'a> Rules<'a> {
 
 /// The room `rules` judge accounts and jobs in, for `world` among the other projects' folds
 /// (outside any project, `world` is empty and `others` are all of them).
-pub fn room_for(rules: Rules<'_>, world: &World, others: &[&World]) -> Room {
+pub fn room_for(rules: Rules<'_>, world: &World, others: &crate::ctx::Others<'_>) -> Room {
     match rules {
         Rules::Project(ctx) => {
-            Room::new(&ctx.cfg, world, others, crate::systems::dispatch::disk_ok(&ctx.cfg.limits, &ctx.clones))
+            Room::new(&ctx.cfg, world, others, crate::systems::dispatch::disk_ok(&ctx.cfg, &ctx.clones))
+                .with_load(&ctx.cfg)
                 .with_dev_shell(crate::systems::devshell::Gate::of(ctx, world))
         }
-        Rules::MachineWide => Room::machine_wide(world, others),
+        Rules::MachineWide => Room::machine_wide(world, &others.worlds),
     }
 }
 

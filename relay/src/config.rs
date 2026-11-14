@@ -37,6 +37,12 @@ pub struct Config {
     /// Who decides at each decision point, in order.
     #[serde(default)]
     pub hooks: Hooks,
+    /// The machine-wide caps of the owner's policy (`[machine]`): the same for every project on the
+    /// machine, and never read from a project's `relay.toml`. Read through [`Config::machine`]
+    /// alone, which reads the policy again each time: a config is loaded once by a process that
+    /// may run for hours, and the owner's cap of a minute ago must hold its next admission.
+    #[serde(skip)]
+    pub caps: Caps,
     /// The policy file this was merged with, when one was read.
     #[serde(skip)]
     pub policy_path: Option<PathBuf>,
@@ -81,6 +87,10 @@ pub struct Profile {
     /// Spend cap per attempt, in USD.
     pub budget: Option<f64>,
     pub readonly: Option<bool>,
+    /// Whether a job of the profile compiles: builds a branch or runs a test suite, a review that
+    /// does so too. Unset is `true`. Only `false` (a design, research, an ask that builds
+    /// nothing) puts a job outside the machine's `max_compiling`.
+    pub compiles: Option<bool>,
     /// What the profile is for, shown by `relay profiles`.
     pub note: Option<String>,
     /// No more than this many jobs of the profile run at once.
@@ -109,6 +119,7 @@ impl Profile {
         put("effort", self.effort.clone());
         put("budget", self.budget.map(|b| b.to_string()));
         put("readonly", self.readonly.map(|b| b.to_string()));
+        put("compiles", self.compiles.map(|b| b.to_string()));
         put("max_running", self.max_running.map(|n| n.to_string()));
         put("max_per_day", self.max_per_day.map(|n| n.to_string()));
         put("check", self.check.clone());
@@ -128,6 +139,7 @@ impl Profile {
             effort: self.effort.clone().or_else(|| base.effort.clone()),
             budget: self.budget.or(base.budget),
             readonly: self.readonly.or(base.readonly),
+            compiles: self.compiles.or(base.compiles),
             note: self.note.clone().or_else(|| base.note.clone()),
             max_running: self.max_running.or(base.max_running),
             max_per_day: self.max_per_day.or(base.max_per_day),
@@ -148,6 +160,10 @@ impl Profile {
         ensure!(self.max_running.is_none_or(|n| n >= 1), "profiles.{name}.max_running must be at least 1");
         ensure!(self.max_per_day.is_none_or(|n| n >= 1), "profiles.{name}.max_per_day must be at least 1");
         ensure!(self.check.as_deref().is_none_or(|c| !c.trim().is_empty()), "profiles.{name}.check is empty");
+        ensure!(
+            self.compiles != Some(false) || self.check.is_none(),
+            "profiles.{name}: compiles = false with a check: an acceptance check builds, so its job compiles"
+        );
         ensure!(
             self.check_red_first != Some(true) || self.check.is_some(),
             "profiles.{name}.check_red_first needs a check"
@@ -171,6 +187,202 @@ impl Profile {
 pub struct Policy {
     session: PolicySession,
     profiles: BTreeMap<String, Profile>,
+    machine: Machine,
+}
+
+/// The owner's caps on what every project's relay on this machine does together (`[machine]` in the
+/// policy file). A project's own limits stay, under these; a project cannot set or lift one. A cap
+/// left out does not apply, so a policy with no `[machine]` table changes nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Machine {
+    /// Compiling jobs running at once, over every project. Every job compiles, a review too (it
+    /// rebuilds the branch and runs its tests), unless its profile says `compiles = false` or it
+    /// was queued with `--compiles false`. A job's acceptance check runs under the job's own unit.
+    pub max_compiling: Option<usize>,
+    /// No session and no acceptance check starts while the machine's available memory
+    /// (`MemAvailable` in `/proc/meminfo`) is under this many GiB. What runs is never touched.
+    pub min_free_mem_gb: Option<Quantity>,
+    /// The least `limits.min_free_disk_gb` of any project: one may raise its floor, never lower it.
+    pub min_free_disk_gb: Option<Quantity>,
+}
+
+/// A project's own disk floor, as its `relay.toml` wrote it (GB). It is half of a floor: the
+/// machine's, in the owner's policy, may be higher, and may change while a session runs. So it
+/// cannot be compared with anything: a disk decision reads a [`Floor`], made of both at that moment.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(transparent)]
+pub struct OwnFloor(Quantity);
+
+/// A resource quantity of a config or the policy (GB of disk, GiB of memory): a number that is
+/// finite and zero or more, and can be nothing else. It is made in one place ([`Quantity::new`],
+/// which the parse goes through), so whatever compares one downstream can never meet NaN, which
+/// compares false with everything and would turn a floor off, nor an infinity or a negative.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Deserialize, serde::Serialize)]
+#[serde(try_from = "f64", into = "f64")]
+pub struct Quantity(f64);
+
+impl Quantity {
+    /// `x`, when it is a finite number, zero or more.
+    pub fn new(x: f64) -> Result<Self, String> {
+        if x.is_finite() && x >= 0.0 {
+            // `-0.0` is zero.
+            Ok(Self(x + 0.0))
+        } else {
+            Err(format!("a quantity must be a finite number, zero or more, not {x}"))
+        }
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
+
+    /// `x`, which a test knows to be valid.
+    #[cfg(test)]
+    pub fn of(x: f64) -> Self {
+        Self::new(x).unwrap()
+    }
+}
+
+impl TryFrom<f64> for Quantity {
+    type Error = String;
+
+    fn try_from(x: f64) -> Result<Self, String> {
+        Self::new(x)
+    }
+}
+
+impl From<Quantity> for f64 {
+    fn from(q: Quantity) -> Self {
+        q.0
+    }
+}
+
+impl std::fmt::Display for Quantity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// The one gate every float of a config or policy file passes, whatever key it is written under
+/// and whether or not relay knows the key: a float that is NaN, infinite or negative is an error
+/// naming its key. No setting of relay's is a negative number, so nothing valid is refused, and a
+/// float setting added later is covered without anyone remembering to check it.
+fn finite_quantities(text: &str) -> Result<()> {
+    fn walk(key: &str, v: &toml::Value) -> Result<()> {
+        match v {
+            toml::Value::Float(x) if !x.is_finite() || *x < 0.0 => {
+                bail!("{key} must be a finite number, zero or more (it is {x})")
+            }
+            toml::Value::Table(t) => {
+                t.iter().try_for_each(|(k, v)| walk(&if key.is_empty() { k.clone() } else { format!("{key}.{k}") }, v))
+            }
+            toml::Value::Array(a) => a.iter().try_for_each(|v| walk(key, v)),
+            _ => Ok(()),
+        }
+    }
+    // Text that is not TOML at all is the typed parse's to refuse, with its place in the file.
+    let Ok(table) = text.parse::<toml::Table>() else { return Ok(()) };
+    walk("", &toml::Value::Table(table))
+}
+
+#[cfg(test)]
+impl From<f64> for OwnFloor {
+    fn from(gb: f64) -> Self {
+        Self(Quantity::of(gb))
+    }
+}
+
+impl PartialEq<f64> for OwnFloor {
+    fn eq(&self, gb: &f64) -> bool {
+        self.0.get() == *gb
+    }
+}
+
+/// The disk floor one decision is made by: the higher of the project's own and the machine's, with
+/// the project's margin above it. A value of the moment it was made ([`Config::disk_floor`] reads
+/// the policy then): whatever decides about the disk makes one, and none is stored.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Floor {
+    /// No job starts, and the largest running clone's job is held, under this much free disk (GB).
+    pub gb: f64,
+    /// A held job resumes, and a queued one starts, this far over it.
+    pub margin_gb: f64,
+    /// Whether it is the machine's floor that stands, being higher than the project's own.
+    pub machines: bool,
+}
+
+impl Floor {
+    /// The floor of a project with `limits` under the owner's caps `machine`: a project may raise
+    /// the machine's floor, never lower it or turn it off.
+    pub fn of(limits: &Limits, machine: &Machine) -> Self {
+        let own = limits.min_free_disk_gb.0.get();
+        let theirs = machine.min_free_disk_gb.map(Quantity::get).filter(|m| *m > own);
+        Self { gb: theirs.unwrap_or(own), margin_gb: limits.disk_resume_margin_gb, machines: theirs.is_some() }
+    }
+
+    /// Whether there is a floor at all (zero is off).
+    pub fn on(&self) -> bool {
+        self.gb > 0.0
+    }
+
+    /// The free disk (GB) a job the floor held resumes at, and a queued build job starts at.
+    pub fn resume_gb(&self) -> f64 {
+        self.gb + self.margin_gb
+    }
+
+    /// Whether `free_gb` is room to start a job, or to resume one the floor held: the floor and its
+    /// margin above it. Unmeasured is not enough; the floor off is always room.
+    pub fn enough(&self, free_gb: Option<f64>) -> bool {
+        !self.on() || free_gb.is_some_and(|gb| gb >= self.resume_gb())
+    }
+}
+
+/// Where a config reads the machine's caps from. It holds no value a caller could keep: the caps
+/// are whatever the policy file says when they are asked for ([`Caps::now`]).
+#[derive(Debug, Clone, Default)]
+pub struct Caps {
+    /// The caps as the policy had them when the config was loaded: what stands while the file is
+    /// there but does not load (half-saved, or invalid).
+    at_load: Machine,
+    /// The policy file, whether or not it existed at load. `None` for a config built with no
+    /// policy file to read (a test's): then the caps at load are all there is.
+    source: Option<PathBuf>,
+}
+
+impl Caps {
+    /// The caps as the policy file says now. A file that is gone caps nothing; one that cannot be
+    /// read or does not pass its checks leaves the caps as they were at load, never looser by an
+    /// accident of a half-saved file.
+    pub fn now(&self) -> Machine {
+        let Some(path) = &self.source else { return self.at_load };
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                Policy::parse(&text).ok().map(|p| p.machine).filter(|m| m.validate().is_ok()).unwrap_or(self.at_load)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Machine::default(),
+            Err(_) => self.at_load,
+        }
+    }
+}
+
+impl Machine {
+    /// Each cap that is set, as `relay config show` prints it.
+    pub fn fields(&self) -> Vec<(&'static str, String)> {
+        [
+            ("max_compiling", self.max_compiling.map(|n| n.to_string())),
+            ("min_free_mem_gb", self.min_free_mem_gb.map(|n| n.to_string())),
+            ("min_free_disk_gb", self.min_free_disk_gb.map(|n| n.to_string())),
+        ]
+        .into_iter()
+        .filter_map(|(k, v)| Some((k, v?)))
+        .collect()
+    }
+
+    fn validate(&self) -> Result<()> {
+        ensure!(self.max_compiling.is_none_or(|n| n >= 1), "machine.max_compiling must be at least 1");
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -184,6 +396,7 @@ const POLICY_FILE: &str = ".config/relay/policy.toml";
 
 impl Policy {
     pub fn parse(text: &str) -> Result<Self> {
+        finite_quantities(text)?;
         Ok(toml::from_str(text)?)
     }
 
@@ -238,9 +451,10 @@ pub struct Limits {
     pub max_load: Option<f64>,
     /// No new build session (each makes a clone) starts below this much free
     /// disk; a gc pass runs at once below it, and the largest running clone's
-    /// job reaches the `disk` decision point.
+    /// job reaches the `disk` decision point. Never under the policy's
+    /// `[machine] min_free_disk_gb`: merged, it is the higher of the two.
     #[serde(alias = "min_free_gb")]
-    pub min_free_disk_gb: f64,
+    pub min_free_disk_gb: OwnFloor,
     /// Free disk must be this many GB above `min_free_disk_gb` before a job the floor held resumes and
     /// before a queued job starts, so a disk hovering at the floor does not flap. It moves neither the
     /// floor nor what stops a running job.
@@ -363,7 +577,7 @@ impl Default for Limits {
             budget_usd: 10.0,
             silent_minutes: 30,
             max_load: None,
-            min_free_disk_gb: 10.0,
+            min_free_disk_gb: OwnFloor(Quantity(10.0)),
             disk_resume_margin_gb: 3.0,
             job_disk_gb: 40.0,
             disk_sample_minutes: 3.0,
@@ -680,6 +894,7 @@ impl Config {
     /// The project's config over the owner's policy: a profile field the project
     /// sets replaces the policy's, one it leaves out stays; banned models add up.
     pub fn parse_with(text: &str, dir: &Path, policy: Option<(&Policy, &Path)>) -> Result<Self> {
+        finite_quantities(text)?;
         let mut cfg: Self = toml::from_str(text)?;
         cfg.repo = dir.join(&cfg.repo).canonicalize().with_context(|| format!("repo {}", cfg.repo.display()))?;
         // A relative `program` path is the config file's, as `repo` is, never the working
@@ -721,6 +936,10 @@ impl Config {
             }
             self.profiles = merged;
             self.policy_path = Some(path.to_path_buf());
+            // The machine's caps are the policy's alone, and nothing of them is copied into this
+            // config: the project's own disk floor stays as written, and each disk decision takes
+            // the higher of it and the machine's floor as the policy has it then ([`Floor`]).
+            self.caps = Caps { at_load: policy.machine, source: Some(path.to_path_buf()) };
         }
         self.origins = origins;
     }
@@ -748,6 +967,18 @@ impl Config {
             fail!(NotFound, "no profile named {name} ({known})");
         };
         Ok(p)
+    }
+
+    /// The owner's machine caps as the policy file says now ([`Caps::now`]): asked at every
+    /// admission point, never kept.
+    pub fn machine(&self) -> Machine {
+        self.caps.now()
+    }
+
+    /// The disk floor for a decision made now ([`Floor::of`] the project's own and the machine's
+    /// as the policy file says at this moment): asked at each one, never kept.
+    pub fn disk_floor(&self) -> Floor {
+        Floor::of(&self.limits, &self.machine())
     }
 
     /// Where a merged setting came from, `project` when unrecorded.
@@ -782,7 +1013,9 @@ impl Config {
             policy.as_ref().map(|(p, from)| (p, from.as_path())),
         )
         .with_context(|| format!("in {}", path.display()))?;
-        let cfg = Self { programs: Some(crate::host::record_in(&crate::ctx::state_root())), ..cfg };
+        let mut cfg = Self { programs: Some(crate::host::record_in(&crate::ctx::state_root())), ..cfg };
+        // A policy written after this load is read at the next admission, as one edited is.
+        cfg.caps.source = Policy::path().map(|(p, _)| p);
         Ok((cfg, path))
     }
 
@@ -802,11 +1035,13 @@ impl Config {
             gc: Gc::default(),
             profiles: BTreeMap::new(),
             hooks: Hooks::default(),
+            caps: Caps::default(),
             policy_path: None,
             programs: Some(crate::host::record_in(&crate::ctx::state_root())),
             origins: BTreeMap::new(),
         };
         cfg.merge(policy.as_ref().map(|(p, from)| (p, from.as_path())));
+        cfg.caps.source = Policy::path().map(|(p, _)| p);
         if let Some((_, from)) = &policy {
             cfg.validate_policy().with_context(|| format!("in policy {}", from.display()))?;
         }
@@ -925,7 +1160,7 @@ impl Config {
         Ok(())
     }
 
-    /// What the policy can set, the bans and the profiles, checked alike inside a project
+    /// What the policy can set, the bans, the profiles and the machine's caps, checked alike inside a project
     /// and outside one ([`Config::policy_only`]).
     fn validate_policy(&self) -> Result<()> {
         for re in self.session.banned_models.keys() {
@@ -934,6 +1169,7 @@ impl Config {
         for (name, p) in &self.profiles {
             p.validate(name)?;
         }
+        self.caps.at_load.validate()?;
         self.validate_escalation()
     }
 
@@ -1435,7 +1671,8 @@ mod tests {
         assert_eq!(cfg.gc.build_outputs, ["target", "node_modules", ".venv"]);
         assert_eq!((cfg.gc.outputs_after_hours, cfg.gc.clones_after_days, cfg.gc.waiting_retain_days), (6.0, 7.0, 7.0));
         assert_eq!((cfg.gc.logs_gzip_after_days, cfg.gc.interval_minutes), (3.0, 60.0));
-        assert_eq!((cfg.limits.job_disk_gb, cfg.limits.min_free_disk_gb), (40.0, 10.0));
+        assert_eq!(cfg.limits.job_disk_gb, 40.0);
+        assert_eq!(cfg.limits.min_free_disk_gb, 10.0);
         assert_eq!(cfg.limits.disk_resume_margin_gb, 3.0);
         assert!(cfg.session.env.is_empty(), "no variable is hard-coded");
         let cfg = Config::parse(
@@ -1509,6 +1746,140 @@ budget = 3
             .unwrap()
     }
 
+    /// Copilot review of PR #70, finding 5: a process that loaded its config before the owner set or
+    /// changed a cap went on with the caps it started with. The caps are read from the policy file
+    /// each time they are asked for; a file that does not load leaves them as they were at load.
+    #[test]
+    fn the_machines_caps_are_read_from_the_policy_again_each_time_they_are_asked_for() {
+        let d = repo();
+        let file = d.path().join("policy.toml");
+        let write = |text: &str| std::fs::write(&file, text).unwrap();
+        write("[machine]\nmax_compiling = 6\n");
+        let policy = Policy::parse("[machine]\nmax_compiling = 6\n").unwrap();
+        let cfg = Config::parse_with("name = \"demo\"", d.path(), Some((&policy, &file))).unwrap();
+        let caps = |cfg: &Config| (cfg.machine().max_compiling, cfg.machine().min_free_mem_gb.map(Quantity::get));
+        assert_eq!(caps(&cfg), (Some(6), None));
+        write("[machine]\nmax_compiling = 2\nmin_free_mem_gb = 4\n");
+        assert_eq!(caps(&cfg), (Some(2), Some(4.0)), "the same config, loaded before the owner's edit");
+        // The disk floor of a decision follows the file too, over the project's own (10 by default).
+        assert_eq!((cfg.disk_floor().gb, cfg.disk_floor().machines), (10.0, false));
+        write("[machine]\nmin_free_disk_gb = 30\n");
+        assert_eq!((cfg.disk_floor().gb, cfg.disk_floor().machines), (30.0, true), "raised while the process runs");
+        write("[machine]\nmin_free_disk_gb = 50\n");
+        assert_eq!(cfg.disk_floor().resume_gb(), 53.0, "and raised again");
+        assert_eq!(cfg.limits.min_free_disk_gb, 10.0, "the project's own is never written over");
+        write("[machine]\nmax_compiling = ");
+        assert_eq!(caps(&cfg), (Some(6), None), "half-saved: the caps at load stand, not none");
+        write("[machine]\nmax_compiling = 0\n");
+        assert_eq!(caps(&cfg), (Some(6), None), "invalid: likewise");
+        write("[profiles.p]\nnote = \"x\"\n");
+        assert_eq!(caps(&cfg), (None, None), "the table removed: no cap");
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(caps(&cfg), (None, None), "the policy removed: no cap");
+        // A config loaded with no policy file to read keeps what it was given.
+        assert_eq!(Config::parse("name = \"demo\"", d.path()).unwrap().machine(), Machine::default());
+    }
+
+    /// Copilot review of PR #70 (third round): `limits.min_free_disk_gb = nan` passed validation, and
+    /// NaN compares false with everything: the machine's floor was discarded and the floor read as
+    /// off, so jobs started below the owner's floor. No quantity can hold such a value: it is refused
+    /// where the file is parsed, in a project's config and in the policy alike, naming its key.
+    #[test]
+    fn a_quantity_that_is_not_a_finite_number_zero_or_more_is_a_config_error_naming_its_key() {
+        let d = repo();
+        let project =
+            |section: &str, line: &str| Config::parse(&format!("name = \"demo\"\n[{section}]\n{line}\n"), d.path());
+        for bad in ["nan", "+nan", "inf", "-inf", "-1.5", "-1"] {
+            for key in ["min_free_disk_gb", "disk_resume_margin_gb", "job_disk_gb"] {
+                let err = format!("{:#}", project("limits", &format!("{key} = {bad}")).unwrap_err());
+                assert!(err.contains(key), "{key} = {bad}: {err}");
+            }
+            for key in ["min_free_mem_gb", "min_free_disk_gb"] {
+                let err = format!("{:#}", Policy::parse(&format!("[machine]\n{key} = {bad}\n")).unwrap_err());
+                assert!(err.contains(key), "machine.{key} = {bad}: {err}");
+            }
+        }
+        // The gate is on the file, not on a list of keys: any float, known to relay or not.
+        for (section, key) in [("limits", "budget_usd"), ("hooks", "held_after_minutes"), ("profiles.p", "budget")] {
+            let err = format!("{:#}", project(section, &format!("{key} = nan")).unwrap_err());
+            assert!(err.contains(&format!("{section}.{key} must be a finite number")), "{err}");
+        }
+        let err = format!("{:#}", Policy::parse("[profiles.p]\nbudget = inf\n").unwrap_err());
+        assert!(err.contains("profiles.p.budget must be a finite number"), "{err}");
+        let err = format!("{:#}", Policy::parse("[machine]\nmin_free_disk_gb = nan\n").unwrap_err());
+        assert!(err.contains("machine.min_free_disk_gb must be a finite number"), "{err}");
+        // And the type itself cannot be made to hold one, whoever makes it.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5] {
+            assert!(Quantity::new(bad).is_err(), "{bad}");
+        }
+        assert_eq!((Quantity::of(0.0).get(), Quantity::of(-0.0).get().is_sign_positive()), (0.0, true));
+        // What is valid still is: whole numbers and floats, and the machine's floor stands over the project's.
+        let cfg = project("limits", "min_free_disk_gb = 0.0\ndisk_resume_margin_gb = 2").unwrap();
+        let policy = Policy::parse("[machine]\nmin_free_disk_gb = 30\nmin_free_mem_gb = 4.5\n").unwrap();
+        let floor = Floor::of(&cfg.limits, &policy.machine);
+        assert_eq!((floor.gb, floor.on(), floor.resume_gb()), (30.0, true, 32.0));
+        assert_eq!(policy.machine.min_free_mem_gb.map(Quantity::get), Some(4.5));
+    }
+
+    /// A profile says whether its jobs compile; unset, they do. The project's field wins, as any other.
+    #[test]
+    fn a_profile_declares_whether_its_jobs_compile_and_the_default_is_that_they_do() {
+        let policy = "[profiles.design]\nreadonly = true\ncompiles = false\n[profiles.review]\nreadonly = true\n";
+        let cfg = merged_with(policy, "[profiles.design]\nnote = \"x\"\n[profiles.review]\ncompiles = true\n");
+        let compiles = |name: &str| cfg.profile(name).unwrap().compiles;
+        assert_eq!((compiles("design"), compiles("review")), (Some(false), Some(true)));
+        assert_eq!(cfg.origin("profiles.design.compiles"), Origin::Policy);
+        assert_eq!(merged_with(policy, "").profile("review").unwrap().compiles, None, "unset: it compiles");
+        assert!(cfg.profile("design").unwrap().fields().contains(&("compiles", "false".to_owned())));
+        let d = repo();
+        let checked = "name = \"demo\"\n[profiles.p]\ncompiles = false\ncheck = \"cargo test\"\n";
+        assert!(Config::parse(checked, d.path()).is_err(), "a check builds, so its job compiles");
+    }
+
+    /// The machine's caps are the owner's: read from the policy's `[machine]`, refused in a project's
+    /// `relay.toml`, and absent they change nothing. The disk floor is the higher of the two files'.
+    #[test]
+    fn the_machines_caps_are_the_policys_and_a_project_only_raises_the_disk_floor() {
+        let caps = "[machine]\nmax_compiling = 6\nmin_free_mem_gb = 4\nmin_free_disk_gb = 30\n";
+        let cfg = merged_with(caps, "");
+        let m = cfg.caps.at_load;
+        let gb = |q: Option<Quantity>| q.map(Quantity::get);
+        assert_eq!((m.max_compiling, gb(m.min_free_mem_gb), gb(m.min_free_disk_gb)), (Some(6), Some(4.0), Some(30.0)));
+        // Copilot review of PR #70 (second round), finding 4: nothing of the machine's floor is copied
+        // into the project's limits, so no reader can hold an old one. A decision takes both, then.
+        assert_eq!(cfg.limits.min_free_disk_gb, 10.0, "the project's own floor stays as written");
+        assert_eq!(cfg.origin("limits.min_free_disk_gb"), Origin::Project);
+        let floor = |cfg: &Config| Floor::of(&cfg.limits, &m);
+        assert_eq!((floor(&cfg).gb, floor(&cfg).machines), (30.0, true), "the project's 10 is under the machine's");
+        let lower = merged_with(caps, "[limits]\nmin_free_disk_gb = 0\n");
+        assert_eq!(floor(&lower).gb, 30.0, "a project cannot lower it, nor turn it off");
+        let higher = merged_with(caps, "[limits]\nmin_free_disk_gb = 60\ndisk_resume_margin_gb = 5\n");
+        assert_eq!((floor(&higher).gb, floor(&higher).machines), (60.0, false), "a project may raise it");
+        assert_eq!(floor(&higher).resume_gb(), 65.0);
+        assert!(
+            floor(&higher).enough(Some(65.0)) && !floor(&higher).enough(Some(64.0)) && !floor(&higher).enough(None)
+        );
+
+        let none = merged("[limits]\nmin_free_disk_gb = 0\n");
+        assert_eq!(none.caps.at_load, Machine::default(), "no [machine] table: no cap");
+        let off = Floor::of(&none.limits, &Machine::default());
+        assert!(!off.on() && off.enough(Some(0.1)), "and the project's floor is its own, as before: off");
+
+        let d = repo();
+        let in_project = Config::parse("name = \"demo\"\n[machine]\nmax_compiling = 99\n", d.path());
+        assert!(in_project.is_err(), "a project cannot set a machine cap");
+        assert!(Policy::parse("[machine]\nmax_compilng = 6\n").is_err(), "a misspelt cap is refused, not ignored");
+        for bad in ["min_free_mem_gb = -1", "min_free_disk_gb = -1"] {
+            assert!(Policy::parse(&format!("[machine]\n{bad}\n")).is_err(), "{bad}: refused where it is parsed");
+        }
+        {
+            let bad = "max_compiling = 0";
+            let policy = Policy::parse(&format!("[machine]\n{bad}\n")).unwrap();
+            let cfg = Config::parse_with("name = \"demo\"", d.path(), Some((&policy, Path::new("/p.toml"))));
+            assert!(cfg.is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn a_project_profile_overrides_the_policy_field_by_field() {
         let cfg = merged("[profiles.bug-hunt]\neffort = \"low\"\nmax_running = 1\n");
@@ -1574,7 +1945,10 @@ budget = 3
             assert!(Config::parse(&text, d.path()).is_err(), "{bad}");
         }
         assert!(Config::parse("name = \"demo\"\n[profiles.Bad]\nnote = \"x\"", d.path()).is_err());
-        assert!(Policy::parse("[limits]\nfloor = 0.5").is_err(), "the policy holds only bans and profiles");
+        assert!(
+            Policy::parse("[limits]\nfloor = 0.5").is_err(),
+            "the policy holds only bans, profiles and the machine's caps"
+        );
     }
 
     #[test]

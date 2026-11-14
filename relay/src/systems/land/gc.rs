@@ -17,7 +17,7 @@
 //! - an idle copy of the linked caches (`sandbox.linked_caches`) in a pool goes once no run has taken
 //!   it for `cache_copies_idle_days`, and so does every idle copy past the `limits.max_running` most
 //!   recently used: no more runs than that hold one at once, and every retired one (`gone-*`). A copy is
-//!   a whole cache of its own, and frees what it holds;
+//!   a whole cache of its own, and frees what it holds that no tree installed from it still links;
 //! - what a killed `relay probe` left (`probes/<pid>-<start>`, apart from every job's clone) goes once no
 //!   process is both.
 //!
@@ -358,7 +358,8 @@ struct Action {
     job: String,
     kind: Kind,
     path: PathBuf,
-    /// Disk the place held (a lower bound when `partial`).
+    /// Disk removing the place gives back (a lower bound when `partial`): what it held, less every file
+    /// that something this pass has not removed still links.
     bytes: u64,
     partial: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -395,6 +396,8 @@ pub fn run(ctx: &Ctx, dry_run: bool) -> Result<()> {
     let end = Instant::now() + Duration::from_secs(ctx.cfg.gc.pass_seconds);
     let items = plan(ctx, &ctx.world()?, now_micros());
     let mut actions: Vec<Action> = Vec::new();
+    // What the places removed so far held of files with several links: a file is freed with its last.
+    let mut freed_so_far = os::Freed::default();
     let mut left = 0;
     let say = |line: &str| {
         if !ctx.json {
@@ -406,8 +409,14 @@ pub fn run(ctx: &Ctx, dry_run: bool) -> Result<()> {
             left = items.len() - i;
             break;
         };
-        // One measure for every place, which follows no link, its root included; a review ref is a name.
-        let (bytes, complete) = if item.kind == Kind::ReviewRef { (0, true) } else { os::dir_size(&item.path, within) };
+        // One measure for every place, which follows no link, its root included, and counts what removing
+        // the place gives back: not a file something outside what this pass removes still links (a package
+        // in a copy of the linked caches, linked into a tree that stays). A review ref is a name.
+        let (bytes, complete, links) = if item.kind == Kind::ReviewRef {
+            (0, true, os::Links::default())
+        } else {
+            freed_so_far.by_removing(&item.path, within)
+        };
         let mut a = Action {
             job: item.job.clone(),
             kind: item.kind,
@@ -422,6 +431,10 @@ pub fn run(ctx: &Ctx, dry_run: bool) -> Result<()> {
         }
         if dry_run && item.kind == Kind::Clone {
             a.rescued = rescue_needed(ctx, item).map(|r| format!("{r} would be made"));
+        }
+        // Gone (or, in a dry run, would be): its links no longer hold their files. A log is gzipped, not removed.
+        if a.kept.is_none() && item.kind != Kind::Log {
+            freed_so_far.removed(links);
         }
         say(&a.line(dry_run));
         actions.push(a);

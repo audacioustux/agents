@@ -252,33 +252,81 @@ pub fn free_disk_gb(path: &Path) -> Option<f64> {
     Some((s.f_bavail * s.f_frsize) as f64 / 1e9)
 }
 
-/// Disk space a tree holds, all of it, from a recursive stat walk that does not follow
-/// symlinks and counts a hard-linked file once, in bytes allocated. Stops when
-/// `within` has passed: then the second value is `false` and the first is a
-/// lower bound. What gc counts.
-pub fn dir_size(path: &Path, within: Duration) -> (u64, bool) {
-    size(path, within, false)
+/// The disk a running job's directories hold together, as its disk use: each counted whole (in bytes
+/// allocated, no symlink followed, a hard-linked file once), but for `apart`, the copy of the linked
+/// caches this run was given in its clone ([`crate::sandbox::farm`]), which is the project's cache and
+/// not the job's work. Only that directory, by its path: where no copy was given, or anywhere else (a
+/// directory of that name in the job's `/tmp`, or deeper in its tree), what a job writes is its own and
+/// counts. Each is walked for at most `within` (a lower bound past it).
+pub fn dirs_size(paths: &[std::path::PathBuf], apart: Option<&Path>, within: Duration) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut seen = std::collections::HashSet::new();
+    let mut once = |meta: &std::fs::Metadata| meta.nlink() < 2 || seen.insert((meta.dev(), meta.ino()));
+    paths.iter().map(|p| walk(p, within, apart, &mut once).0).sum()
 }
 
-/// The same for a job's clone, as its disk use: its own copy of the linked caches
-/// ([`crate::sandbox::farm`]), `.git/relay-caches`, is the project's cache, not the job's work, and is
-/// left out; only that one (a job's tree can name a directory that, at any other depth, and it is the
-/// job's).
-pub fn job_work_size(path: &Path, within: Duration) -> (u64, bool) {
-    size(path, within, true)
+/// What removing places frees, one after another, in bytes allocated. A file's blocks go with its last
+/// link only: a package in a copy of the linked caches is hard-linked into every tree installed from it,
+/// and removing the copy frees nothing of it while such a tree stays (nor does removing the tree while
+/// the copy stays). So a file with several links counts once every one of them is among what was
+/// removed, with the place that held the last. What gc counts.
+#[derive(Debug, Default)]
+pub struct Freed {
+    /// The links already removed of each file that has several, by device and inode.
+    gone: std::collections::HashMap<(u64, u64), u64>,
 }
 
-fn size(path: &Path, within: Duration, job_work: bool) -> (u64, bool) {
+/// The links a place holds of each file that has several: what [`Freed::removed`] is told once it is gone.
+#[derive(Debug, Default)]
+pub struct Links(std::collections::HashMap<(u64, u64), u64>);
+
+impl Freed {
+    /// The bytes removing `path` frees, after every place [`Freed::removed`] before it: a tree walked
+    /// without following a symlink, its root included (one there, or a file, is itself, never what it
+    /// leads to). Stops when `within` has passed: then the second value is `false` and the first is a
+    /// lower bound. With the links it holds, for [`Freed::removed`].
+    pub fn by_removing(&self, path: &Path, within: Duration) -> (u64, bool, Links) {
+        use std::os::unix::fs::MetadataExt;
+        let mut links = Links::default();
+        let mut last = |meta: &std::fs::Metadata| {
+            if meta.nlink() < 2 {
+                return true;
+            }
+            let id = (meta.dev(), meta.ino());
+            let here = links.0.entry(id).or_insert(0);
+            *here += 1;
+            self.gone.get(&id).copied().unwrap_or(0) + *here == meta.nlink()
+        };
+        let (bytes, whole) = walk(path, within, None, &mut last);
+        (bytes, whole, links)
+    }
+
+    /// The place those `links` were counted in is gone.
+    pub fn removed(&mut self, links: Links) {
+        for (id, n) in links.0 {
+            *self.gone.entry(id).or_insert(0) += n;
+        }
+    }
+}
+
+/// The bytes allocated to the tree at `path`, from a recursive stat walk that follows no symlink: every
+/// directory but `apart`, and each other entry `counts` says to count (asked once per link of a file).
+/// Stops when `within` has passed: then the second value is `false` and the first is a lower bound.
+fn walk(
+    path: &Path,
+    within: Duration,
+    apart: Option<&Path>,
+    counts: &mut dyn FnMut(&std::fs::Metadata) -> bool,
+) -> (u64, bool) {
     use std::os::unix::fs::MetadataExt;
     // The root too is looked at as itself: a symlink (or a file) there is its own size, never what it
     // leads to, which removing it would not free.
     match path.symlink_metadata() {
-        Ok(meta) if !meta.is_dir() => return (meta.blocks() * 512, true),
+        Ok(meta) if !meta.is_dir() => return (if counts(&meta) { meta.blocks() * 512 } else { 0 }, true),
         Err(_) => return (0, true),
         Ok(_) => {}
     }
     let end = std::time::Instant::now() + within;
-    let mut seen = std::collections::HashSet::new();
     let mut total = 0;
     let mut todo = vec![path.to_path_buf()];
     while let Some(dir) = todo.pop() {
@@ -287,25 +335,20 @@ fn size(path: &Path, within: Duration, job_work: bool) -> (u64, bool) {
         }
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
-            let Ok(meta) = entry.path().symlink_metadata() else { continue };
+            let at = entry.path();
+            let Ok(meta) = at.symlink_metadata() else { continue };
             if meta.is_dir() {
-                if job_work && dir == path.join(".git") && entry.file_name() == crate::sandbox::farm::IN_CLONE {
+                if apart == Some(at.as_path()) {
                     continue;
                 }
                 total += meta.blocks() * 512;
-                todo.push(entry.path());
-            } else if meta.nlink() < 2 || seen.insert((meta.dev(), meta.ino())) {
+                todo.push(at);
+            } else if counts(&meta) {
                 total += meta.blocks() * 512;
             }
         }
     }
     (total, true)
-}
-
-/// The disk a running job's directories hold together, as its disk use ([`job_work_size`]), each walked
-/// for at most `within` (a lower bound past it).
-pub fn dirs_size(paths: &[std::path::PathBuf], within: Duration) -> u64 {
-    paths.iter().map(|p| job_work_size(p, within).0).sum()
 }
 
 /// A size for people and boards: `340K`, `12G`, `1.5G` (decimal units).
@@ -327,6 +370,18 @@ mod tests {
     use super::*;
     use crate::config::tempdir::Dir;
 
+    /// All a tree holds that goes with it: what gc counts for a place, nothing else removed before it.
+    fn dir_size(path: &Path, within: Duration) -> (u64, bool) {
+        let (bytes, whole, _) = Freed::default().by_removing(path, within);
+        (bytes, whole)
+    }
+
+    /// A running job's clone, as its disk use, with the copy of the linked caches it was given in its `.git`.
+    fn job_work_size(clone: &Path, within: Duration) -> (u64, bool) {
+        let copy = clone.join(".git").join(crate::sandbox::farm::IN_CLONE);
+        (dirs_size(&[clone.to_path_buf()], Some(&copy), within), true)
+    }
+
     /// The clone's own copy of the linked caches is the project's cache, not the job's work, so it is left
     /// out of the clone's size; a directory of that name anywhere else in the clone is the job's, and counts.
     #[test]
@@ -342,6 +397,36 @@ mod tests {
         assert!(job_work_size(&clone, Duration::from_secs(10)).0 >= without + (1 << 20), "the job's own was not");
     }
 
+    /// Copilot at a6b6099: gc counted all a copy of the linked caches holds as freed, but its packages are
+    /// hard-linked into the trees installed from it, and those blocks stay while such a tree does. A file
+    /// with several links is freed with the last of them: with the place that held it, once every other
+    /// is among what was removed, and never while one is outside.
+    #[test]
+    fn a_file_is_freed_with_its_last_link_only() {
+        let d = Dir::new();
+        let (copy, tree, kept) = (d.path().join("copy"), d.path().join("tree"), d.path().join("kept"));
+        for dir in [&copy, &tree, &kept] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(copy.join("both"), vec![1u8; 1 << 20]).unwrap();
+        std::fs::hard_link(copy.join("both"), tree.join("both")).unwrap();
+        std::fs::write(copy.join("outside"), vec![1u8; 1 << 20]).unwrap();
+        std::fs::hard_link(copy.join("outside"), kept.join("outside")).unwrap();
+        std::fs::write(copy.join("own"), vec![1u8; 1 << 18]).unwrap();
+        let within = Duration::from_secs(10);
+        let mut freed = Freed::default();
+        let (bytes, whole, links) = freed.by_removing(&copy, within);
+        assert!(whole && (1 << 18..1 << 20).contains(&bytes), "only what nothing else links: {bytes}");
+        // Kept (its removal failed): its links are still there, and the tree frees nothing of the shared file.
+        assert!(freed.by_removing(&tree, within).0 < 1 << 20);
+        // Gone: the tree holds the last link of the file they shared, and never the one a kept place links.
+        freed.removed(links);
+        let (bytes, _, links) = freed.by_removing(&tree, within);
+        assert!((1 << 20..2 << 20).contains(&bytes), "the last link frees the file, once: {bytes}");
+        freed.removed(links);
+        assert!(freed.by_removing(&kept, within).0 >= 1 << 20, "and so does the last of the other");
+    }
+
     /// Copilot at a6b6099: every directory a running job is measured by was sized as a clone, so a
     /// `.git/relay-caches` in its `/tmp` was left out too: work written there never counted against
     /// `limits.job_disk_gb`. Only the clone has a copy of the caches; its `/tmp` is counted whole.
@@ -352,8 +437,17 @@ mod tests {
         std::fs::create_dir_all(clone.join(".git")).unwrap();
         std::fs::create_dir_all(tmp.join(".git/relay-caches")).unwrap();
         std::fs::write(tmp.join(".git/relay-caches/work"), vec![1u8; 1 << 20]).unwrap();
-        let bytes = dirs_size(&[clone, tmp], Duration::from_secs(10));
+        let copy = clone.join(".git/relay-caches");
+        let bytes = dirs_size(&[clone.clone(), tmp.clone()], Some(&copy), Duration::from_secs(10));
         assert!(bytes >= 1 << 20, "work in /tmp/.git/relay-caches was left out of the job's disk use: {bytes}");
+        // Nor is a directory of that name in the clone left out when this run was given no copy there (no
+        // cache is linked): the job made it, and what it writes there is its work.
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::write(copy.join("work"), vec![1u8; 1 << 20]).unwrap();
+        let paths = [clone, tmp];
+        let given = dirs_size(&paths, Some(&copy), Duration::from_secs(10));
+        let not_given = dirs_size(&paths, None, Duration::from_secs(10));
+        assert!(not_given >= given + (1 << 20), "a job with no copy hid its work under the copy's name: {not_given}");
     }
 
     /// Copilot on (e): the skip of a clone's copy of the caches was in `dir_size` itself, so gc's sizes left

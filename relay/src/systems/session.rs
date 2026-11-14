@@ -275,6 +275,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         log: "log.ndjson",
         stderr: "stderr.log",
         measure: work.clone.iter().map(SessionRepo::path).chain([work.tmp.as_path()]).collect(),
+        apart: launch.caches.as_ref().map(sandbox::farm::Farm::path),
     };
     let (mut report, ending, disk) =
         drive(ctx, job, &seat.key, &run, &mut launch.cmd, launch.stdin.as_deref(), seat.harness.reader(), &|| true)?;
@@ -723,6 +724,7 @@ pub fn consult(
             log: "check.ndjson",
             stderr: "check-stderr.log",
             measure: Vec::new(),
+            apart: None,
         };
         let ran = drive(ctx, job, &home.key(), &run, &mut cmd, inv.stdin.as_deref(), harness.reader(), live)
             .map(|(report, ending, _)| (report, ending));
@@ -1007,6 +1009,9 @@ struct Run<'a> {
     stderr: &'a str,
     /// What to measure while it runs, for a job's worker: its clone (a build job) and its `/tmp`.
     measure: Vec<&'a Path>,
+    /// The copy of the linked caches this run was given in its clone, which is not its work: left out of
+    /// what is measured. None where it was given none: then nothing is.
+    apart: Option<&'a Path>,
 }
 
 /// What the runner hears while it drives a session: a line of output, the
@@ -1142,11 +1147,12 @@ fn listen(
     let (stop, stopped) = mpsc::channel::<()>();
     if !run.measure.is_empty() {
         let dirs: Vec<PathBuf> = run.measure.iter().map(|p| (*p).to_path_buf()).collect();
+        let apart = run.apart.map(Path::to_path_buf);
         let every = Duration::from_secs_f64(ctx.cfg.limits.disk_sample_minutes * 60.0);
         let sizes = tx.clone();
         std::thread::spawn(move || {
             loop {
-                if sizes.send(Heard::Disk(os::dirs_size(&dirs, DISK_WALK))).is_err() {
+                if sizes.send(Heard::Disk(os::dirs_size(&dirs, apart.as_deref(), DISK_WALK))).is_err() {
                     return;
                 }
                 if !matches!(stopped.recv_timeout(every), Err(mpsc::RecvTimeoutError::Timeout)) {

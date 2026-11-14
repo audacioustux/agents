@@ -639,6 +639,29 @@ mod tests {
         assert_eq!(std::fs::read_to_string(farm.path().join(".cache/pkg")).unwrap(), "warm", "the copy was lost");
     }
 
+    /// Copilot at a6b6099: a bound cache a job left mode 000 could not be opened to bind, and that error
+    /// refuses the sandbox: no session or check using the cache started again, so none could put it right.
+    /// It is relay's own directory: made usable again and bound, as a copy's is. A link there is still refused.
+    #[test]
+    fn a_bound_cache_a_job_made_unreadable_is_bound_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = TempDir::new();
+        let shared = d.path().join("caches");
+        let rel = cache(".cache");
+        drop(open_cache_dir(&shared, &rel).unwrap());
+        std::fs::write(shared.join(".cache/pkg"), "warm").unwrap();
+        std::fs::set_permissions(shared.join(".cache"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let bound = open_cache_dir(&shared, &rel);
+        let mode = std::fs::metadata(shared.join(".cache")).unwrap().permissions().mode() & 0o700;
+        std::fs::set_permissions(shared.join(".cache"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(bound.is_ok(), "a cache made unreadable refuses every sandbox after: {bound:?}");
+        assert_eq!(mode, 0o700, "the next job cannot use it");
+        assert_eq!(std::fs::read_to_string(shared.join(".cache/pkg")).unwrap(), "warm");
+        std::fs::remove_dir_all(shared.join(".cache")).unwrap();
+        std::os::unix::fs::symlink(d.path(), shared.join(".cache")).unwrap();
+        assert!(open_cache_dir(&shared, &rel).is_err(), "a link in a cache's place was followed");
+    }
+
     /// A copy left by a run relay never saw end is used again in place, and nothing it held is lost.
     #[test]
     fn a_copy_left_in_place_is_used_again() {

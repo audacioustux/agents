@@ -871,6 +871,120 @@ mod tests {
         assert!(refused.is_err(), "a copy left in place that cannot go must refuse the launch");
     }
 
+    /// The linked caches the plan links for a job with a tree, under this `[sandbox]` table, in the home
+    /// `user` the caller laid out below `root`.
+    fn linkable_in(root: &Path, user: &Path, sandbox: &str) -> Vec<CachePath> {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let cfg = Config::parse(&format!("name = \"t\"\n[sandbox]\nhide = []\n{sandbox}"), &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        let (scratch, tmp, clone) = (root.join("state/t/jobs/j.d"), root.join("data/t/scratch/j"), root.join("clone"));
+        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
+        let m = Mounts {
+            home: &home,
+            workdir: Some(&clone),
+            scratch: &scratch,
+            inbox: None,
+            tmp: &tmp,
+            cwd: &clone,
+            account: false,
+            caches: None,
+        };
+        linkable(&ctx, user, &m)
+    }
+
+    /// Copilot at a6b6099: a hidden path that is itself a symlink leading out of a cache
+    /// (`~/.cargo/git/secret -> /elsewhere`) was compared only by where it leads, which is not under the
+    /// cache, so the cache was linked; a warmed copy holding a real `secret/key` was then readable in the
+    /// job's tree, the hide rule mounted elsewhere. A path is under a cache by any directory on its way.
+    #[test]
+    fn a_hidden_symlink_leading_out_of_a_cache_keeps_it_a_bind() {
+        let d = Dir::new();
+        let user = d.path().join("user");
+        std::fs::create_dir_all(user.join(".cargo/git")).unwrap();
+        std::fs::create_dir_all(d.path().join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(d.path().join("elsewhere"), user.join(".cargo/git/secret")).unwrap();
+        let rels = linkable_in(
+            d.path(),
+            &user,
+            "hide_home = [\".cargo/git/secret\"]\ncaches = [\".cargo/git\"]\nlinked_caches = [\".cargo/git\"]\n",
+        );
+        assert!(rels.is_empty(), "{rels:?}");
+    }
+
+    /// Copilot at a6b6099: with `~/.alias -> .store` and both declared caches, the other entry was left out of
+    /// the nesting check because it leads to the same place, so `.store` was linked: its symlink then stood
+    /// in the rebuilt home beside `.alias`, whose bind landed on it, and no sandbox started. Only the entry
+    /// itself is left out; another that leads into, around or to it keeps it a bind.
+    #[test]
+    fn a_cache_another_cache_leads_to_is_not_linked() {
+        let d = Dir::new();
+        let user = d.path().join("user");
+        std::fs::create_dir_all(user.join(".store")).unwrap();
+        std::os::unix::fs::symlink(".store", user.join(".alias")).unwrap();
+        let rels = linkable_in(
+            d.path(),
+            &user,
+            "hide_home = []\ncaches = [\".alias\", \".store\"]\nlinked_caches = [\".store\"]\n",
+        );
+        assert!(rels.is_empty(), "{rels:?}");
+    }
+
+    /// Copilot at a6b6099: with the home itself a symlink (`/home/me -> /srv/me`) a linked cache's
+    /// directory was rebuilt at the path as written, and bubblewrap refuses a tmpfs on a symlink: no
+    /// sandbox started, where the cache as a bind had. A cache is linked only where no directory on its
+    /// whole path, the home and what is above it included, is a symlink.
+    #[test]
+    fn a_cache_in_a_symlinked_home_is_not_linked() {
+        let d = Dir::new();
+        std::fs::create_dir_all(d.path().join("srv-me/.cache")).unwrap();
+        let user = d.path().join("me");
+        std::os::unix::fs::symlink(d.path().join("srv-me"), &user).unwrap();
+        let rels =
+            linkable_in(d.path(), &user, "hide_home = []\ncaches = [\".cache\"]\nlinked_caches = [\".cache\"]\n");
+        assert!(rels.is_empty(), "{rels:?}");
+    }
+
+    /// Copilot at a6b6099 (two threads): the handles a sandbox binds its caches by were left open across
+    /// `exec` in the runner, which holds them through its disk-decision agents and its acceptance checks.
+    /// Bubblewrap closes the handles its own arguments name and passes every other on, so such a child
+    /// read what its plan hides through `/proc/self/fd/<n>/secret`. A handle is close-on-exec in the
+    /// runner for its whole life: nothing the runner starts inherits it.
+    #[test]
+    fn a_bound_caches_handle_reaches_no_other_child_of_the_runner() {
+        let d = Dir::new();
+        let root = d.path();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let user = root.join("user");
+        std::fs::create_dir_all(user.join(".cache")).unwrap();
+        let conf = "name = \"t\"\n[sandbox]\nhide = []\nhide_home = []\ncaches = [\".cache\"]\n";
+        let cfg = Config::parse(conf, &repo).unwrap();
+        let ctx = Ctx::unclaimed(cfg, repo.join("relay.toml"), root.join("state"), root.join("data"));
+        let (scratch, tmp) = (root.join("state/t/jobs/j.d"), root.join("data/t/scratch/j"));
+        let home = Home { harness: "claude", label: "default".into(), dir: user.join(".claude") };
+        let m = Mounts {
+            home: &home,
+            workdir: None,
+            scratch: &scratch,
+            inbox: None,
+            tmp: &tmp,
+            cwd: &repo,
+            account: false,
+            caches: None,
+        };
+        let (_built, keep) = args(&ctx, &user, &m, Vec::new()).unwrap();
+        assert_eq!(keep.len(), 1);
+        for fd in &keep {
+            let flags = rustix::io::fcntl_getfd(fd).unwrap();
+            assert!(flags.contains(rustix::io::FdFlags::CLOEXEC), "the runner's handle is left open across exec");
+            let n = std::os::fd::AsRawFd::as_raw_fd(fd).to_string();
+            let inherited =
+                std::process::Command::new("sh").args(["-c", "test -e /proc/self/fd/$0", &n]).status().unwrap();
+            assert!(!inherited.success(), "another child of the runner was given the cache's handle");
+        }
+    }
+
     #[test]
     fn a_placeholder_is_seeded_empty_and_never_through_a_symlink() {
         let d = Dir::new();

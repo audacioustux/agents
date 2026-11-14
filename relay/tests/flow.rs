@@ -577,6 +577,64 @@ fn a_cache_with_a_hidden_path_under_it_is_never_copied() {
     assert_eq!((j["status"].as_str(), j["bars"][0]["result"].as_str()), (Some("done"), Some("pass")), "{j}");
 }
 
+/// Copilot at a6b6099: the probe ran bubblewrap itself and took its exit with a code as proof that its
+/// sandbox had ended. Bubblewrap reports its command's exit before the rest of its pid namespace has
+/// gone, so the probe's copy of the linked caches went back to the pool on no proof. The probe's
+/// sandboxes run under the supervisor, as a session's and a check's do: the one witness of a whole tree's end.
+#[test]
+fn the_probes_sandboxes_run_under_the_supervisor() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("probe-supervised", false);
+    claude_account(&env.home, "a", 10, false);
+    // A bubblewrap of the test's own, first on the probe's PATH: it notes who started it, then is the real one.
+    let (bin, log) = (env.root.join("bin"), env.root.join("started-by"));
+    std::fs::create_dir_all(&bin).unwrap();
+    let found = Command::new("sh").args(["-c", "command -v bwrap"]).output().unwrap();
+    let real = String::from_utf8_lossy(&found.stdout).trim().to_owned();
+    write_executable(
+        &bin.join("bwrap"),
+        &format!(
+            "#!/bin/sh\n{{ tr '\\0' ' ' </proc/$PPID/cmdline; echo; }} >>'{}'\nexec '{real}' \"$@\"\n",
+            log.display()
+        ),
+    );
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let mut probe = Command::new(env!("CARGO_BIN_EXE_relay"));
+    probe.args(["probe", "--account", "claude:a"]).env("PATH", path);
+    let probe = relay_cmd(&env, &mut probe);
+    ok(&probe, "probe");
+    let started_by = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(!started_by.is_empty(), "the probe ran no sandbox");
+    for by in started_by.lines() {
+        assert!(by.contains(" supervise "), "a probe's sandbox was started by `{by}`, not by a supervisor");
+    }
+}
+
+/// Copilot at a6b6099: gc sized a copy of the linked caches by all it holds and said that much was freed.
+/// A copy's packages are hard-linked into the trees installed from it, and a file's blocks go only with
+/// its last link: what a kept tree still links is not freed by removing the copy.
+#[test]
+fn gc_says_freed_only_what_no_kept_tree_still_links() {
+    let env = setup("gc-links", false);
+    let copy = env.root.join("data/relay/flow/copies-for-sessions/gone-left");
+    std::fs::create_dir_all(copy.join(".cache")).unwrap();
+    std::fs::write(copy.join(".cache/pkg"), vec![1u8; 1 << 20]).unwrap();
+    std::fs::write(copy.join(".cache/own"), vec![1u8; 1 << 18]).unwrap();
+    // A tree installed from the copy, which stays.
+    let kept = env.root.join("data/relay/flow/kept-tree");
+    std::fs::create_dir_all(&kept).unwrap();
+    std::fs::hard_link(copy.join(".cache/pkg"), kept.join("pkg")).unwrap();
+    let pass = relay(&env, &["land", "gc", "--json"]);
+    ok(&pass, "gc");
+    let report: serde_json::Value = serde_json::from_slice(&pass.stdout).unwrap();
+    assert!(!copy.exists() && kept.join("pkg").exists(), "{report}");
+    let freed = report["freed_bytes"].as_u64().unwrap();
+    assert!(freed >= 1 << 18, "what only the copy held is freed: {report}");
+    assert!(freed < 1 << 20, "a package a kept tree still links was said to be freed: {report}");
+}
+
 /// Audit finding 4: protected config an account does not have yet was not mounted at all, so its
 /// session could create it: a `settings.json` with a hook, a `hooks/` script, or a new omp profile that
 /// relay would then discover as an account. Each now gets a read-only placeholder.

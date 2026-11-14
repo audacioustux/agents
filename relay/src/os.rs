@@ -342,6 +342,20 @@ mod tests {
         assert!(job_work_size(&clone, Duration::from_secs(10)).0 >= without + (1 << 20), "the job's own was not");
     }
 
+    /// Copilot at a6b6099: every directory a running job is measured by was sized as a clone, so a
+    /// `.git/relay-caches` in its `/tmp` was left out too: work written there never counted against
+    /// `limits.job_disk_gb`. Only the clone has a copy of the caches; its `/tmp` is counted whole.
+    #[test]
+    fn a_jobs_tmp_is_counted_whole_whatever_it_names_its_directories() {
+        let d = Dir::new();
+        let (clone, tmp) = (d.path().join("clone"), d.path().join("tmp"));
+        std::fs::create_dir_all(clone.join(".git")).unwrap();
+        std::fs::create_dir_all(tmp.join(".git/relay-caches")).unwrap();
+        std::fs::write(tmp.join(".git/relay-caches/work"), vec![1u8; 1 << 20]).unwrap();
+        let bytes = dirs_size(&[clone, tmp], Duration::from_secs(10));
+        assert!(bytes >= 1 << 20, "work in /tmp/.git/relay-caches was left out of the job's disk use: {bytes}");
+    }
+
     /// Copilot on (e): the skip of a clone's copy of the caches was in `dir_size` itself, so gc's sizes left
     /// it out too, and a dead probe's warmed copy freed "nothing". A whole tree is counted whole; only a
     /// live job's disk accounting leaves its copy out, by asking for that.

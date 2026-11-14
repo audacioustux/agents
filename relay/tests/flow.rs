@@ -1321,6 +1321,34 @@ fn a_refused_add_writes_nothing() {
     std::fs::remove_file(&hold).unwrap();
 }
 
+/// Copilot on PR #69 (hint.rs:65): a review's name is its build's review for as long as its record is there.
+/// rev was dequeued before it ran and is still build's review; next, queued `--after rev`, waits for its
+/// accept. `queue add rev` as any other job would let next start on work no review accepted: only another
+/// review of build takes the name.
+#[test]
+fn a_review_that_never_ran_gives_its_name_only_to_another_review_of_its_build() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-name", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "build", "--text", "[status-done] Make a change."]), "queue build");
+    wait_status(&env, "build", "running");
+    ok(&relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "Review."]), "queue rev");
+    ok(&relay(&env, &["queue", "add", "next", "--after", "rev", "--text", "Build on it."]), "queue next");
+    ok(&relay(&env, &["queue", "dequeue", "rev"]), "dequeue rev before it starts");
+    let out = relay(&env, &["queue", "add", "rev", "--text", "Something else."]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    assert!(stderr(&out).contains("a review of build"), "{}", stderr(&out));
+    assert_eq!(job(&env, "rev")["reason"], "dequeued", "nothing took its place: {}", board(&env));
+    ok(&relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "Review again."]), "a review of build");
+    assert_eq!(job(&env, "rev")["status"], "queued", "{}", board(&env));
+    std::fs::remove_file(&hold).unwrap();
+}
+
 #[test]
 fn after_names_only_jobs_that_exist() {
     let env = setup("unknown", false);

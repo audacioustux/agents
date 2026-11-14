@@ -225,10 +225,12 @@ fn open_path(p: &Path) -> io::Result<OwnedFd> {
     Ok(rustix::fs::open(p, flags, Mode::empty())?)
 }
 
-/// The directory `name` in `at`, unless it is anything else (a symlink included).
-fn open_dir(at: &OwnedFd, name: impl rustix::path::Arg) -> io::Result<OwnedFd> {
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    Ok(rustix::fs::openat(at, name, flags, Mode::empty())?)
+/// The directory `name` in `at`, unless it is anything else (a symlink included). Every directory opened
+/// by name here is one a job could write (a cache, a copy, what is in them), and a job can leave one
+/// with no permissions: it is relay's own, so its owner's are put back rather than the open refused
+/// ([`crate::hostdir::open_writable_dir`]).
+fn open_dir(at: &OwnedFd, name: &CStr) -> io::Result<OwnedFd> {
+    Ok(crate::hostdir::open_writable_dir(at.as_fd(), name)?)
 }
 
 fn names(rel: &Path) -> impl Iterator<Item = &OsStr> {
@@ -238,11 +240,15 @@ fn names(rel: &Path) -> impl Iterator<Item = &OsStr> {
     })
 }
 
+fn c_name(name: &OsStr) -> io::Result<CString> {
+    CString::new(name.as_bytes()).map_err(|_| io::ErrorKind::InvalidInput.into())
+}
+
 /// `rel` under `at`, one directory at a time, following no symlink.
 fn open_beneath(at: &OwnedFd, rel: &Path) -> io::Result<OwnedFd> {
     let mut fd = at.try_clone()?;
     for n in names(rel) {
-        fd = open_dir(&fd, n)?;
+        fd = open_dir(&fd, &c_name(n)?)?;
     }
     Ok(fd)
 }
@@ -256,7 +262,7 @@ fn make_beneath(at: &OwnedFd, rel: &Path) -> io::Result<OwnedFd> {
             Ok(()) | Err(Errno::EXIST) => {}
             Err(e) => return Err(e.into()),
         }
-        let cn = CString::new(n.as_bytes()).map_err(|_| Errno::INVAL)?;
+        let cn = c_name(n)?;
         // A directory a job made unreadable is made usable again (and kept); anything else under the name
         // (a symlink to elsewhere) goes.
         fd = match crate::hostdir::open_writable_dir(fd.as_fd(), &cn) {
@@ -347,7 +353,9 @@ fn shared_root(shared: &Path) -> io::Result<OwnedFd> {
 
 /// `rel` in relay's caches, from their opened root one directory at a time, following no symlink and
 /// making each directory that is not there. Anything else in the way is refused, never replaced: what a
-/// bound cache and the probe's markers are made through.
+/// bound cache and the probe's markers are made through. A directory a job left with no permissions (a
+/// bound cache is its to write, its mode included) is made usable again: refused, no sandbox using the
+/// cache could start to put it right.
 fn make_shared(root: &OwnedFd, rel: &Path) -> io::Result<OwnedFd> {
     let mut fd = root.try_clone()?;
     for n in names(rel) {
@@ -355,7 +363,7 @@ fn make_shared(root: &OwnedFd, rel: &Path) -> io::Result<OwnedFd> {
             Ok(()) | Err(Errno::EXIST) => {}
             Err(e) => return Err(e.into()),
         }
-        fd = open_dir(&fd, n)?;
+        fd = open_dir(&fd, &c_name(n)?)?;
     }
     Ok(fd)
 }

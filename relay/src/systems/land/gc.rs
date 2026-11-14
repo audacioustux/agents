@@ -65,12 +65,11 @@ fn micros(secs: f64) -> u64 {
     u64::try_from(Duration::from_secs_f64(secs.max(0.0)).as_micros()).unwrap_or(u64::MAX)
 }
 
-/// Whether a queued job still needs `name`'s branch: it waits for it, or forks it.
+/// Whether a job that waits still needs `name`'s branch: an edge of the dependency graph ends at it (as
+/// readiness and cleanup read it: through a review and its builder, a replaced review, a requeued builder),
+/// or a queued job forks it.
 fn waited_for(world: &World, name: &str) -> bool {
-    world.jobs().values().any(|k| {
-        k.status == crate::world::Status::Queued
-            && (k.after.iter().any(|a| a == name) || k.fork.as_ref().is_some_and(|f| f.job == name))
-    })
+    world.needed(name)
 }
 
 /// What `j`'s clone is due for at `now_us` (bus time). Nothing for a live job, a
@@ -509,6 +508,35 @@ mod tests {
             assert_eq!(due_of(n), Due::default(), "{n}");
         }
         assert_eq!(due_of("free"), Due { outputs: true, clone: true });
+    }
+
+    /// Copilot on PR #69 (world.rs:813): gc keeps what the dependency graph says a waiting job needs, not
+    /// only what it names. next waits on rev, whose reject of build halted: next needs build's branch (it
+    /// starts from it once rev accepts), so build's clone stays, and so does a forked job's.
+    #[test]
+    fn a_clone_a_waiting_job_needs_through_a_review_is_kept() {
+        let gc = Gc { outputs_after_hours: 0.0, clones_after_days: 0.0, waiting_retain_days: 0.0, ..Gc::default() };
+        let mut build = job("build", Status::Done, Some(1));
+        build.verdicts.push(crate::world::Reviewed {
+            reviewer: "rev".into(),
+            commit: "c1".into(),
+            verdict: crate::bus::Verdict::Reject,
+            reason: Some(crate::bus::Reason::TestFailure),
+            family: None,
+            stale_head: None,
+            at: 1,
+        });
+        build.review_halted = Some("rev's chain halted: ceiling".into());
+        let rev = Job {
+            kind: crate::bus::Kind::Review,
+            acceptance: crate::bus::Acceptance::ReviewOf("build".into()),
+            after: vec!["build".into()],
+            ..job("rev", Status::Done, Some(1))
+        };
+        let next = Job { after: vec!["rev".into()], ..job("next", Status::Queued, None) };
+        let w = world(vec![build.clone(), rev, next, job("free", Status::Done, Some(1))]);
+        assert_eq!(due(&w, &build, &gc, 10 * DAY), Due::default(), "next stands on build through rev");
+        assert_eq!(due(&w, &w.jobs()["free"], &gc, 10 * DAY), Due { outputs: true, clone: true });
     }
 
     #[test]

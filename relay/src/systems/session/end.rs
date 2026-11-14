@@ -258,8 +258,7 @@ fn check_message(c: &CheckRun) -> String {
 
 /// Whether the report's final section says `status: done`.
 pub(super) fn final_status_done(answer: &str, marker: &str) -> bool {
-    let tail = if marker.is_empty() { Some(answer) } else { answer.rfind(marker).map(|i| &answer[i..]) };
-    tail.is_some_and(|t| {
+    crate::harness::report::final_section(answer, marker).map(|f| f.section).is_some_and(|t| {
         t.lines().any(|l| {
             let l = l.trim().to_ascii_lowercase();
             l.strip_prefix("status:").is_some_and(|v| v.trim().starts_with("done"))

@@ -3568,6 +3568,46 @@ fn a_review_anything_waits_on_through_the_graph_is_not_cleaned_away() {
     std::fs::remove_file(env.home.join(".claude.a/hold")).unwrap();
 }
 
+/// Copilot on PR #69 (queue.rs:205): a reader that takes no lock sees a change half way. A replacement review
+/// is published before the `unchained` that names it, so no reader ever sees "superseded by rev2, gone".
+#[test]
+fn a_replacement_review_is_recorded_before_anything_names_it() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-order", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    ok(&relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "[verdict-accept] Review."]), "rev");
+    assert_eq!(wait_for(&env, "rev")["status"], "done");
+    ok(&relay(&env, &["queue", "add", "rev2", "--review-of", "build", "--text", "[verdict-accept] Again."]), "rev2");
+    let logged = events(&env);
+    let at = |pred: &dyn Fn(&serde_json::Value) -> bool| logged.iter().position(pred);
+    let queued = at(&|e| e["type"] == "queued" && e["job"] == "rev2").unwrap();
+    let unchained = at(&|e| e["type"] == "unchained" && e["job"] == "rev" && e["by"] == "rev2").unwrap();
+    assert!(queued < unchained, "rev2 is recorded before the unchained that names it: {logged:?}");
+}
+
+/// Copilot on PR #69 (world.rs:813): a build job starts from the branches it depends on, or not at all. With
+/// build's clone collected by gc, next (after build) is refused, naming build, instead of starting from HEAD.
+#[test]
+fn a_build_whose_base_clone_is_gone_is_refused_not_started_from_head() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("base-gone", false);
+    configure(&env, "", "[gc]\nclones_after_days = 0\n");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    ok(&relay(&env, &["land", "gc"]), "gc");
+    assert_eq!(job(&env, "build")["collected"], "clone");
+    let next = build(&env, "next", &["--after", "build"]);
+    assert_eq!(next["status"], "failed", "{next}");
+    let reason = next["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("the branch of build it starts from is gone"), "{reason}");
+}
+
 #[test]
 fn a_profile_that_asks_for_an_independent_family_refuses_a_same_family_reviewer() {
     if !have_bwrap() {

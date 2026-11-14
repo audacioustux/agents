@@ -202,7 +202,13 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     };
     let recorded = serde_json::to_value(&event)?["type"].clone();
     let what = if matches!(event, QueueEvent::Resumed { .. }) { "resuming" } else { "queuing" };
-    events.push(event);
+    // A job queued is published before anything that names it (a replacement review before the `unchained`
+    // that points at it); every other change names only what is recorded already.
+    if matches!(event, QueueEvent::Queued { .. }) {
+        events.insert(0, event);
+    } else {
+        events.push(event);
+    }
     if let Err(cycle) = change.try_record(&ctx.port(&Source(())), events, &name)? {
         fail!(Conflict, "{what} {name} would make it wait for itself: {cycle}, so none of them would ever start");
     }

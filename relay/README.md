@@ -103,7 +103,10 @@ dependencies on: a build after a review of a build starts from the first
 build's branch. With several such jobs, it starts from the tip that
 holds all the others; when their branches diverge, so no tip holds them all,
 the job fails at once and says so: land one into another, or queue it after
-one of them. Read-only jobs read your repository, as before.
+one of them. A base whose branch relay can no longer read (cleaned away, or its
+clone collected) fails it at once too, naming that job: it is never left out,
+which would start the job from `HEAD` without that work. Read-only jobs read your
+repository, as before.
 
 **Forks.** `queue add NAME --fork JOB` starts the new job as a fork of JOB's
 session (claude: `--resume ID --fork-session`): it begins with JOB's whole
@@ -761,6 +764,9 @@ so an earlier commit's reject is history, not the state.
   after a resume reads the builder's answer to the reject. When that run ended without
   a FINAL section, the file says so above its last message; when it left no message at
   all, the file says there is no FINAL to read and to judge by the commits and diff.
+  What counts as the report is read one way everywhere (the run's verdict, the end rule,
+  the review's verdict, this file): with `session.final_marker = ""`, any nonempty
+  answer is the report.
 - **Landing.** `land fetch` prints `note: no review has accepted <tip>` when a review
   was asked of the job and none accepted its tip. It never blocks: landing stays
   your step.
@@ -934,7 +940,8 @@ line each (`gc: removed <path> (<size>)`, `gc: would remove ...` in a dry run),
 a totals line, and a `collected` event per clone removed or emptied:
 
 - **Build outputs** of a job that is not live (not running, checking or queued)
-  and that no queued job waits for (`--after`) or forks, once it has ended
+  and that no waiting job needs (an edge of the [dependency graph](#what-a-job-is)
+  ends at it, through a review and its builder too) or a queued job forks, once it has ended
   `outputs_after_hours` ago. The source and the branch stay, so `queue resume`
   works and only rebuilds.
 - **Scratch directories** (a job's `/tmp`, `<data dir>/<project>/scratch/<job>`) on the

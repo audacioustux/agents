@@ -1297,28 +1297,43 @@ fn drive(
     Ok((reader.report().clone(), ending, disk))
 }
 
-/// The build jobs whose branches a build job starts from: those it waits
-/// for, through any read-only job between (build, review, build), and the one
-/// it forks, each with its clone and branch.
-pub fn bases(world: &World, job: &Job) -> Vec<(String, PathBuf, String)> {
+/// The build jobs whose branches a build job starts from: those it waits for, through any read-only job
+/// between (build, review, build), and the one it forks, each with its clone and branch (`found`, by name);
+/// and those whose branch relay can no longer read (`gone`: cleaned away, or its clone collected). A base
+/// that is gone is never left out silently, which would start the job from the repository's `HEAD`.
+pub fn bases(world: &World, job: &Job) -> Bases {
     let mut todo: Vec<&String> = job.after.iter().collect();
     todo.extend(job.fork.as_ref().map(|f| &f.job));
     let mut seen: Vec<&String> = Vec::new();
-    let mut out: Vec<(String, PathBuf, String)> = Vec::new();
+    let mut out = Bases::default();
     while let Some(n) = todo.pop() {
         if seen.contains(&n) {
             continue;
         }
         seen.push(n);
-        let Some(j) = world.jobs().get(n) else { continue };
+        let Some(j) = world.jobs().get(n) else {
+            out.gone.push(n.clone());
+            continue;
+        };
         if j.readonly() {
             todo.extend(&j.after);
-        } else if let (Some(dir), Some(branch)) = (&j.workdir, &j.branch) {
-            out.push((n.clone(), dir.path().to_path_buf(), branch.clone()));
+            continue;
+        }
+        match (j.workdir.as_ref().filter(|d| d.path().exists()), &j.branch) {
+            (Some(dir), Some(branch)) => out.found.push((n.clone(), dir.path().to_path_buf(), branch.clone())),
+            _ => out.gone.push(n.clone()),
         }
     }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.found.sort_by(|a, b| a.0.cmp(&b.0));
+    out.gone.sort();
     out
+}
+
+/// What [`bases`] found.
+#[derive(Debug, Default, PartialEq)]
+pub struct Bases {
+    pub found: Vec<(String, PathBuf, String)>,
+    pub gone: Vec<String>,
 }
 
 /// Of the base branches' tips, the one every other is an ancestor of, or why
@@ -1347,12 +1362,7 @@ pub fn pick_base(
 /// A build job with `bases` starts from the newest of their branch tips (`pick_base`).
 /// A job that has run (`ran`) and lost its clone to gc starts from its own work in
 /// the repository instead: the rescue ref gc made, else its branch as fetched.
-fn clone(
-    ctx: &Ctx,
-    name: &str,
-    bases: &[(String, PathBuf, String)],
-    ran: bool,
-) -> Result<(SessionRepo, String, Option<String>)> {
+fn clone(ctx: &Ctx, name: &str, bases: &Bases, ran: bool) -> Result<(SessionRepo, String, Option<String>)> {
     // Relay's own until the session starts, so plain git; from then on the session's (`SessionRepo`).
     let dir = ctx.clones.join(name);
     let branch = format!("{}{name}", ctx.cfg.session.branch_prefix);
@@ -1368,8 +1378,20 @@ fn clone(
     let _ = crate::hostdir::remove_tree(&dir);
     let made = (|| -> Result<Option<String>> {
         ok(Command::new("git").args(["clone", "--quiet", "--shared"]).arg(&ctx.cfg.repo).arg(&dir), "git clone")?;
+        let own = [format!("refs/relay/rescue/{name}"), format!("refs/heads/{branch}")]
+            .into_iter()
+            .find(|r| ran && checkpoint_rev(&ctx.cfg.repo, r).is_some());
+        // With no work of its own to go on from, it starts from its bases: all of them, or not at all.
+        if own.is_none() && !bases.gone.is_empty() {
+            bail!(
+                "not started: the branch of {} it starts from is gone (cleaned away, or its clone collected by gc), \
+                 and starting from the repository's HEAD would leave that work out; queue it after a job whose \
+                 branch is there, or release it from that one (relay queue release {name} --from ...)",
+                bases.gone.join(", ")
+            );
+        }
         let mut tips = Vec::new();
-        for (job, from, b) in bases {
+        for (job, from, b) in &bases.found {
             let what = format!("fetching {job}'s branch {b}");
             ok(Ctx::git(&dir).arg("fetch").arg("--quiet").arg(from).arg(format!("{b}:refs/relay/base/{job}")), &what)?;
             let tip = checkpoint_rev(&dir, &format!("refs/relay/base/{job}")).with_context(|| what.clone())?;
@@ -1378,9 +1400,6 @@ fn clone(
         let ancestor = |a: &str, b: &str| {
             Ctx::git(&dir).args(["merge-base", "--is-ancestor", a, b]).status().is_ok_and(|s| s.success())
         };
-        let own = [format!("refs/relay/rescue/{name}"), format!("refs/heads/{branch}")]
-            .into_iter()
-            .find(|r| ran && checkpoint_rev(&ctx.cfg.repo, r).is_some());
         let start = match own {
             Some(r) => {
                 let what = format!("fetching {name}'s own work from {r}");
@@ -1446,10 +1465,14 @@ mod base_tests {
 
     #[test]
     fn a_build_finds_its_bases_through_a_review_between() {
+        let clones = crate::config::tempdir::Dir::new();
+        for n in ["one", "other", "two"] {
+            std::fs::create_dir_all(clones.path().join(n)).unwrap();
+        }
         let build = |n: &str, after: &[&str]| Job {
             name: n.into(),
             after: after.iter().map(|a| (*a).to_owned()).collect(),
-            workdir: Some(SessionRepo::new(format!("/c/{n}"))),
+            workdir: Some(SessionRepo::new(clones.path().join(n))),
             branch: Some(format!("job/{n}")),
             ..Job::default()
         };
@@ -1463,10 +1486,18 @@ mod base_tests {
         for j in [build("one", &[]), review("look", &["one"]), review("loop", &["loop"]), build("other", &[])] {
             w.jobs_mut().insert(j.name.clone(), j);
         }
-        let names = |j: &Job| bases(&w, j).into_iter().map(|b| b.0).collect::<Vec<_>>();
+        let names = |j: &Job| bases(&w, j).found.into_iter().map(|b| b.0).collect::<Vec<_>>();
         assert_eq!(names(&build("two", &["look"])), ["one"], "build, review, build");
         assert_eq!(names(&build("two", &["look", "other", "loop"])), ["one", "other"]);
         assert!(names(&build("two", &["loop"])).is_empty(), "a cycle ends");
+
+        // Copilot on PR #69 (world.rs:813): a base whose clone gc collected, or that is gone, is named, never
+        // left out (which would start the job from HEAD without its work).
+        let collected = Job { workdir: None, collected: Some("clone".into()), ..build("collected", &[]) };
+        w.jobs_mut().insert(collected.name.clone(), collected);
+        let b = bases(&w, &build("two", &["look", "collected", "ghost"]));
+        assert_eq!(b.gone, ["collected", "ghost"]);
+        assert_eq!(b.found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["one"], "what is there is still found");
     }
 
     #[test]

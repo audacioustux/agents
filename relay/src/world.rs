@@ -466,9 +466,10 @@ pub struct WarmFailure {
 /// The dependency analysis of one state of a world's jobs, built on the first query after a change
 /// (`Deps::build`): what each job waits for, and whether it is blocked. Every query
 /// (`waits`, `blocked`, `startable`, `moves_on_its_own`) reads it, so a whole pass costs one linear
-/// build. Nothing can leave it stale: `World::jobs` is private, and `jobs_mut` and the fold drop it.
+/// build; beside it, what the jobs that wait need kept (`World::needed`), built on its first query. Nothing
+/// can leave either stale: `World::jobs` is private, and `jobs_mut` and the fold drop them.
 #[derive(Default)]
-struct Deps(std::sync::OnceLock<Analysis>);
+struct Deps(std::sync::OnceLock<Analysis>, std::sync::OnceLock<std::collections::HashSet<String>>);
 
 /// The built analysis: each job's waits.
 #[derive(Debug)]
@@ -955,6 +956,17 @@ impl<'w> Graph<'w> {
         }
     }
 
+    /// What the jobs that wait need kept: every job an edge of theirs ends at ([`Graph::deps`]), and every job a
+    /// queued one forks. gc keeps their clones, as cleanup keeps their records ([`Graph::waiters`]).
+    pub fn needed(&self) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        for j in self.jobs.values().filter(|j| self.waiting(j)) {
+            out.extend(self.deps(j).into_iter().map(|d| d.on));
+            out.extend(j.fork.as_ref().map(|f| f.job.clone()));
+        }
+        out
+    }
+
     /// The jobs that wait on `name`, directly or through other waiting jobs, by any edge: what removing `name`
     /// would release onto work it no longer holds, or block for good.
     pub fn waiters(&self, name: &str) -> Vec<String> {
@@ -1188,6 +1200,11 @@ impl World {
     /// The effective dependency graph of these jobs ([`Graph`]).
     pub fn graph(&self) -> Graph<'_> {
         Graph::new(&self.jobs)
+    }
+
+    /// Whether a job that waits needs `name` kept ([`Graph::needed`]): built once per state of the jobs.
+    pub fn needed(&self, name: &str) -> bool {
+        self.deps.1.get_or_init(|| self.graph().needed()).contains(name)
     }
 
     /// Whether `name` may be cleaned away: the jobs that wait on it, directly or through others, by any edge

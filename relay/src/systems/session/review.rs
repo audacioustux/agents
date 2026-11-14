@@ -101,44 +101,26 @@ pub(super) fn hand_over(ctx: &Ctx, inbox: &HostDir, r: &Reviewing) -> Result<Pat
 /// and plainly when that result has no final section or there is none at all.
 fn builder_result(job: &str, result: Option<&str>, marker: &str) -> String {
     let head = format!("# The last result of {job}\n\n");
+    // What its report is, read as its run's verdict read it.
+    let what = if marker.is_empty() { "final report".to_owned() } else { format!("{marker} section") };
     let Some(text) = result.map(str::trim).filter(|t| !t.is_empty()) else {
         return format!(
-            "{head}{job}'s latest run left no final message, so there is no {marker} section to read. Judge the \
-             branch by its commits and its diff alone.\n"
+            "{head}{job}'s latest run left no final message, so there is no {what} to read. Judge the branch by its \
+             commits and its diff alone.\n"
         );
     };
-    // Whether there is a final section is read from the whole message, never from what is kept of it.
-    let Some(at) = final_section(text, marker) else {
+    // Whether there is a report is read from the whole message, never from what is kept of it.
+    let Some(report) = crate::harness::report::final_section(text, marker) else {
         let text = checkpoint::bounded(text, BUILDER_RESULT_MAX);
         return format!(
-            "{head}{job}'s latest run ended without a {marker} section. This is its last message as relay read it; \
-             do not take it for a report, and judge the branch by its commits and its diff.\n\n{text}\n"
+            "{head}{job}'s latest run ended without a {what}. This is its last message as relay read it; do not \
+             take it for a report, and judge the branch by its commits and its diff.\n\n{text}\n"
         );
     };
     // The final section whole, and as much of the summary just above it as there is room for.
-    let (summary, section) = text.split_at(at);
-    let summary = tail(summary, BUILDER_RESULT_MAX.saturating_sub(section.len()));
-    format!(
-        "{head}What {job}'s latest run ended with: its {marker} section and what it wrote above it.\n\n{summary}{section}\n"
-    )
-}
-
-/// Where the final section of `text` starts: its last line that begins with `marker`, else the last place
-/// `marker` appears at all (as `Report::choose` finds it). `None` when it appears nowhere.
-fn final_section(text: &str, marker: &str) -> Option<usize> {
-    if marker.is_empty() {
-        return None;
-    }
-    let mut start = 0;
-    let mut found = None;
-    for line in text.split_inclusive('\n') {
-        let indent = line.len() - line.trim_start().len();
-        if line.trim_start().starts_with(marker) {
-            found = Some(start + indent);
-        }
-        start += line.len();
-    }
-    found.or_else(|| text.rfind(marker))
+    let summary = tail(report.summary, BUILDER_RESULT_MAX.saturating_sub(report.section.len()));
+    let above = if report.summary.is_empty() { "" } else { " and what it wrote above it" };
+    format!("{head}What {job}'s latest run ended with: its {what}{above}.\n\n{summary}{}\n", report.section)
 }
 
 /// The end of `text` in at most `max` bytes, saying how much came before it.
@@ -175,7 +157,7 @@ pub(super) fn preamble(r: &Reviewing, result: &Path) -> String {
 /// A review's verdict from its report's final section: a `verdict: accept|reject` line, and for a
 /// reject a `reason:` line naming a code (`other` when it names none that exists).
 pub(super) fn verdict(answer: &str, marker: &str) -> Option<(Verdict, Option<Reason>)> {
-    let tail = if marker.is_empty() { Some(answer) } else { answer.rfind(marker).map(|i| &answer[i..]) }?;
+    let tail = crate::harness::report::final_section(answer, marker)?.section;
     let field = |name: &str| {
         tail.lines().rev().find_map(|l| {
             let l = l.trim().trim_start_matches(['-', '*', ' ']);
@@ -568,6 +550,14 @@ mod tests {
             huge.ends_with(&format!("{whole}\n")) && !huge.contains("summary\n"),
             "a final section past the bound is whole"
         );
+        // Copilot on PR #69 (review.rs:111): with `session.final_marker = ""` any nonempty answer is the
+        // report, as the run's verdict and the review's own verdict read it; so it is handed over as one.
+        let unmarked = builder_result("b", Some("Did the parser.\nstatus: done"), "");
+        assert!(
+            unmarked.contains("its final report.") && unmarked.contains("Did the parser.\nstatus: done"),
+            "{unmarked}"
+        );
+        assert!(!unmarked.contains("do not take it for a report"), "{unmarked}");
         let long = builder_result("b", Some(&"x".repeat(BUILDER_RESULT_MAX + 10)), "FINAL");
         assert!(long.len() < BUILDER_RESULT_MAX + 512 && long.contains("(10 more bytes)"), "bounded");
     }

@@ -1,5 +1,6 @@
 //! dispatch: gives queued jobs a seat on the account with the most room, and
-//! reaps sessions whose runner died. Emits: dispatched, reaped.
+//! reaps sessions whose runner died. Emits: dispatched, reaped, unheld, hold-ended,
+//! in-line, out-of-line, runner-exited.
 //!
 //! It is the only system that acts on its own. `serve` takes the dispatcher
 //! role with flock (a second one exits at once), wakes on the bus doorbell or
@@ -19,12 +20,12 @@ use clap::Subcommand;
 
 use crate::accounts::{STALE_MICROS, harness_of};
 use crate::bus::{DispatchEvent, now_micros};
-use crate::config::{Config, Limits, Profile};
+use crate::config::{Config, Floor, Limits, Profile};
 use crate::ctx::Ctx;
 use crate::harness::{Harness, Home};
 use crate::os::{self, Role};
 use crate::world::{AccountState, DAY_MICROS, Job, Status, Wait, World};
-pub use room::{Cause, Hold, READING_WAIT_MICROS, Room, Start};
+pub use room::{Constraint, Hold, Pool, READING_WAIT_MICROS, Room, Start, memory_hold};
 
 /// The longest sleep. Only a runner that dies without a word (one started by
 /// an earlier dispatcher, or killed outright) waits this long to be reaped.
@@ -63,9 +64,10 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
 }
 
 /// Why nothing more starts this pass, for the log (printed only when it
-/// changes); when that could change; and the jobs a limit holds.
+/// changes); when that could change; the jobs a limit holds; and those of them
+/// that would start but for the machine's compiling pool, so are in line for it.
 #[derive(Debug, Default, PartialEq)]
-struct Held(Vec<String>, Option<u64>, Vec<String>);
+struct Held(Vec<String>, Option<u64>, Vec<String>, Vec<String>);
 
 fn serve(ctx: &Ctx) -> Result<()> {
     let Some(role) = Role::try_take(&ctx.state.join("dispatch.lock"))? else { return Ok(()) };
@@ -166,8 +168,8 @@ fn gc_pass(ctx: &Ctx) -> Duration {
     let interval = Duration::from_secs_f64(ctx.cfg.gc.interval_minutes * 60.0);
     let stamp = ctx.state.join("gc.last");
     let since = std::fs::metadata(&stamp).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
-    let min = ctx.cfg.limits.min_free_disk_gb;
-    let low = min > 0.0 && os::free_disk_gb(&ctx.clones).is_some_and(|gb| gb < min);
+    let floor = ctx.cfg.disk_floor();
+    let low = floor.on() && os::free_disk_gb(&ctx.clones).is_some_and(|gb| gb < floor.gb);
     if since.is_none_or(|s| s >= interval || low && s >= LOW_DISK_GAP) {
         // Stamped now as well as when the pass ends, so a slow one is not started again.
         let _ = std::fs::write(&stamp, "");
@@ -195,16 +197,25 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
             j.status = Status::Failed;
         }
     }
+    // A claim ends when its runner is seen gone with nothing of its tree left (its lock is free),
+    // and only by this record of it: a dead process stays dead, so nothing is given back too soon.
+    for c in world.claims.iter().filter(|c| !c.live()) {
+        port.emit(DispatchEvent::RunnerExited { runner_pid: c.runner.0, runner_started: c.runner.1 })?;
+        let _ = std::fs::remove_file(crate::world::claim_lock(c.runner));
+    }
     // Accounts belong to the machine: what other projects learned of them, and
     // the seats their sessions hold, count here too. Their jobs stay theirs.
     let neighbours = ctx.neighbours();
-    let others: Vec<&World> = neighbours.iter().collect();
     let dev_shell = crate::systems::devshell::Gate::of(ctx, &world);
-    let mut room =
-        Room::new(&ctx.cfg, &world, &others, disk_ok(&ctx.cfg.limits, &ctx.clones)).with_dev_shell(dev_shell.clone());
+    let mut room = Room::new(&ctx.cfg, &world, &neighbours.seen(), disk_ok(&ctx.cfg, &ctx.clones))
+        .with_load(&ctx.cfg)
+        .with_dev_shell(dev_shell.clone());
     crate::systems::quota::start_refresh(ctx, &room, &world, true)?;
     let mut held = Held::default();
-    for Start { job, account, model, provider } in plan(&ctx.cfg, &mut room, &world, now_micros(), &mut held) {
+    let starts = plan(&ctx.cfg, &mut room, &world, now_micros(), &mut held);
+    let started: Vec<&str> = starts.iter().map(|s| s.job.as_str()).collect();
+    line_up(&port, &world, &held.3, &started)?;
+    for Start { job, account, model, provider } in starts {
         let (pid, gate) = ctx.spawn_gated(&["session", "run", &job], &ctx.job_file(&job, "runner.log"))?;
         let started = os::start_time(pid).unwrap_or(0);
         // The runner reads its account and model from this event, so it waits at the gate until it is written.
@@ -235,7 +246,34 @@ fn tick(ctx: &Ctx) -> Result<(bool, Held, Option<u64>)> {
         .values()
         .any(|j| j.held && world.moves_on_its_own(j))
         .then(|| now_micros() + u64::try_from(HELD_POLL.as_micros()).unwrap_or(0));
-    Ok((busy, Held(held.0, None, Vec::new()), [due, held.1, held_due, poll].into_iter().flatten().min()))
+    Ok((busy, Held(held.0, None, Vec::new(), Vec::new()), [due, held.1, held_due, poll].into_iter().flatten().min()))
+}
+
+/// Records which of this project's queued jobs are in line for the machine's compiling pool
+/// (`in_line`: those this pass held by it alone), so every other project's dispatcher leaves a unit
+/// for each one that has waited longer than its own job. Written under the machine's seats lock,
+/// as a dispatch is, and only when it differs from what the fold has: a job newly in line, or put
+/// there by an earlier dispatcher, is recorded with this one; one in line no longer, and not
+/// `started` this pass (its dispatch says so itself), is taken out.
+fn line_up(port: &crate::bus::Port<DispatchEvent>, world: &World, in_line: &[String], started: &[&str]) -> Result<()> {
+    let me = std::process::id();
+    let planner = (me, os::start_time(me).unwrap_or(0));
+    let pool = Pool::Compiling.key();
+    for j in world.jobs().values().filter(|j| j.status == Status::Queued && !started.contains(&j.name.as_str())) {
+        let wanted = in_line.contains(&j.name);
+        let recorded = j.in_line.as_ref().is_some_and(|l| l.pool == pool && l.planner == planner);
+        if wanted && !recorded {
+            port.emit(DispatchEvent::InLine {
+                job: j.name.clone(),
+                pool: pool.clone(),
+                planner_pid: planner.0,
+                planner_started: planner.1,
+            })?;
+        } else if !wanted && j.in_line.is_some() {
+            port.emit(DispatchEvent::OutOfLine { job: j.name.clone() })?;
+        }
+    }
+    Ok(())
 }
 
 /// Starts the `held` chain for each job in `held` that has waited past
@@ -286,21 +324,10 @@ fn next_due(accounts: &[(&dyn Harness, Option<&AccountState>)], waiting: bool, n
     times.into_iter().filter(|&t| t > now_us).min()
 }
 
-/// The free disk (GB) a job the floor held resumes at, and a queued build job starts at: the floor
-/// (`limits.min_free_disk_gb`) and the margin above it (`limits.disk_resume_margin_gb`).
-pub fn resume_gb(limits: &Limits) -> f64 {
-    limits.min_free_disk_gb + limits.disk_resume_margin_gb
-}
-
-/// Whether free disk under the clones (`clones`) lets a build job start: unmeasured is not enough.
-pub fn disk_ok(limits: &Limits, clones: &Path) -> bool {
-    enough_disk(limits, os::free_disk_gb(clones))
-}
-
-/// Whether `free_gb` is room to start a job, or to resume one the floor held: the floor and its
-/// margin above it. The floor off (zero) is always room.
-fn enough_disk(limits: &Limits, free_gb: Option<f64>) -> bool {
-    limits.min_free_disk_gb <= 0.0 || free_gb.is_some_and(|gb| gb >= resume_gb(limits))
+/// Whether free disk under the clones (`clones`) lets a build job start now, by the floor as it
+/// stands now ([`Config::disk_floor`]): unmeasured is not enough.
+pub fn disk_ok(cfg: &Config, clones: &Path) -> bool {
+    cfg.disk_floor().enough(os::free_disk_gb(clones))
 }
 
 /// Resumes the job the floor has held longest, when free disk is back over the floor and its margin, or the
@@ -311,7 +338,7 @@ fn unhold(ctx: &Ctx, port: &crate::bus::Port<DispatchEvent>) -> Result<()> {
     let free = os::free_disk_gb(&ctx.clones);
     let neighbours = ctx.neighbours();
     let others: Vec<&World> = neighbours.iter().collect();
-    match resume_due(limits, &ctx.world()?, &others, free, now_micros()) {
+    match resume_due(limits, ctx.cfg.disk_floor(), &ctx.world()?, &others, free, now_micros()) {
         Some(Due::Resume { job, message, settle_us, budget_usd }) => {
             eprintln!(
                 "{} resumed {job}: disk is back ({} GB free)",
@@ -348,8 +375,15 @@ enum Due {
 /// floor is off, and no job resumed from a hold, in this project or another on the machine (`others`), is
 /// still settling (queued, or started less than a disk sample ago), so the space is not eaten again by two
 /// at once.
-fn resume_due(limits: &Limits, world: &World, others: &[&World], free_gb: Option<f64>, now_us: u64) -> Option<Due> {
-    if !enough_disk(limits, free_gb) {
+fn resume_due(
+    limits: &Limits,
+    floor: Floor,
+    world: &World,
+    others: &[&World],
+    free_gb: Option<f64>,
+    now_us: u64,
+) -> Option<Due> {
+    if !floor.enough(free_gb) {
         return None;
     }
     let settle = settle_micros(limits);
@@ -387,7 +421,7 @@ fn resume_due(limits: &Limits, world: &World, others: &[&World], free_gb: Option
         budget_usd = Some(left);
     }
     let seen = j.reason.as_deref().unwrap_or("free disk was under the floor");
-    let back = if limits.min_free_disk_gb > 0.0 {
+    let back = if floor.on() {
         format!("Free disk is back ({} GB free)", free_gb.unwrap_or_default().round())
     } else {
         "The disk floor has since been turned off".to_owned()
@@ -429,25 +463,16 @@ pub fn profile_hold(
     Some((format!("profile {name}: {count} started in 24h (max {max}){at}"), Some(slot)))
 }
 
-/// Which queued jobs start now, where, and on what model. Pure apart from reading the load
-/// average. Each job is judged by `room.judge` (the same judgment the board's reasons show), and
-/// each start is booked in `room` before the next job is judged. The seats other projects hold
-/// count against `limits.per_account`, but not against this project's `max_running`. `now_us`
-/// is bus time, so a profile's daily window can be judged at any moment.
+/// Which queued jobs start now, where, and on what model. Pure: it reads only `room`. Each job is
+/// judged by `room.judge` (the same judgment the board's reasons show), and each start is booked in
+/// `room` before the next job is judged. Every job that does not start is held with its reason, by
+/// whichever constraint binds (the project's `max_running` and the load as any other), so each
+/// reaches the `held` hook. What other projects run counts against the machine's pools
+/// (`limits.per_account`, `machine.max_compiling`), never against this project's `max_running`.
+/// `now_us` is bus time, so a profile's daily window can be judged at any moment.
 fn plan(cfg: &Config, room: &mut Room, world: &World, now_us: u64, held: &mut Held) -> Vec<Start> {
-    let limits = &cfg.limits;
-    let mut total = world.jobs().values().filter(|j| j.status == Status::Running).count();
-    if let (Some(max), Some(now)) = (limits.max_load, os::load_average())
-        && now > max
-    {
-        held.0.push(format!("load {now:.1} is above {max}"));
-        return Vec::new();
-    }
     let mut out = Vec::new();
     for j in queue(world) {
-        if total >= limits.max_running {
-            break;
-        }
         let waits = world.waits(j);
         if !waits.is_empty() {
             if world.blocked(j) {
@@ -455,28 +480,27 @@ fn plan(cfg: &Config, room: &mut Room, world: &World, now_us: u64, held: &mut He
             }
             continue;
         }
-        match place(cfg, room, j, None, now_us) {
-            Ok(Some(start)) => {
-                total += 1;
-                out.push(start);
-            }
+        match place(cfg, room, j, now_us) {
+            Ok(Some(start)) => out.push(start),
             Ok(None) => {}
-            Err(Hold { why, until, .. }) => {
+            Err(Hold { why, until, by }) => {
                 held.0.push(format!("{}: {why}", j.name));
                 held.1 = [held.1, until].into_iter().flatten().min();
                 held.2.push(j.name.clone());
+                if by == Constraint::Pool(Pool::Compiling) {
+                    held.3.push(j.name.clone());
+                }
             }
         }
     }
     out
 }
 
-/// The one choice of a seat, for a queued job and for a decision's session alike: `j` judged by
-/// `room.judge`, the account chosen by [`choose`] (away from `avoid` where another fits), and the
-/// start booked in `room` ([`Room::take`]) so whatever is judged next sees it.
-fn place(cfg: &Config, room: &mut Room, j: &Job, avoid: Option<&str>, now_us: u64) -> Result<Option<Start>, Hold> {
+/// The one choice of a seat for a queued job: `j` judged by `room.judge`, the account chosen by
+/// [`choose`], and the start booked in `room` ([`Room::take`]) so whatever is judged next sees it.
+fn place(cfg: &Config, room: &mut Room, j: &Job, now_us: u64) -> Result<Option<Start>, Hold> {
     let fits = room.judge(cfg, j, now_us)?;
-    let Some(home) = choose(j, &fits, avoid).cloned() else { return Ok(None) };
+    let Some(home) = choose(j, &fits, None).cloned() else { return Ok(None) };
     Ok(Some(room.take(cfg, j, &home, now_us)))
 }
 
@@ -494,8 +518,9 @@ fn session_job(worker: &Job, harness: &str, model: Option<&str>, since: u64) -> 
     }
 }
 
-/// A seat in `room` for a decision's `agent:` session for `worker` ([`session_job`]), chosen as a
-/// queued job's is ([`place`]): another account than the worker's where one fits, so no worker grades
+/// A seat in `room` for a decision's `agent:` session for `worker` ([`session_job`]), judged as a
+/// session ([`Room::judge_session`]: the memory gate and the accounts) and chosen as a queued job's
+/// is ([`choose`]): another account than the worker's where one fits, so no worker grades
 /// itself; else the worker's own. The worker's seat is as the fold has it: a run that asked at `cap`
 /// or `ended` is `checking` and holds none, while one at `disk` still runs and keeps its seat.
 pub fn place_session(
@@ -508,11 +533,11 @@ pub fn place_session(
     now_us: u64,
 ) -> Result<Start, Hold> {
     let j = session_job(worker, harness, model, since);
-    place(cfg, room, &j, worker.account.as_deref(), now_us)?.ok_or_else(|| Hold {
-        cause: Cause::Accounts,
-        why: format!("no {harness} account has room"),
-        until: None,
-    })
+    let fits = room.judge_session(cfg, &j, now_us)?;
+    let Some(home) = choose(&j, &fits, worker.account.as_deref()).cloned() else {
+        return Err(Hold { why: format!("no {harness} account has room"), until: None, by: Constraint::Accounts });
+    };
+    Ok(room.take_session(cfg, &j, &home))
 }
 
 /// Books a seat for decision `id`'s `agent:` session for `worker` ([`place_session`]) under the
@@ -533,11 +558,11 @@ pub fn book_session(
     let Some(_seats) = Role::try_take(&ctx.state_root.join("seats.lock"))? else { return Ok(Booking::Busy) };
     let world = ctx.world()?;
     let neighbours = ctx.neighbours();
-    let others: Vec<&World> = neighbours.iter().collect();
     // A decision's session is read-only: free disk does not hold it, nor does the dev shell.
-    let mut room = Room::new(&ctx.cfg, &world, &others, true);
-    let Ok(start) = place_session(&ctx.cfg, &mut room, worker, harness, model, since, now_micros()) else {
-        return Ok(Booking::Held);
+    let mut room = Room::new(&ctx.cfg, &world, &neighbours.seen(), true);
+    let start = match place_session(&ctx.cfg, &mut room, worker, harness, model, since, now_micros()) {
+        Ok(start) => start,
+        Err(hold) => return Ok(Booking::Held(hold)),
     };
     let Some(home) = room.found().iter().find(|h| h.key() == start.account).cloned() else {
         anyhow::bail!("{} was chosen but is not found", start.account);
@@ -554,25 +579,29 @@ pub fn book_session(
 pub enum Booking {
     /// Booked and recorded: the home of the account it is on.
     Booked(Home),
-    /// No account takes the session now.
-    Held,
+    /// The session does not start now: no account takes it, or the machine's memory gate holds it.
+    Held(Hold),
     /// The machine's seat lock is held by another planner for now.
     Busy,
 }
 
-/// The queued jobs, oldest first: the order [`plan`] judges them in.
+/// The queued jobs in the order [`plan`] judges them in: the one that has waited longest first
+/// ([`Job::waiting_since`]). It is the one order of every line: within the project here, and
+/// across projects for a unit of the machine's compiling pool, so a job is never first in one and
+/// behind in the other.
 fn queue(world: &World) -> Vec<&Job> {
     let mut queued: Vec<&Job> = world.jobs().values().filter(|j| j.status == Status::Queued).collect();
-    queued.sort_by_key(|j| j.created_at);
+    queued.sort_by_key(|j| j.waiting_since());
     queued
 }
 
 /// The account the next start would take, by [`plan`]'s own judgment and choice, with the job it
 /// would start: the first queued job free of waits that `room` admits somewhere. With no such job
 /// queued, the account a job that asks for nothing would get. `None` when every queued job free
-/// of waits is held. The load average and `max_running` aside: they say when, not where.
+/// of waits is held. The load, the memory, `max_running` and the machine's compiling pool aside:
+/// they say when, not where ([`Room::judge_where`]).
 pub fn next_pick(cfg: &Config, room: &Room, world: &World, now_us: u64) -> Option<(Option<String>, String)> {
-    let pick = |j: &Job| room.judge(cfg, j, now_us).ok().and_then(|fits| choose(j, &fits, None).map(Home::key));
+    let pick = |j: &Job| room.judge_where(cfg, j, now_us).ok().and_then(|fits| choose(j, &fits, None).map(Home::key));
     let free: Vec<&Job> = queue(world).into_iter().filter(|j| world.waits(j).is_empty()).collect();
     if free.is_empty() {
         return pick(&Job::default()).map(|a| (None, a));
@@ -616,9 +645,12 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
+    use super::room::{Gauges, LINGER_MICROS, LOOK_AGAIN_MICROS};
     use super::*;
     use crate::accounts;
+    use crate::config::{Machine, Quantity};
     use crate::harness::Meter;
+    use crate::world::Claim;
 
     fn home(harness: &'static str, label: &str) -> Home {
         Home { harness, label: label.into(), dir: PathBuf::from("/x") }
@@ -1451,21 +1483,26 @@ mod tests {
     }
 
     fn floor(min: f64, margin: f64) -> Limits {
-        Limits { min_free_disk_gb: min, disk_resume_margin_gb: margin, ..Limits::default() }
+        Limits { min_free_disk_gb: min.into(), disk_resume_margin_gb: margin, ..Limits::default() }
+    }
+
+    /// The floor of a project with these limits and no machine floor over it.
+    fn of(limits: &Limits) -> Floor {
+        Floor::of(limits, &Machine::default())
     }
 
     #[test]
     fn a_held_job_resumes_only_over_the_floor_and_its_margin() {
         let l = floor(60.0, 3.0);
         let w = held_world(&[("a", Status::Stopped, true, 5)]);
-        let due = |free| resume_due(&l, &w, &[], free, NOW_US).and_then(resumed);
+        let due = |free| resume_due(&l, of(&l), &w, &[], free, NOW_US).and_then(resumed);
         assert_eq!(due(Some(57.0)), None, "under the floor");
         assert_eq!(due(Some(62.9)), None, "over the floor, not over its margin: no flapping");
         assert_eq!(due(None), None, "unmeasured is not room");
         assert_eq!(due(Some(63.0)).as_deref(), Some("a"));
         let off = floor(0.0, 3.0);
-        assert!(off.min_free_disk_gb <= 0.0);
-        let message = message(resume_due(&l, &w, &[], Some(65.2), NOW_US).unwrap());
+        assert!(!of(&off).on());
+        let message = message(resume_due(&l, of(&l), &w, &[], Some(65.2), NOW_US).unwrap());
         assert!(message.contains("disk floor") && message.contains("Nothing in your work"), "{message}");
         assert!(message.contains("65 GB free"), "{message}");
     }
@@ -1475,29 +1512,33 @@ mod tests {
         let l = floor(60.0, 3.0);
         // Stopped and not held: by a person (or any other end), whatever the disk says.
         let w = held_world(&[("p", Status::Stopped, false, 1), ("f", Status::Failed, false, 1)]);
-        assert_eq!(resume_due(&l, &w, &[], Some(900.0), NOW_US), None);
+        assert_eq!(resume_due(&l, of(&l), &w, &[], Some(900.0), NOW_US), None);
     }
 
     #[test]
     fn held_jobs_resume_one_at_a_time_oldest_first() {
         let l = floor(60.0, 3.0);
         let mut w = held_world(&[("late", Status::Stopped, true, 9), ("early", Status::Stopped, true, 4)]);
-        let first = resumed(resume_due(&l, &w, &[], Some(70.0), NOW_US).unwrap()).unwrap();
+        let first = resumed(resume_due(&l, of(&l), &w, &[], Some(70.0), NOW_US).unwrap()).unwrap();
         assert_eq!(first, "early", "the one held longest");
         // It is resumed: queued, and the next waits while it has not started.
         let at = NOW_US - 10;
         let j = w.jobs_mut().get_mut("early").unwrap();
         (j.status, j.held, j.unheld_at, j.queued_at) = (Status::Queued, false, Some(at), at);
-        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US), None, "still queued: the space is not spent yet");
+        assert_eq!(
+            resume_due(&l, of(&l), &w, &[], Some(70.0), NOW_US),
+            None,
+            "still queued: the space is not spent yet"
+        );
         // It starts: still settling for a disk sample, then the next one goes.
         let j = w.jobs_mut().get_mut("early").unwrap();
         (j.status, j.started_at) = (Status::Running, Some(NOW_US - 5));
-        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US), None, "just started: not measured yet");
+        assert_eq!(resume_due(&l, of(&l), &w, &[], Some(70.0), NOW_US), None, "just started: not measured yet");
         let later = NOW_US + settle_micros(&l);
-        assert_eq!(resume_due(&l, &w, &[], Some(70.0), later).and_then(resumed).as_deref(), Some("late"));
+        assert_eq!(resume_due(&l, of(&l), &w, &[], Some(70.0), later).and_then(resumed).as_deref(), Some("late"));
         // The first ended; nothing settles.
         w.jobs_mut().get_mut("early").unwrap().status = Status::Done;
-        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).and_then(resumed).as_deref(), Some("late"));
+        assert_eq!(resume_due(&l, of(&l), &w, &[], Some(70.0), NOW_US).and_then(resumed).as_deref(), Some("late"));
     }
 
     /// A held project's neighbour has resumed a job from its own hold, as `unheld_at` says.
@@ -1515,15 +1556,18 @@ mod tests {
         for status in [Status::Queued, Status::Running] {
             let theirs = settling_neighbour(status);
             assert_eq!(
-                resume_due(&l, &w, &[&theirs], Some(70.0), NOW_US),
+                resume_due(&l, of(&l), &w, &[&theirs], Some(70.0), NOW_US),
                 None,
                 "{status:?}: the space is not spent yet"
             );
         }
         let theirs = settling_neighbour(Status::Running);
         let later = NOW_US + settle_micros(&l);
-        assert!(resume_due(&l, &w, &[&theirs], Some(70.0), later).is_some(), "once it has run a sample");
-        assert!(resume_due(&l, &w, &[&settling_neighbour(Status::Done)], Some(70.0), NOW_US).is_some(), "it ended");
+        assert!(resume_due(&l, of(&l), &w, &[&theirs], Some(70.0), later).is_some(), "once it has run a sample");
+        assert!(
+            resume_due(&l, of(&l), &w, &[&settling_neighbour(Status::Done)], Some(70.0), NOW_US).is_some(),
+            "it ended"
+        );
     }
 
     #[test]
@@ -1532,10 +1576,10 @@ mod tests {
         // The child was held first (older), the done parent after it was resumed: the parent goes first.
         let mut w = held_world(&[("child", Status::Stopped, true, 3), ("parent", Status::Stopped, true, 8)]);
         w.jobs_mut().get_mut("child").unwrap().after = vec!["parent".into()];
-        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).and_then(resumed).as_deref(), Some("parent"));
+        assert_eq!(resume_due(&l, of(&l), &w, &[], Some(70.0), NOW_US).and_then(resumed).as_deref(), Some("parent"));
         // With the parent done, the child is free to go.
         w.jobs_mut().get_mut("parent").unwrap().status = Status::Done;
-        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US).and_then(resumed).as_deref(), Some("child"));
+        assert_eq!(resume_due(&l, of(&l), &w, &[], Some(70.0), NOW_US).and_then(resumed).as_deref(), Some("child"));
     }
 
     #[test]
@@ -1543,16 +1587,20 @@ mod tests {
         let enabled = floor(60.0, 3.0);
         let off = floor(0.0, 3.0);
         let mut w = held_world(&[("a", Status::Stopped, true, 4), ("b", Status::Stopped, true, 9)]);
-        assert_eq!(resume_due(&enabled, &w, &[], Some(10.0), NOW_US), None, "under the floor while it is on");
+        assert_eq!(
+            resume_due(&enabled, of(&enabled), &w, &[], Some(10.0), NOW_US),
+            None,
+            "under the floor while it is on"
+        );
         for free in [Some(10.0), None] {
-            let due = resume_due(&off, &w, &[], free, NOW_US).unwrap();
+            let due = resume_due(&off, of(&off), &w, &[], free, NOW_US).unwrap();
             let (job, message) = (resumed(due.clone()).unwrap(), message(due));
             assert_eq!(job, "a", "the oldest, whatever the disk says: there is no floor");
             assert!(message.contains("turned off") && !message.contains("0 GB floor"), "{message}");
         }
         let j = w.jobs_mut().get_mut("a").unwrap();
         (j.status, j.held, j.unheld_at, j.queued_at) = (Status::Queued, false, Some(NOW_US - 10), NOW_US - 10);
-        assert_eq!(resume_due(&off, &w, &[], Some(10.0), NOW_US), None, "still one at a time");
+        assert_eq!(resume_due(&off, of(&off), &w, &[], Some(10.0), NOW_US), None, "still one at a time");
     }
 
     #[test]
@@ -1562,7 +1610,7 @@ mod tests {
         let j = w.jobs_mut().get_mut("early").unwrap();
         // Resumed at `at`, started, and sent back to the queue by a retry: `queued_at` moved on, the marker did not.
         (j.status, j.held, j.unheld_at, j.queued_at) = (Status::Queued, false, Some(NOW_US - 10), NOW_US - 5);
-        assert_eq!(resume_due(&l, &w, &[], Some(70.0), NOW_US), None, "queued again: still not started");
+        assert_eq!(resume_due(&l, of(&l), &w, &[], Some(70.0), NOW_US), None, "queued again: still not started");
     }
 
     #[test]
@@ -1574,12 +1622,12 @@ mod tests {
         let (at, started) = (NOW_US - 6 * 60_000_000, NOW_US - 5 * 60_000_000);
         let j = theirs.jobs_mut().get_mut("n").unwrap();
         (j.unheld_at, j.started_at, j.settle_us) = (Some(at), Some(started), 30 * 60_000_000);
-        assert_eq!(resume_due(&l, &w, &[&theirs], Some(70.0), NOW_US), None);
+        assert_eq!(resume_due(&l, of(&l), &w, &[&theirs], Some(70.0), NOW_US), None);
         let after = started + 30 * 60_000_000;
-        assert!(resume_due(&l, &w, &[&theirs], Some(70.0), after).is_some(), "its own window has passed");
+        assert!(resume_due(&l, of(&l), &w, &[&theirs], Some(70.0), after).is_some(), "its own window has passed");
         // One recorded without a window settles for ours.
         theirs.jobs_mut().get_mut("n").unwrap().settle_us = 0;
-        assert!(resume_due(&l, &w, &[&theirs], Some(70.0), NOW_US).is_some());
+        assert!(resume_due(&l, of(&l), &w, &[&theirs], Some(70.0), NOW_US).is_some());
     }
 
     #[test]
@@ -1589,7 +1637,7 @@ mod tests {
             let mut w = held_world(&[("a", Status::Stopped, true, 4)]);
             let j = w.jobs_mut().get_mut("a").unwrap();
             (j.cost_usd, j.budget_usd) = (cost, budget);
-            resume_due(&l, &w, &[], Some(70.0), NOW_US)
+            resume_due(&l, of(&l), &w, &[], Some(70.0), NOW_US)
         };
         let budget = |due| match due {
             Some(Due::Resume { budget_usd, .. }) => Some(budget_usd),
@@ -1603,18 +1651,400 @@ mod tests {
         let no_ceiling = Limits { job_ceiling_usd: None, ..l };
         let mut w = held_world(&[("a", Status::Stopped, true, 4)]);
         w.jobs_mut().get_mut("a").unwrap().cost_usd = 99.0;
-        assert!(matches!(resume_due(&no_ceiling, &w, &[], Some(70.0), NOW_US), Some(Due::Resume { .. })));
+        assert!(matches!(
+            resume_due(&no_ceiling, of(&no_ceiling), &w, &[], Some(70.0), NOW_US),
+            Some(Due::Resume { .. })
+        ));
+    }
+
+    /// A job the project's own `limits.max_running` (or `limits.max_load`) holds is held as any other
+    /// is: with a reason, and among the jobs the `held` hook is asked about. It used to be passed
+    /// over in silence, so it never reached the hook.
+    #[test]
+    fn a_job_held_by_max_running_has_a_reason_and_reaches_the_held_hook() {
+        let (_d, cfg) = omp_config("max_running = 1\n");
+        let jobs = [("a", Status::Running, "minimax-code/M3"), ("b", Status::Queued, "openai-codex/gpt-6.1")];
+        let (world, found) = omp_world(&jobs, 0.1, 0.1);
+        let (out, held) = plan_omp(&cfg, &world, &found);
+        assert_eq!(out, [], "the project runs its one job");
+        assert_eq!(held.2, ["b"], "the held hook is asked about it: {:?}", held.0);
+        assert_eq!(held.0, ["b: 1 of 1 running in this project (limits.max_running)"]);
+    }
+
+    /// The owner's caps with this many compiling jobs at once, and no other.
+    fn capped(max_compiling: usize) -> Machine {
+        Machine { max_compiling: Some(max_compiling), ..Machine::default() }
+    }
+
+    /// One omp account with room ([`omp_world`]) and these jobs of ours, each `(name, status,
+    /// read-only, waiting since)`, a running one held by this process as its runner, with the claim
+    /// its dispatch recorded.
+    fn machine_world(jobs: &[(&str, Status, bool, u64)]) -> (World, Vec<Home>) {
+        let (mut world, found) = omp_world(&[], 0.1, 0.1);
+        let me = std::process::id();
+        for &(name, status, readonly, queued_at) in jobs {
+            let running = status == Status::Running;
+            let j = Job {
+                name: name.into(),
+                status,
+                kind: if readonly { crate::bus::Kind::Read } else { crate::bus::Kind::Build },
+                account: running.then(|| "omp:default".to_owned()),
+                runner: running.then(|| (me, os::start_time(me).unwrap())),
+                models: BTreeMap::from([("omp".to_owned(), "openai-codex/gpt-6.1".to_owned())]),
+                created_at: queued_at,
+                queued_at,
+                ..Job::default()
+            };
+            world.claims.extend(j.runner.map(|runner| Claim { job: j.name.clone(), runner, no_compile: false }));
+            world.jobs_mut().insert(j.name.clone(), j);
+        }
+        (world, found)
+    }
+
+    /// The room of `world` among `others` under the owner's caps `machine`, with seats for a burst.
+    fn room_under(machine: Machine, world: &World, others: &[&World], found: &[Home]) -> Room {
+        Room::of(found.to_vec(), world.accounts.clone(), world, others, true).with_machine(machine)
+    }
+
+    /// The jobs a pass starts in `room`, in order, and why the rest are held ([`burst_config`]'s limits).
+    fn plan_in(mut room: Room, world: &World) -> (Vec<String>, Held) {
+        let (_d, cfg) = burst_config();
+        let mut held = Held::default();
+        let out = plan(&cfg, &mut room, world, NOW_US, &mut held);
+        (out.into_iter().map(|s| s.job).collect(), held)
+    }
+
+    /// As [`plan_in`], for `world` among `others` under the owner's caps `machine`.
+    fn plan_under(machine: Machine, world: &World, others: &[&World], found: &[Home]) -> (Vec<String>, Held) {
+        plan_in(room_under(machine, world, others, found), world)
+    }
+
+    const CAP: &str = "machine.max_compiling in the owner's policy";
+
+    /// The owner's ruling 1 (revised 2026-11-13): compiling jobs are capped over every project on the
+    /// machine, and what compiles is declared, never inferred from the read-only flag. A review
+    /// rebuilds its branch and runs its tests, so it counts as a build does; only a job queued as
+    /// compiling nothing neither takes a unit nor waits for one.
+    #[test]
+    fn the_machines_compiling_cap_counts_every_projects_jobs_but_those_that_compile_nothing() {
+        let (_d, cfg) = burst_config();
+        let jobs = [
+            ("build", Status::Queued, false, 5),
+            ("review", Status::Queued, true, 6),
+            ("design", Status::Queued, true, 7),
+        ];
+        let (mut world, found) = machine_world(&jobs);
+        world.jobs_mut().get_mut("design").unwrap().no_compile = true;
+        let (theirs, _) = machine_world(&[("x", Status::Running, false, 1)]);
+        let (out, held) = plan_under(capped(1), &world, &[&theirs], &found);
+        assert_eq!(out, ["design"], "a job that compiles nothing starts regardless");
+        let why = format!("1 of 1 compiling on this machine, over every project ({CAP})");
+        assert_eq!(held.0, [format!("build: {why}"), format!("review: {why}")], "the reason names the machine cap");
+        assert_eq!(held.2, ["build", "review"], "both reach the held hook");
+        assert_eq!(held.3, ["build", "review"], "and both are in line for a unit");
+        assert_eq!(held.1, Some(NOW_US + LOOK_AGAIN_MICROS), "a unit a dead runner held comes back with no event");
+        let room = room_under(capped(1), &world, &[&theirs], &found);
+        for job in ["build", "review"] {
+            let hold = room.hold(&cfg, &world.jobs()[job], NOW_US).unwrap();
+            assert_eq!(hold.by, Constraint::Pool(Pool::Compiling), "{job}: the binding constraint is named");
+        }
+        assert_eq!(room.hold(&cfg, &world.jobs()["design"], NOW_US), None);
+        assert_eq!(room.taken(&Pool::Compiling), 1);
+
+        // Their one job is a review: read-only, and it holds the unit all the same.
+        let (their_review, _) = machine_world(&[("x", Status::Running, true, 1)]);
+        assert_eq!(plan_under(capped(1), &world, &[&their_review], &found).0, ["design"]);
+        // Their job was queued as compiling nothing: it holds no unit, so our oldest takes it.
+        let mut quiet = theirs.clone();
+        quiet.claims[0].no_compile = true;
+        assert_eq!(plan_under(capped(1), &world, &[&quiet], &found).0, ["build", "design"]);
+        // Their runner died: nobody here reaps it, and its unit is free at once.
+        let mut dead = theirs.clone();
+        dead.claims[0].runner.1 += 1;
+        let (out, held) = plan_under(capped(1), &world, &[&dead], &found);
+        assert_eq!(out, ["build", "design"], "a dead runner holds no unit");
+        assert_eq!(held.3, ["review"], "our own build has the unit now: each start is booked before the next");
+        // A job being checked at its cap still has its runner, and its acceptance check to come.
+        let mut checking = theirs.clone();
+        checking.jobs_mut().get_mut("x").unwrap().status = Status::Checking;
+        assert_eq!(plan_under(capped(1), &world, &[&checking], &found).0, ["design"]);
+
+        // With two units, the build and the review both run, and a third compiling job waits.
+        assert_eq!(plan_under(capped(2), &world, &[], &found).0.len(), 3);
+        assert_eq!(plan_under(capped(2), &world, &[&theirs], &found).0, ["build", "design"]);
+        // With no cap in the policy, nothing of this holds anyone: exactly as before.
+        assert_eq!(plan_under(Machine::default(), &world, &[&theirs], &found).0.len(), 3);
+    }
+
+    /// Copilot review of PR #70, finding 1: a project whose fold could not be read was dropped from
+    /// the neighbours in silence, so its compiling jobs were in nobody's count and the cap could be
+    /// passed unseen. A room that knows a project is unread admits nothing that compiles while the
+    /// owner caps compiling, and the hold names the project.
+    #[test]
+    fn a_project_that_cannot_be_read_holds_what_compiles_rather_than_being_left_out_of_the_count() {
+        let (_d, cfg) = burst_config();
+        let (mut world, found) =
+            machine_world(&[("build", Status::Queued, false, 5), ("design", Status::Queued, true, 6)]);
+        world.jobs_mut().get_mut("design").unwrap().no_compile = true;
+        let unread = |machine, names: &[&str]| {
+            room_under(machine, &world, &[], &found).with_unread(names.iter().map(|n| (*n).to_owned()).collect())
+        };
+        let (out, held) = plan_in(unread(capped(2), &["tickify"]), &world);
+        assert_eq!(out, ["design"], "nothing is free to count as free; what compiles nothing needs no count");
+        let why = format!(
+            "build: the compiling jobs on this machine cannot be counted: the state of project tickify cannot be read ({CAP})"
+        );
+        assert_eq!(held.0, [why]);
+        assert_eq!((held.2.clone(), held.3.len()), (vec!["build".to_owned()], 0), "held, for the hook; in no line");
+        assert_eq!(held.1, Some(NOW_US + LOOK_AGAIN_MICROS), "looked at again: nothing says when it can be read");
+        let hold = unread(capped(2), &["thegrid", "tickify"]).hold(&cfg, &world.jobs()["build"], NOW_US).unwrap();
+        assert_eq!(hold.by, Constraint::Uncounted);
+        assert!(hold.why.contains("projects thegrid, tickify cannot be read"), "{}", hold.why);
+        // Every project read: the count is whole. No cap: there is nothing to count.
+        assert_eq!(plan_in(unread(capped(2), &[]), &world).0.len(), 2);
+        assert_eq!(plan_in(unread(Machine::default(), &["tickify"]), &world).0.len(), 2);
+    }
+
+    /// Copilot review of PR #70, finding 2: the unit followed the job's status. It is the runner
+    /// process's claim: held past its job's `ended` and by a runner the fold set aside, while the
+    /// process lives, in our project as in another; and never by a status whose runner has died.
+    #[test]
+    fn a_compiling_unit_is_counted_by_its_live_runner_process_in_every_project() {
+        let (world, found) = machine_world(&[("b", Status::Queued, false, 9)]);
+        let me = std::process::id();
+        let live = (me, os::start_time(me).unwrap());
+        let gone = (live.0, live.1 + 1);
+        let (theirs, _) = machine_world(&[("x", Status::Running, false, 1)]);
+        let with = |edit: &dyn Fn(&mut World)| {
+            let mut w = theirs.clone();
+            edit(&mut w);
+            w
+        };
+        let x = |w: &mut World, edit: &dyn Fn(&mut Job)| edit(w.jobs_mut().get_mut("x").unwrap());
+        // Ended, its runner still at work (the re-review comes after `ended`): the unit is held, and
+        // it comes back with no event, so the job is judged again in a moment.
+        let ended = with(&|w| x(w, &|x| x.status = Status::Done));
+        let (out, held) = plan_under(capped(1), &world, &[&ended], &found);
+        assert_eq!(out.len(), 0, "{:?}", held.0);
+        assert_eq!(held.1, Some(NOW_US + LINGER_MICROS));
+        // Resumed by hand during its check: the fold has no runner for the job, and the check runs on.
+        let set_aside = with(&|w| x(w, &|x| (x.status, x.runner) = (Status::Queued, None)));
+        assert_eq!(plan_under(capped(1), &world, &[&set_aside], &found).0.len(), 0);
+        // The job cleaned away under its live runner: the claim is the fold's, not the job's.
+        let cleaned = with(&|w| drop(w.jobs_mut().remove("x")));
+        assert_eq!(plan_under(capped(1), &world, &[&cleaned], &found).0.len(), 0);
+        // Dispatched again beside the old process: two live processes of one job hold two units, and
+        // a dead one none.
+        let mut second = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let other = (second.id(), os::start_time(second.id()).unwrap());
+        let claim = |runner| Claim { job: "x".into(), runner, no_compile: false };
+        let both = with(&|w| w.claims.extend([claim(gone), claim(other)]));
+        let units = room_under(capped(4), &world, &[&both], &found).taken(&Pool::Compiling);
+        second.kill().unwrap();
+        #[allow(clippy::disallowed_methods, reason = "a test reaps the child it killed")]
+        second.wait().unwrap();
+        assert_eq!(units, 2);
+        // Once the process has exited, nothing is held, whatever the status says: in their project,
+        let dead = with(&|w| w.claims[0].runner = gone);
+        assert_eq!(plan_under(capped(1), &world, &[&dead], &found).0, ["b"]);
+        // and in ours, where the count used to follow the status (a board reads before any reap).
+        let (mut ours, found) = machine_world(&[("r", Status::Running, false, 1), ("b", Status::Queued, false, 9)]);
+        assert_eq!(plan_under(capped(1), &ours, &[], &found).0.len(), 0, "our live runner holds the unit");
+        ours.claims[0].runner = gone;
+        assert_eq!(plan_under(capped(1), &ours, &[], &found).0, ["b"]);
+        ours.jobs_mut().get_mut("r").unwrap().status = Status::Failed;
+        ours.claims[0].runner = live;
+        assert_eq!(plan_under(capped(1), &ours, &[], &found).0.len(), 0, "ended in our fold, alive on the machine");
+    }
+
+    /// Copilot review of PR #70, finding 3: a pass walked the queue by creation while the line across
+    /// projects went by how long a job had waited, so a job could be first in one order and behind in
+    /// the other. There is one order: since when it has waited.
+    #[test]
+    fn the_queue_is_walked_in_the_order_the_line_across_projects_is_kept() {
+        let (mut world, found) =
+            machine_world(&[("early", Status::Queued, false, 1), ("late", Status::Queued, false, 2)]);
+        // `early` was created first, and went back into the queue (a retry, a resume) after `late` came.
+        world.jobs_mut().get_mut("early").unwrap().queued_at = 9;
+        let names: Vec<&str> = queue(&world).iter().map(|j| j.name.as_str()).collect();
+        assert_eq!(names, ["late", "early"], "the one that has waited longest is judged first");
+        let (out, held) = plan_under(capped(1), &world, &[], &found);
+        assert_eq!((out, held.3), (vec!["late".to_owned()], vec!["early".to_owned()]), "and takes the one unit");
+        // The same key orders the line across projects: theirs has waited since 5, between the two.
+        let (mut theirs, _) = machine_world(&[("old", Status::Queued, false, 5)]);
+        let me = std::process::id();
+        let planner = (me, os::start_time(me).unwrap());
+        theirs.jobs_mut().get_mut("old").unwrap().in_line =
+            Some(crate::world::InLine { pool: Pool::Compiling.key(), planner });
+        let (out, held) = plan_under(capped(2), &world, &[&theirs], &found);
+        assert_eq!(out, ["late"], "ahead of theirs in both orders");
+        assert!(
+            held.0[0].starts_with("early: 1 of 2 compiling") && held.0[0].contains("waited longer"),
+            "{:?}",
+            held.0
+        );
+        // A job recorded before queueing times were waits since its creation.
+        let old = Job { created_at: 4, ..Job::default() };
+        assert_eq!((old.waiting_since(), world.jobs()["early"].waiting_since()), (4, 9));
+    }
+
+    /// Older jobs start first across projects: a unit is left for each job of another project that
+    /// has waited longer in the line, while the dispatcher that put it there lives.
+    #[test]
+    fn a_free_compiling_unit_is_left_for_another_projects_job_that_waited_longer() {
+        let me = std::process::id();
+        let planner = (me, os::start_time(me).unwrap());
+        let theirs = |queued_at: u64, planner: (u32, u64)| {
+            let (mut w, _) = machine_world(&[("old", Status::Queued, false, queued_at)]);
+            let line = crate::world::InLine { pool: Pool::Compiling.key(), planner };
+            w.jobs_mut().get_mut("old").unwrap().in_line = Some(line);
+            w
+        };
+        let (world, found) = machine_world(&[("b", Status::Queued, false, 9)]);
+        let (out, held) = plan_under(capped(1), &world, &[&theirs(5, planner)], &found);
+        assert_eq!(out.len(), 0, "theirs has waited since 5, ours since 9");
+        let why = format!(
+            "b: 0 of 1 compiling on this machine, over every project, \
+             and 1 job of another project has waited longer for the rest ({CAP})"
+        );
+        assert_eq!(held.0, [why]);
+        assert_eq!(held.3, ["b"], "ours is in line too, behind it");
+        // Ours is the older one: theirs waits for it, as their dispatcher judges by the same rule.
+        assert_eq!(plan_under(capped(1), &world, &[&theirs(12, planner)], &found).0.len(), 1);
+        assert_eq!(
+            plan_under(capped(1), &world, &[&theirs(9, planner)], &found).0.len(),
+            1,
+            "equal ages never deadlock"
+        );
+        // A line nobody tends holds nobody back: their dispatcher is gone, so nothing would start it.
+        assert_eq!(plan_under(capped(1), &world, &[&theirs(5, (me, planner.1 + 1))], &found).0.len(), 1);
+        // Their job is no longer queued (it started, or was stopped): the record is void.
+        let mut started = theirs(5, planner);
+        started.jobs_mut().get_mut("old").unwrap().status = Status::Stopped;
+        assert_eq!(plan_under(capped(1), &world, &[&started], &found).0.len(), 1);
+        // With two units and one of them taken, the one left is the older job's.
+        let (busy, _) = machine_world(&[("r", Status::Running, false, 1), ("b", Status::Queued, false, 9)]);
+        assert_eq!(plan_under(capped(2), &busy, &[&theirs(5, planner)], &found).0.len(), 0);
+        assert_eq!(plan_under(capped(2), &world, &[&theirs(5, planner)], &found).0.len(), 1, "a unit for each");
+    }
+
+    /// The owner's ruling 2: no session starts while the machine's available memory is under the
+    /// floor, read-only or not, a decision's session included. Unmeasured, or no floor: no gate.
+    #[test]
+    fn the_memory_gate_holds_every_new_session_under_the_machines_floor() {
+        let (_d, cfg) = burst_config();
+        let floor = Machine { min_free_mem_gb: Some(Quantity::of(4.0)), ..Machine::default() };
+        let (world, found) = machine_world(&[("build", Status::Queued, false, 5), ("read", Status::Queued, true, 6)]);
+        let room =
+            |machine, mem_gb| room_under(machine, &world, &[], &found).with_gauges(Gauges { load: None, mem_gb });
+        let hold = |machine, mem_gb, job: &str| room(machine, mem_gb).hold(&cfg, &world.jobs()[job], NOW_US);
+        let low = "3.2 GiB of memory available, under the machine's 4 GiB floor \
+                   (machine.min_free_mem_gb in the owner's policy)";
+        for job in ["build", "read"] {
+            let h = hold(floor, Some(3.21), job).unwrap();
+            assert_eq!((h.why.as_str(), h.by.clone()), (low, Constraint::Memory), "{job}");
+            assert_eq!(h.until, Some(NOW_US + LOOK_AGAIN_MICROS), "memory coming back is no event");
+            assert_eq!(hold(floor, Some(4.0), job), None, "at the floor is room");
+            assert_eq!(hold(floor, None, job), None, "memory that cannot be read holds nothing");
+        }
+        assert_eq!(hold(Machine::default(), Some(0.1), "build"), None, "no floor in the policy: no gate");
+        assert_eq!(memory_hold(&floor, Some(3.21)).as_deref(), Some(low), "a check waits by the same judgment");
+        assert_eq!(memory_hold(&floor, Some(5.0)), None);
+
+        let (out, held) = plan_in(room(floor, Some(1.0)), &world);
+        assert_eq!((out.len(), held.2.len(), held.3.len()), (0, 2, 0), "both held, and reach the held hook");
+        // A decision's `agent:` session is a session too.
+        let worker = Job { name: "w".into(), ..Job::default() };
+        let model = Some("openai-codex/gpt-6.1");
+        let seat = |mem_gb| place_session(&cfg, &mut room(floor, mem_gb), &worker, "omp", model, NOW_US, NOW_US);
+        assert_eq!(seat(Some(1.0)).unwrap_err().by, Constraint::Memory);
+        assert_eq!(seat(Some(8.0)).unwrap().account, "omp:default");
+    }
+
+    /// The owner's ruling 3: the disk floor is the machine's, and a queued build job waits for it.
+    #[test]
+    fn the_disk_gate_holds_a_build_under_the_machines_floor_and_no_read_only_job() {
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let text = "name = \"demo\"\n[limits]\nmin_free_disk_gb = 0\nper_account = 16\nmax_running = 20\n";
+        let cfg = Config::parse(text, d.path()).unwrap();
+        let machine = Machine { min_free_disk_gb: Some(Quantity::of(30.0)), ..Machine::default() };
+        let (world, found) = machine_world(&[("build", Status::Queued, false, 5), ("read", Status::Queued, true, 6)]);
+        let hold = |ok, job: &str| {
+            room_under(machine, &world, &[], &found).with_disk(ok).hold(&cfg, &world.jobs()[job], NOW_US)
+        };
+        let h = hold(false, "build").unwrap();
+        assert_eq!(h.why, "free disk below 33 GB (the machine's 30 GB floor and its margin)");
+        assert_eq!((h.by, h.until), (Constraint::Disk, Some(NOW_US + LOOK_AGAIN_MICROS)));
+        assert_eq!(hold(false, "read"), None, "a read-only job makes no clone");
+        assert_eq!(hold(true, "build"), None);
+        let floor = Floor::of(&cfg.limits, &machine);
+        assert!(floor.enough(Some(33.0)) && !floor.enough(Some(32.0)), "the machine's floor");
+    }
+
+    /// A hold names the constraint that binds: the first that holds the job, in the order `judge`
+    /// asks them. A job held by something of its own project is not in line for the machine's pool.
+    #[test]
+    fn a_hold_names_the_constraint_that_binds_first() {
+        let (_d, mut cfg) = burst_config();
+        let mut machine =
+            Machine { max_compiling: Some(1), min_free_mem_gb: Some(Quantity::of(4.0)), ..Machine::default() };
+        cfg.limits.max_load = Some(8.0);
+        cfg.profiles.insert("solo".into(), profile(Some(1), None));
+        cfg.profiles.insert("daily".into(), profile(None, Some(1)));
+        // Everything binds at once: one job of ours runs (a build, of profile `solo`), the load and
+        // the memory are past their limits, the disk has no room, and no account has a seat.
+        let (mut world, found) = machine_world(&[("r", Status::Running, false, 1), ("q", Status::Queued, false, 5)]);
+        world.jobs_mut().get_mut("r").unwrap().profile = Some("solo".into());
+        world.profile_starts.insert("daily".into(), vec![NOW_US - 1]);
+        let gauges = Gauges { load: Some(9.5), mem_gb: Some(1.0) };
+        let by = |cfg: &Config, machine: Machine, profile: Option<&str>, disk_ok| {
+            let j = Job { profile: profile.map(Into::into), ..world.jobs()["q"].clone() };
+            let room = Room::of(found.clone(), world.accounts.clone(), &world, &[], disk_ok)
+                .with_machine(machine)
+                .with_gauges(gauges);
+            room.hold(cfg, &j, NOW_US).map(|h| (h.by, h.why))
+        };
+        let pool = |p: Pool| Some(Constraint::Pool(p));
+        let first = |cfg: &Config, machine, profile, disk_ok| by(cfg, machine, profile, disk_ok).map(|(by, _)| by);
+        cfg.limits.max_running = 1;
+        cfg.limits.per_account = 1;
+        assert_eq!(first(&cfg, machine, Some("solo"), false), pool(Pool::Profile("solo".into())));
+        assert_eq!(first(&cfg, machine, Some("daily"), false), Some(Constraint::PerDay));
+        let (running, why) = by(&cfg, machine, None, false).unwrap();
+        assert_eq!(running, Constraint::Pool(Pool::Running));
+        assert_eq!(why, "1 of 1 running in this project (limits.max_running)");
+        cfg.limits.max_running = 20;
+        let (load, why) = by(&cfg, machine, None, false).unwrap();
+        assert_eq!((load, why.as_str()), (Constraint::Load, "load 9.5 is above 8 (limits.max_load)"));
+        cfg.limits.max_load = None;
+        assert_eq!(first(&cfg, machine, None, false), Some(Constraint::Memory));
+        machine.min_free_mem_gb = None;
+        assert_eq!(first(&cfg, machine, None, false), Some(Constraint::Disk));
+        assert_eq!(first(&cfg, machine, None, true), Some(Constraint::Accounts));
+        cfg.limits.per_account = 16;
+        assert_eq!(first(&cfg, machine, None, true), pool(Pool::Compiling), "asked last: it would start but for it");
+        assert_eq!(first(&cfg, capped(2), None, true), None);
+        assert_eq!(Pool::Compiling.key(), "machine.max_compiling");
+        assert_eq!(Pool::Profile("solo".into()).key(), "profiles.solo.max_running");
+
+        // Held by the project's own limit, the job is not in line for the machine's pool.
+        cfg.limits.max_running = 1;
+        let mut held = Held::default();
+        let mut room = room_under(capped(1), &world, &[], &found);
+        assert_eq!(plan(&cfg, &mut room, &world, NOW_US, &mut held), []);
+        assert_eq!((held.2.clone(), held.3.clone()), (vec!["q".to_owned()], Vec::new()));
     }
 
     #[test]
     fn admission_waits_for_the_floor_and_its_margin() {
         let l = floor(60.0, 3.0);
-        assert!(!enough_disk(&l, Some(61.0)), "over the floor is not enough to start");
-        assert!(enough_disk(&l, Some(63.0)));
-        assert!(!enough_disk(&l, None), "unmeasured is not enough");
-        assert!(enough_disk(&floor(0.0, 3.0), Some(0.5)), "the floor off lets everything start");
+        assert!(!of(&l).enough(Some(61.0)), "over the floor is not enough to start");
+        assert!(of(&l).enough(Some(63.0)));
+        assert!(!of(&l).enough(None), "unmeasured is not enough");
+        assert!(of(&floor(0.0, 3.0)).enough(Some(0.5)), "the floor off lets everything start");
         let (_d, cfg) = omp_config("");
-        let cfg = Config { limits: Limits { min_free_disk_gb: 60.0, ..cfg.limits }, ..cfg };
+        let cfg = Config { limits: Limits { min_free_disk_gb: 60.0.into(), ..cfg.limits }, ..cfg };
         let queued = Job { name: "q".into(), status: Status::Queued, ..Job::default() };
         let w = World::default();
         let hold = |ok| Room::of(Vec::new(), BTreeMap::new(), &w, &[], ok).hold(&cfg, &queued, NOW_US).map(|h| h.why);

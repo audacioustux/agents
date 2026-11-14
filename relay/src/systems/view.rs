@@ -149,6 +149,7 @@ fn world_json(world: &World) -> Result<serde_json::Value> {
     for j in world.jobs().values() {
         v["jobs"][&j.name]["pending"] = serde_json::to_value(world.waits(j))?;
         v["jobs"][&j.name]["readonly"] = j.readonly().into();
+        v["jobs"][&j.name]["compiles"] = j.compiles().into();
     }
     Ok(v)
 }
@@ -227,7 +228,9 @@ fn status(scope: Scope<'_>, json: bool, all: bool, everywhere: bool) -> Result<(
 /// window), and returns those whose reading was asked for. What every view of the accounts does,
 /// `view status --json` included: an orchestrator that only polls that still gets fresh readings.
 fn refresh_shown(ctx: &Ctx, world: &World, others: &[&World]) -> Result<Vec<String>> {
-    let room = crate::systems::quota::room_for(crate::systems::quota::Rules::Project(ctx), world, others);
+    // A room for the accounts' readings alone: nothing is admitted in it, so nothing is counted.
+    let others = crate::ctx::Others { worlds: others.to_vec(), unreadable: Vec::new() };
+    let room = crate::systems::quota::room_for(crate::systems::quota::Rules::Project(ctx), world, &others);
     crate::systems::quota::start_refresh(ctx, &room, world, false)
 }
 
@@ -311,7 +314,7 @@ fn kind_in(own: Option<(&Config, &Room)>, j: &Job) -> String {
     let profile = j.profile.as_deref().map(|name| {
         let bound = own.and_then(|(cfg, room)| {
             let max = cfg.profiles.get(name)?.max_running?;
-            let running = room.profile_running(name);
+            let running = room.taken(&crate::systems::dispatch::Pool::Profile(name.to_owned()));
             (running >= max).then(|| format!("{name} {running}/{max}"))
         });
         bound.unwrap_or_else(|| name.to_owned())
@@ -413,7 +416,7 @@ fn held_by_floor(cfg: Option<&Config>, j: &Job) -> Option<String> {
     }
     let why = j.reason.as_deref().unwrap_or("disk floor");
     Some(match cfg {
-        Some(c) => format!("held: {why}; resumes at {} GB free", crate::systems::dispatch::resume_gb(&c.limits)),
+        Some(c) => format!("held: {why}; resumes at {} GB free", c.disk_floor().resume_gb()),
         None => format!("held: {why}; resumes when space is back"),
     })
 }
@@ -424,6 +427,8 @@ pub fn notes(j: &Job) -> Vec<String> {
     let mut notes: Vec<String> = j.checkpoints.last().map(crate::bus::Check::summary).into_iter().collect();
     notes.extend(overran(j));
     notes.extend(declared(j));
+    // The default (it compiles) goes unsaid; the exception is what a reader needs to see.
+    notes.extend((!j.compiles()).then(|| "compiles nothing".to_owned()));
     notes.extend(collected(j).map(str::to_owned));
     notes
 }
@@ -638,6 +643,7 @@ fn result(ctx: &Ctx, name: &str, wait: bool) -> Result<()> {
     if ctx.json {
         let mut v = serde_json::to_value(j)?;
         v["readonly"] = j.readonly().into();
+        v["compiles"] = j.compiles().into();
         v["answer"] = answer.as_deref().map(str::trim_end).into();
         v["log"] = log.display().to_string().into();
         v["logs"] = logs.iter().map(|l| l.display().to_string()).collect::<Vec<_>>().into();
@@ -911,7 +917,7 @@ mod tests {
     fn a_held_job_shows_its_reason_and_the_space_it_waits_for() {
         use crate::world::{Job, Status};
         let (_dir, mut cfg) = one_seat();
-        cfg.limits.min_free_disk_gb = 60.0;
+        cfg.limits.min_free_disk_gb = 60.0.into();
         cfg.limits.disk_resume_margin_gb = 3.0;
         let held = Job {
             name: "h".into(),

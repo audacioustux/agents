@@ -35,7 +35,7 @@ mod bar;
 mod end;
 mod review;
 
-use end::{at_end, final_status_done};
+use end::{Final, Halt, at_end, final_status_done, terminal};
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
@@ -319,7 +319,18 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
             let note = format!("finished ${spent_usd:.2} against a ${cap_usd:.2} budget");
             at_end(ctx, job, seat.home, &ran, (outcome, Some(note)), ending.silent)
         }
-        Verdict::Budget => at_cap(ctx, job, &ran),
+        // A checkpoint's stop is settled by the run's own report: done when it says so, and then judged
+        // as any done run is; otherwise held for a human.
+        Verdict::Budget => match at_cap(ctx, job, &ran)? {
+            Capped::Ended(ended) => Ok(ended),
+            Capped::Halted(halt) => {
+                let fin = Final::of(&report.answer, marker);
+                match terminal((Outcome::Failed, None), &fin, Some(&halt), marker) {
+                    done @ (Outcome::Done, _) => at_end(ctx, job, seat.home, &ran, done, ending.silent),
+                    held => Ok(held),
+                }
+            }
+        },
         v => {
             let ended = conclude(ctx, job, &seat.key, v, now_s())?;
             at_end(ctx, job, seat.home, &ran, ended, ending.silent)
@@ -521,24 +532,34 @@ fn request(ctx: &Ctx, job: &Job, run: &Ran<'_>, point: Point) -> Result<(Request
     Ok((req, world))
 }
 
+/// How a run at its cap left it: ended there (its cap is the owner's to raise, or the job goes on), or
+/// stopped by its checkpoint, which [`terminal`] decides the end of.
+enum Capped {
+    Ended(Ended),
+    Halted(Halt),
+}
+
 /// A run at its cap: the owner decides, or the `cap` chain does, and the job
 /// goes on with a larger cap. No change since the last checkpoint is a stop
 /// that asks no model, by the `rule` handler.
-fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
+fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Capped> {
     let hooked = ctx.cfg.hooks.cap.is_some();
     let spent = job.cost_usd + run.report.cost_usd;
     let cap = match checkpoint::next(&ctx.cfg.limits, job.readonly(), hooked, job.budget_usd, spent) {
         Next::Manual => {
-            return Ok((Outcome::Failed, Some("reached its spend cap; resume with --budget to go on".into())));
+            return Ok(Capped::Ended((
+                Outcome::Failed,
+                Some("reached its spend cap; resume with --budget to go on".into()),
+            )));
         }
         Next::Ceiling { cap, ceiling } => {
-            return Ok((
+            return Ok(Capped::Ended((
                 Outcome::Failed,
                 Some(format!(
                     "reached its spend cap; another ${cap:.2} would pass the job's ceiling of ${ceiling:.2}; \
                      resume with --budget to go on"
                 )),
-            ));
+            )));
         }
         Next::Check { cap } => cap,
     };
@@ -599,19 +620,15 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
             cost_usd: d.cost_usd,
             decision: Some(d.id.clone()),
         };
-        let stopped = if check.why.is_empty() { String::new() } else { format!(" ({})", check.why) };
+        let halt = Halt { checkpoint: n, why: check.why.clone() };
         port.emit(SessionEvent::Checked { job: job.name.clone(), check })?;
-        Ok(if next.is_none() {
-            (
-                Outcome::Failed,
-                Some(format!("waits for a human at its checkpoint{stopped}; resume with --budget to go on")),
-            )
-        } else {
-            (Outcome::Retry, None)
-        })
+        Ok(if next.is_none() { Capped::Halted(halt) } else { Capped::Ended((Outcome::Retry, None)) })
     })?;
     Ok(carried.unwrap_or_else(|| {
-        (Outcome::Failed, Some(format!("decision {} not carried out: the job moved on since it was asked", d.id)))
+        Capped::Ended((
+            Outcome::Failed,
+            Some(format!("decision {} not carried out: the job moved on since it was asked", d.id)),
+        ))
     }))
 }
 
@@ -771,6 +788,8 @@ fn await_seat(
     // A wait that cannot be had has had its turn at a reading under way already.
     let since = if wait.is_zero() { now_micros().saturating_sub(dispatch::READING_WAIT_MICROS) } else { now_micros() };
     let mut asked: Option<Instant> = None;
+    // What held the last try, to say so when the wait runs out.
+    let mut held: Option<dispatch::Hold> = None;
     loop {
         let id = seat.id;
         let record = |s: &dispatch::Start| seat.book(s);
@@ -785,14 +804,15 @@ fn await_seat(
                 std::thread::sleep(SEAT_LOCK_POLL);
                 continue;
             }
-            Ok(dispatch::Booking::Held | dispatch::Booking::Busy) => {}
+            Ok(dispatch::Booking::Held(hold)) => held = Some(hold),
+            Ok(dispatch::Booking::Busy) => {}
             Err(e) => return Err(format!("agent:{} found no seat: {e:#}", agent.label)),
         }
         if asked.is_none_or(|t| t.elapsed() >= SEAT_REREAD)
             && let Ok(world) = ctx.world()
         {
             let neighbours = ctx.neighbours();
-            let room = Room::new(&ctx.cfg, &world, &neighbours.iter().collect::<Vec<_>>(), true);
+            let room = Room::new(&ctx.cfg, &world, &neighbours.seen(), true);
             if stale(&room, &agent.harness) {
                 asked = Some(Instant::now());
                 let _ = crate::systems::quota::start_refresh(ctx, &room, &world, false);
@@ -804,6 +824,10 @@ fn await_seat(
         }
         if left.is_zero() {
             let (harness, label) = (&agent.harness, &agent.label);
+            // The memory gate holds a session whatever the accounts have: say that, not "no account".
+            if let Some(h) = held.filter(|h| h.by == dispatch::Constraint::Memory) {
+                return Err(format!("agent:{label} did not start: {}", h.why));
+            }
             return Err(if wait.is_zero() {
                 format!("no {harness} account is free for agent:{label}")
             } else {
@@ -904,16 +928,25 @@ fn stderr_tail(ctx: &Ctx, job: &Job) -> String {
     if read.is_err() || lines.is_empty() { String::new() } else { format!("; its stderr ends: {}", lines.join(" / ")) }
 }
 
-/// The invocation, niced, inside the sandbox when it is on.
-fn command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> Command {
-    let Ok(c) = build(ctx, inv, mounts, |p| Ok::<_, std::convert::Infallible>(Command::new(p)));
-    c
+/// The invocation, niced, inside the sandbox when it is on, under `relay supervise`: the one way this
+/// runner starts anything, its session and each run of its acceptance check alike: the whole process group ends with it, with the runner, or when it is stopped
+/// ([`crate::supervised`]). The supervisor holds this runner's claim lock ([`own_claim`]) until the
+/// last process of its tree is reaped, so the runner's claim on the machine outlasts a runner that
+/// is killed outright for exactly as long as anything it started still runs.
+fn supervised_command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<Command> {
+    let hold = own_claim();
+    build(ctx, inv, mounts, |p| crate::supervised::holding(p, Some(&hold)))
 }
 
-/// The same under `relay supervise`, for a session the runner drives: its whole process group ends
-/// with it, with the runner, or when it is stopped ([`crate::supervised`]).
-fn supervised_command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<Command> {
-    build(ctx, inv, mounts, |p| crate::supervised::command(p))
+/// This runner's claim lock ([`crate::world::claim_lock`]), in a directory that is there.
+fn own_claim() -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let me = std::process::id();
+    let lock = crate::world::claim_lock((me, os::start_time(me).unwrap_or(0)));
+    if let Some(dir) = lock.parent() {
+        let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir);
+    }
+    lock
 }
 
 fn build<E>(
@@ -988,6 +1021,7 @@ pub struct DiskStop {
 /// would not help and stopping every one would be worse than the full disk.
 pub fn disk_reason(
     limits: &crate::config::Limits,
+    floor: crate::config::Floor,
     bytes: u64,
     free_gb: Option<f64>,
     largest: bool,
@@ -1002,8 +1036,8 @@ pub fn disk_reason(
         let why = format!("disk: clone {} over {}", os::size_str(bytes), gb(limits.job_disk_gb));
         return Some(DiskStop { why, floor: false });
     }
-    let free = free_gb.filter(|&f| largest && limits.min_free_disk_gb > 0.0 && f < limits.min_free_disk_gb)?;
-    Some(DiskStop { why: format!("disk: {} free, under {}", gb(free), gb(limits.min_free_disk_gb)), floor: true })
+    let free = free_gb.filter(|&f| largest && floor.on() && f < floor.gb)?;
+    Some(DiskStop { why: format!("disk: {} free, under {}", gb(free), gb(floor.gb)), floor: true })
 }
 
 /// A measured clone: records its size, and when it is a reason to stop, says
@@ -1021,7 +1055,9 @@ fn on_disk(ctx: &Ctx, job: &Job, bytes: u64, quiet_until: Option<Instant>, askin
         .filter(|o| o.name != job.name && o.status.has_runner())
         .all(|o| o.disk_bytes.unwrap_or(0) <= bytes);
     let free = os::free_disk_gb(&ctx.clones);
-    let Some(stop) = disk_reason(&ctx.cfg.limits, bytes, free, largest) else { return Ok(DiskStep::Go) };
+    // The floor as it stands at this sample: the owner may have moved the machine's since the session began.
+    let floor = ctx.cfg.disk_floor();
+    let Some(stop) = disk_reason(&ctx.cfg.limits, floor, bytes, free, largest) else { return Ok(DiskStep::Go) };
     let Some(handlers) = decide::chain(&ctx.cfg, Point::Disk) else { return Ok(DiskStep::Stop(stop)) };
     let mut req = Request::new(job, Point::Disk);
     req.brief = std::fs::read_to_string(ctx.job_file(&job.name, "prompt.md")).unwrap_or_default();
@@ -1376,12 +1412,15 @@ fn checkpoint_rev(dir: &Path, rev: &str) -> Option<String> {
 
 #[cfg(test)]
 mod disk_tests {
-    use super::{DiskStop, disk_reason};
+    use super::DiskStop;
     use crate::config::Limits;
 
     #[test]
     fn a_clone_over_the_ceiling_or_a_full_disk_names_its_reason() {
-        let l = Limits { job_disk_gb: 40.0, min_free_disk_gb: 20.0, ..Limits::default() };
+        let l = Limits { job_disk_gb: 40.0, min_free_disk_gb: 20.0.into(), ..Limits::default() };
+        let disk_reason = |l: &Limits, bytes, free, largest| {
+            super::disk_reason(l, crate::config::Floor::of(l, &crate::config::Machine::default()), bytes, free, largest)
+        };
         let gb = |g: u64| g * 1_000_000_000;
         let reason = |l: &Limits, bytes, free, largest| disk_reason(l, bytes, free, largest);
         let stop = |why: &str, floor| Some(DiskStop { why: why.into(), floor });
@@ -1395,7 +1434,7 @@ mod disk_tests {
             stop("disk: clone 52G over 40G", false),
             "the job's own size comes first"
         );
-        let off = Limits { job_disk_gb: 0.0, min_free_disk_gb: 0.0, ..l };
+        let off = Limits { job_disk_gb: 0.0, min_free_disk_gb: 0.0.into(), ..l };
         assert_eq!(disk_reason(&off, gb(900), Some(0.1), true), None, "zero turns both off");
     }
 }

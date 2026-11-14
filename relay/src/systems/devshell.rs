@@ -27,7 +27,7 @@ use crate::ctx::Ctx;
 use crate::host::RelayEnv;
 use crate::os::Role;
 use crate::supervised::Supervised;
-use crate::systems::dispatch::{Cause, Hold};
+use crate::systems::dispatch::{Constraint, Hold};
 use crate::world::{DevShell, World};
 
 // One attempt's time limit is `session.env_shell_attempt_secs`. A warm-up that needs longer is
@@ -279,7 +279,7 @@ impl Gate {
                 Some(path) => format!("dev shell needs warming again: {path} is gone"),
                 None => "dev shell not warmed yet".into(),
             };
-            Hold { cause: Cause::Setup, why, until: None }
+            Hold { why, until: None, by: Constraint::DevShell }
         };
         let Some(s) = &self.state else { return Some(not_yet()) };
         if let Some(since) = s.warming_since {
@@ -289,7 +289,7 @@ impl Gate {
             if let Some(f) = s.failed.as_ref().filter(|f| f.timed_out) {
                 let _ = write!(why, "; attempt {} running; the last {}", s.failures + 1, f.why);
             }
-            return Some(Hold { cause: Cause::Setup, why, until: None });
+            return Some(Hold { why, until: None, by: Constraint::DevShell });
         }
         let Some(f) = &s.failed else { return Some(not_yet()) };
         let retry = Self::retry_at(s);
@@ -302,7 +302,7 @@ impl Gate {
             why.push_str(": ");
             why.push_str(&line);
         }
-        Some(Hold { cause: Cause::Setup, why, until: Some(retry) })
+        Some(Hold { why, until: Some(retry), by: Constraint::DevShell })
     }
 
     /// Whether a warm-up should start at `now_us`: not recorded for the current key, and no

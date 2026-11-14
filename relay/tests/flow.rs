@@ -657,6 +657,48 @@ fn a_run_resumed_with_a_failed_check_that_changes_nothing_does_not_grow_its_cap(
     assert_eq!(checks.lines().count(), 0, "no model was asked");
 }
 
+/// omp's last turn, cut off at the cap before its `agent_end`, has already said its FINAL section: a
+/// checkpoint's stop then ends the job as that report says. Done, and what waits for it starts; anything
+/// else is held for a human, and says why.
+#[test]
+fn a_checkpoint_stop_after_a_done_report_ends_the_job_done() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("checkpoint-done", true);
+    configure(&env, "budget_growth = 2.0\njob_ceiling_usd = 1.0\n", "");
+    omp_default(&env.home, 20, false);
+    claude_account(&env.home, "b", 50, false);
+    // Each omp turn costs $0.02, past the $0.015 cap; the stub commits nothing, so the checkpoint stops it.
+    std::fs::write(env.home.join(".omp/cost"), "0.02").unwrap();
+    let add = |name: &str, text: &str| {
+        ok(&relay(&env, &["queue", "add", name, "--text", text, "--harness", "omp", "--budget", "0.015"]), "queue");
+        let after = format!("{name}-next");
+        let args = ["queue", "add", &after, "--text", "Look.", "--readonly", "--harness", "claude", "--after", name];
+        ok(&relay(&env, &args), "queue its dependent");
+    };
+
+    add("finished", "[status-done] Make a change.");
+    let j = wait_for(&env, "finished");
+    assert_eq!(j["status"], "done", "{j}");
+    assert_eq!(j["checkpoints"][0]["verdict"], "stop", "{j}");
+    let reason = j["reason"].as_str().unwrap_or_default();
+    assert!(reason.starts_with("finished; stopped at checkpoint 1 (no new commit"), "{reason}");
+    let next = wait_for(&env, "finished-next");
+    assert_eq!(next["status"], "done", "what waited for it started: {next}");
+
+    add("partway", "[status-partial] Make a change.");
+    let j = wait_for(&env, "partway");
+    assert_eq!(j["status"], "failed", "{j}");
+    let reason = j["reason"].as_str().unwrap_or_default();
+    assert!(reason.starts_with("held for a human: stopped at checkpoint 1 (no new commit"), "{reason}");
+    assert!(reason.contains("its FINAL section says status: partial"), "{reason}");
+    assert!(board(&env).contains("held for a human"), "{}", board(&env));
+    let next = job(&env, "partway-next");
+    assert_eq!(next["status"], "queued", "{next}");
+    assert!(board(&env).contains("waits for partway (failed)"), "{}", board(&env));
+}
+
 /// The job's status, once it has been `want` (bounded, so a hang fails the test).
 fn until(env: &Env, name: &str, want: &str) {
     for _ in 0..300 {

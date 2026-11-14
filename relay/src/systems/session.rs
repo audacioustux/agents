@@ -35,7 +35,7 @@ mod bar;
 mod end;
 mod review;
 
-use end::{at_end, final_status_done};
+use end::{Final, Halt, at_end, final_status_done, terminal};
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
@@ -319,7 +319,18 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
             let note = format!("finished ${spent_usd:.2} against a ${cap_usd:.2} budget");
             at_end(ctx, job, seat.home, &ran, (outcome, Some(note)), ending.silent)
         }
-        Verdict::Budget => at_cap(ctx, job, &ran),
+        // A checkpoint's stop is settled by the run's own report: done when it says so, and then judged
+        // as any done run is; otherwise held for a human.
+        Verdict::Budget => match at_cap(ctx, job, &ran)? {
+            Capped::Ended(ended) => Ok(ended),
+            Capped::Halted(halt) => {
+                let fin = Final::of(&report.answer, marker);
+                match terminal((Outcome::Failed, None), &fin, Some(&halt), marker) {
+                    done @ (Outcome::Done, _) => at_end(ctx, job, seat.home, &ran, done, ending.silent),
+                    held => Ok(held),
+                }
+            }
+        },
         v => {
             let ended = conclude(ctx, job, &seat.key, v, now_s())?;
             at_end(ctx, job, seat.home, &ran, ended, ending.silent)
@@ -521,24 +532,34 @@ fn request(ctx: &Ctx, job: &Job, run: &Ran<'_>, point: Point) -> Result<(Request
     Ok((req, world))
 }
 
+/// How a run at its cap left it: ended there (its cap is the owner's to raise, or the job goes on), or
+/// stopped by its checkpoint, which [`terminal`] decides the end of.
+enum Capped {
+    Ended(Ended),
+    Halted(Halt),
+}
+
 /// A run at its cap: the owner decides, or the `cap` chain does, and the job
 /// goes on with a larger cap. No change since the last checkpoint is a stop
 /// that asks no model, by the `rule` handler.
-fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
+fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Capped> {
     let hooked = ctx.cfg.hooks.cap.is_some();
     let spent = job.cost_usd + run.report.cost_usd;
     let cap = match checkpoint::next(&ctx.cfg.limits, job.readonly(), hooked, job.budget_usd, spent) {
         Next::Manual => {
-            return Ok((Outcome::Failed, Some("reached its spend cap; resume with --budget to go on".into())));
+            return Ok(Capped::Ended((
+                Outcome::Failed,
+                Some("reached its spend cap; resume with --budget to go on".into()),
+            )));
         }
         Next::Ceiling { cap, ceiling } => {
-            return Ok((
+            return Ok(Capped::Ended((
                 Outcome::Failed,
                 Some(format!(
                     "reached its spend cap; another ${cap:.2} would pass the job's ceiling of ${ceiling:.2}; \
                      resume with --budget to go on"
                 )),
-            ));
+            )));
         }
         Next::Check { cap } => cap,
     };
@@ -599,19 +620,15 @@ fn at_cap(ctx: &Ctx, job: &Job, run: &Ran<'_>) -> Result<Ended> {
             cost_usd: d.cost_usd,
             decision: Some(d.id.clone()),
         };
-        let stopped = if check.why.is_empty() { String::new() } else { format!(" ({})", check.why) };
+        let halt = Halt { checkpoint: n, why: check.why.clone() };
         port.emit(SessionEvent::Checked { job: job.name.clone(), check })?;
-        Ok(if next.is_none() {
-            (
-                Outcome::Failed,
-                Some(format!("waits for a human at its checkpoint{stopped}; resume with --budget to go on")),
-            )
-        } else {
-            (Outcome::Retry, None)
-        })
+        Ok(if next.is_none() { Capped::Halted(halt) } else { Capped::Ended((Outcome::Retry, None)) })
     })?;
     Ok(carried.unwrap_or_else(|| {
-        (Outcome::Failed, Some(format!("decision {} not carried out: the job moved on since it was asked", d.id)))
+        Capped::Ended((
+            Outcome::Failed,
+            Some(format!("decision {} not carried out: the job moved on since it was asked", d.id)),
+        ))
     }))
 }
 

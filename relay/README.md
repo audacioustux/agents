@@ -1222,7 +1222,13 @@ The check reads the brief, every earlier verdict, `git log --stat` since the
 last checkpoint (with the diff when it is small) and the worker's last message,
 and answers `continue`, `redirect` (with a correction the worker reads next) or
 `stop`. On `continue` or `redirect` the same session resumes with the cap
-times the growth; on `stop` the job is left `failed` for you. No new commit and
+times the growth. A `stop` is settled by the run's own report, read as a
+review's verdict is: when its FINAL section says `status: done`, the work was
+finished and the job ends `done` (after its acceptance check and `ended` chain,
+as any done run), the checkpoint's words kept in its reason, and what waits for
+it starts. Otherwise the job is left `failed` for you, its reason saying it is
+held for a human and what the report said (`status: partial`, no FINAL
+section). No new commit and
 no changed file since the last checkpoint is a `stop` that asks no model, and so
 is a clone that still stands exactly at the commit its acceptance check last
 failed at (a run resumed with that failure that changed nothing): however much

@@ -56,6 +56,7 @@ use regex::Regex;
 
 use crate::config::CachePath;
 use crate::ctx::Ctx;
+use crate::supervised::Passed;
 
 pub mod farm;
 
@@ -391,14 +392,16 @@ fn host_sockets() -> Vec<PathBuf> {
     out
 }
 
-/// Bubblewrap's arguments, and the directories it binds by open handle (`--bind-fd`), which must stay open
-/// until it has started. An error when a bind source cannot be prepared: the sandbox is refused.
+/// Bubblewrap's arguments, and the directories it binds by open handle (`--bind-fd`), each with which
+/// argument names it: the sandbox's supervisor gives bubblewrap those, and no other child of the runner
+/// ever has them ([`Passed`]). They must stay open until the sandbox has ended. An error when a bind
+/// source cannot be prepared: the sandbox is refused.
 pub fn args(
     ctx: &Ctx,
     user_home: &Path,
     m: &Mounts<'_>,
     env: Vec<(OsString, OsString)>,
-) -> std::io::Result<(Vec<OsString>, Vec<std::os::fd::OwnedFd>)> {
+) -> std::io::Result<(Vec<OsString>, Vec<Passed>)> {
     let mut keep = Vec::new();
     let mut a: Vec<OsString> =
         ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--bind"].map(OsString::from).to_vec();
@@ -447,11 +450,11 @@ pub fn args(
                         ctx.cfg.sandbox.caches.iter().find(|r| ctx.caches.join(r) == *src).ok_or_else(|| {
                             std::io::Error::other(format!("{} is none of relay's caches", src.display()))
                         })?;
-                    let fd = farm::open_cache_dir(&ctx.caches, rel).map_err(|e| {
+                    let dir = farm::open_cache_dir(&ctx.caches, rel).map_err(|e| {
                         std::io::Error::new(e.kind(), format!("preparing the cache {}: {e}", rel.display()))
                     })?;
-                    a.extend(["--bind-fd".into(), std::os::fd::AsRawFd::as_raw_fd(&fd).to_string().into(), p.into()]);
-                    keep.push(fd);
+                    a.extend(["--bind-fd".into(), crate::supervised::HANDLE.into(), p.into()]);
+                    keep.push(Passed { arg: a.len() - 2, dir });
                     continue;
                 }
                 // Made empty on the host, then mounted read-only like any protected path. Should that fail
@@ -991,9 +994,11 @@ mod tests {
             account: false,
             caches: None,
         };
-        let (_built, keep) = args(&ctx, &user, &m, Vec::new()).unwrap();
+        let (built, keep) = args(&ctx, &user, &m, Vec::new()).unwrap();
         assert_eq!(keep.len(), 1);
-        for fd in &keep {
+        for Passed { arg, dir: fd } in &keep {
+            // Its argument is no handle's number until the sandbox's supervisor puts its own there.
+            assert_eq!((built[arg - 1].to_str(), built[*arg].to_str()), (Some("--bind-fd"), Some("handle")));
             let flags = rustix::io::fcntl_getfd(fd).unwrap();
             assert!(flags.contains(rustix::io::FdFlags::CLOEXEC), "the runner's handle is left open across exec");
             let n = std::os::fd::AsRawFd::as_raw_fd(fd).to_string();

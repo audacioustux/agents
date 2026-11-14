@@ -4,10 +4,9 @@
 //! dispatch. Nothing here names a harness: the account's harness builds the
 //! command and reads the output, and the limits are enforced here for all.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::ops::ControlFlow;
-use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +25,7 @@ use crate::harness::{Harness, Home, Invocation, Permissions, Reader, Session, Ta
 use crate::hostdir::HostDir;
 use crate::os;
 use crate::sandbox::{self, Mounts};
-use crate::supervised::Supervised;
+use crate::supervised::{Passed, Supervised};
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request, Reviewing};
 use crate::systems::dispatch::{self, Room};
@@ -226,8 +225,10 @@ struct Workspace {
 /// A session ready to run.
 struct Launch {
     cmd: Command,
-    /// The directories its sandbox binds by open handle, open until it has run.
-    _keep: Vec<OwnedFd>,
+    /// The directories its sandbox binds by open handle, close-on-exec here and given to the sandbox by
+    /// its supervisor alone ([`Passed`]): nothing else this runner starts (a decision's agent, a check)
+    /// has them. Open until it has run.
+    _keep: Vec<Passed>,
     /// The zone the session keeps its clock in: its environment's `TZ`, which the config sets, never relay's.
     zone: jiff::tz::TimeZone,
     stdin: Option<String>,
@@ -715,7 +716,7 @@ pub fn consult(
             account: true,
             caches: None,
         };
-        let (mut cmd, _keep) = build(ctx, &inv, &mounts, |p| crate::supervised::holding(p, hold.as_deref()))?;
+        let (mut cmd, _keep) = build(ctx, &inv, &mounts, hold.as_deref())?;
         let run = Run {
             session_id: None,
             budget_usd: agent.budget_usd,
@@ -955,10 +956,9 @@ fn stderr_tail(ctx: &Ctx, job: &Job) -> String {
 /// ([`crate::supervised`]). The supervisor holds this runner's claim lock ([`own_claim`]) until the
 /// last process of its tree is reaped, so the runner's claim on the machine outlasts a runner that
 /// is killed outright for exactly as long as anything it started still runs. With the directories
-/// it binds by open handle (keep them until it has started); an error when the sandbox cannot be prepared.
-fn supervised_command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<(Command, Vec<OwnedFd>)> {
-    let hold = own_claim();
-    build(ctx, inv, mounts, |p| crate::supervised::holding(p, Some(&hold)))
+/// it binds by open handle (keep them until it has ended); an error when the sandbox cannot be prepared.
+fn supervised_command(ctx: &Ctx, inv: &Invocation, mounts: &Mounts<'_>) -> std::io::Result<(Command, Vec<Passed>)> {
+    build(ctx, inv, mounts, Some(&own_claim()))
 }
 
 /// This runner's claim lock ([`crate::world::claim_lock`]), in a directory that is there.
@@ -972,23 +972,26 @@ fn own_claim() -> PathBuf {
     lock
 }
 
+/// The command for `inv` under the supervisor, which holds `hold` (a seat's or a claim's lock): in the
+/// sandbox, which the supervisor alone gives the directories it binds by open handle, or as it is.
 fn build(
     ctx: &Ctx,
     inv: &Invocation,
     mounts: &Mounts<'_>,
-    new: impl FnOnce(&OsStr) -> std::io::Result<Command>,
-) -> std::io::Result<(Command, Vec<OwnedFd>)> {
+    hold: Option<&Path>,
+) -> std::io::Result<(Command, Vec<Passed>)> {
     let mut argv: Vec<OsString> = vec!["nice".into(), "-n".into(), ctx.cfg.session.nice.to_string().into()];
     argv.push(inv.program.clone());
     argv.extend(inv.args.iter().cloned());
     let env = sandbox::session_env(ctx, inv);
     if ctx.cfg.sandbox.enabled {
+        // The handles' arguments are counted from bubblewrap's first: its own come first.
         let (args, keep) = sandbox::args(ctx, &accounts::home(), mounts, env)?;
-        let mut c = new(OsStr::new("bwrap"))?;
+        let mut c = crate::supervised::holding("bwrap", hold, &keep)?;
         c.args(args).args(argv);
         Ok((c, keep))
     } else {
-        let mut c = new(&argv[0])?;
+        let mut c = crate::supervised::holding(&argv[0], hold, &[])?;
         c.args(&argv[1..]).env_clear().envs(env).current_dir(mounts.cwd);
         Ok((c, Vec::new()))
     }

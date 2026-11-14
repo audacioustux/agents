@@ -322,9 +322,16 @@ impl<'a> Probe<'a> {
         marks.mark_copy()?;
         let mounts = Mounts { caches: marks.copy.as_ref().map(sandbox::farm::Farm::path), ..mounts };
         let plan = sandbox::plan(self.ctx, &user, &mounts);
-        let (args, _keep) = sandbox::args(self.ctx, &user, &mounts, sandbox::session_env(self.ctx, &inv))?;
-        let inside =
-            |sh: &str| Command::new("bwrap").args(&args).args([OsString::from("sh"), "-c".into(), sh.into()]).output();
+        let (args, passed) = sandbox::args(self.ctx, &user, &mounts, sandbox::session_env(self.ctx, &inv))?;
+        // Each under the supervisor, as a session's sandbox and a check's are: it alone gives bubblewrap
+        // the directories bound by handle, and it alone sees the sandbox's whole tree end (bubblewrap says
+        // how its command exited before the rest of its namespace has gone).
+        let inside = |sh: &str| -> std::io::Result<(crate::supervised::Output, Option<sandbox::farm::Ended>)> {
+            let mut c = crate::supervised::holding("bwrap", None, &passed)?;
+            c.args(&args).args([OsString::from("sh"), "-c".into(), sh.into()]);
+            let (out, child) = crate::supervised::output(&mut c)?;
+            Ok((out, sandbox::farm::Ended::reaped(&child)))
+        };
         // Proof, for the copy, that each sandbox run on it ended: all of them, or none.
         let mut waited: Vec<Option<sandbox::farm::Ended>> = Vec::new();
         let mut outcomes = Vec::new();
@@ -337,15 +344,15 @@ impl<'a> Probe<'a> {
                 let ok = Command::new("sh").args(["-c", control]).status()?.success();
                 report(ok, &format!("{} (control: present outside)", c.what), "");
             }
-            let out = inside(&c.inside)?;
-            waited.push(sandbox::farm::Ended::waited(out.status));
+            let (out, ended) = inside(&c.inside)?;
+            waited.push(ended);
             report(out.status.success(), &c.what, String::from_utf8_lossy(&out.stderr).trim());
         }
         // The sandbox's own regex, on what the inside sees; the harness's own
         // variables (CLAUDE_CONFIG_DIR, OMP_PROFILE) are meant to be there.
         let deny = regex::Regex::new(&self.ctx.cfg.sandbox.env_deny)?;
-        let env_out = inside("env")?;
-        waited.push(sandbox::farm::Ended::waited(env_out.status));
+        let (env_out, ended) = inside("env")?;
+        waited.push(ended);
         marks.ended = waited.iter().copied().collect::<Option<Vec<_>>>().and_then(|all| all.last().copied());
         let env = String::from_utf8_lossy(&env_out.stdout).into_owned();
         let leaked: Vec<&str> = env
@@ -541,8 +548,9 @@ mod tests {
         .unwrap();
         assert!(!marks.copy.as_ref().unwrap().path().join(rel).join(cache_marker()).exists(), "copied with the cache");
         marks.mark_copy().unwrap();
-        // As its runs prove, each waited for to its end: here one process, exited with a code.
-        marks.ended = sandbox::farm::Ended::waited(std::process::Command::new("true").status().unwrap());
+        // As its runs prove, each seen to its end by its supervisor: here one process, exited with a code.
+        let (_, child) = crate::supervised::output(&mut crate::supervised::command("true").unwrap()).unwrap();
+        marks.ended = sandbox::farm::Ended::reaped(&child);
         assert!(marks.copy.as_ref().unwrap().path().join(rel).join(cache_marker()).exists(), "the copy has its own");
         drop(marks);
         let pooled: Vec<_> = sandbox::farm::idle(&ctx.session_copies);

@@ -103,6 +103,10 @@ enum System {
         /// A seat's lock to hold, shared, for as long as the child or anything it starts lives.
         #[arg(long)]
         hold: Option<std::path::PathBuf>,
+        /// A directory to give the child by open handle: which of its arguments names it (the first
+        /// is 0), and the runner's own handle on it.
+        #[arg(long, num_args = 2, value_names = ["ARG", "HANDLE"])]
+        pass: Vec<usize>,
         #[arg(last = true, required = true)]
         argv: Vec<std::ffi::OsString>,
     },
@@ -114,7 +118,9 @@ fn main() -> ExitCode {
     let result = match cli.system {
         System::Ask(a) => systems::ask::run(&a, json),
         // Its output is the handler's: it says nothing of its own there.
-        System::Supervise { parent, hold, argv } => return supervised::supervise(parent, hold.as_deref(), &argv),
+        System::Supervise { parent, hold, pass, argv } => {
+            return supervised::supervise(parent, hold.as_deref(), &pass, &argv);
+        }
         system => run(cli.config.as_deref(), json, system).map(|()| 0),
     };
     reply::finish(result, json, "relay")

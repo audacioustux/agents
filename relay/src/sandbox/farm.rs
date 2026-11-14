@@ -25,7 +25,8 @@
 //!   judge the plan asks, and anything else in it is removed when it is taken: a cache left a bind is
 //!   never in a job's tree.
 //! - **Only with proof it ended.** A copy goes back to the pool for another run only when it is given back
-//!   with evidence that everything its sandbox started has ended ([`Ended`], [`Farm::give_back`]). Dropped
+//!   with evidence that everything its sandbox started has ended ([`Ended`], [`Farm::give_back`]): its
+//!   supervisor's, the one witness of a whole tree's end, for a session, a check and the probe alike. Dropped
 //!   any other way (an error, a panic, a sandbox killed from outside), it is retired: renamed into the
 //!   pool as gone, for gc, never taken again; so is one that cannot be cut down for its next run.
 
@@ -41,21 +42,18 @@ use rustix::io::Errno;
 use crate::config::CachePath;
 
 /// Evidence that everything a copy's sandbox started has ended: what a copy is given back to the pool with,
-/// for another run ([`Farm::give_back`]). Made only from what saw it end.
+/// for another run ([`Farm::give_back`]). Made only from the one thing that sees it end, the supervisor:
+/// bubblewrap's own exit is no proof, since it says how its command exited before the rest of its pid
+/// namespace has gone.
 #[derive(Debug, Clone, Copy)]
 pub struct Ended(());
 
 impl Ended {
-    /// The supervisor exited after reaping its whole tree, sandboxed processes included.
+    /// The supervisor exited after reaping its whole tree, sandboxed processes included: a subreaper, it
+    /// is left the sandbox's init when bubblewrap exits, and the kernel lets that init be reaped only
+    /// once every process of its namespace has ended.
     pub fn reaped(supervisor: &crate::supervised::Supervised) -> Option<Self> {
         supervisor.tree_ended().then_some(Self(()))
-    }
-
-    /// bubblewrap, waited for, exited with a code: it waits for its namespace's init, which the kernel
-    /// lets end only after every other process of the namespace has. Killed by a signal instead (from
-    /// outside), it proves nothing.
-    pub fn waited(bwrap: std::process::ExitStatus) -> Option<Self> {
-        bwrap.code().map(|_| Self(()))
     }
 }
 
@@ -301,12 +299,12 @@ pub fn clear(parent: &Path, name: &str, pool: &Path) -> io::Result<()> {
 }
 
 /// The cache `rel` in relay's caches `shared`, opened (made if not there) from their root one directory
-/// at a time, following no symlink, and left open across `exec`: what a cache is bound into a sandbox by
-/// (`--bind-fd`), so bubblewrap binds this directory and resolves no path a session could have written.
+/// at a time, following no symlink: what a cache is bound into a sandbox by (`--bind-fd`), so bubblewrap
+/// binds this directory and resolves no path a session could have written. Close-on-exec, as every
+/// handle of the runner's is: only the sandbox's supervisor is given the directory
+/// ([`crate::supervised::Passed`]).
 pub fn open_cache_dir(shared: &Path, rel: &CachePath) -> io::Result<OwnedFd> {
-    let fd = make_shared(&shared_root(shared)?, rel)?;
-    rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty())?;
-    Ok(fd)
+    make_shared(&shared_root(shared)?, rel)
 }
 
 /// Puts the empty file `name` in the cache `rel` of relay's caches `shared`, where nothing of that name is,
@@ -574,14 +572,19 @@ mod tests {
     /// Fable and Copilot on (e): a check gave its copy back whatever became of its bwrap; killed from
     /// outside, bwrap returns before its namespace has ended. Only an exit with a code proves the end: a
     /// bwrap killed by a signal gives no proof, and the check's copy is retired.
+    /// Copilot at a6b6099: nor does bubblewrap's own exit with a code, which comes before the rest of its
+    /// namespace has gone: the proof is its supervisor's, here `sh` standing in for it as in every unit test.
     #[test]
     fn a_check_whose_sandbox_was_killed_retires_its_copy() {
         let p = place();
         let farm = take(&p);
-        let killed = std::process::Command::new("sh").args(["-c", "kill -9 $$"]).status().unwrap();
-        let exited = std::process::Command::new("sh").args(["-c", "exit 1"]).status().unwrap();
-        assert!(Ended::waited(killed).is_none() && Ended::waited(exited).is_some());
-        match Ended::waited(killed) {
+        let run = |script: &str| {
+            let mut c = crate::supervised::command("sh").unwrap();
+            crate::supervised::output(c.args(["-c", script])).unwrap().1
+        };
+        let (killed, exited) = (run("kill -9 $$"), run("exit 1"));
+        assert!(Ended::reaped(&killed).is_none() && Ended::reaped(&exited).is_some());
+        match Ended::reaped(&killed) {
             Some(ended) => farm.give_back(ended),
             None => drop(farm),
         }

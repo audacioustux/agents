@@ -1,5 +1,6 @@
 //! view: read-only. Who is working on what, and what each session said.
 
+mod counts;
 pub mod machine;
 mod stats;
 pub mod usage;
@@ -15,6 +16,7 @@ use crate::ctx::Ctx;
 use crate::systems::dispatch::Room;
 use crate::systems::quota::AccountsView;
 use crate::world::{Job, Wait, World};
+pub use counts::Counts;
 use machine::{Machine, Scope};
 
 #[derive(Debug, Subcommand)]
@@ -151,14 +153,41 @@ fn world_json(world: &World) -> Result<serde_json::Value> {
     Ok(v)
 }
 
+/// The counts `--json` carries beside the folded state: of the jobs the text board would list, the
+/// machine's total and, for every project, each project's own.
+fn json_counts(scope: Scope<'_>, m: &Machine, all: bool, everywhere: bool, now: u64) -> serde_json::Value {
+    let room = m.room(scope.home);
+    let everywhere = everywhere || !m.projects.iter().any(|p| p.own);
+    let jobs = listed(m.shown(everywhere), all, now);
+    let cap = |own: bool| own.then_some(scope.cfg.limits.max_running);
+    let capped = |c: Counts, own: bool| cap(own).map_or(c.clone(), |max| c.capped(max));
+    let total = Counts::of(jobs.iter().copied(), scope.cfg, &room, now);
+    if !everywhere {
+        return serde_json::to_value(capped(total, true)).unwrap_or_default();
+    }
+    let per: serde_json::Map<String, serde_json::Value> = m
+        .shown(true)
+        .map(|p| {
+            let c = Counts::of(jobs.iter().copied().filter(|(q, _)| q.name == p.name), scope.cfg, &room, now);
+            (p.name.clone(), serde_json::to_value(capped(c, p.own)).unwrap_or_default())
+        })
+        .collect();
+    serde_json::json!({ "total": total, "projects": per })
+}
+
 fn status(scope: Scope<'_>, json: bool, all: bool, everywhere: bool) -> Result<()> {
     if json {
+        let now = now_micros();
         let (mut v, refreshing) = match scope.home {
             Some(ctx) if !everywhere => {
                 let world = ctx.world()?;
                 let neighbours = ctx.neighbours();
                 let refreshing = refresh_shown(ctx, &world, &neighbours.iter().collect::<Vec<_>>())?;
-                (world_json(&world)?, refreshing)
+                let m = scope.read()?;
+                let counts = json_counts(scope, &m, all, false, now);
+                let mut v = world_json(m.own())?;
+                v["counts"] = counts;
+                (v, refreshing)
             }
             _ => {
                 let m = scope.read()?;
@@ -172,7 +201,8 @@ fn status(scope: Scope<'_>, json: bool, all: bool, everywhere: bool) -> Result<(
                     )?,
                     None => Vec::new(),
                 };
-                (serde_json::json!({ "projects": projects, "unreadable": m.unreadable }), refreshing)
+                let counts = json_counts(scope, &m, all, true, now);
+                (serde_json::json!({ "projects": projects, "unreadable": m.unreadable, "counts": counts }), refreshing)
             }
         };
         // Beside the folded state, never in it: the accounts whose reading was asked for, as `quota show --json` says.
@@ -275,9 +305,18 @@ fn board_order(j: &Job) -> (u8, std::cmp::Reverse<u64>) {
     (rank, std::cmp::Reverse(j.ended_at.or(j.started_at).unwrap_or(j.created_at)))
 }
 
-/// What a job is asked to run as: its profile, else the model it names, then its effort.
-pub fn kind(j: &Job) -> String {
-    let what = j.profile.clone().unwrap_or_else(|| j.models.values().cloned().collect::<Vec<_>>().join(","));
+/// What a job is asked to run as: its profile, else the model it names, then its effort. Where the profile's own cap binds, how full it is: `w2-build 6/6`, so a queue
+/// held by it explains itself. Only the project relay runs in (`own`) can say.
+fn kind_in(own: Option<(&Config, &Room)>, j: &Job) -> String {
+    let profile = j.profile.as_deref().map(|name| {
+        let bound = own.and_then(|(cfg, room)| {
+            let max = cfg.profiles.get(name)?.max_running?;
+            let running = room.profile_running(name);
+            (running >= max).then(|| format!("{name} {running}/{max}"))
+        });
+        bound.unwrap_or_else(|| name.to_owned())
+    });
+    let what = profile.unwrap_or_else(|| j.models.values().cloned().collect::<Vec<_>>().join(","));
     match j.effort.as_deref() {
         Some(effort) => format!("{what} {effort}"),
         None => what,
@@ -405,7 +444,7 @@ pub fn job_cells(own: Option<(&Config, &Room)>, world: &World, j: &Job, now: u64
         j.name.clone(),
         j.status.as_str().to_owned(),
         j.account.as_deref().or(j.pinned.as_deref()).unwrap_or("-").to_owned(),
-        kind(j),
+        kind_in(own, j),
         model_cell(cfg, j),
         since.map_or_else(|| "-".into(), |t| ago(now, t)),
         if j.cost_usd > 0.0 { format!("${:.2}", j.cost_usd) } else { String::new() },
@@ -481,6 +520,34 @@ struct Shown {
     width: Option<usize>,
 }
 
+/// The header over the rows: the counts of the jobs listed below it, with the cap where it is known.
+/// Inside a project, `jobs: 10 running of at most 10 · 19 queued (4 waiting on another job) · 2 need a
+/// human`; for every project, the machine total, then one line per project with jobs listed.
+fn counts_lines(
+    cfg: &Config,
+    room: &Room,
+    jobs: &[(&machine::Project, &Job)],
+    everywhere: bool,
+    now: u64,
+) -> Vec<String> {
+    let of = |on: &dyn Fn(&machine::Project) -> bool| {
+        Counts::of(jobs.iter().filter(|(p, _)| on(p)).map(|&(p, j)| (p, j)), cfg, room, now)
+    };
+    if !everywhere {
+        return vec![format!("jobs: {}", of(&|_| true).capped(cfg.limits.max_running).line())];
+    }
+    let mut lines = vec![format!("jobs in every project: {}", of(&|_| true).line())];
+    let mut names: Vec<&str> = jobs.iter().map(|(p, _)| p.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    for name in names {
+        let own = jobs.iter().any(|(p, _)| p.name == name && p.own);
+        let c = of(&|p| p.name == name);
+        lines.push(format!("  {name}: {}", if own { c.capped(cfg.limits.max_running) } else { c }.line()));
+    }
+    lines
+}
+
 /// The jobs and accounts, as text.
 fn board(cfg: &Config, m: &Machine, room: &Room, accounts: &AccountsView, shown: Shown) -> String {
     let Shown { all, everywhere, width } = shown;
@@ -488,11 +555,7 @@ fn board(cfg: &Config, m: &Machine, room: &Room, accounts: &AccountsView, shown:
     let everywhere = everywhere || !m.projects.iter().any(|p| p.own);
     let jobs = listed(m.shown(everywhere), all, now);
     let rows: Vec<Vec<String>> = jobs.iter().map(|(p, j)| row_cells(cfg, room, p, j, everywhere, now)).collect();
-    let mut lines = vec![if everywhere {
-        "jobs in every project".to_owned()
-    } else {
-        format!("jobs (at most {} running)", cfg.limits.max_running)
-    }];
+    let mut lines = counts_lines(cfg, room, &jobs, everywhere, now);
     lines.extend(table(&rows).into_iter().map(|r| format!("  {r}")));
     if jobs.is_empty() {
         lines.push("  (none)".into());
@@ -680,7 +743,10 @@ fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
 
 #[cfg(test)]
 mod tests {
-    use super::{answer_in, board_order, fit, models, short_model, table};
+    use super::{
+        AccountsView, Counts, Machine, Room, Shown, answer_in, board, board_order, fit, listed, machine, models,
+        now_micros, short_model, table,
+    };
 
     #[test]
     fn a_model_id_is_short_and_keeps_its_version() {
@@ -920,5 +986,74 @@ mod tests {
         assert_eq!(fit(text, Some(10)), "short\na line fa…\nthird\nfourth");
         assert_eq!(fit(text, None), text, "piped: whole lines");
         assert!(fit("·×·×·×", Some(4)).chars().count() == 4, "counted in characters, not bytes");
+    }
+
+    /// A mixed world as the text board draws it: the header's numbers are those of the rows under
+    /// it, and each queued job is counted under one reason.
+    #[test]
+    fn the_header_counts_the_rows_it_heads() {
+        use crate::world::{AccountState, Job, Status};
+        let (dir, cfg) = one_seat();
+        let now = now_micros();
+        let job = |name: &str, status: Status| Job {
+            name: name.into(),
+            status,
+            task: format!("task {name}"),
+            created_at: now - 1_000,
+            started_at: (status == Status::Running).then_some(now - 1_000),
+            ended_at: (!status.is_live()).then_some(now - 1_000),
+            account: (status == Status::Running).then(|| "claude:a".into()),
+            ..Job::default()
+        };
+        let hunter = |name: &str, status: Status| Job { profile: Some("hunt".into()), ..job(name, status) };
+        let jobs = [
+            hunter("run-hunt", Status::Running),
+            hunter("held-by-cap", Status::Queued),
+            Job { after: vec!["run-hunt".into()], ..job("after-run", Status::Queued) },
+            Job { after: vec!["broke".into()], ..job("after-failed", Status::Queued) },
+            job("plain", Status::Queued),
+            job("broke", Status::Failed),
+            job("finished", Status::Done),
+        ];
+        let mut w = crate::world::World::default();
+        w.accounts.insert("claude:a".into(), AccountState { read_at: Some(now - 1), ..Default::default() });
+        for j in &jobs {
+            w.jobs_mut().insert(j.name.clone(), j.clone());
+        }
+        let home = crate::harness::Home { harness: "claude", label: "a".into(), dir: "/x".into() };
+        let room = Room::of(vec![home], w.accounts.clone(), &w, &[], true);
+        let m = Machine {
+            projects: vec![machine::Project { name: "demo".into(), jobs: dir.path().into(), world: w, own: true }],
+            unreadable: Vec::new(),
+        };
+        let accounts = AccountsView::default();
+        let text = board(&cfg, &m, &room, &accounts, Shown { all: false, everywhere: false, width: None });
+        let header = text.lines().next().unwrap();
+        // One seat is taken by the running job, so the plain job waits for an account; the hunter, for its profile's cap.
+        assert_eq!(
+            header,
+            "jobs: 1 running of at most 2 · 4 queued (1 waiting on another job, 1 held by account limits, \
+             1 held by hunt cap) · 2 need a human"
+        );
+        // And the rows say the same: one running row, four queued, one failed, none counted twice.
+        let rows =
+            |status: &str| text.lines().filter(|l| l.starts_with("  ") && l.contains(&format!("  {status}  "))).count();
+        assert_eq!((rows("running"), rows("queued"), rows("failed"), rows("done")), (1, 4, 1, 1), "{text}");
+        let row = |name: &str| text.lines().find(|l| l.trim_start().starts_with(name)).unwrap();
+        assert!(row("held-by-cap").contains("hunt 1/1"), "the cap that binds shows where it binds: {text}");
+        assert!(row("plain").contains("no account has room"), "{text}");
+        let c = Counts::of(listed(m.shown(false), false, now), &cfg, &room, now);
+        assert_eq!(c.queued, c.waiting_on_job + c.blocked + c.held_total(), "every queued job under one reason");
+        // Everywhere: the machine total, then each project.
+        let every = board(&cfg, &m, &room, &accounts, Shown { all: false, everywhere: true, width: None });
+        let head: Vec<&str> = every.lines().take(2).collect();
+        assert_eq!(
+            head[0],
+            "jobs in every project: 1 running · 4 queued (1 waiting on another job, 1 held by account limits, 1 held by hunt cap) · 2 need a human"
+        );
+        assert_eq!(
+            head[1],
+            "  demo: 1 running of at most 2 · 4 queued (1 waiting on another job, 1 held by account limits, 1 held by hunt cap) · 2 need a human"
+        );
     }
 }

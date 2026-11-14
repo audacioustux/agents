@@ -24,7 +24,7 @@ use crate::ctx::Ctx;
 use crate::harness::{Harness, Home};
 use crate::os::{self, Role};
 use crate::world::{AccountState, DAY_MICROS, Job, Status, Wait, World};
-pub use room::{Hold, READING_WAIT_MICROS, Room, Start};
+pub use room::{Cause, Hold, READING_WAIT_MICROS, Room, Start};
 
 /// The longest sleep. Only a runner that dies without a word (one started by
 /// an earlier dispatcher, or killed outright) waits this long to be reaped.
@@ -461,7 +461,7 @@ fn plan(cfg: &Config, room: &mut Room, world: &World, now_us: u64, held: &mut He
                 out.push(start);
             }
             Ok(None) => {}
-            Err(Hold { why, until }) => {
+            Err(Hold { why, until, .. }) => {
                 held.0.push(format!("{}: {why}", j.name));
                 held.1 = [held.1, until].into_iter().flatten().min();
                 held.2.push(j.name.clone());
@@ -508,8 +508,11 @@ pub fn place_session(
     now_us: u64,
 ) -> Result<Start, Hold> {
     let j = session_job(worker, harness, model, since);
-    place(cfg, room, &j, worker.account.as_deref(), now_us)?
-        .ok_or_else(|| Hold { why: format!("no {harness} account has room"), until: None })
+    place(cfg, room, &j, worker.account.as_deref(), now_us)?.ok_or_else(|| Hold {
+        cause: Cause::Accounts,
+        why: format!("no {harness} account has room"),
+        until: None,
+    })
 }
 
 /// Books a seat for decision `id`'s `agent:` session for `worker` ([`place_session`]) under the

@@ -58,9 +58,23 @@ impl Refused {
     }
 }
 
+/// What kind of thing holds a queued job, for counting the held by what holds them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    /// Its profile's `max_running` or `max_per_day`.
+    Profile,
+    /// Free disk under the floor.
+    Disk,
+    /// The development environment is not warm.
+    Setup,
+    /// No account it may use has room, or a reading of one is awaited.
+    Accounts,
+}
+
 /// Why a queued job does not start now, and when (bus time) that could change with no event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hold {
+    pub cause: Cause,
     pub why: String,
     pub until: Option<u64>,
 }
@@ -142,6 +156,11 @@ impl Room {
     /// The first home signed in as the same account as `key`, when `key` is not the first.
     pub fn twin_of(&self, key: &str) -> Option<&String> {
         self.twins.get(key)
+    }
+
+    /// How many of this project's jobs of profile `name` have a runner.
+    pub fn profile_running(&self, name: &str) -> usize {
+        self.running.get(name).copied().unwrap_or(0)
     }
 
     /// The sessions every project runs on the account `key` (and its twins), on any provider.
@@ -241,12 +260,13 @@ impl Room {
             let running = self.running.get(name).copied().unwrap_or(0);
             let starts = self.starts.get(name).map_or(&[][..], Vec::as_slice);
             if let Some((why, until)) = profile_hold(name, p, running, starts, now_us) {
-                return Err(Hold { why, until });
+                return Err(Hold { cause: Cause::Profile, why, until });
             }
         }
         if !j.readonly() && !self.disk_ok {
             let (floor, need) = (cfg.limits.min_free_disk_gb, crate::systems::dispatch::resume_gb(&cfg.limits));
             return Err(Hold {
+                cause: Cause::Disk,
                 why: format!("free disk below {need} GB (the {floor} GB floor and its margin)"),
                 until: None,
             });
@@ -271,7 +291,7 @@ impl Room {
         }
         if fits.is_empty() {
             let why = if why.is_empty() { "the job's harness or pin allows no account".into() } else { why.join("; ") };
-            return Err(Hold { why: format!("no account has room ({why})"), until: None });
+            return Err(Hold { cause: Cause::Accounts, why: format!("no account has room ({why})"), until: None });
         }
         // An account read a moment ago should not take the job only because the others' readings are
         // still under way: wait for those that may have more room, a little while, unless the job
@@ -288,7 +308,7 @@ impl Room {
                 fresh.join(", "),
                 at(until).map_or_else(String::new, |t| format!(" (until {t} at most)"))
             );
-            return Err(Hold { why, until: Some(until) });
+            return Err(Hold { cause: Cause::Accounts, why, until: Some(until) });
         }
         Ok(fits)
     }

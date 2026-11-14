@@ -79,6 +79,7 @@ services:
     environment:
       RUNNER_SCOPE: org
       ORG_NAME: stage-crew
+      RUNNER_GROUP: tickify-ci
       ACCESS_TOKEN: ${TICKIFY_ORG_ACCESS_TOKEN:?}
       RUNNER_NAME_PREFIX: dokploy-tickify-nonprod
       LABELS: dokploy-tickify-nonprod
@@ -118,6 +119,7 @@ services:
     environment:
       RUNNER_SCOPE: org
       ORG_NAME: stage-crew
+      RUNNER_GROUP: tickify-ci
       ACCESS_TOKEN: ${TICKIFY_ORG_ACCESS_TOKEN:?}
       RUNNER_NAME_PREFIX: dokploy-tickify
       LABELS: dokploy-tickify
@@ -157,6 +159,7 @@ services:
     environment:
       RUNNER_SCOPE: org
       ORG_NAME: nobinalo
+      RUNNER_GROUP: grid-ci
       ACCESS_TOKEN: ${NOBINALO_ORG_ACCESS_TOKEN:?}
       RUNNER_NAME_PREFIX: dokploy-optics
       LABELS: dokploy-optics

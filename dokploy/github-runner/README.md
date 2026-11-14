@@ -25,6 +25,26 @@ take the nonprod pool. A runner group restricted to selected repositories
 would narrow the scope further, at the cost of managing the group by hand
 alongside the labels.
 
+### Runner groups
+
+Org scope alone offers a pool to every repository of its organisation, and
+the pools hold the host's Docker socket and run jobs as root. Each pool is
+therefore in a runner group of its own, which restricts it to the
+repositories — and, for the Optics pool, the workflows — that should use it:
+
+| Pool | Group | Repositories | Allowed workflows |
+|---|---|---|---|
+| `runner-tickify-nonprod`, `runner-tickify` | `tickify-ci` (stage-crew) | `stage-crew/tickify` | any workflow in that repo |
+| `runner-optics` | `grid-ci` (nobinalo) | `nobinalo/Optics` | `check.yml`, `dev-shell.yml` |
+
+`RUNNER_GROUP` in the compose file is what puts a pool's runners in that
+group on every registration; without it they land in the organisation's
+Default group, which offers them to every repository.
+
+The Default group of both organisations is set to *selected repositories*
+with none selected, so a runner that registers without a group is offered
+to nobody — a visible failure rather than a silent one.
+
 ## Files
 
 - `compose.yml` — Dokploy Compose definition.

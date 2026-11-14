@@ -1,6 +1,10 @@
 # Three runner services on one host. A runner registers to exactly one scope, so
 # each pool is its own service; scaling either is its `deploy.replicas`.
 #
+# Every pool registers at its organisation's scope: stage-crew for tickify's two,
+# nobinalo for Optics. Scope is per organisation, so the labels — not the scope
+# — are what keep a pool to its own jobs.
+#
 # Replicas rule out `container_name` and per-replica named volumes, so runner
 # registration and /nix both live in the container filesystem:
 # - Registration is ephemeral by design: the image self-registers from its
@@ -11,13 +15,14 @@
 #   redeploy — a shared named volume is not an option, since concurrent
 #   replicas would race the nix store's sqlite db.
 #
-# Each pool reads the same two variables, prefixed with its name:
-# <POOL>_REPO_URL and <POOL>_ACCESS_TOKEN (.env.example).
+# Each pool reads one variable, prefixed with its name:
+# <POOL>_ORG_ACCESS_TOKEN (.env.example) — a PAT that can mint a registration
+# token for that organisation's runners.
 #
-# Each pool is given only its own repo's token, never the whole `.env` (no
-# `env_file`). The image un-exports ACCESS_TOKEN before the runner starts,
+# Each pool is given only its own organisation's token, never the whole `.env`
+# (no `env_file`). The image un-exports ACCESS_TOKEN before the runner starts,
 # but every other variable reaches each job's environment, so a shared env
-# file would hand each pool's <POOL>_ACCESS_TOKEN to the other's jobs.
+# file would hand each pool's <POOL>_ORG_ACCESS_TOKEN to the other's jobs.
 # Dokploy's environment still fills the `${…}` below. A pool's own token
 # stays readable by its jobs, which run as root, in PID 1's environment
 # (/proc/1/environ); the image's UNSET_CONFIG_VARS would not change that,
@@ -72,9 +77,9 @@ services:
           cpus: 10
           memory: 16G
     environment:
-      RUNNER_SCOPE: repo
-      REPO_URL: ${TICKIFY_REPO_URL:?}
-      ACCESS_TOKEN: ${TICKIFY_ACCESS_TOKEN:?}
+      RUNNER_SCOPE: org
+      ORG_NAME: stage-crew
+      ACCESS_TOKEN: ${TICKIFY_ORG_ACCESS_TOKEN:?}
       RUNNER_NAME_PREFIX: dokploy-tickify-nonprod
       LABELS: dokploy-tickify-nonprod
       # Persistent runner (not EPHEMERAL): keeps the workspace and /nix warm
@@ -111,9 +116,9 @@ services:
           cpus: 4
           memory: 8G
     environment:
-      RUNNER_SCOPE: repo
-      REPO_URL: ${TICKIFY_REPO_URL:?}
-      ACCESS_TOKEN: ${TICKIFY_ACCESS_TOKEN:?}
+      RUNNER_SCOPE: org
+      ORG_NAME: stage-crew
+      ACCESS_TOKEN: ${TICKIFY_ORG_ACCESS_TOKEN:?}
       RUNNER_NAME_PREFIX: dokploy-tickify
       LABELS: dokploy-tickify
       # Without `self-hosted`, `Linux` and `X64`, only a job that names
@@ -150,9 +155,9 @@ services:
           cpus: 4
           memory: 8G
     environment:
-      RUNNER_SCOPE: repo
-      REPO_URL: ${OPTICS_REPO_URL:?}
-      ACCESS_TOKEN: ${OPTICS_ACCESS_TOKEN:?}
+      RUNNER_SCOPE: org
+      ORG_NAME: nobinalo
+      ACCESS_TOKEN: ${NOBINALO_ORG_ACCESS_TOKEN:?}
       RUNNER_NAME_PREFIX: dokploy-optics
       LABELS: dokploy-optics
       # Persistent, as tickify's. Optics' checkout keeps the default

@@ -1047,6 +1047,24 @@ impl<'w> Graph<'w> {
         }
     }
 
+    /// Whether `from` waits on `to` through the edges of waiting jobs, one hop or more.
+    pub fn reaches(&self, from: &str, to: &str) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        let mut todo = vec![from.to_owned()];
+        while let Some(at) = todo.pop() {
+            let Some(j) = self.jobs.get(&at).filter(|j| self.waiting(j)) else { continue };
+            for d in self.deps(j) {
+                if d.on == to {
+                    return true;
+                }
+                if seen.insert(d.on.clone()) {
+                    todo.push(d.on);
+                }
+            }
+        }
+        false
+    }
+
     /// What the jobs that wait need kept: every job an edge of theirs ends at ([`Graph::deps`]), and every job a
     /// queued one forks. gc keeps their clones, as cleanup keeps their records ([`Graph::waiters`]).
     pub fn needed(&self) -> std::collections::HashSet<String> {

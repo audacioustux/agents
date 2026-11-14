@@ -144,6 +144,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     // What is recorded, in order, files the brief changes, and for a stop the runner to signal once it is recorded.
     let mut events = Vec::new();
     let mut briefs: Vec<(String, String)> = Vec::new();
+    let mut added: Option<Candidate> = None;
     let (event, runner) = match cmd {
         Cmd::Add(add) => {
             // A job that ended before it ever started (dequeued) has nothing to keep:
@@ -153,7 +154,9 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
                 fail!(Conflict, "job {name} exists; pick another name{free}");
             }
             let replaced = add.declare.review_of().map(|b| chain(world.jobs(), b)).unwrap_or_default();
-            let queued = add.queued(ctx, world.jobs())?;
+            let candidate = add.queued(ctx, world.jobs())?;
+            let queued = candidate.event.clone();
+            added = Some(candidate);
             // One live chain per job: the new review takes the old one's place, in the same breath.
             events.extend(
                 replaced
@@ -221,13 +224,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     } else {
         events.push(event);
     }
-    if let Err(cycle) = change.try_record(&ctx.port(&Source(())), events, &name)? {
-        fail!(Conflict, "{what} {name} would make it wait for itself: {cycle}, so none of them would ever start");
-    }
-    // A reviewer started afresh reads the new brief as its own: written before the lock lets a dispatch in.
-    for (reviewer, brief) in &briefs {
-        Ctx::write_private(&ctx.job_file(reviewer, "prompt.md"), brief.as_bytes())?;
-    }
+    commit(&mut change, events, (&name, what), added.as_ref(), &briefs)?;
     drop(change);
     if let Some(runner) = runner {
         stop_runner(runner)?;
@@ -252,7 +249,9 @@ fn chain(jobs: &BTreeMap<String, Job>, builder: &str) -> Vec<String> {
 
 impl Add {
     /// Checks the request, stores the brief, and says what to record.
-    fn queued(self, ctx: &Ctx, jobs: &BTreeMap<String, Job>) -> Result<QueueEvent> {
+    /// The `queued` event this line records, and the brief it brings, read and checked but not yet written:
+    /// nothing is written until the whole change is accepted ([`Candidate::write`]).
+    fn queued(self, ctx: &Ctx, jobs: &BTreeMap<String, Job>) -> Result<Candidate> {
         if !valid_name(&self.name) || self.name.starts_with(RESERVED) {
             fail!(Usage, "job names are lowercase letters, digits and dashes, and do not start with {RESERVED}");
         }
@@ -312,14 +311,10 @@ impl Add {
         if !compiles && declared.acceptance.command().is_some() {
             fail!(Refused, "--compiles false with an acceptance check: a check builds, so its job compiles");
         }
-        // The brief reaches the session on stdin or as a file, never in argv (/proc/<pid>/cmdline is public).
-        // A name whose job was dequeued starts clean: its files are the old job's, and the logs append.
-        ctx.wipe_job_files(&name)?;
-        Ctx::write_private(&ctx.job_file(&name, "prompt.md"), brief.as_bytes())?;
         let task =
             self.task.unwrap_or_else(|| brief.trim().lines().next().unwrap_or_default().chars().take(80).collect());
-        Ok(QueueEvent::Queued {
-            job: name,
+        let event = QueueEvent::Queued {
+            job: name.clone(),
             task,
             readonly: fill.readonly,
             harnesses,
@@ -335,7 +330,49 @@ impl Add {
             depth: 0,
             acceptance: declared.acceptance,
             compiles,
-        })
+        };
+        Ok(Candidate { name, brief, event })
+    }
+}
+
+/// Records a command's change in `change`: the whole of it checked first (the name and the command's own
+/// checks before this, the graph here), so a refused command changes nothing on disk; then the files (a new
+/// job's brief, a reviewer's replaced one), before the lock lets a dispatch in; then the events. `what`
+/// names the command for a refusal: `(job, "queuing" | "resuming")`.
+fn commit(
+    change: &mut Change<'_>,
+    events: Vec<QueueEvent>,
+    (name, what): (&str, &str),
+    added: Option<&Candidate>,
+    briefs: &[(String, String)],
+) -> Result<()> {
+    let ctx = change.ctx();
+    if let Some(cycle) = change.cycle(&events, name) {
+        fail!(Conflict, "{what} {name} would make it wait for itself: {cycle}, so none of them would ever start");
+    }
+    if let Some(candidate) = added {
+        candidate.write(ctx)?;
+    }
+    for (reviewer, brief) in briefs {
+        Ctx::write_private(&ctx.job_file(reviewer, "prompt.md"), brief.as_bytes())?;
+    }
+    change.record(&ctx.port(&Source(())), events)
+}
+
+/// A job a line would queue, checked but not yet written: its `queued` event, and the brief its files take.
+struct Candidate {
+    name: String,
+    brief: String,
+    event: QueueEvent,
+}
+
+impl Candidate {
+    /// Writes its files, once the whole change it is part of was accepted (and before the lock lets a dispatch
+    /// in). The brief reaches the session on stdin or as a file, never in argv (/proc/<pid>/cmdline is public).
+    /// A name whose job was dequeued starts clean: its files are the old job's, and the logs append.
+    fn write(&self, ctx: &Ctx) -> Result<()> {
+        ctx.wipe_job_files(&self.name)?;
+        Ctx::write_private(&ctx.job_file(&self.name, "prompt.md"), self.brief.as_bytes())
     }
 }
 
@@ -395,13 +432,16 @@ pub fn follow_up(change: &mut Change<'_>, parent: &Job, f: FollowUp) -> Result<S
         fork: f.fork.then(|| parent.name.clone()),
         declare: declare::Declare::default(),
     };
-    let mut event = add.queued(ctx, world.jobs())?;
-    if let QueueEvent::Queued { parent: of, depth, .. } = &mut event {
+    let mut candidate = add.queued(ctx, world.jobs())?;
+    if let QueueEvent::Queued { parent: of, depth, .. } = &mut candidate.event {
         (*of, *depth) = (Some(parent.name.clone()), parent.depth + 1);
     }
-    if let Err(cycle) = change.try_record(&ctx.port(&Source(())), vec![event], &name)? {
+    // Checked whole before its files are written, as `queue add` is.
+    if let Some(cycle) = change.cycle(std::slice::from_ref(&candidate.event), &name) {
         fail!(Conflict, "queuing {name} would make it wait for itself: {cycle}, so none of them would ever start");
     }
+    candidate.write(ctx)?;
+    change.record(&ctx.port(&Source(())), vec![candidate.event])?;
     ctx.wake_dispatch()?;
     Ok(name)
 }

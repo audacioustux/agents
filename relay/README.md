@@ -77,7 +77,10 @@ than wait forever. Queue the dependency again (or `queue resume` it), or
 drops the waits and does not cancel anything. To withdraw the job instead, `relay queue dequeue NAME`.
 Every command relay suggests for a job (in a refusal, a failure's reason or a wait that
 cannot end) is one that job's state accepts as printed, step by step: the suggestion
-and the command's own check are the same check.
+and the command's own check are the same check. A suggestion reaches what it is for
+(a name it frees is free after it), takes `queue stop` for the request it is (the job
+runs until its runner has ended), and a release it suggests names exactly the
+`--after` entries it removes. A refused `queue add` writes nothing.
 Only existing jobs can be named. A dependency that is reviewed counts as done only
 once its review accepts ([below](#reviews)), so a review adds waits no `--after`
 names. relay computes **one dependency graph** from the event log, and everything

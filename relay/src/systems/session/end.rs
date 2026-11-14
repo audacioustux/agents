@@ -237,8 +237,9 @@ fn done_rule(r: &EndRule<'_>) -> Option<(Action, String)> {
     if r.reviewing
         && let Some((verdict, reason)) = review::verdict(r.answer, r.marker)
     {
-        let tail = r.answer.rfind(r.marker).filter(|_| !r.marker.is_empty()).map_or(r.answer, |i| &r.answer[i..]);
-        let message = checkpoint::bounded(tail.trim(), 4096);
+        // The findings are the section the verdict was read from: the one parse of a report.
+        let section = review::final_section(r.answer, r.marker).unwrap_or(r.answer);
+        let message = checkpoint::bounded(section.trim(), 4096);
         return Some((Action::Review { verdict, reason, message }, "the review's report gives its verdict".into()));
     }
     r.final_done.then(|| (Action::Accept, "done, and its report says status: done".into()))
@@ -465,6 +466,16 @@ mod tests {
             r.answer = "FINAL\nstatus: done";
         });
         assert_eq!(plain, Some(Action::Accept), "a review that gives no verdict ends as any done run");
+        // Copilot on PR #69 (end.rs:240): notes that mention the marker do not cut the findings short; the
+        // builder is sent the same section the verdict was read from.
+        let mentions = "FINAL\nverdict: reject\nreason: test-failure\nnotes: parse() panics on empty input,\n\
+                        as the FINAL report of the last run said too.";
+        let a = rule(Outcome::Done, |r| {
+            r.reviewing = true;
+            r.answer = mentions;
+        });
+        let Some(Action::Review { message, .. }) = a else { panic!("{a:?}") };
+        assert!(message.starts_with("FINAL\nverdict: reject") && message.contains("parse() panics"), "{message}");
     }
 
     #[test]

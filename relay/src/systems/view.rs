@@ -672,7 +672,9 @@ fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
         }
         if !world.moves_on_its_own(&j) {
             let why = Wait::summary(&world.waits(&j)).unwrap_or_else(|| "cannot start on its own".into());
-            let release = crate::systems::hint::Cmd::new(name, crate::systems::hint::Step::Release(Vec::new()));
+            // Exactly the waits that will never end: the others are still on their way.
+            let blocked: Vec<String> = world.waits(&j).into_iter().filter(|w| w.blocked).map(|w| w.job).collect();
+            let release = crate::systems::hint::Cmd::new(name, crate::systems::hint::Step::Release(blocked));
             let or =
                 crate::systems::hint::hint(&world, &[vec![release]]).map_or_else(String::new, |h| format!(", or {h}"));
             fail!(Conflict, "{name} {why}, so it will not end on its own: queue that job again{or}");

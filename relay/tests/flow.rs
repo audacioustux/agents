@@ -1293,6 +1293,34 @@ fn the_hint_printed_for_a_name_in_use_frees_it() {
     std::fs::remove_file(&hold).unwrap();
 }
 
+/// Copilot on PR #69 (queue.rs:225): a refused `queue add` changes nothing on disk. x was dequeued before it
+/// ever started, so its name is free; reusing it for a review that would wait for itself is refused, and x's
+/// own brief is still there, not the rejected one a later `queue resume x` would run.
+#[test]
+fn a_refused_add_writes_nothing() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("add-refused", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "build", "--text", "[status-done] Make a change."]), "queue build");
+    wait_status(&env, "build", "running");
+    ok(&relay(&env, &["queue", "add", "test", "--after", "build", "--text", "Test it."]), "queue test");
+    ok(&relay(&env, &["queue", "add", "x", "--text", "The original brief."]), "queue x");
+    ok(&relay(&env, &["queue", "dequeue", "x"]), "dequeue x before it starts");
+    let prompt = env.root.join("state/relay/flow/jobs/x.prompt.md");
+    assert_eq!(std::fs::read_to_string(&prompt).unwrap(), "The original brief.");
+    let out = relay(&env, &["queue", "add", "x", "--review-of", "build", "--after", "test", "--text", "Rejected."]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    assert!(stderr(&out).contains("would make it wait for itself"), "{}", stderr(&out));
+    assert_eq!(std::fs::read_to_string(&prompt).unwrap(), "The original brief.", "nothing was written");
+    assert_eq!(job(&env, "x")["task"], "The original brief.");
+    std::fs::remove_file(&hold).unwrap();
+}
+
 #[test]
 fn after_names_only_jobs_that_exist() {
     let env = setup("unknown", false);

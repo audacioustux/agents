@@ -126,6 +126,10 @@ fn after(world: &World, cmd: &Cmd) -> World {
                 Step::Resume => (j.status, j.held) = (Status::Queued, false),
                 Step::Release(from) => j.after.retain(|a| !from.is_empty() && !from.contains(a)),
                 Step::Dequeue => (j.status, j.reason) = (Status::Stopped, Some("dequeued".into())),
+                // A stop of a running job is a request: its runner ends when it has passed the TERM on, so
+                // the job is still running when the person types the next command. Only a job the disk floor
+                // holds (no runner) is stopped by the record itself.
+                Step::Stop if j.status == Status::Running => j.stop_requested = true,
                 Step::Stop => (j.status, j.held) = (Status::Stopped, false),
                 _ => {}
             }
@@ -146,35 +150,63 @@ pub fn works(world: &World, plan: &[Cmd]) -> bool {
     true
 }
 
+/// A plan as a hint names exactly what it changes: a release names the `--after` entries it removes, never
+/// "all of them" (which would drop waits the hint is not about).
+fn exact(plan: &[Cmd]) -> bool {
+    !plan.is_empty() && plan.iter().all(|c| !matches!(&c.step, Step::Release(from) if from.is_empty()))
+}
+
+fn line(plan: &[Cmd]) -> String {
+    plan.iter().map(Cmd::line).collect::<Vec<_>>().join(", then ")
+}
+
 /// The plans of `plans` that `world` accepts, as one hint: each plan's commands joined by ", then ", the
 /// plans by " or ". `None` when no plan works: then relay names no command at all.
 pub fn hint(world: &World, plans: &[Vec<Cmd>]) -> Option<String> {
-    let ok: Vec<String> = plans
-        .iter()
-        .filter(|p| !p.is_empty() && works(world, p))
-        .map(|p| p.iter().map(Cmd::line).collect::<Vec<_>>().join(", then "))
-        .collect();
+    let ok: Vec<String> = plans.iter().filter(|p| exact(p) && works(world, p)).map(|p| line(p)).collect();
     (!ok.is_empty()).then(|| ok.join(" or "))
 }
 
-/// What frees the name of `job` for a new `queue add`, by its state: a queued job dequeued (it never
-/// started), a live one stopped and cleaned, an ended one cleaned.
-pub fn free_name(world: &World, job: &str) -> Option<String> {
-    let c = |s| Cmd::new(job, s);
-    hint(world, &[vec![c(Step::Dequeue)], vec![c(Step::Clean)], vec![c(Step::Stop), c(Step::Clean)]])
+/// The first plan of `plans` that `world` accepts and that reaches `goal`: the goal is accepted on the state
+/// the plan leaves. A hint is printed for what it is for, and only where running it gets there.
+pub fn reaching(world: &World, plans: &[Vec<Cmd>], goal: &Cmd) -> Option<String> {
+    plans
+        .iter()
+        .find(|p| exact(p) && works(world, &[p.as_slice(), std::slice::from_ref(goal)].concat()))
+        .map(|p| line(p))
 }
 
-/// What lets `waiter` go on without `on`: released from the `--after` entries through which it waits on
-/// `on`, or, for a review waiting on its builder, its chain detached.
+/// What frees the name of `job` for a new `queue add`: the first plan after which `queue add` is accepted. A
+/// queued job that never started is dequeued; one that ran is dequeued and cleaned (a dequeue keeps its
+/// attempts); an ended one is cleaned. A running job has none to offer: a stop is a request, and it is still
+/// running until its runner has ended, so `land clean` would refuse it.
+pub fn free_name(world: &World, job: &str) -> Option<String> {
+    let c = |s| Cmd::new(job, s);
+    let plans = [
+        vec![c(Step::Dequeue)],
+        vec![c(Step::Dequeue), c(Step::Clean)],
+        vec![c(Step::Clean)],
+        vec![c(Step::Stop), c(Step::Clean)],
+    ];
+    reaching(world, &plans, &c(Step::Add))
+}
+
+/// What lets `waiter` go on without `on`: released from exactly the `--after` entries through which it
+/// waits on `on`, directly or through other waiting jobs (each first hop that leads there, and none other),
+/// or, for a review waiting on its builder, its chain detached. No release is offered when no entry leads
+/// to `on`.
 pub fn release_from(world: &World, waiter: &Job, on: &str) -> Option<String> {
-    let entries: Vec<String> = world.graph().deps(waiter).into_iter().filter(|d| d.on == on).map(|d| d.after).collect();
+    let graph = world.graph();
     let mut from: Vec<String> = Vec::new();
-    for e in entries {
-        if !from.contains(&e) {
-            from.push(e);
+    for d in graph.deps(waiter) {
+        if (d.on == on || graph.reaches(&d.on, on)) && !from.contains(&d.after) {
+            from.push(d.after);
         }
     }
-    let mut plans = vec![vec![Cmd::new(&waiter.name, Step::Release(from))]];
+    let mut plans = Vec::new();
+    if !from.is_empty() {
+        plans.push(vec![Cmd::new(&waiter.name, Step::Release(from))]);
+    }
     plans.extend(waiter.review_of().map(|b| vec![Cmd::new(b, Step::Unreview)]));
     hint(world, &plans)
 }
@@ -204,12 +236,20 @@ mod tests {
         };
         let cases = [
             ("queued", job(Status::Queued, false, 0), Some("relay queue dequeue x"), None),
-            ("running", job(Status::Running, false, 1), Some("relay queue stop x, then relay land clean x"), None),
+            // Copilot on PR #69 (hint.rs:164): a dequeue keeps a job's attempts, so one that ran is cleaned too.
+            (
+                "queued again",
+                job(Status::Queued, false, 1),
+                Some("relay queue dequeue x, then relay land clean x"),
+                None,
+            ),
+            // Copilot on PR #69 (hint.rs:129): a stop is a request; the job is still running when cleaned.
+            ("running", job(Status::Running, false, 1), None, None),
             ("checking", job(Status::Checking, false, 1), None, None),
             (
                 "held",
                 job(Status::Stopped, true, 1),
-                Some("relay land clean x or relay queue stop x, then relay land clean x"),
+                Some("relay land clean x"),
                 Some("relay queue release x --from base, then relay queue resume x --message continue"),
             ),
             (
@@ -226,5 +266,35 @@ mod tests {
             let plan = vec![Cmd::new("x", Step::Release(vec!["base".into()])), Cmd::new("x", Step::Resume)];
             assert_eq!(hint(&w, &[plan]).as_deref(), start, "{state}: starting without base");
         }
+    }
+
+    /// Copilot on PR #69 (hint.rs:177): a release hint names exactly the entries it removes. next waits on base
+    /// through mid only (`--after mid,other`): it is released from mid, never from everything, and a job next
+    /// does not wait on gets no release at all.
+    #[test]
+    fn a_release_hint_names_exactly_the_entries_that_lead_to_the_job() {
+        let queued = |name: &str, after: &[&str]| Job {
+            name: name.into(),
+            status: Status::Queued,
+            after: after.iter().map(|a| (*a).to_owned()).collect(),
+            ..Job::default()
+        };
+        let base = Job { name: "base".into(), status: Status::Failed, ..Job::default() };
+        let w = world(vec![base, queued("mid", &["base"]), queued("other", &[]), queued("next", &["mid", "other"])]);
+        assert_eq!(w.waiters("base"), ["mid", "next"], "next waits on base through mid");
+        let next = &w.jobs()["next"];
+        assert_eq!(release_from(&w, next, "base").as_deref(), Some("relay queue release next --from mid"));
+        assert_eq!(release_from(&w, next, "unrelated"), None, "nothing leads there: no release");
+    }
+
+    /// Copilot on PR #69 (hint.rs:129): `queue stop` asks a running job's runner to end and returns; the job is
+    /// still running when the next command runs, so `land clean` would refuse it. No such plan is offered.
+    #[test]
+    fn a_running_job_is_not_offered_a_stop_then_clean() {
+        let running = Job { name: "x".into(), status: Status::Running, attempts: 1, ..Job::default() };
+        let w = world(vec![running]);
+        assert_eq!(free_name(&w, "x"), None);
+        let stop_then_clean = [Cmd::new("x", Step::Stop), Cmd::new("x", Step::Clean)];
+        assert!(!works(&w, &stop_then_clean), "the stop is pending when the clean comes");
     }
 }

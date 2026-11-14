@@ -687,7 +687,7 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// 19: a queued job is in line for a machine-wide pool (`in-line`, `out-of-line`) and says whether it
 /// compiles (`no_compile`); every runner dispatched claims its place until its recorded exit
 /// (`claims`, `runner-exited`).
-const FOLD_VERSION: u32 = 20;
+const FOLD_VERSION: u32 = 21;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -1227,6 +1227,7 @@ impl World {
                     // A person stopping a held job takes it out of the floor's hands: it stays stopped.
                     if j.held {
                         (j.held, j.reason) = (false, Some("stopped by request".into()));
+                        j.stopped_for = Some(StopCause::Person);
                     }
                 }
             }
@@ -1272,6 +1273,7 @@ impl World {
                 }
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.status = Status::Running;
+                    j.stopped_for = None;
                     j.account = Some(account.clone());
                     (j.model, j.provider) = (model.clone(), provider.clone());
                     j.runner = Some((*runner_pid, *runner_started));
@@ -1507,6 +1509,7 @@ impl World {
             SessionEvent::Checking { job, .. } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.status = Status::Checking;
+                    j.stopped_for = None;
                 }
             }
             SessionEvent::Checked { job, check } => {
@@ -1595,6 +1598,7 @@ impl World {
                     && !matches!(point, Point::Held | Point::Disk)
                 {
                     j.status = Status::Checking;
+                    j.stopped_for = None;
                 }
                 self.decisions.insert(
                     id.clone(),
@@ -2070,6 +2074,7 @@ mod tests {
         (18, 0x4bb9_80c4_5c80_027a),
         (19, 0xff2a_3110_25d7_0f54),
         (20, 0xff2a_3110_25d7_0f54),
+        (21, 0xff2a_3110_25d7_0f54),
     ];
 
     #[test]
@@ -2690,6 +2695,26 @@ mod tests {
         let mut asked = with(vec![Event::Queue(QueueEvent::StopRequested { job: "a".into() })]);
         asked.push(st(9, ended_for("a", Outcome::Stopped, "stopped by request")));
         assert_eq!(cause(asked), (Status::Stopped, Some(StopCause::Person), false));
+        // A person's stop that takes over a job the floor holds is the last stop: no runner is left to
+        // end it again, so the stop itself records it. The same when the hold had given up on the ceiling.
+        let stop = || Event::Queue(QueueEvent::StopRequested { job: "a".into() });
+        let mut taken = held.clone();
+        taken.push(st(9, stop()));
+        assert_eq!(cause(taken), (Status::Stopped, Some(StopCause::Person), false), "not left as the floor's");
+        let mut stuck_then_stopped = spent.clone();
+        stuck_then_stopped.push(st(10, stop()));
+        assert_eq!(
+            cause(stuck_then_stopped),
+            (Status::Stopped, Some(StopCause::Stuck), true),
+            "no transition: still stuck"
+        );
+        let mut dequeued_after = spent.clone();
+        dequeued_after.push(st(10, Event::Queue(QueueEvent::Dequeued { job: "a".into() })));
+        assert_eq!(cause(dequeued_after), (Status::Stopped, Some(StopCause::Person), false), "the last stop speaks");
+        // A job that runs again is not stopped for anything.
+        let mut ran = held.clone();
+        ran.push(st(9, dispatched("a")));
+        assert_eq!(cause(ran), (Status::Running, None, false));
         let dequeued = vec![st(1, queued("a")), st(2, Event::Queue(QueueEvent::Dequeued { job: "a".into() }))];
         assert_eq!(cause(dequeued), (Status::Stopped, Some(StopCause::Person), false));
         let again = Event::Dispatch(DispatchEvent::Unheld {

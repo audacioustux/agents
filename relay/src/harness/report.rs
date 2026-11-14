@@ -52,12 +52,44 @@ pub struct Said {
     pub api_status: Option<u64>,
 }
 
+/// An answer's report, split where its final section starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Final<'a> {
+    /// What the answer says above the final section.
+    pub summary: &'a str,
+    /// The final section, to the end of the answer.
+    pub section: &'a str,
+}
+
+/// What the report in `answer` is, for the `session.final_marker` setting `marker`: the one reading the run's
+/// verdict, the end rule, a review's verdict and the builder's result a review is handed all use. With a
+/// marker, the final section runs from the last line that begins with it (else its last appearance) to the
+/// end, the summary above it; with none, a nonempty answer is all report. `None`: the answer has no report.
+pub fn final_section<'a>(answer: &'a str, marker: &str) -> Option<Final<'a>> {
+    if marker.is_empty() {
+        return (!answer.trim().is_empty()).then_some(Final { summary: "", section: answer });
+    }
+    let mut start = 0;
+    let mut found = None;
+    for line in answer.split_inclusive('\n') {
+        let indent = line.len() - line.trim_start().len();
+        if line.trim_start().starts_with(marker) {
+            found = Some(start + indent);
+        }
+        start += line.len();
+    }
+    let at = found.or_else(|| answer.rfind(marker))?;
+    let (summary, section) = answer.split_at(at);
+    Some(Final { summary, section })
+}
+
 impl Report {
     /// Keeps the report, with its own status: the latest result carrying `marker`, else the latest
     /// one that is not a wake-up (a wake-up's "ok" must not replace it), else the latest. With no
     /// results, the report stays as its reader filled it.
     pub fn choose(&mut self, marker: &str) {
-        let marked = self.results.iter().rev().find(|s| !marker.is_empty() && s.text.contains(marker));
+        // With no marker every answer is a report: then the latest that is not a wake-up, as below.
+        let marked = self.results.iter().rev().find(|s| !marker.is_empty() && final_section(&s.text, marker).is_some());
         // With no finished report, an error that ended the run (a limit, a lapsed sign-in) is what
         // it is judged by, never an earlier "waiting" that it cut short.
         let failed_last = || self.results.last().filter(|s| !marker.is_empty() && s.is_error);
@@ -104,8 +136,8 @@ static AUTH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(failed to authenticate|oauth (session|token) (has )?expired|refresh token expired|not logged in|please run /login|re-?login|invalid api key|unauthorized|\b401\b)").expect("regex")
 });
 
-/// `final_marker` empty means any answer counts as the report. A read-only job
-/// has no commits left to finish, so any non-empty answer is its result.
+/// What counts as the report is [`final_section`]'s: with `final_marker` empty, any nonempty answer. A
+/// read-only job has no commits left to finish, so any non-empty answer is its result.
 pub fn verdict(r: &Report, end: Ending, final_marker: &str, readonly: bool, now_s: i64) -> Verdict {
     if end.over_budget || r.budget_hit {
         return Verdict::Budget;
@@ -113,7 +145,7 @@ pub fn verdict(r: &Report, end: Ending, final_marker: &str, readonly: bool, now_
     // A finished report stands however the process ended after it: a background child kept
     // alive past the silence or time limit, or an exit error after the result, loses nothing.
     let answered = readonly && !r.answer.trim().is_empty();
-    let reported = final_marker.is_empty() || r.answer.contains(final_marker) || answered;
+    let reported = final_section(&r.answer, final_marker).is_some() || answered;
     if r.ended && !r.is_error && reported {
         return Verdict::Done;
     }
@@ -262,6 +294,17 @@ fn month_number(m: &str) -> Option<i8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One reading of what the report is, for either marker setting: a marked answer splits at its last
+    /// marker line; with no marker any nonempty answer is all report; an answer without one has none.
+    #[test]
+    fn the_report_is_read_one_way_for_either_marker_setting() {
+        let marked = final_section("did it\nFINAL\nnotes: a FINAL word\nstatus: done", "FINAL").unwrap();
+        assert_eq!((marked.summary, marked.section), ("did it\n", "FINAL\nnotes: a FINAL word\nstatus: done"));
+        assert_eq!(final_section("did it", "FINAL"), None);
+        assert_eq!(final_section("did it", ""), Some(Final { summary: "", section: "did it" }));
+        assert_eq!(final_section("  \n", ""), None, "an empty answer is no report");
+    }
 
     // 2026-11-02T15:00:00Z
     const NOW: i64 = 1_793_631_600;

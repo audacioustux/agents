@@ -5,6 +5,8 @@ pub mod checkpoint;
 pub mod decide;
 pub mod devshell;
 pub mod dispatch;
+pub mod graph;
+pub mod hint;
 pub mod land;
 pub mod probe;
 pub mod profiles;

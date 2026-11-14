@@ -411,10 +411,13 @@ fn resume_due(
     if let Some(ceiling) = limits.job_ceiling_usd.filter(|c| j.cost_usd + j.budget_usd > *c) {
         let left = ceiling - j.cost_usd;
         if left <= 0.0 {
+            let resume = crate::systems::hint::Cmd::new(&j.name, crate::systems::hint::Step::Resume);
+            let then = crate::systems::hint::hint(world, &[vec![resume]])
+                .map_or_else(String::new, |h| format!(", then `{h}`"));
             let why = format!(
                 "held by the disk floor, but another run would pass limits.job_ceiling_usd (${ceiling:.2}, ${:.2} spent): \
-                 raise it, then `relay queue resume {}`",
-                j.cost_usd, j.name
+                 raise it{then}",
+                j.cost_usd
             );
             return Some(Due::Release { job: j.name.clone(), why });
         }

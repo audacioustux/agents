@@ -9,6 +9,7 @@ use clap::Subcommand;
 
 use crate::bus::LandEvent;
 use crate::ctx::Ctx;
+use crate::systems::hint;
 
 /// The capability to write land's port; only this module can make one.
 #[derive(Debug)]
@@ -100,8 +101,30 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Gc { .. } => unreachable!("handled above"),
         Cmd::Clean { name } => {
             let Some(j) = world.jobs().get(&name) else { fail!(NotFound, "no job named {name}") };
-            if j.status.is_live() {
-                fail!(Conflict, "{name} is {}; stop it first", j.status.as_str());
+            let clean = hint::Cmd::new(&name, hint::Step::Clean);
+            if let Err(refused) = hint::accepts(&world, &clean) {
+                // What waits on it, through any edge of the dependency graph, would lose what it waits on: each
+                // named with what lets it go on without it, as its state accepts.
+                let waiters = world.waiters(&name);
+                if waiters.is_empty() {
+                    return Err(refused.into());
+                }
+                let how: Vec<String> = waiters
+                    .iter()
+                    .filter_map(|w| world.jobs().get(w))
+                    .filter_map(|w| hint::release_from(&world, w, &name).map(|h| format!("{}: {h}", w.name)))
+                    .collect();
+                let how = if how.is_empty() {
+                    String::new()
+                } else {
+                    format!("; or let them go on without it ({})", how.join("; "))
+                };
+                fail!(
+                    Conflict,
+                    "{} wait on {name} (relay view status says how): cleaning it would release them onto work no \
+                     review accepted, or block them for good; clean {name} once they have started{how}",
+                    waiters.join(", ")
+                );
             }
             if let Some(dir) = j.workdir.as_ref().map(crate::ctx::SessionRepo::path).filter(|d| d.exists()) {
                 // Only ever a directory relay made.

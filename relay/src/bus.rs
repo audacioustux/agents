@@ -108,6 +108,16 @@ pub enum QueueEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<String>,
     },
+    /// The review chain of the build job `job` stopped short of an accept: its reviewer `review`
+    /// rejected it (or judged a head it has left) and relay could not resume the one whose turn it is,
+    /// for `why` (`hooks.max_decisions`, the job's ceiling, a banned model). Nothing moves the chain
+    /// on its own until a person resumes the builder or the reviewer, so a job queued `--after` it
+    /// is blocked rather than left waiting.
+    ReviewHalted {
+        job: String,
+        review: String,
+        why: String,
+    },
     /// The brief the chained review `job` is judged by from its next re-review on.
     ReviewBriefed {
         job: String,
@@ -304,6 +314,10 @@ pub enum SessionEvent {
         cost_usd: f64,
         turns: u32,
         reason: Option<String>,
+        /// For a build job: its branch's tip in its clone as the run ended, the commit a review's accept must
+        /// name for what waits on the review to start.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head: Option<String>,
     },
     /// The job's clone was measured while it ran: `bytes` allocated.
     Disk {
@@ -849,6 +863,12 @@ pub trait Owned: Serialize + DeserializeOwned {
     /// The capability to write this port, constructible only by its system.
     type Source: Source;
     fn wrap(self) -> Event;
+
+    /// It adds an edge to the dependency graph or revives a job, so only a [`crate::systems::graph::Change`]
+    /// records it, under the jobs lock and checked against the world as it is then.
+    fn changes_graph(&self) -> bool {
+        false
+    }
 }
 
 /// A port's capability names the file it writes, relative to the bus.
@@ -858,18 +878,32 @@ pub trait Source {
 
 macro_rules! owned {
     ($ty:ty, $system:literal, $variant:ident, $source:ty) => {
+        owned!($ty, $system, $variant, $source, |_e: &$ty| false);
+    };
+    ($ty:ty, $system:literal, $variant:ident, $source:ty, $changes:expr) => {
         impl Owned for $ty {
             const SYSTEM: &'static str = $system;
             type Source = $source;
             fn wrap(self) -> Event {
                 Event::$variant(self)
             }
+            fn changes_graph(&self) -> bool {
+                $changes(self)
+            }
         }
     };
 }
-owned!(QueueEvent, "queue", Queue, crate::systems::queue::Source);
+// A job queued or resumed, and a review replacing a chain, add edges or revive a job; so does a run's end,
+// which can put the job back in the queue or leave a review waiting on its builder.
+owned!(QueueEvent, "queue", Queue, crate::systems::queue::Source, |e: &QueueEvent| matches!(
+    e,
+    QueueEvent::Queued { .. } | QueueEvent::Resumed { .. } | QueueEvent::Unchained { .. }
+));
 owned!(DispatchEvent, "dispatch", Dispatch, crate::systems::dispatch::Source);
-owned!(SessionEvent, "session", Session, crate::systems::session::Source);
+owned!(SessionEvent, "session", Session, crate::systems::session::Source, |e: &SessionEvent| matches!(
+    e,
+    SessionEvent::Ended { .. }
+));
 owned!(QuotaEvent, "quota", Quota, crate::systems::quota::Source);
 owned!(LandEvent, "land", Land, crate::systems::land::Source);
 owned!(DecideEvent, "decide", Decide, crate::systems::decide::Source);
@@ -993,7 +1027,22 @@ impl<E: Owned> Port<E> {
         Self { file: bus.join(source.file()), _event: PhantomData }
     }
 
+    /// Records `event`, unless it changes the dependency graph: that only a
+    /// [`crate::systems::graph::Change`] records ([`Port::record`]), under the jobs lock.
     pub fn emit(&self, event: E) -> Result<()> {
+        anyhow::ensure!(
+            !event.changes_graph(),
+            "a change to the dependency graph is recorded only by systems::graph::Change, under the jobs lock"
+        );
+        self.write(event)
+    }
+
+    /// Records `event`, for the [`crate::systems::graph::Change`] that checked it under the jobs lock.
+    pub fn record(&self, event: E, _by: &crate::systems::graph::Recorded) -> Result<()> {
+        self.write(event)
+    }
+
+    fn write(&self, event: E) -> Result<()> {
         let mut line = serde_json::to_vec(&Line { t: now_micros(), event })?;
         line.push(b'\n');
         let mut f = OpenOptions::new()

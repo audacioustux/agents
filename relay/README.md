@@ -75,7 +75,31 @@ the dispatcher awake. So does every job queued behind it, however deep the chain
 than wait forever. Queue the dependency again (or `queue resume` it), or
 `relay queue release NAME [--from a]`, which **starts the job now** (once a seat is free): it
 drops the waits and does not cancel anything. To withdraw the job instead, `relay queue dequeue NAME`.
-Only existing jobs can be named, so there are no cycles.
+Every command relay suggests for a job (in a refusal, a failure's reason or a wait that
+cannot end) is one that job's state accepts as printed, step by step: the suggestion
+and the command's own check are the same check. A suggestion reaches what it is for
+(a name it frees is free after it), takes `queue stop` for the request it is (the job
+runs until its runner has ended), and a release it suggests names exactly the
+`--after` entries it removes. A refused `queue add` writes nothing.
+Only existing jobs can be named. A dependency that is reviewed counts as done only
+once its review accepts ([below](#reviews)), so a review adds waits no `--after`
+names. relay computes **one dependency graph** from the event log, and everything
+reads it: whether a job may start, the cycle check, and `land clean`. A job's edges
+are its `--after` jobs; for one that is a build with a review chain, the chain's
+review too; for one that is a review, every review that replaced it and the one they
+end at, and that review's builder, through the review's whole life (an accept is of
+the builder's tip; while the review has not accepted it, the builder is requeued
+behind it). A job's edges count while it waits: queued, held by the disk
+floor, or a review done without an accept (its builder's next end revives it). Every
+transition that adds an edge or revives a job is refused if it would close a cycle,
+naming it (exit 4: `queuing rev would make it wait for itself: rev → test → rev (test
+waits for build, which rev reviews)`). Those transitions are `queue add` (a review
+replacing a chain included), `queue resume`, a decision's follow-up, a builder resumed
+by a reject or a reviewer resumed to judge again (the chain halts instead, saying
+why), and a run that ends back in the queue (a retry, rerun, requeue or hold, which
+then ends `failed` instead). Each is checked and recorded in one step under the jobs
+lock, on the event log as it is then, so no other command can change the graph between
+the check and the record; relay records such an event no other way.
 
 **Where a build job starts.** A build job starts from the repository's `HEAD`,
 unless it waits for build jobs (`--after`) or forks one (`--fork`): then its
@@ -85,7 +109,10 @@ dependencies on: a build after a review of a build starts from the first
 build's branch. With several such jobs, it starts from the tip that
 holds all the others; when their branches diverge, so no tip holds them all,
 the job fails at once and says so: land one into another, or queue it after
-one of them. Read-only jobs read your repository, as before.
+one of them. A base whose branch relay can no longer read (cleaned away, or its
+clone collected) fails it at once too, naming that job: it is never left out,
+which would start the job from `HEAD` without that work. Read-only jobs read your
+repository, as before.
 
 **Forks.** `queue add NAME --fork JOB` starts the new job as a fork of JOB's
 session (claude: `--resume ID --fork-session`): it begins with JOB's whole
@@ -135,7 +162,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue unreview JOB` | Detach the review chained to JOB, with no replacement: it no longer re-reviews or resumes JOB (exit 4 when none is chained) |
 | `relay queue add NAME ... --fork JOB` | Start as a fork of JOB's session, from its branch when it is a build job ([forks](#what-a-job-is)) |
 | `relay decide list [--wait [--timeout S]]` / `relay decide answer ID --action A ...` | Decisions waiting for the orchestrator / answer one ([hooks](#hooks)) |
-| `relay queue release NAME [--from A,...]` | Start a queued job now, without waiting for some or all of its `--after` jobs to finish (not a cancel: `dequeue` withdraws it). A job the [disk floor](#disk) holds is freed of those jobs too, and starts when there is room |
+| `relay queue release NAME [--from A,...]` | Start a queued job now, without waiting for some or all of its `--after` jobs to finish (not a cancel: `dequeue` withdraws it). A job the [disk floor](#disk) holds is freed of those jobs too, and starts when there is room; a job that ended without being done (failed, stopped) is freed of them for its next `queue resume`. A job named may be gone (cleaned away): releasing only takes the name away |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one (or a job the [disk floor](#disk) holds, which then stays stopped). A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends and its runner has exited (it may re-review or wake the dispatcher after the end), and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |
@@ -797,6 +824,57 @@ so an earlier commit's reject is history, not the state.
   "family"`: at `queue add` (exit 5) when every harness it may use would do, else when
   its session starts, which then fails at once. Otherwise the family is recorded and
   allowed.
+- **What waits on a review waits for its accept.** A job queued `--after REV`, where
+  REV is a review (`--review-of BUILD`), starts only once REV's latest verdict is an
+  accept of BUILD's branch, not when REV's run ends. While REV has rejected, BUILD
+  answers and the chain judges again, the dependent waits and says where the chain is
+  (`after rev (reject: test-failure; build running)`, then `re-review due`); the
+  re-review's accept releases it. **A job queued `--after BUILD` waits the same way
+  when BUILD has a live review chain**: accepted work is what a successor should build
+  on, and a build after BUILD starts from BUILD's branch, so it would otherwise start
+  from the commit the review sent back (`after build (in review: rev running)`). A
+  review of BUILD itself waits for BUILD alone. Where nothing will move the chain on, the
+  wait is **blocked** rather than endless: BUILD failed or was stopped (`waits for rev
+  (reject: test-failure; build failed)`); a resume the chain needs was refused for good
+  (`hooks.max_decisions`, the ceiling, a banned model: relay records `review-halted {job,
+  review, why}` and the board says `rev's chain halted: ...`); or `queue unreview BUILD`
+  detached REV (`waits for rev (review detached)`; a job after BUILD then has no chain
+  to wait for and starts). A blocked job does not start or keep the dispatcher awake,
+  `view result --wait` on it exits 4, and `queue release` starts it anyway, as for any
+  dependency. Resuming BUILD or its chained review by hand clears a halt; resuming a
+  review that was replaced or detached does not. When REV is replaced (`superseded by
+  rev2`, and rev2 perhaps by rev3), its dependents follow the replacements, whether or
+  not the replaced reviews ever ran, and wait for the last one's accept.
+- **An accept is of the tip it judged.** relay records a build job's tip as each run
+  ends (`ended {head}`), and only an accept of that commit releases what waits on the
+  chain. If a person resumes BUILD after the accept, its dependents wait while it works
+  (`after rev (accept; build running)`); when it ends on a new tip, relay resumes the
+  chained review on that tip, as after a reject (`accept of an earlier tip; re-review
+  due`), and the new accept releases them. A run that ends on the accepted commit
+  leaves the accept standing. Either end, BUILD's or the review's when it was still
+  ending (so it could not be resumed yet), asks for the re-review by one test: BUILD
+  is done, and the verdict is a reject BUILD ran after (with a commit or without), a
+  stale verdict, or an accept of a tip other than the one BUILD ended at.
+- **Cleaning keeps what waits.** `land clean NAME` refuses (exit 4) while any job
+  waits on NAME in the dependency graph, directly or through others, and names them.
+  That covers a successor of BUILD while BUILD answers a reject (its board line reads
+  only `after build`), jobs queued after a review that was replaced since, and a
+  review whose builder is requeued behind it. Cleaning would take the verdicts or
+  the branch they wait on with it, and a forgotten job that was done counts as waited
+  for, so they would start on work no review accepted. Let them start, `queue
+  release` them, or `queue unreview` the chain first.
+- **The reviewer reads the builder's last result.** Before every start and resume of
+  the review, relay writes BUILD's last result (what its latest run ended with: its
+  FINAL section, always whole, and as much of the summary just above it as fits in
+  64 KiB) to `builder-result.md` in the
+  review's inbox, which the session reads but cannot write (BUILD's own record lives in
+  relay's state, which no session sees), and the preamble names the file. A re-review
+  after a resume reads the builder's answer to the reject. When that run ended without
+  a FINAL section, the file says so above its last message; when it left no message at
+  all, the file says there is no FINAL to read and to judge by the commits and diff.
+  What counts as the report is read one way everywhere (the run's verdict, the end rule,
+  the review's verdict, this file): with `session.final_marker = ""`, any nonempty
+  answer is the report.
 - **Landing.** `land fetch` prints `note: no review has accepted <tip>` when a review
   was asked of the job and none accepted its tip. It never blocks: landing stays
   your step.
@@ -970,7 +1048,8 @@ line each (`gc: removed <path> (<size>)`, `gc: would remove ...` in a dry run),
 a totals line, and a `collected` event per clone removed or emptied:
 
 - **Build outputs** of a job that is not live (not running, checking or queued)
-  and that no queued job waits for (`--after`) or forks, once it has ended
+  and that no waiting job needs (an edge of the [dependency graph](#what-a-job-is)
+  ends at it, through a review and its builder too) or a queued job forks, once it has ended
   `outputs_after_hours` ago. The source and the branch stay, so `queue resume`
   works and only rebuilds.
 - **Scratch directories** (a job's `/tmp`, `<data dir>/<project>/scratch/<job>`) on the

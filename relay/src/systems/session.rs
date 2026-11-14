@@ -29,6 +29,7 @@ use crate::supervised::Supervised;
 use crate::systems::checkpoint::{self, Next};
 use crate::systems::decide::{self, Request, Reviewing};
 use crate::systems::dispatch::{self, Room};
+use crate::systems::graph::Change;
 use crate::world::{Job, World};
 
 mod bar;
@@ -108,7 +109,7 @@ pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
     let mut spend = (0.0, 0);
     let (outcome, reason) =
         attempt(ctx, &job, &mut spend).unwrap_or_else(|e| (Outcome::Failed, Some(format!("{e:#}"))));
-    port.emit(SessionEvent::Ended { job: name.clone(), outcome, cost_usd: spend.0, turns: spend.1, reason })?;
+    let outcome = record_end(ctx, &port, &name, outcome, reason, spend)?;
     // A reviewed job that answered a reject is judged again, on its new tip.
     if outcome == Outcome::Done {
         let _ = review::rereview(ctx, &name);
@@ -116,6 +117,38 @@ pub fn run(ctx: &Ctx, Cmd::Run { name }: Cmd) -> Result<()> {
         let _ = review::rereview_if_overtaken(ctx, &name);
     }
     ctx.wake_dispatch()
+}
+
+/// Records how the run ended, as one [`Change`] under the jobs lock: on the world as it is then, the tip the
+/// run leaves (what an accept must name), and a run back in the queue (a retry, a rerun, a follow-up, a
+/// requeue under another profile, or held by the floor), which waits again, ends `failed` instead where that
+/// would make it wait for itself. Returns the outcome recorded. The lock is released on return, before the
+/// re-review that may follow takes it.
+fn record_end(
+    ctx: &Ctx,
+    port: &crate::bus::Port<SessionEvent>,
+    name: &str,
+    outcome: Outcome,
+    reason: Option<String>,
+    (cost_usd, turns): (f64, u32),
+) -> Result<Outcome> {
+    let mut change = Change::take(ctx)?;
+    let head = change.world().jobs().get(name).and_then(review::tip);
+    let ended = |outcome, reason| SessionEvent::Ended {
+        job: name.to_owned(),
+        outcome,
+        cost_usd,
+        turns,
+        reason,
+        head: head.clone(),
+    };
+    let revived = matches!(outcome, Outcome::Retry | Outcome::Rerun | Outcome::Held);
+    let (outcome, reason) = match change.cycle(&[ended(outcome, reason.clone())], name).filter(|_| revived) {
+        Some(c) => (Outcome::Failed, Some(format!("requeuing it would make it wait for itself: {c}"))),
+        None => (outcome, reason),
+    };
+    change.record(port, vec![ended(outcome, reason)])?;
+    Ok(outcome)
 }
 
 type Ended = (Outcome, Option<String>);
@@ -361,8 +394,23 @@ fn seat<'a>(ctx: &Ctx, job: &Job, found: &'a [Home]) -> Step<Seat<'a>> {
 fn workspace(ctx: &Ctx, job: &Job) -> Result<Step<Workspace>> {
     let (mut clone_dir, mut base) = (job.workdir.clone(), job.base.clone());
     if !job.readonly() && clone_dir.is_none() {
-        let bases = bases(&ctx.world()?, job);
-        let (dir, branch, made) = match clone(ctx, &job.name, &bases, job.session_id.is_some()) {
+        let world = ctx.world()?;
+        let bases = bases(&world, job);
+        // What a person can do about a base that is gone, as the job will be once refused: failed.
+        let mut failed = world.clone();
+        if let Some(j) = failed.jobs_mut().get_mut(&job.name) {
+            j.status = crate::world::Status::Failed;
+        }
+        // Released from its own entries that lead to the bases that are gone (never from the bases by name:
+        // it may wait for them only through a review), it starts without them.
+        let plan = bases.release().map(|from| {
+            vec![
+                crate::systems::hint::Cmd::new(&job.name, crate::systems::hint::Step::Release(from)),
+                crate::systems::hint::Cmd::new(&job.name, crate::systems::hint::Step::Resume),
+            ]
+        });
+        let recover = crate::systems::hint::hint(&failed, plan.as_slice());
+        let (dir, branch, made) = match clone(ctx, &job.name, &bases, job.session_id.is_some(), recover.as_deref()) {
             Ok(made) => made,
             Err(e) => return Ok(ControlFlow::Break((Outcome::Failed, Some(format!("{e:#}"))))),
         };
@@ -408,7 +456,11 @@ fn launch(
         Ok(r) => r,
         Err(why) => return Ok(ControlFlow::Break((Outcome::Failed, Some(why)))),
     };
-    let preamble = reviewing.as_ref().map(review::preamble);
+    // It reads its builder's last result from its inbox, as of this start: a re-review gets the answer to its reject.
+    let preamble = match &reviewing {
+        Some(r) => Some(review::preamble(r, &review::hand_over(ctx, &work.inbox, r)?)),
+        None => None,
+    };
     // A fork has its parent's context but not its own task: it is told its brief.
     // A review whose brief was replaced is told the new one when it picks its session up again.
     let message = match (&job.rebrief, resumed.is_some()) {
@@ -1296,28 +1348,54 @@ fn drive(
     Ok((reader.report().clone(), ending, disk))
 }
 
-/// The build jobs whose branches a build job starts from: those it waits
-/// for, through any read-only job between (build, review, build), and the one
-/// it forks, each with its clone and branch.
-pub fn bases(world: &World, job: &Job) -> Vec<(String, PathBuf, String)> {
-    let mut todo: Vec<&String> = job.after.iter().collect();
-    todo.extend(job.fork.as_ref().map(|f| &f.job));
-    let mut seen: Vec<&String> = Vec::new();
-    let mut out: Vec<(String, PathBuf, String)> = Vec::new();
-    while let Some(n) = todo.pop() {
-        if seen.contains(&n) {
-            continue;
-        }
-        seen.push(n);
-        let Some(j) = world.jobs().get(n) else { continue };
-        if j.readonly() {
-            todo.extend(&j.after);
-        } else if let (Some(dir), Some(branch)) = (&j.workdir, &j.branch) {
-            out.push((n.clone(), dir.path().to_path_buf(), branch.clone()));
+/// The build jobs whose branches a build job starts from, as the dependency graph names them
+/// ([`crate::world::Graph::bases`]: those it waits for, through any read-only job between, and the one it
+/// forks), each with its clone and branch (`found`, by name); and those whose branch relay can no longer read
+/// (`gone`: cleaned away, or its clone collected). A base that is gone is never left out silently, which would
+/// start the job from the repository's `HEAD`.
+pub fn bases(world: &World, job: &Job) -> Bases {
+    let mut out = Bases::default();
+    for base in world.graph().bases(job) {
+        let read = world.jobs().get(&base.job).and_then(|j| {
+            Some((j.workdir.as_ref().filter(|d| d.path().exists())?.path().to_path_buf(), j.branch.clone()?))
+        });
+        match read {
+            Some((dir, branch)) if !out.found.iter().any(|f| f.0 == base.job) => {
+                out.found.push((base.job, dir, branch));
+            }
+            Some(_) => {}
+            None => {
+                if !out.gone.contains(&base.job) {
+                    out.gone.push(base.job);
+                }
+                if !out.gone_by.contains(&base.after) {
+                    out.gone_by.push(base.after);
+                }
+            }
         }
     }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.found.sort_by(|a, b| a.0.cmp(&b.0));
+    out.gone.sort();
     out
+}
+
+/// What [`bases`] found.
+#[derive(Debug, Default, PartialEq)]
+pub struct Bases {
+    pub found: Vec<(String, PathBuf, String)>,
+    pub gone: Vec<String>,
+    /// How the job comes to each base that is gone: its own `--after` entry that leads there (a review of the
+    /// base, as often as the base itself), or none for the job it forks.
+    gone_by: Vec<Option<String>>,
+}
+
+impl Bases {
+    /// The job's own `--after` entries to release it from so that it starts without the bases that are gone:
+    /// every entry that leads to one, which is what `queue release --from` takes. `None` when no release does
+    /// it: a base that is gone is the job it forks.
+    pub fn release(&self) -> Option<Vec<String>> {
+        self.gone_by.iter().cloned().collect()
+    }
 }
 
 /// Of the base branches' tips, the one every other is an ancestor of, or why
@@ -1349,8 +1427,9 @@ pub fn pick_base(
 fn clone(
     ctx: &Ctx,
     name: &str,
-    bases: &[(String, PathBuf, String)],
+    bases: &Bases,
     ran: bool,
+    recover: Option<&str>,
 ) -> Result<(SessionRepo, String, Option<String>)> {
     // Relay's own until the session starts, so plain git; from then on the session's (`SessionRepo`).
     let dir = ctx.clones.join(name);
@@ -1367,8 +1446,20 @@ fn clone(
     let _ = crate::hostdir::remove_tree(&dir);
     let made = (|| -> Result<Option<String>> {
         ok(Command::new("git").args(["clone", "--quiet", "--shared"]).arg(&ctx.cfg.repo).arg(&dir), "git clone")?;
+        let own = [format!("refs/relay/rescue/{name}"), format!("refs/heads/{branch}")]
+            .into_iter()
+            .find(|r| ran && checkpoint_rev(&ctx.cfg.repo, r).is_some());
+        // With no work of its own to go on from, it starts from its bases: all of them, or not at all.
+        if own.is_none() && !bases.gone.is_empty() {
+            let recover = recover.map_or_else(String::new, |h| format!("; to start it without that work: {h}"));
+            bail!(
+                "not started: the branch of {} it starts from is gone (cleaned away, or its clone collected by gc), \
+                 and starting from the repository's HEAD would leave that work out{recover}",
+                bases.gone.join(", ")
+            );
+        }
         let mut tips = Vec::new();
-        for (job, from, b) in bases {
+        for (job, from, b) in &bases.found {
             let what = format!("fetching {job}'s branch {b}");
             ok(Ctx::git(&dir).arg("fetch").arg("--quiet").arg(from).arg(format!("{b}:refs/relay/base/{job}")), &what)?;
             let tip = checkpoint_rev(&dir, &format!("refs/relay/base/{job}")).with_context(|| what.clone())?;
@@ -1377,9 +1468,6 @@ fn clone(
         let ancestor = |a: &str, b: &str| {
             Ctx::git(&dir).args(["merge-base", "--is-ancestor", a, b]).status().is_ok_and(|s| s.success())
         };
-        let own = [format!("refs/relay/rescue/{name}"), format!("refs/heads/{branch}")]
-            .into_iter()
-            .find(|r| ran && checkpoint_rev(&ctx.cfg.repo, r).is_some());
         let start = match own {
             Some(r) => {
                 let what = format!("fetching {name}'s own work from {r}");
@@ -1448,10 +1536,14 @@ mod base_tests {
 
     #[test]
     fn a_build_finds_its_bases_through_a_review_between() {
+        let clones = crate::config::tempdir::Dir::new();
+        for n in ["one", "other", "two"] {
+            std::fs::create_dir_all(clones.path().join(n)).unwrap();
+        }
         let build = |n: &str, after: &[&str]| Job {
             name: n.into(),
             after: after.iter().map(|a| (*a).to_owned()).collect(),
-            workdir: Some(SessionRepo::new(format!("/c/{n}"))),
+            workdir: Some(SessionRepo::new(clones.path().join(n))),
             branch: Some(format!("job/{n}")),
             ..Job::default()
         };
@@ -1465,10 +1557,53 @@ mod base_tests {
         for j in [build("one", &[]), review("look", &["one"]), review("loop", &["loop"]), build("other", &[])] {
             w.jobs_mut().insert(j.name.clone(), j);
         }
-        let names = |j: &Job| bases(&w, j).into_iter().map(|b| b.0).collect::<Vec<_>>();
+        let names = |j: &Job| bases(&w, j).found.into_iter().map(|b| b.0).collect::<Vec<_>>();
         assert_eq!(names(&build("two", &["look"])), ["one"], "build, review, build");
         assert_eq!(names(&build("two", &["look", "other", "loop"])), ["one", "other"]);
         assert!(names(&build("two", &["loop"])).is_empty(), "a cycle ends");
+
+        // Copilot on PR #69 (world.rs:813): a base whose clone gc collected, or that is gone, is named, never
+        // left out (which would start the job from HEAD without its work).
+        let collected = Job { workdir: None, collected: Some("clone".into()), ..build("collected", &[]) };
+        w.jobs_mut().insert(collected.name.clone(), collected);
+        let b = bases(&w, &build("two", &["look", "collected", "ghost"]));
+        assert_eq!(b.gone, ["collected", "ghost"]);
+        assert_eq!(b.found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["one"], "what is there is still found");
+    }
+
+    /// Copilot on PR #69 (session.rs:1369): a job after a replaced review starts from what the review that
+    /// releases it waited for. rev1 (`--after build,other`) was replaced by rev2 (`--after build`), whose accept
+    /// releases next: next starts from build, and other, which has no clone yet, is no base of it.
+    #[test]
+    fn a_build_after_a_replaced_review_starts_from_what_its_replacement_waited_for() {
+        let clones = crate::config::tempdir::Dir::new();
+        std::fs::create_dir_all(clones.path().join("build")).unwrap();
+        let job = |n: &str, after: &[&str]| Job {
+            name: n.into(),
+            after: after.iter().map(|a| (*a).to_owned()).collect(),
+            ..Job::default()
+        };
+        let review = |n: &str, after: &[&str]| Job {
+            kind: crate::bus::Kind::Review,
+            acceptance: crate::bus::Acceptance::ReviewOf("build".into()),
+            ..job(n, after)
+        };
+        let build = Job {
+            workdir: Some(SessionRepo::new(clones.path().join("build"))),
+            branch: Some("job/build".into()),
+            ..job("build", &[])
+        };
+        let rev1 = Job {
+            unchained: Some(crate::world::Unchained { by: Some("rev2".into()) }),
+            ..review("rev1", &["build", "other"])
+        };
+        let mut w = World::default();
+        for j in [build, job("other", &[]), rev1, review("rev2", &["build"])] {
+            w.jobs_mut().insert(j.name.clone(), j);
+        }
+        let b = bases(&w, &job("next", &["rev1"]));
+        assert_eq!(b.gone, [""; 0], "other is no base: rev2, which releases next, never waited for it");
+        assert_eq!(b.found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["build"]);
     }
 
     #[test]
@@ -1609,5 +1744,86 @@ mod env_tests {
                 .map(|(_, v)| v.to_string_lossy().into_owned());
             assert_eq!(got.as_deref(), Some(want.as_str()), "the {who}'s environment");
         }
+    }
+}
+
+#[cfg(test)]
+mod change_tests {
+    use super::*;
+    use crate::bus::DispatchEvent;
+    use crate::config::Config;
+
+    fn put(ctx: &Ctx, file: &str, t: u64, event: serde_json::Value) {
+        use std::io::Write as _;
+        let mut v = event;
+        v["t"] = t.into();
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(ctx.bus.join(file)).unwrap();
+        writeln!(f, "{v}").unwrap();
+    }
+
+    /// Copilot on PR #69 (session.rs:132): b runs `--after a`; while it runs, another process queues ra, a review
+    /// of a `--after b` (b is not waiting, so that closes no cycle then). b's end puts it back in the queue,
+    /// where it would wait on a's review, ra, which waits on b. The end is checked on the world as it is when
+    /// it is recorded, under the jobs lock, so it sees ra and ends b failed, naming the cycle.
+    #[test]
+    fn a_run_back_in_the_queue_is_checked_against_the_graph_as_it_is_when_recorded() {
+        let dir = crate::config::tempdir::Dir::new();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let cfg = Config::parse("name = \"demo\"\n", root).unwrap();
+        let ctx = Ctx::unclaimed(cfg, root.join("relay.toml"), root.join("state"), root.join("data"));
+        std::fs::create_dir_all(ctx.bus.join("session")).unwrap();
+        std::fs::create_dir_all(&ctx.jobs).unwrap();
+        let queued = |job: &str, after: &[&str], review: Option<&str>| {
+            let mut v = serde_json::json!({"type": "queued", "job": job, "task": "x", "readonly": review.is_some(),
+                "effort": null, "budget_usd": 1.0, "pinned": null, "after": after});
+            if let Some(of) = review {
+                v["acceptance"] = serde_json::json!({ "review-of": of });
+            }
+            v
+        };
+        let dispatched = |job: &str| {
+            serde_json::to_value(DispatchEvent::Dispatched {
+                job: job.into(),
+                account: "c:w".into(),
+                model: None,
+                provider: String::new(),
+                runner_pid: 7,
+                runner_started: 1,
+            })
+            .unwrap()
+        };
+        let ended = |outcome| {
+            let e = SessionEvent::Ended { job: "a".into(), outcome, cost_usd: 0.0, turns: 1, reason: None, head: None };
+            serde_json::to_value(e).unwrap()
+        };
+        put(&ctx, "queue.ndjson", 1, queued("a", &[], None));
+        put(&ctx, "dispatch.ndjson", 2, dispatched("a"));
+        put(&ctx, "session/a.1.1.ndjson", 3, ended(Outcome::Done));
+        put(&ctx, "queue.ndjson", 4, queued("b", &["a"], None));
+        put(&ctx, "dispatch.ndjson", 5, dispatched("b"));
+        let b = ctx.world().unwrap().jobs()["b"].clone();
+        // Another process, while b runs.
+        put(&ctx, "queue.ndjson", 6, queued("ra", &["a", "b"], Some("a")));
+
+        let recorded = record_end(&ctx, &port(&ctx, &b), "b", Outcome::Retry, None, (0.0, 1)).unwrap();
+        assert_eq!(recorded, Outcome::Failed);
+        let w = ctx.world().unwrap();
+        let reason = w.jobs()["b"].reason.clone().unwrap_or_default();
+        assert!(
+            reason.contains("would make it wait for itself: b → ra → b (b waits for a, which ra reviews)"),
+            "{reason}"
+        );
+        assert_eq!(w.jobs()["b"].status, crate::world::Status::Failed);
+
+        let plain = port(&ctx, &b).emit(SessionEvent::Ended {
+            job: "b".into(),
+            outcome: Outcome::Done,
+            cost_usd: 0.0,
+            turns: 1,
+            reason: None,
+            head: None,
+        });
+        assert!(plain.is_err(), "a run's end is recorded only by a Change");
     }
 }

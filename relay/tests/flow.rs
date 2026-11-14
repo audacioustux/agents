@@ -1217,6 +1217,148 @@ fn a_job_whose_dependency_failed_is_blocked_until_released() {
     assert_eq!(out.status.code(), Some(4), "nothing left to release");
 }
 
+/// Runs every command of a hint relay printed (`relay a ..., then relay b ...`), each of which must be accepted.
+fn run_hint(env: &Env, printed: &str) {
+    for step in printed.split(", then ") {
+        let args: Vec<&str> = step.trim().trim_start_matches("relay ").split_whitespace().collect();
+        ok(&relay(env, &args), &format!("the printed hint `{step}`"));
+    }
+}
+
+/// The hint that follows `after` in `text`, to the end of its sentence.
+fn hint_after<'t>(text: &'t str, after: &str) -> &'t str {
+    let at = text.find(after).unwrap_or_else(|| panic!("no `{after}` in: {text}")) + after.len();
+    text[at..].split(['\n', ';']).next().unwrap_or_default().trim().trim_end_matches('.')
+}
+
+/// Copilot on PR #69 (graph.rs:103): next's failed base is cleaned away while next is dequeued; resumed,
+/// next waits for a job that is gone. Releasing it from that job takes the name away and lets it run.
+#[test]
+fn a_job_can_be_released_from_a_prerequisite_that_was_cleaned_away() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("release-gone", false);
+    claude_account(&env.home, "a", 10, false);
+    let fail = env.home.join(".claude.a/fail");
+    std::fs::write(&fail, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "base", "--text", "One.", "--readonly"]), "queue base");
+    ok(&relay(&env, &["queue", "add", "next", "--text", "Two.", "--readonly", "--after", "base"]), "queue next");
+    until(&env, "base", "failed");
+    std::fs::remove_file(&fail).unwrap();
+    ok(&relay(&env, &["queue", "dequeue", "next"]), "dequeue next");
+    ok(&relay(&env, &["land", "clean", "base"]), "nothing waits on base now");
+    ok(&relay(&env, &["queue", "resume", "next", "--message", "Again."]), "resume next");
+    assert!(board(&env).contains("waits for base (gone)"), "{}", board(&env));
+    ok(&relay(&env, &["queue", "release", "next", "--from", "base"]), "release next from the job that is gone");
+    assert_eq!(job(&env, "next")["after"], serde_json::json!([]));
+    assert_eq!(wait_for(&env, "next")["status"], "done");
+}
+
+/// Copilot on PR #69 (session.rs:1389): the hint printed with a refusal is a command the job's state accepts.
+/// next's base clone was collected, so next fails; the hint printed with it is run as printed, and works.
+#[test]
+fn the_hint_printed_when_a_base_is_gone_works_on_the_failed_job() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("hint-base", false);
+    configure(&env, "", "[gc]\nclones_after_days = 0\n");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    ok(&relay(&env, &["land", "gc"]), "gc");
+    let next = build(&env, "next", &["--after", "build"]);
+    assert_eq!(next["status"], "failed", "{next}");
+    let reason = next["reason"].as_str().unwrap_or_default().to_owned();
+    let printed = hint_after(&reason, "to start it without that work: ");
+    assert_eq!(
+        printed, "relay queue release next --from build, then relay queue resume next --message continue",
+        "{reason}"
+    );
+    run_hint(&env, printed);
+    assert_eq!(wait_for(&env, "next")["status"], "done", "{}", board(&env));
+}
+
+/// Copilot on PR #69: the hint `queue add` prints for a name in use frees it, by the job's state: a queued
+/// job is dequeued (it never started), not cleaned (which a live job refuses).
+#[test]
+fn the_hint_printed_for_a_name_in_use_frees_it() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("hint-name", false);
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "slow", "--text", "Take your time."]), "queue slow");
+    wait_status(&env, "slow", "running");
+    ok(&relay(&env, &["queue", "add", "x", "--text", "One.", "--after", "slow"]), "queue x");
+    let out = relay(&env, &["queue", "add", "x", "--text", "Two."]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    let said = stderr(&out);
+    let printed = hint_after(&said, "pick another name, or: ");
+    assert_eq!(printed, "relay queue dequeue x", "{said}");
+    run_hint(&env, printed);
+    ok(&relay(&env, &["queue", "add", "x", "--text", "Two."]), "the name is free");
+    std::fs::remove_file(&hold).unwrap();
+}
+
+/// Copilot on PR #69 (queue.rs:225): a refused `queue add` changes nothing on disk. x was dequeued before it
+/// ever started, so its name is free; reusing it for a review that would wait for itself is refused, and x's
+/// own brief is still there, not the rejected one a later `queue resume x` would run.
+#[test]
+fn a_refused_add_writes_nothing() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("add-refused", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "build", "--text", "[status-done] Make a change."]), "queue build");
+    wait_status(&env, "build", "running");
+    ok(&relay(&env, &["queue", "add", "test", "--after", "build", "--text", "Test it."]), "queue test");
+    ok(&relay(&env, &["queue", "add", "x", "--text", "The original brief."]), "queue x");
+    ok(&relay(&env, &["queue", "dequeue", "x"]), "dequeue x before it starts");
+    let prompt = env.root.join("state/relay/flow/jobs/x.prompt.md");
+    assert_eq!(std::fs::read_to_string(&prompt).unwrap(), "The original brief.");
+    let out = relay(&env, &["queue", "add", "x", "--review-of", "build", "--after", "test", "--text", "Rejected."]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    assert!(stderr(&out).contains("would make it wait for itself"), "{}", stderr(&out));
+    assert_eq!(std::fs::read_to_string(&prompt).unwrap(), "The original brief.", "nothing was written");
+    assert_eq!(job(&env, "x")["task"], "The original brief.");
+    std::fs::remove_file(&hold).unwrap();
+}
+
+/// Copilot on PR #69 (hint.rs:65): a review's name is its build's review for as long as its record is there.
+/// rev was dequeued before it ran and is still build's review; next, queued `--after rev`, waits for its
+/// accept. `queue add rev` as any other job would let next start on work no review accepted: only another
+/// review of build takes the name.
+#[test]
+fn a_review_that_never_ran_gives_its_name_only_to_another_review_of_its_build() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-name", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "build", "--text", "[status-done] Make a change."]), "queue build");
+    wait_status(&env, "build", "running");
+    ok(&relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "Review."]), "queue rev");
+    ok(&relay(&env, &["queue", "add", "next", "--after", "rev", "--text", "Build on it."]), "queue next");
+    ok(&relay(&env, &["queue", "dequeue", "rev"]), "dequeue rev before it starts");
+    let out = relay(&env, &["queue", "add", "rev", "--text", "Something else."]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    assert!(stderr(&out).contains("a review of build"), "{}", stderr(&out));
+    assert_eq!(job(&env, "rev")["reason"], "dequeued", "nothing took its place: {}", board(&env));
+    ok(&relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "Review again."]), "a review of build");
+    assert_eq!(job(&env, "rev")["status"], "queued", "{}", board(&env));
+    std::fs::remove_file(&hold).unwrap();
+}
+
 #[test]
 fn after_names_only_jobs_that_exist() {
     let env = setup("unknown", false);
@@ -3591,6 +3733,153 @@ fn a_builder_that_answers_a_reject_is_judged_again_on_its_new_tip() {
     assert_eq!(rev_parse(&env.repo, "refs/relay/review/rev"), "");
 }
 
+/// `TheGrid`, 2026-11-13: beam/U6 was queued `--after` a review that rejected, and started on the branch the
+/// review had just sent back. A job after a review starts only once the chain accepts, and so does a job
+/// after the reviewed build: both on the branch the builder answered with.
+#[test]
+fn a_job_after_a_review_or_its_build_waits_for_the_accept_and_starts_on_the_answer() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-gate", false);
+    configure(&env, "job_ceiling_usd = 100.0\nmax_running = 4\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &["--model", "claude=claude-opus-5-5"]);
+    let tip = rev_parse(&workdir(&env, "build"), "HEAD");
+    // The review rejects and leaves the account on hold: what starts next stays running until the hold goes.
+    let text = "[verdict-reject] [hold-after] Review the change.";
+    let out = relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", text]);
+    ok(&out, "queue the review");
+    for (name, after) in [("next", "rev"), ("follow", "build")] {
+        let out = relay(&env, &["queue", "add", name, "--after", after, "--text", "[status-done] Build on it."]);
+        ok(&out, "queue the dependent");
+    }
+    wait_status(&env, "build", "running");
+    // A second account, on hold too, so a seat is free for whatever may start now.
+    claude_account(&env.home, "b", 10, false);
+    let holds = [env.home.join(".claude.a/hold"), env.home.join(".claude.b/hold")];
+    std::fs::write(&holds[1], "").unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let shown = board(&env);
+    for name in ["next", "follow"] {
+        assert_eq!(job(&env, name)["status"], "queued", "{name} must not start on the rejected branch: {shown}");
+    }
+    assert!(shown.contains("after rev (reject: test-failure; build running)"), "{shown}");
+    assert!(shown.contains("after build"), "{shown}");
+    for h in &holds {
+        std::fs::remove_file(h).unwrap();
+    }
+
+    for name in ["next", "follow"] {
+        assert_eq!(wait_for(&env, name)["status"], "done", "{}", board(&env));
+    }
+    let b = job(&env, "build");
+    let new_tip = rev_parse(&workdir(&env, "build"), "HEAD");
+    assert_ne!(new_tip, tip, "the reject sent the builder back: {b}");
+    let logged = events(&env);
+    let at = |pred: &dyn Fn(&serde_json::Value) -> bool| logged.iter().position(pred);
+    let accepted = at(&|e| e["type"] == "reviewed" && e["job"] == "rev" && e["verdict"] == "accept")
+        .unwrap_or_else(|| panic!("no accept: {b}"));
+    for name in ["next", "follow"] {
+        let started = at(&|e| e["type"] == "started" && e["job"] == name).unwrap();
+        assert!(started > accepted, "{name} started before the accept: {}", board(&env));
+        assert_eq!(job(&env, name)["base"].as_str(), Some(new_tip.as_str()), "{name} starts on the answered branch");
+    }
+}
+
+/// Copilot on PR #69: an accept is of the tip it judged. A builder a person resumes after the accept has work
+/// no review accepted: what waits on the review, or on the build, waits while it works, the chain judges its new
+/// tip without being asked, and that accept releases them, onto the new tip.
+#[test]
+fn a_builder_resumed_after_an_accept_is_judged_again_before_anything_after_it_starts() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-tip", false);
+    configure(&env, "job_ceiling_usd = 100.0\nmax_running = 4\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &["--model", "claude=claude-opus-5-5"]);
+    let out = relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "[verdict-accept] Review it."]);
+    ok(&out, "queue the review");
+    let b = wait_verdicts(&env, "build", 1);
+    let tip = rev_parse(&workdir(&env, "build"), "HEAD");
+    assert_eq!(
+        (b["verdicts"][0]["verdict"].as_str(), b["verdicts"][0]["commit"].as_str()),
+        (Some("accept"), Some(tip.as_str()))
+    );
+    assert_eq!(wait_for(&env, "rev")["status"], "done");
+
+    // A person resumes the builder; it works on, held, while a second account (held too) has a free seat.
+    let holds = [env.home.join(".claude.a/hold"), env.home.join(".claude.b/hold")];
+    std::fs::write(&holds[0], "").unwrap();
+    ok(&relay(&env, &["queue", "resume", "build", "--message", "[status-done] One more thing."]), "resume");
+    wait_status(&env, "build", "running");
+    claude_account(&env.home, "b", 10, false);
+    std::fs::write(&holds[1], "").unwrap();
+    for (name, after) in [("next", "rev"), ("follow", "build")] {
+        let out = relay(&env, &["queue", "add", name, "--after", after, "--text", "[status-done] Build on it."]);
+        ok(&out, "queue the dependent");
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    let shown = board(&env);
+    for name in ["next", "follow"] {
+        assert_eq!(job(&env, name)["status"], "queued", "{name} must not start on unreviewed work: {shown}");
+    }
+    assert!(shown.contains("after rev (accept; build running)"), "{shown}");
+    for h in &holds {
+        std::fs::remove_file(h).unwrap();
+    }
+
+    for name in ["next", "follow"] {
+        assert_eq!(wait_for(&env, name)["status"], "done", "{}", board(&env));
+    }
+    let new_tip = rev_parse(&workdir(&env, "build"), "HEAD");
+    assert_ne!(new_tip, tip, "the resumed builder committed");
+    assert_eq!(job(&env, "rev")["attempts"], 2, "nobody asked: the review judged the new tip");
+    let logged = events(&env);
+    let at = |pred: &dyn Fn(&serde_json::Value) -> bool| logged.iter().position(pred);
+    let accepted = at(&|e| e["type"] == "reviewed" && e["verdict"] == "accept" && e["commit"] == new_tip.as_str())
+        .unwrap_or_else(|| panic!("no accept of {new_tip}: {}", board(&env)));
+    for name in ["next", "follow"] {
+        let started = at(&|e| e["type"] == "started" && e["job"] == name).unwrap();
+        assert!(started > accepted, "{name} started before the accept of the new tip: {}", board(&env));
+        assert_eq!(job(&env, name)["base"].as_str(), Some(new_tip.as_str()), "{name} starts on the accepted tip");
+    }
+    let told = prompts(&env, "a") + &prompts(&env, "b");
+    assert!(told.contains("so your accept is not for its tip"), "the re-review is told why");
+}
+
+/// w2r-beam-u2b judged from commit messages: "the builder's FINAL was not readable here". A review reads its
+/// builder's last result in its own inbox, named in its preamble, and a re-review reads the answer to its reject.
+#[test]
+fn a_review_reads_its_builders_last_result_and_a_re_review_the_newer_one() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-result", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    rejected(&env);
+    wait_verdicts(&env, "build", 2);
+    assert_eq!(wait_for(&env, "rev")["attempts"], 2);
+    let read = std::fs::read_to_string(env.home.join(".claude.a/builder-results")).unwrap_or_default();
+    let seen: Vec<&str> = read.split("--\n").filter(|s| !s.trim().is_empty()).collect();
+    assert_eq!(seen.len(), 2, "one read per start of the review: {read}");
+    let head = "# The last result of build";
+    assert!(
+        seen.iter().all(|s| s.starts_with(head) && s.contains("its FINAL section and what it wrote above it")),
+        "{read}"
+    );
+    assert!(
+        seen[0].contains("ran on .claude.a with 1 transcript turns\nFINAL\nstatus: done"),
+        "the first run's: {read}"
+    );
+    assert!(
+        seen[1].contains("with 2 transcript turns\nFINAL ok") && !seen[1].contains("status: done"),
+        "the answer to the reject: {read}"
+    );
+    assert!(prompts(&env, "a").contains("builder-result.md` (read-only)"), "{}", prompts(&env, "a"));
+}
+
 /// A reviewer that keeps rejecting is asked again only while it can still record its verdict
 /// (`hooks.max_decisions` caps the decisions on a job), so the loop stops and the board is the last verdict.
 #[test]
@@ -3621,6 +3910,7 @@ fn a_reject_loop_stops_where_the_reviewer_can_no_longer_record_a_verdict() {
         ),
         "queue the review",
     );
+    ok(&relay(&env, &["queue", "add", "next", "--after", "rev", "--text", "Build on it."]), "queue the dependent");
     // reject, builder again, reject again, builder a third time; then the reviewer has had its two
     // decisions, so it is not resumed on the third tip (its verdict would be dropped, leaving a stale one).
     let mut settled = None;
@@ -3649,6 +3939,18 @@ fn a_reject_loop_stops_where_the_reviewer_can_no_longer_record_a_verdict() {
     // The board shows the last recorded verdict, for the commit it judged.
     assert!(board(&env).contains("review by rev: reject: other"), "{}", board(&env));
     assert!(r2["reason"].as_str().unwrap_or_default().contains("build resumed"), "its last verdict was acted on: {r2}");
+    // The chain will not accept on its own, so what waits on it is blocked, and says why.
+    let next = job(&env, "next");
+    assert_eq!(next["status"], "queued", "{next}");
+    let shown = board(&env);
+    assert!(
+        shown.contains("waits for rev (reject: other; rev's chain halted: rev has had 2 decisions already"),
+        "{shown}"
+    );
+    let mut cmd = Command::new("timeout");
+    cmd.args(["30", env!("CARGO_BIN_EXE_relay"), "view", "result", "next", "--wait"]);
+    let out = relay_cmd(&env, &mut cmd);
+    assert_eq!(out.status.code(), Some(4), "a wait on it ends: {}", out_of(&out));
 }
 
 /// `hooks.max_decisions` bounds one chain's rejects of a builder; a replaced chain's verdicts left the board,
@@ -3694,6 +3996,210 @@ fn a_ceiling_stops_a_reject_from_resuming_a_builder() {
     let r = wait_for(&env, "rev");
     assert!(r["reason"].as_str().unwrap_or_default().contains("ceiling"), "{r}");
     assert_eq!(job(&env, "build")["attempts"], 1);
+}
+
+/// Copilot on PR #69: the chain's verdicts are what hold the jobs after a rejected build and its review.
+/// Cleaning the review (or the build) away would release them onto the rejected tip, so it is refused.
+#[test]
+fn a_review_whose_chain_holds_jobs_back_is_not_cleaned_away() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-clean", false);
+    configure(&env, "job_ceiling_usd = 5.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    ok(
+        &relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "[verdict-reject] Review the change."]),
+        "queue",
+    );
+    let r = wait_for(&env, "rev");
+    assert!(r["reason"].as_str().unwrap_or_default().contains("ceiling"), "the builder was not resumed: {r}");
+    for (name, after) in [("next", "rev"), ("follow", "build")] {
+        let out = relay(&env, &["queue", "add", name, "--after", after, "--text", "[status-done] Build on it."]);
+        ok(&out, "queue the dependent");
+    }
+    for name in ["rev", "build"] {
+        let out = relay(&env, &["land", "clean", name]);
+        assert_eq!(out.status.code(), Some(4), "{name}: {}", out_of(&out));
+        let said = stderr(&out);
+        assert!(said.contains(&format!("wait on {name}")) && said.contains("follow"), "{said}");
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    for name in ["next", "follow"] {
+        assert_eq!(job(&env, name)["status"], "queued", "{name} stays held: {}", board(&env));
+    }
+    assert!(board(&env).contains("waits for rev (reject: test-failure; rev's chain halted"), "{}", board(&env));
+}
+
+/// Copilot on PR #69: a review's implied edges can close a cycle no `--after` names: test waits for build's
+/// review, and a review queued after test is that review. Refused when queued, naming the cycle.
+#[test]
+fn a_review_that_would_wait_for_itself_is_refused_at_queue_time() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-cycle", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "build", "--text", "[status-done] Make a change."]), "queue the build");
+    wait_status(&env, "build", "running");
+    ok(&relay(&env, &["queue", "add", "test", "--after", "build", "--text", "Test it."]), "queue the test");
+    let out = relay(&env, &["queue", "add", "rev", "--review-of", "build", "--after", "test", "--text", "Review it."]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    let said = stderr(&out);
+    assert!(
+        said.contains(
+            "queuing rev would make it wait for itself: rev → test → rev (test waits for build, which rev reviews)"
+        ),
+        "{said}"
+    );
+    assert!(job(&env, "rev").is_null(), "nothing was queued");
+
+    // A replacement review is the chain too.
+    ok(&relay(&env, &["queue", "add", "rev1", "--review-of", "build", "--text", "Review it."]), "the first review");
+    let out = relay(&env, &["queue", "add", "rev2", "--review-of", "build", "--after", "test", "--text", "Again."]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    assert!(stderr(&out).contains("rev2 → test → rev2"), "{}", stderr(&out));
+    assert!(board(&env).contains("rev1") && !board(&env).contains("superseded by rev2"), "the chain is as it was");
+    std::fs::remove_file(&hold).unwrap();
+}
+
+/// Copilot on PR #69 (queue.rs:157): a cycle can close on any transition that revives a job, not only on
+/// add. build and test (after build) are done; rev, a review of build after test (and after a job still at
+/// work), is queued. Resuming test makes it wait on build's review, rev, which waits on test.
+#[test]
+fn resuming_a_job_into_a_cycle_through_a_review_is_refused() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-resume-cycle", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    build(&env, "test", &["--after", "build"]);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "slow", "--text", "Take your time."]), "queue a job at work");
+    wait_status(&env, "slow", "running");
+    let out =
+        relay(&env, &["queue", "add", "rev", "--review-of", "build", "--after", "test,slow", "--text", "Review."]);
+    ok(&out, "the review: nothing waits on it yet");
+    let out = relay(&env, &["queue", "resume", "test", "--message", "Again."]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    let said = stderr(&out);
+    assert!(
+        said.contains(
+            "resuming test would make it wait for itself: test → rev → test (test waits for build, which rev reviews)"
+        ),
+        "{said}"
+    );
+    assert_eq!(job(&env, "test")["status"], "done", "nothing was resumed");
+    std::fs::remove_file(&hold).unwrap();
+}
+
+/// Copilot on PR #69 (world.rs:1010): what waits on a review's chain is in the graph however its board line
+/// reads. rev rejects build and resumes it; while build works, a job after build reads `after build`, yet it
+/// waits on rev's verdict, so rev is not cleaned away. A review replaced since still holds what waits on it.
+#[test]
+fn a_review_anything_waits_on_through_the_graph_is_not_cleaned_away() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-clean-graph", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    let text = "[verdict-reject] [hold-after] Review the change.";
+    ok(&relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", text]), "queue the review");
+    wait_status(&env, "build", "running");
+    ok(&relay(&env, &["queue", "add", "succ", "--after", "build", "--text", "Build on it."]), "queue the successor");
+    let out = relay(&env, &["land", "clean", "rev"]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    assert!(stderr(&out).contains("succ wait on rev"), "{}", stderr(&out));
+
+    // Replaced, it still holds what was queued after it.
+    ok(&relay(&env, &["queue", "add", "next", "--after", "rev", "--text", "Build on it."]), "queue after rev");
+    ok(&relay(&env, &["queue", "add", "rev2", "--review-of", "build", "--text", "Review it."]), "replace rev");
+    let out = relay(&env, &["land", "clean", "rev"]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    assert!(stderr(&out).contains("next wait on rev"), "{}", stderr(&out));
+    for name in ["succ", "next"] {
+        assert_eq!(job(&env, name)["status"], "queued", "{}", board(&env));
+    }
+    std::fs::remove_file(env.home.join(".claude.a/hold")).unwrap();
+}
+
+/// Copilot on PR #69 (queue.rs:205): a reader that takes no lock sees a change half way. A replacement review
+/// is published before the `unchained` that names it, so no reader ever sees "superseded by rev2, gone".
+#[test]
+fn a_replacement_review_is_recorded_before_anything_names_it() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("review-order", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    ok(&relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "[verdict-accept] Review."]), "rev");
+    assert_eq!(wait_for(&env, "rev")["status"], "done");
+    ok(&relay(&env, &["queue", "add", "rev2", "--review-of", "build", "--text", "[verdict-accept] Again."]), "rev2");
+    let logged = events(&env);
+    let at = |pred: &dyn Fn(&serde_json::Value) -> bool| logged.iter().position(pred);
+    let queued = at(&|e| e["type"] == "queued" && e["job"] == "rev2").unwrap();
+    let unchained = at(&|e| e["type"] == "unchained" && e["job"] == "rev" && e["by"] == "rev2").unwrap();
+    assert!(queued < unchained, "rev2 is recorded before the unchained that names it: {logged:?}");
+}
+
+/// Copilot on PR #69 (world.rs:813): a build job starts from the branches it depends on, or not at all. With
+/// build's clone collected by gc, next (after build) is refused, naming build, instead of starting from HEAD.
+#[test]
+fn a_build_whose_base_clone_is_gone_is_refused_not_started_from_head() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("base-gone", false);
+    configure(&env, "", "[gc]\nclones_after_days = 0\n");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    ok(&relay(&env, &["land", "gc"]), "gc");
+    assert_eq!(job(&env, "build")["collected"], "clone");
+    let next = build(&env, "next", &["--after", "build"]);
+    assert_eq!(next["status"], "failed", "{next}");
+    let reason = next["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("the branch of build it starts from is gone"), "{reason}");
+}
+
+/// Copilot on PR #69 (session.rs:407): the recovery a missing base is refused with names the job's own
+/// `--after` entries that lead to it. rev accepted build, whose clone gc then collected; next, queued
+/// `--after rev`, is refused for build's branch, and is told to be released from rev, which it does wait for.
+#[test]
+fn a_base_gone_behind_a_review_names_the_entry_to_be_released_from() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("base-gone-review", false);
+    configure(
+        &env,
+        "job_ceiling_usd = 100.0
+",
+        "[gc]\nclones_after_days = 0\n",
+    );
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    ok(&relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "[verdict-accept] Review."]), "rev");
+    assert_eq!(wait_for(&env, "rev")["status"], "done");
+    ok(&relay(&env, &["land", "gc"]), "gc");
+    assert_eq!(job(&env, "build")["collected"], "clone");
+    let next = build(&env, "next", &["--after", "rev"]);
+    assert_eq!(next["status"], "failed", "{next}");
+    let reason = next["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("the branch of build it starts from is gone"), "{reason}");
+    let hint = "relay queue release next --from rev, then relay queue resume next --message continue";
+    assert!(reason.contains(hint), "{reason}");
+    ok(&relay(&env, &["queue", "release", "next", "--from", "rev"]), "the release it names");
 }
 
 #[test]

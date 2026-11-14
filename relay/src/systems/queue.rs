@@ -13,7 +13,9 @@ use crate::bus::{ACCEPTANCE_GATE, Fork, QueueEvent};
 use crate::config::{Profile, valid_name};
 use crate::ctx::Ctx;
 use crate::os;
-use crate::world::{Job, Status, World};
+use crate::systems::graph::Change;
+use crate::systems::hint::{self, Step};
+use crate::world::{Job, Status};
 
 /// The capability to write queue's port; only this module can make one.
 #[derive(Debug)]
@@ -50,7 +52,7 @@ pub enum Cmd {
     Unreview { name: String },
     /// Start a queued job now, without waiting for the jobs it was queued `--after` to finish (not a
     /// cancel: `dequeue` withdraws it). A job the disk floor holds is freed of them too and starts when
-    /// there is room.
+    /// there is room; one that ended without being done is freed of them for its next resume.
     Release {
         name: String,
         /// Stop waiting for only these (repeat, or comma-separate); it starts once none is left. Default: all of them.
@@ -121,9 +123,10 @@ fn usd(s: &str) -> Result<f64, String> {
 }
 
 pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
-    // From the check to the record, so two adds of one name cannot both pass.
-    let _lock = ctx.jobs_lock()?;
-    let world = ctx.world()?;
+    // From the check to the record, under the jobs lock, so two adds of one name cannot both pass and no
+    // other change to the graph comes between this one's check and its record.
+    let mut change = Change::take(ctx)?;
+    let world = change.world().clone();
     let name = match &cmd {
         Cmd::Add(add) => add.name.clone(),
         Cmd::Resume { name, .. }
@@ -133,24 +136,22 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         | Cmd::Stop { name } => name.clone(),
     };
     let job = world.jobs().get(&name);
-    // The job, when its status is one the command applies to.
-    let when = |ok: fn(Status) -> bool| match job {
-        None => fail!(NotFound, "no job named {name}"),
-        Some(j) if !ok(j.status) => fail!(Conflict, "{name} is {}", j.status.as_str()),
-        Some(j) => anyhow::Ok(j),
+    // The job, when the command accepts it as it is (`hint::accepts`, which every recovery hint is checked by).
+    let when = |step: Step| -> Result<&Job> {
+        hint::accepts(&world, &hint::Cmd::new(&name, step))?;
+        job.ok_or_else(|| anyhow::anyhow!("no job named {name}"))
     };
     // What is recorded, in order, files the brief changes, and for a stop the runner to signal once it is recorded.
     let mut events = Vec::new();
     let mut briefs: Vec<(String, String)> = Vec::new();
+    let mut added: Option<Candidate> = None;
     let (event, runner) = match cmd {
         Cmd::Add(add) => {
-            // A job that ended before it ever started (dequeued) has nothing to keep:
-            // its name is free again.
-            if job.is_some_and(|j| j.status.is_live() || j.attempts > 0) {
-                fail!(Conflict, "job {name} exists; pick another name, or: relay land clean {name}");
-            }
+            name_free(&world, &name, add.declare.review_of())?;
             let replaced = add.declare.review_of().map(|b| chain(world.jobs(), b)).unwrap_or_default();
-            let queued = add.queued(ctx, world.jobs())?;
+            let candidate = add.queued(ctx, world.jobs())?;
+            let queued = candidate.event.clone();
+            added = Some(candidate);
             // One live chain per job: the new review takes the old one's place, in the same breath.
             events.extend(
                 replaced
@@ -161,14 +162,14 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             (queued, None)
         }
         Cmd::Unreview { .. } => {
-            let j = when(|_| true)?;
+            let j = when(Step::Unreview)?;
             let mut chained = chain(world.jobs(), &j.name);
             let Some(last) = chained.pop() else { fail!(Conflict, "{name} has no review chained to it") };
             events.extend(chained.into_iter().map(|job| QueueEvent::Unchained { job, by: None }));
             (QueueEvent::Unchained { job: last, by: None }, None)
         }
         Cmd::Resume { message, budget, models, review_brief, .. } => {
-            let j = when(|s| !s.is_live() || s == Status::Checking)?;
+            let j = when(Step::Resume)?;
             let models = parse_models(ctx, &j.harnesses, &models)?;
             // The model it will run on, checked now: a banned one would only fail at dispatch.
             let mut next = j.models.clone();
@@ -195,23 +196,31 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
             }
             (QueueEvent::Resumed { job: name.clone(), message, budget_usd: budget, models }, None)
         }
-        Cmd::Release { from, .. } => (release(job, &name, from)?, None),
+        Cmd::Release { from, .. } => {
+            when(Step::Release(from.clone()))?;
+            (QueueEvent::Released { job: name.clone(), from }, None)
+        }
         Cmd::Dequeue { .. } => {
-            when(|s| s == Status::Queued)?;
+            when(Step::Dequeue)?;
             (QueueEvent::Dequeued { job: name.clone() }, None)
         }
-        Cmd::Stop { .. } => (QueueEvent::StopRequested { job: name.clone() }, stop_target(job, &name)?),
+        Cmd::Stop { .. } => {
+            let j = when(Step::Stop)?;
+            // A running job's runner is signalled; one the disk floor holds has none, and the record stops it.
+            (QueueEvent::StopRequested { job: name.clone() }, j.runner.filter(|_| j.status == Status::Running))
+        }
     };
     let recorded = serde_json::to_value(&event)?["type"].clone();
-    // A reviewer started afresh reads the new brief as its own.
-    for (reviewer, brief) in &briefs {
-        Ctx::write_private(&ctx.job_file(reviewer, "prompt.md"), brief.as_bytes())?;
+    let what = if matches!(event, QueueEvent::Resumed { .. }) { "resuming" } else { "queuing" };
+    // A job queued is published before anything that names it (a replacement review before the `unchained`
+    // that points at it); every other change names only what is recorded already.
+    if matches!(event, QueueEvent::Queued { .. }) {
+        events.insert(0, event);
+    } else {
+        events.push(event);
     }
-    let port = ctx.port(&Source(()));
-    for before in events {
-        port.emit(before)?;
-    }
-    port.emit(event)?;
+    commit(&mut change, events, (&name, what), added.as_ref(), &briefs)?;
+    drop(change);
     if let Some(runner) = runner {
         stop_runner(runner)?;
     }
@@ -219,32 +228,25 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     ctx.reply(&serde_json::json!({ "job": name, "recorded": recorded }), &format!("{name}: recorded"))
 }
 
-/// What `queue release` records for `job`: it stops waiting for `from` (all of its `--after` jobs when empty).
-fn release(job: Option<&Job>, name: &str, from: Vec<String>) -> Result<QueueEvent> {
-    let waiting = match job {
-        None => fail!(NotFound, "no job named {name}"),
-        // A job the disk floor holds waits for its prerequisites as a queued one does.
-        Some(j) if j.status != Status::Queued && !j.held => fail!(Conflict, "{name} is {}", j.status.as_str()),
-        Some(j) => &j.after,
-    };
-    if waiting.is_empty() {
-        fail!(Conflict, "{name} waits for no job");
+/// Whether `queue add` may give `name` to a new job, a review of `review_of` when that is named. A job that
+/// ended before it ever started (dequeued) has nothing to keep, so its name is free again
+/// ([`hint::accepts`]); but a review that never ran is still its build's review, and what was queued after
+/// it waits, by its name, for that build's accept: only another review of the same build takes its place.
+fn name_free(world: &crate::world::World, name: &str, review_of: Option<&str>) -> Result<()> {
+    if hint::accepts(world, &hint::Cmd::new(name, Step::Add)).is_err() {
+        let free = hint::free_name(world, name).map_or_else(String::new, |h| format!(", or: {h}"));
+        fail!(Conflict, "job {name} exists; pick another name{free}");
     }
-    if let Some(other) = from.iter().find(|f| !waiting.contains(f)) {
-        fail!(Usage, "{name} does not wait for {other} (it waits for {})", waiting.join(", "));
+    if let Some(b) = world.jobs().get(name).and_then(Job::review_of).filter(|b| review_of != Some(*b)) {
+        let clean = hint::hint(world, &[vec![hint::Cmd::new(name, Step::Clean)]])
+            .map_or_else(String::new, |h| format!(", or: {h}"));
+        fail!(
+            Conflict,
+            "job {name} exists, a review of {b}: what waits on it waits for that review's accept, so only \
+             another review of {b} takes its name; pick another name{clean}"
+        );
     }
-    Ok(QueueEvent::Released { job: name.to_owned(), from })
-}
-
-/// The runner a stop of `job` signals: a running job's. A job the disk floor holds has none, and is stopped
-/// by the record alone (it then stays stopped); any other job is not running, so there is nothing to stop.
-fn stop_target(job: Option<&Job>, name: &str) -> Result<Option<(u32, u64)>> {
-    match job {
-        None => fail!(NotFound, "no job named {name}"),
-        Some(j) if j.status == Status::Running => Ok(j.runner),
-        Some(j) if j.held => Ok(None),
-        Some(j) => fail!(Conflict, "{name} is {}", j.status.as_str()),
-    }
+    Ok(())
 }
 
 /// Ends a running job's runner with a TERM, sent only while the recorded pid is still the recorded
@@ -263,7 +265,9 @@ fn chain(jobs: &BTreeMap<String, Job>, builder: &str) -> Vec<String> {
 
 impl Add {
     /// Checks the request, stores the brief, and says what to record.
-    fn queued(self, ctx: &Ctx, jobs: &BTreeMap<String, Job>) -> Result<QueueEvent> {
+    /// The `queued` event this line records, and the brief it brings, read and checked but not yet written:
+    /// nothing is written until the whole change is accepted ([`Candidate::write`]).
+    fn queued(self, ctx: &Ctx, jobs: &BTreeMap<String, Job>) -> Result<Candidate> {
         if !valid_name(&self.name) || self.name.starts_with(RESERVED) {
             fail!(Usage, "job names are lowercase letters, digits and dashes, and do not start with {RESERVED}");
         }
@@ -323,14 +327,10 @@ impl Add {
         if !compiles && declared.acceptance.command().is_some() {
             fail!(Refused, "--compiles false with an acceptance check: a check builds, so its job compiles");
         }
-        // The brief reaches the session on stdin or as a file, never in argv (/proc/<pid>/cmdline is public).
-        // A name whose job was dequeued starts clean: its files are the old job's, and the logs append.
-        ctx.wipe_job_files(&name)?;
-        Ctx::write_private(&ctx.job_file(&name, "prompt.md"), brief.as_bytes())?;
         let task =
             self.task.unwrap_or_else(|| brief.trim().lines().next().unwrap_or_default().chars().take(80).collect());
-        Ok(QueueEvent::Queued {
-            job: name,
+        let event = QueueEvent::Queued {
+            job: name.clone(),
             task,
             readonly: fill.readonly,
             harnesses,
@@ -346,7 +346,49 @@ impl Add {
             depth: 0,
             acceptance: declared.acceptance,
             compiles,
-        })
+        };
+        Ok(Candidate { name, brief, event })
+    }
+}
+
+/// Records a command's change in `change`: the whole of it checked first (the name and the command's own
+/// checks before this, the graph here), so a refused command changes nothing on disk; then the files (a new
+/// job's brief, a reviewer's replaced one), before the lock lets a dispatch in; then the events. `what`
+/// names the command for a refusal: `(job, "queuing" | "resuming")`.
+fn commit(
+    change: &mut Change<'_>,
+    events: Vec<QueueEvent>,
+    (name, what): (&str, &str),
+    added: Option<&Candidate>,
+    briefs: &[(String, String)],
+) -> Result<()> {
+    let ctx = change.ctx();
+    if let Some(cycle) = change.cycle(&events, name) {
+        fail!(Conflict, "{what} {name} would make it wait for itself: {cycle}, so none of them would ever start");
+    }
+    if let Some(candidate) = added {
+        candidate.write(ctx)?;
+    }
+    for (reviewer, brief) in briefs {
+        Ctx::write_private(&ctx.job_file(reviewer, "prompt.md"), brief.as_bytes())?;
+    }
+    change.record(&ctx.port(&Source(())), events)
+}
+
+/// A job a line would queue, checked but not yet written: its `queued` event, and the brief its files take.
+struct Candidate {
+    name: String,
+    brief: String,
+    event: QueueEvent,
+}
+
+impl Candidate {
+    /// Writes its files, once the whole change it is part of was accepted (and before the lock lets a dispatch
+    /// in). The brief reaches the session on stdin or as a file, never in argv (/proc/<pid>/cmdline is public).
+    /// A name whose job was dequeued starts clean: its files are the old job's, and the logs append.
+    fn write(&self, ctx: &Ctx) -> Result<()> {
+        ctx.wipe_job_files(&self.name)?;
+        Ctx::write_private(&ctx.job_file(&self.name, "prompt.md"), self.brief.as_bytes())
     }
 }
 
@@ -378,9 +420,10 @@ pub struct FollowUp {
 }
 
 /// Queues `f` as `queue add` would, and returns its name. Only a decision queues a follow-up, so this
-/// runs inside `Decided::carry`: `world` was read under the jobs lock carry holds, after it checked that
-/// `parent` is still at the attempt the decision was about.
-pub fn follow_up(ctx: &Ctx, world: &World, parent: &Job, f: FollowUp) -> Result<String> {
+/// runs inside `Decided::carry`, whose `change` holds the jobs lock and read the world under it, after it
+/// checked that `parent` is still at the attempt the decision was about.
+pub fn follow_up(change: &mut Change<'_>, parent: &Job, f: FollowUp) -> Result<String> {
+    let (ctx, world) = (change.ctx(), change.world());
     let base = f.name.unwrap_or_else(|| format!("{}-next", parent.name));
     let name = (1..1000)
         .map(|i| if i == 1 { base.clone() } else { format!("{base}-{i}") })
@@ -405,11 +448,16 @@ pub fn follow_up(ctx: &Ctx, world: &World, parent: &Job, f: FollowUp) -> Result<
         fork: f.fork.then(|| parent.name.clone()),
         declare: declare::Declare::default(),
     };
-    let mut event = add.queued(ctx, world.jobs())?;
-    if let QueueEvent::Queued { parent: of, depth, .. } = &mut event {
+    let mut candidate = add.queued(ctx, world.jobs())?;
+    if let QueueEvent::Queued { parent: of, depth, .. } = &mut candidate.event {
         (*of, *depth) = (Some(parent.name.clone()), parent.depth + 1);
     }
-    ctx.port(&Source(())).emit(event)?;
+    // Checked whole before its files are written, as `queue add` is.
+    if let Some(cycle) = change.cycle(std::slice::from_ref(&candidate.event), &name) {
+        fail!(Conflict, "queuing {name} would make it wait for itself: {cycle}, so none of them would ever start");
+    }
+    candidate.write(ctx)?;
+    change.record(&ctx.port(&Source(())), vec![candidate.event])?;
     ctx.wake_dispatch()?;
     Ok(name)
 }
@@ -418,23 +466,48 @@ pub fn follow_up(ctx: &Ctx, world: &World, parent: &Job, f: FollowUp) -> Result<
 /// on any account with room. Not while it works, not once `hooks.max_decisions` reviews have rejected it,
 /// and not on a banned model. `None` when resumed, else why not.
 /// Only a review's decision does this, so it runs inside `Decided::carry`, which holds the jobs lock.
-pub fn resume_reviewed(ctx: &Ctx, builder: &str, message: String) -> Result<Option<String>> {
-    let world = ctx.world()?;
-    let Some(j) = world.jobs().get(builder) else { return Ok(Some(format!("{builder} is gone"))) };
+pub fn resume_reviewed(
+    change: &mut Change<'_>,
+    builder: &str,
+    reviewer: &str,
+    message: String,
+) -> Result<Option<String>> {
+    let Some(j) = change.world().jobs().get(builder).cloned() else { return Ok(Some(format!("{builder} is gone"))) };
     // This reject is already among the verdicts: `hooks.max_decisions` of them resume the builder.
     let rejected =
         j.verdicts.iter().filter(|v| v.verdict == crate::bus::Verdict::Reject && v.stale_head.is_none()).count();
-    resume_by_review(ctx, j, rejected, message)
+    let why = resume_by_review(change, &j, rejected, message)?;
+    halted(change, (builder, reviewer), builder, why)
+}
+
+/// Records that the review chain `(builder, reviewer)` stopped short of an accept, when the resume of `turn`
+/// (one of the two) that it needed was refused for good (`why`), so a job waiting on the chain is blocked
+/// rather than left waiting. A refusal because `turn` is at work, or gone, is not one: its end moves the
+/// chain on, and a job waiting on one that is gone is blocked as it is.
+fn halted(
+    change: &mut Change<'_>,
+    (builder, reviewer): (&str, &str),
+    turn: &str,
+    why: Option<String>,
+) -> Result<Option<String>> {
+    let Some(why) = why else { return Ok(None) };
+    if change.world().jobs().get(turn).is_some_and(|j| !j.status.is_live()) {
+        let halt = QueueEvent::ReviewHalted { job: builder.to_owned(), review: reviewer.to_owned(), why: why.clone() };
+        change.record(&change.ctx().port(&Source(())), vec![halt])?;
+    }
+    Ok(Some(why))
 }
 
 /// Resumes the reviewer `reviewer` of a branch whose builder has answered its reject, so its verdict is
-/// for the new tip. Held to the same bounds as the builder's resume: at most `hooks.max_decisions` rejects
+/// for the new tip, when that is still due under the lock ([`crate::world::World::rereview_due`]: two ends
+/// can ask for the same re-review, and the second must not buy it twice). Held to the same bounds as the
+/// builder's resume: at most `hooks.max_decisions` rejects
 /// by this reviewer already, a reviewer that can no longer have a decision act on it, the job's ceiling,
-/// and a banned model. `None` when resumed, else why not.
+/// and a banned model. `None` when resumed, else why not. Takes the jobs lock: never call it holding one.
 pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String) -> Result<Option<String>> {
-    let _lock = ctx.jobs_lock()?;
-    let world = ctx.world()?;
-    let Some(j) = world.jobs().get(reviewer) else { return Ok(Some(format!("{reviewer} is gone"))) };
+    let mut change = Change::take(ctx)?;
+    let world = change.world();
+    let Some(j) = world.jobs().get(reviewer).cloned() else { return Ok(Some(format!("{reviewer} is gone"))) };
     if let Some(u) = &j.unchained {
         return Ok(Some(format!("{reviewer} is no longer {builder}'s reviewer ({})", u.summary())));
     }
@@ -442,12 +515,17 @@ pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String
     if world.jobs().get(builder).is_some_and(|b| b.status.is_live()) {
         return Ok(Some(format!("{builder} is at work again; its end asks for the review")));
     }
-    // A run that could not record its verdict (the cap on decisions per job) would leave the stale one.
-    if !crate::systems::decide::can_decide(&ctx.cfg, &world, j) {
+    // Whoever asked chose this review on a world read before the lock: another end may have got the re-review
+    // since, and its verdict be in. Whether one is due is decided here, on the world as it is now.
+    if world.rereview_due(builder, reviewer).is_none() {
         return Ok(Some(format!(
-            "{reviewer} has had {} decisions already (hooks.max_decisions)",
-            ctx.cfg.hooks.max_decisions
+            "no re-review by {reviewer} is due: its last verdict stands for what {builder} ended with"
         )));
+    }
+    // A run that could not record its verdict (the cap on decisions per job) would leave the stale one.
+    if !crate::systems::decide::can_decide(&ctx.cfg, world, &j) {
+        let why = format!("{reviewer} has had {} decisions already (hooks.max_decisions)", ctx.cfg.hooks.max_decisions);
+        return halted(&mut change, (builder, reviewer), reviewer, Some(why));
     }
     let rejected = world.jobs().get(builder).map_or(0, |b| {
         b.verdicts
@@ -455,12 +533,21 @@ pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String
             .filter(|v| v.reviewer == reviewer && v.verdict == crate::bus::Verdict::Reject && v.stale_head.is_none())
             .count()
     });
-    resume_by_review(ctx, j, rejected, message)
+    let why = resume_by_review(&mut change, &j, rejected, message)?;
+    halted(&mut change, (builder, reviewer), reviewer, why)
 }
 
 /// The shared bounds of a resume that a review causes: `j` is not live, `rejected` is within
-/// `hooks.max_decisions`, another run fits its ceiling, and its model is not banned.
-fn resume_by_review(ctx: &Ctx, j: &crate::world::Job, rejected: usize, message: String) -> Result<Option<String>> {
+/// `hooks.max_decisions`, another run fits its ceiling, its model is not banned, and back in the queue it
+/// would not wait for itself (a builder requeued behind its review, a review revived behind what it waits on).
+/// Checked and recorded in `change`, under the jobs lock.
+fn resume_by_review(
+    change: &mut Change<'_>,
+    j: &crate::world::Job,
+    rejected: usize,
+    message: String,
+) -> Result<Option<String>> {
+    let ctx = change.ctx();
     let builder = j.name.as_str();
     if j.status.is_live() {
         return Ok(Some(format!("{builder} is {}", j.status.as_str())));
@@ -475,12 +562,10 @@ fn resume_by_review(ctx: &Ctx, j: &crate::world::Job, rejected: usize, message: 
     if let Some((_, m, why)) = j.models.iter().find_map(|(h, m)| ctx.cfg.session.banned(m).map(|r| (h, m, r))) {
         return Ok(Some(format!("model {m} is banned: {why}")));
     }
-    ctx.port(&Source(())).emit(QueueEvent::Resumed {
-        job: builder.to_owned(),
-        message,
-        budget_usd: None,
-        models: BTreeMap::new(),
-    })?;
+    let resumed = QueueEvent::Resumed { job: builder.to_owned(), message, budget_usd: None, models: BTreeMap::new() };
+    if let Err(cycle) = change.try_record(&ctx.port(&Source(())), vec![resumed], builder)? {
+        return Ok(Some(format!("resuming it would make it wait for itself: {cycle}")));
+    }
     ctx.wake_dispatch()?;
     Ok(None)
 }
@@ -672,6 +757,27 @@ mod tests {
     use crate::bus::{Event, Stamped};
     use crate::world::World;
 
+    /// Copilot on PR #69 (session.rs:132): a change to the dependency graph checked outside the jobs lock can
+    /// be overtaken by another before it is recorded. So no event that adds an edge or revives a job is
+    /// recorded by a plain emit: only a `systems::graph::Change`, which checks and records it under the lock.
+    #[test]
+    fn a_change_to_the_graph_is_never_recorded_by_a_plain_emit() {
+        let dir = crate::config::tempdir::Dir::new();
+        let port: crate::bus::Port<QueueEvent> = crate::bus::Port::new(dir.path(), &Source(()));
+        let queued =
+            r#"{"type":"queued","job":"x","task":"t","readonly":false,"effort":null,"budget_usd":1.0,"pinned":null}"#;
+        let resumed =
+            QueueEvent::Resumed { job: "x".into(), message: "m".into(), budget_usd: None, models: BTreeMap::new() };
+        let unchained = QueueEvent::Unchained { job: "r".into(), by: Some("r2".into()) };
+        for e in [serde_json::from_str(queued).unwrap(), resumed, unchained] {
+            let kind = serde_json::to_value(&e).unwrap()["type"].clone();
+            let refused = port.emit(e).expect_err("a graph change by a plain emit");
+            assert!(refused.to_string().contains("only by systems::graph::Change"), "{kind}: {refused}");
+        }
+        assert!(!dir.path().join("queue.ndjson").exists(), "nothing was written");
+        port.emit(QueueEvent::Dequeued { job: "x".into() }).expect("what takes an edge away needs no check");
+    }
+
     fn key(brief: &str, models: &[(&str, &str)], commit: &str) -> String {
         let models = models.iter().map(|(h, m)| ((*h).to_owned(), (*m).to_owned())).collect();
         reuse_key(brief, &["claude".to_owned()], &models, Some("high"), commit)
@@ -755,6 +861,7 @@ mod tests {
                         cost_usd: 0.1,
                         turns: 1,
                         reason: None,
+                        head: None,
                     }),
                 });
             }
@@ -786,14 +893,23 @@ mod tests {
         w.jobs_mut().extend([("p".to_owned(), failed), ("c".to_owned(), held)]);
         let c = &w.jobs()["c"];
         assert!(w.blocked(c) && !w.moves_on_its_own(c), "the state the command is printed for");
-        let event = release(Some(c), "c", Vec::new()).expect("the printed command succeeds");
+        hint::accepts(&w, &hint::Cmd::new("c", Step::Release(Vec::new()))).expect("the printed command succeeds");
+        let event = QueueEvent::Released { job: "c".into(), from: Vec::new() };
         w.apply(&Stamped { t: 9, from: None, event: Event::Queue(event) });
         let c = &w.jobs()["c"];
         assert!(w.waits(c).is_empty() && !w.blocked(c) && c.held, "free of p, still held for the disk");
         assert!(w.moves_on_its_own(c), "the dispatcher resumes it when space is back");
-        // A job that is stopped for good, or running, has nothing to release.
-        let stopped = Job { held: false, ..c.clone() };
-        assert_eq!(refusal(release(Some(&stopped), "c", Vec::new()).map(|_| ())), "c is stopped");
+        // A running job has nothing to release; one that ended without being done changes what its next
+        // resume waits for (a base cleaned away can be dropped before it is resumed).
+        let mut w2 = w.clone();
+        w2.jobs_mut().get_mut("c").unwrap().after = vec!["p".into()];
+        (w2.jobs_mut().get_mut("c").unwrap().status, w2.jobs_mut().get_mut("c").unwrap().held) =
+            (Status::Running, false);
+        let release =
+            |w: &World| -> Result<()> { Ok(hint::accepts(w, &hint::Cmd::new("c", Step::Release(Vec::new())))?) };
+        assert_eq!(refusal(release(&w2)), "c is running");
+        w2.jobs_mut().get_mut("c").unwrap().status = Status::Failed;
+        release(&w2).expect("a failed job's waits can be dropped before its resume");
     }
 
     #[test]

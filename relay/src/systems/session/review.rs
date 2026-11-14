@@ -2,7 +2,7 @@
 //! reviewer can read, tells it exactly which commit to judge, reads its verdict, and for a reject
 //! sends the findings back to the builder.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -10,6 +10,7 @@ use super::{Ran, checkpoint_rev, port};
 use crate::bus::{Reason, SessionEvent, Verdict};
 use crate::config::model_family;
 use crate::ctx::Ctx;
+use crate::hostdir::HostDir;
 use crate::systems::checkpoint;
 use crate::systems::decide::Reviewing;
 use crate::world::Job;
@@ -81,9 +82,59 @@ fn merge_base(repo: &Path, commit: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|s| !s.is_empty())
 }
 
+/// The file in a review's inbox that holds its builder's last result.
+pub(super) const BUILDER_RESULT: &str = "builder-result.md";
+
+/// The most of a builder's result a review is handed: a report, not a transcript.
+const BUILDER_RESULT_MAX: usize = 64 * 1024;
+
+/// Hands the review the builder's last result, written afresh on every start and resume into the review's
+/// inbox, which its session reads and cannot write: the builder's own record lives in relay's state, which a
+/// session never sees. Returns the file's path, the same inside the sandbox as outside.
+pub(super) fn hand_over(ctx: &Ctx, inbox: &HostDir, r: &Reviewing) -> Result<PathBuf> {
+    let result = std::fs::read_to_string(ctx.job_file(&r.job, "result.md")).ok();
+    let text = builder_result(&r.job, result.as_deref(), &ctx.cfg.session.final_marker);
+    Ok(inbox.write(BUILDER_RESULT, text.as_bytes())?)
+}
+
+/// What the builder-result file says: the builder's last result (its final section and the summary above it),
+/// and plainly when that result has no final section or there is none at all.
+fn builder_result(job: &str, result: Option<&str>, marker: &str) -> String {
+    let head = format!("# The last result of {job}\n\n");
+    // What its report is, read as its run's verdict read it.
+    let what = if marker.is_empty() { "final report".to_owned() } else { format!("{marker} section") };
+    let Some(text) = result.map(str::trim).filter(|t| !t.is_empty()) else {
+        return format!(
+            "{head}{job}'s latest run left no final message, so there is no {what} to read. Judge the branch by its \
+             commits and its diff alone.\n"
+        );
+    };
+    // Whether there is a report is read from the whole message, never from what is kept of it.
+    let Some(report) = crate::harness::report::final_section(text, marker) else {
+        let text = checkpoint::bounded(text, BUILDER_RESULT_MAX);
+        return format!(
+            "{head}{job}'s latest run ended without a {what}. This is its last message as relay read it; do not \
+             take it for a report, and judge the branch by its commits and its diff.\n\n{text}\n"
+        );
+    };
+    // The final section whole, and as much of the summary just above it as there is room for.
+    let summary = tail(report.summary, BUILDER_RESULT_MAX.saturating_sub(report.section.len()));
+    let above = if report.summary.is_empty() { "" } else { " and what it wrote above it" };
+    format!("{head}What {job}'s latest run ended with: its {what}{above}.\n\n{summary}{}\n", report.section)
+}
+
+/// The end of `text` in at most `max` bytes, saying how much came before it.
+fn tail(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let cut = (text.len() - max..=text.len()).find(|&i| text.is_char_boundary(i)).unwrap_or(text.len());
+    format!("… ({cut} earlier bytes left out)\n{}", &text[cut..])
+}
+
 /// What a review is told before anything else, on every start and every resume: the commit it is to
-/// judge now, which can be newer than the one it saw before.
-pub(super) fn preamble(r: &Reviewing) -> String {
+/// judge now, which can be newer than the one it saw before, and where the builder's last result is.
+pub(super) fn preamble(r: &Reviewing, result: &Path) -> String {
     let base = r.base.as_deref().unwrap_or("HEAD");
     let range = format!("{base}..{}", r.reference);
     let codes: Vec<&str> = Reason::ALL.iter().map(|r| r.as_str()).collect();
@@ -91,19 +142,23 @@ pub(super) fn preamble(r: &Reviewing) -> String {
         "This is a review of job {job}'s branch. relay fetched it into the repository as `{reference}`, at commit \
          {commit}: judge exactly that commit, even if you saw an earlier one. It started from {base}, so \
          `git log {range}` lists its commits and `git diff {range}` is its change. Judge the work as the brief asks.\n\n\
+         {job}'s last result, its FINAL section and the summary above it as of this start, is in `{result}` \
+         (read-only). It says what the builder claims; check that against the commit.\n\n\
          End your FINAL section with a line `verdict: accept` or `verdict: reject`. For a reject, add a line \
          `reason: <code>` ({codes}) and put the findings the builder must act on in `notes`.",
         job = r.job,
         reference = r.reference,
         commit = r.commit,
+        result = result.display(),
         codes = codes.join(", "),
     )
 }
 
-/// A report's final section: from its last `marker` on, or the whole answer when there is no marker.
-/// None: the report has no such section.
+/// A report's final section, as the one parse of a report reads it ([`crate::harness::report::final_section`]):
+/// every reader of a report (a run's status, a review's verdict, the findings sent back to a builder) takes
+/// this same section. None: the report has none.
 pub(super) fn final_section<'a>(answer: &'a str, marker: &str) -> Option<&'a str> {
-    if marker.is_empty() { Some(answer) } else { answer.rfind(marker).map(|i| &answer[i..]) }
+    crate::harness::report::final_section(answer, marker).map(|f| f.section)
 }
 
 /// A field of a report's final section, `name: value` (a list bullet allowed before it), the last one
@@ -136,7 +191,7 @@ pub(super) fn verdict(answer: &str, marker: &str) -> Option<(Verdict, Option<Rea
 /// Records a review's verdict on the reviewed job, and for a reject resumes the builder's session
 /// with the findings, within `hooks.max_decisions`. Returns the line for the review's own record.
 pub(super) fn carry_out(
-    ctx: &Ctx,
+    change: &mut crate::systems::graph::Change<'_>,
     job: &Job,
     run: &Ran<'_>,
     verdict: Verdict,
@@ -146,9 +201,9 @@ pub(super) fn carry_out(
     let (Some(of), Some(seen)) = (job.review_of(), run.reviewing) else {
         return Ok(format!("verdict {}, but this job reviews no branch", verdict.as_str()));
     };
-    let family = run.model.map(model_family);
-    // Who this review is, and where the branch is, now: both can have changed since the review started.
-    let world = ctx.world()?;
+    let (ctx, family) = (change.ctx(), run.model.map(model_family));
+    // Who this review is, and where the branch is, now (under the lock): both can have changed since it started.
+    let world = change.world();
     let unchained = world.jobs().get(&job.name).and_then(|r| r.unchained.clone());
     let stale_head = world.jobs().get(of).and_then(tip).filter(|t| *t != seen.commit);
     let event = SessionEvent::Reviewed {
@@ -160,7 +215,8 @@ pub(super) fn carry_out(
         family,
         stale_head: stale_head.clone(),
     };
-    port(ctx, job).emit(event)?;
+    // Recorded in the change, so the reject is among the verdicts the builder's resume counts.
+    change.record(&port(ctx, job), vec![event])?;
     let said = match reason {
         Some(r) => format!("review of {of}: {} ({})", verdict.as_str(), r.as_str()),
         None => format!("review of {of}: {}", verdict.as_str()),
@@ -188,60 +244,60 @@ pub(super) fn carry_out(
         reason.map_or("other", Reason::as_str),
         checkpoint::bounded(findings.trim(), 4096)
     );
-    Ok(match crate::systems::queue::resume_reviewed(ctx, of, message)? {
+    Ok(match crate::systems::queue::resume_reviewed(change, of, &job.name, message)? {
         None => format!("{said}; {of} resumed with the findings"),
         Some(why) => format!("{said}; {of} not resumed: {why}"),
     })
 }
 
 /// The commit a build job's branch is at in its clone, when it still has one.
-fn tip(b: &Job) -> Option<String> {
+pub(super) fn tip(b: &Job) -> Option<String> {
     let dir = b.workdir.as_ref().filter(|d| d.path().exists())?;
     dir.rev(&format!("refs/heads/{}", b.branch.as_ref()?))
 }
 
-/// After a reviewed job's run ended done: resumes the chained reviewer whose latest verdict on it was a reject
-/// or was for a head the branch had left, so the board's verdict is for the new tip. The reviewer's ref is fetched again when it starts, and its
+/// After a reviewed job's run ended done: resumes the chained reviewer whose latest verdict on it was a reject,
+/// was for a head the branch had left, or accepted a commit that is not the tip the run ended at (`Job::head`:
+/// a person resumed the builder after the accept), so the board's verdict is for the new tip and what waits on
+/// the chain is released by an accept of it. The reviewer's ref is fetched again when it starts, and its
 /// preamble names the new commit. Bounded as the builder's own resume is. Returns who was resumed.
 pub(super) fn rereview(ctx: &Ctx, builder: &str) -> Result<Vec<String>> {
     resume_rejecting(ctx, builder, None)
 }
 
-/// After a review ended: when the builder it rejected (or whose head moved under the review) answered and ended
-/// before this review was marked ended (so `rereview` found it still running), the builder's tip has moved past
-/// the commit the review judged and nobody else will ask for the new one: resume it now.
+/// After a review ended: when the builder it rejected (or whose head moved under the review, or whose tip it
+/// accepted) ran on and ended before this review was marked ended (so `rereview` found it still running), the
+/// builder's tip has moved past the commit the review judged and nobody else will ask for the new one: resume
+/// it now.
 pub(super) fn rereview_if_overtaken(ctx: &Ctx, reviewer: &str) -> Result<Vec<String>> {
     let world = ctx.world()?;
     let Some(of) = world.jobs().get(reviewer).and_then(|r| r.review_of()) else { return Ok(Vec::new()) };
     resume_rejecting(ctx, of, Some(reviewer))
 }
 
-/// The reviewers of `builder` (just `only`, when named) that rejected it last and can be asked again.
-/// With `only`, the builder must be done and past the commit judged.
+/// The reviewers of `builder` (just `only`, when named) whose last verdict does not stand for what it ended
+/// with ([`crate::world::World::rereview_due`]), and can be asked again.
 fn resume_rejecting(ctx: &Ctx, builder: &str, only: Option<&str>) -> Result<Vec<String>> {
     let world = ctx.world()?;
-    let Some(b) = world.jobs().get(builder) else { return Ok(Vec::new()) };
-    let rejecting: Vec<&str> = world
+    // The builder's end and the review's ask by the same test (`World::rereview_due`), so neither order of the
+    // two loses it; the resume is recorded by that test again under the jobs lock, so neither asks twice.
+    let rejecting: Vec<(&str, &crate::world::Reviewed)> = world
         .jobs()
         .values()
-        .filter(|r| r.review_of() == Some(builder) && r.unchained.is_none() && only.is_none_or(|o| o == r.name))
-        .filter(|r| {
-            let last = b.verdicts.iter().rev().find(|v| v.reviewer == r.name);
-            last.is_some_and(|v| {
-                v.wants_again()
-                    && (only.is_none()
-                        || (b.status == crate::world::Status::Done && tip(b).is_some_and(|t| t != v.commit)))
-            })
-        })
-        .map(|r| r.name.as_str())
+        .filter(|r| only.is_none_or(|o| o == r.name))
+        .filter_map(|r| Some((r.name.as_str(), world.rereview_due(builder, &r.name)?)))
         .collect();
     let mut resumed = Vec::new();
-    for reviewer in rejecting {
-        let stale = b.verdicts.iter().rev().find(|v| v.reviewer == reviewer).is_some_and(|v| v.stale_head.is_some());
-        let why = if stale {
-            format!("{builder}'s branch moved while you were judging it, so that verdict is not for its head.")
-        } else {
-            format!("{builder} has answered your findings and ended its run.")
+    for (reviewer, v) in rejecting {
+        let why = match v {
+            v if v.stale_head.is_some() => {
+                format!("{builder}'s branch moved while you were judging it, so that verdict is not for its head.")
+            }
+            v if !v.wants_again() => format!(
+                "{builder} worked on after you accepted {}, so your accept is not for its tip.",
+                v.commit.get(..12).unwrap_or(&v.commit)
+            ),
+            _ => format!("{builder} has answered your findings and ended its run."),
         };
         let message = format!(
             "{why} Judge its branch again, now at the commit named above, and end with your FINAL section and a verdict."
@@ -256,6 +312,240 @@ fn resume_rejecting(ctx: &Ctx, builder: &str, only: Option<&str>) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A project in a scratch directory whose job ceiling refuses every resume a review asks for, so a re-review
+    /// that is due shows as the chain's halt and starts nothing.
+    fn project(dir: &crate::config::tempdir::Dir) -> Ctx {
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let cfg = crate::config::Config::parse("name = \"demo\"\n[limits]\njob_ceiling_usd = 0.5\n", root).unwrap();
+        let ctx = Ctx::unclaimed(cfg, root.join("relay.toml"), root.join("state"), root.join("data"));
+        std::fs::create_dir_all(ctx.bus.join("session")).unwrap();
+        std::fs::create_dir_all(&ctx.jobs).unwrap();
+        ctx
+    }
+
+    fn put(ctx: &Ctx, file: &str, t: u64, event: serde_json::Value) {
+        use std::io::Write as _;
+        let mut v = event;
+        v["t"] = t.into();
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(ctx.bus.join(file)).unwrap();
+        writeln!(f, "{v}").unwrap();
+    }
+
+    fn json(e: impl serde::Serialize) -> serde_json::Value {
+        serde_json::to_value(e).unwrap()
+    }
+
+    /// The bus up to the builder ending on a tip past the one `rev` accepted, while `rev` has not ended yet.
+    fn accepted_then_overtaken(ctx: &Ctx) {
+        use crate::bus::{DispatchEvent, Outcome, QueueEvent};
+        let dispatched = |job: &str| {
+            json(DispatchEvent::Dispatched {
+                job: job.into(),
+                account: "c:w".into(),
+                model: None,
+                provider: String::new(),
+                runner_pid: 7,
+                runner_started: 1,
+            })
+        };
+        let ended = |job: &str, head: &str| {
+            let head = Some(head.to_owned()).filter(|h| !h.is_empty());
+            json(SessionEvent::Ended {
+                job: job.into(),
+                outcome: Outcome::Done,
+                cost_usd: 0.0,
+                turns: 1,
+                reason: None,
+                head,
+            })
+        };
+        let queued = r#"{"type":"queued","job":"build","task":"x","readonly":false,"effort":null,"budget_usd":1.0,"pinned":null}"#;
+        put(ctx, "queue.ndjson", 1, serde_json::from_str(queued).unwrap());
+        put(ctx, "dispatch.ndjson", 2, dispatched("build"));
+        put(ctx, "session/build.1.1.ndjson", 3, ended("build", "c1"));
+        let review = r#"{"type":"queued","job":"rev","task":"x","readonly":true,"effort":null,"budget_usd":1.0,"pinned":null,"after":["build"],"acceptance":{"review-of":"build"}}"#;
+        put(ctx, "queue.ndjson", 4, serde_json::from_str(review).unwrap());
+        put(ctx, "dispatch.ndjson", 5, dispatched("rev"));
+        let accept = SessionEvent::Reviewed {
+            job: "rev".into(),
+            of: "build".into(),
+            commit: "c1".into(),
+            verdict: Verdict::Accept,
+            reason: None,
+            family: None,
+            stale_head: None,
+        };
+        put(ctx, "session/rev.4.1.ndjson", 6, json(accept));
+        let resumed = QueueEvent::Resumed {
+            job: "build".into(),
+            message: "more".into(),
+            budget_usd: None,
+            models: std::collections::BTreeMap::new(),
+        };
+        put(ctx, "queue.ndjson", 7, json(resumed));
+        put(ctx, "dispatch.ndjson", 8, dispatched("build"));
+        put(ctx, "session/build.1.2.ndjson", 9, ended("build", "c2"));
+    }
+
+    /// Whether the chain asked `rev` to judge again: the project's ceiling refuses it, which the bus records.
+    fn asked_again(ctx: &Ctx) -> bool {
+        ctx.world().unwrap().jobs()["build"].review_halted.as_deref().is_some_and(|h| h.contains("ceiling"))
+    }
+
+    /// Copilot on PR #69: an accept the builder went past is judged again whichever end comes last, the builder's
+    /// (it resumes the review) or the review's (it was still running when the builder ended, so it asks itself).
+    #[test]
+    fn an_accept_the_builder_went_past_is_judged_again_in_either_order() {
+        let ended_rev = |ctx: &Ctx| {
+            let e = SessionEvent::Ended {
+                job: "rev".into(),
+                outcome: crate::bus::Outcome::Done,
+                cost_usd: 0.0,
+                turns: 1,
+                reason: None,
+                head: None,
+            };
+            put(ctx, "session/rev.4.1.ndjson", 10, json(e));
+        };
+        // The review ends first; the builder's end asks.
+        let dir = crate::config::tempdir::Dir::new();
+        let ctx = project(&dir);
+        accepted_then_overtaken(&ctx);
+        ended_rev(&ctx);
+        rereview(&ctx, "build").unwrap();
+        assert!(asked_again(&ctx), "the builder's end: {:?}", ctx.world().unwrap().jobs()["build"]);
+
+        // The builder ends first, while the review still runs: its end cannot resume it; the review's end asks.
+        let dir = crate::config::tempdir::Dir::new();
+        let ctx = project(&dir);
+        accepted_then_overtaken(&ctx);
+        rereview(&ctx, "build").unwrap();
+        assert!(!asked_again(&ctx), "a running review is not resumed");
+        ended_rev(&ctx);
+        rereview_if_overtaken(&ctx, "rev").unwrap();
+        assert!(asked_again(&ctx), "the review's end: {:?}", ctx.world().unwrap().jobs()["build"]);
+    }
+
+    /// Copilot on PR #69 (queue.rs:492): whether a re-review is due is decided under the jobs lock, on the world
+    /// as it is then. The builder's end and the review's both found rev due; one resumed it, and it accepted the
+    /// new tip and ended before the other took the lock: that one asks for nothing, the accept stands.
+    #[test]
+    fn a_re_review_another_end_already_got_is_not_asked_for_again() {
+        use crate::bus::{DispatchEvent, Outcome, QueueEvent};
+        let dir = crate::config::tempdir::Dir::new();
+        let ctx = project(&dir);
+        accepted_then_overtaken(&ctx);
+        let ended = SessionEvent::Ended {
+            job: "rev".into(),
+            outcome: Outcome::Done,
+            cost_usd: 0.0,
+            turns: 1,
+            reason: None,
+            head: None,
+        };
+        put(&ctx, "session/rev.4.1.ndjson", 10, json(ended.clone()));
+        // The first end's resume, and the run it started: an accept of c2, the builder's tip.
+        let resumed = QueueEvent::Resumed {
+            job: "rev".into(),
+            message: "again".into(),
+            budget_usd: None,
+            models: std::collections::BTreeMap::new(),
+        };
+        put(&ctx, "queue.ndjson", 11, json(resumed));
+        let dispatched = DispatchEvent::Dispatched {
+            job: "rev".into(),
+            account: "c:w".into(),
+            model: None,
+            provider: String::new(),
+            runner_pid: 7,
+            runner_started: 1,
+        };
+        put(&ctx, "dispatch.ndjson", 12, json(dispatched));
+        let accept = SessionEvent::Reviewed {
+            job: "rev".into(),
+            of: "build".into(),
+            commit: "c2".into(),
+            verdict: Verdict::Accept,
+            reason: None,
+            family: None,
+            stale_head: None,
+        };
+        put(&ctx, "session/rev.4.2.ndjson", 13, json(accept));
+        put(&ctx, "session/rev.4.2.ndjson", 14, json(ended));
+        let world = ctx.world().unwrap();
+        let last = world.jobs()["build"].verdicts.last().unwrap();
+        assert_eq!((last.commit.as_str(), world.jobs()["rev"].status), ("c2", crate::world::Status::Done));
+
+        // The second end, which chose rev before that run: it asks under the lock, and is told no.
+        let why = crate::systems::queue::resume_reviewer(&ctx, "rev", "build", "judge again".into()).unwrap();
+        assert!(why.is_some_and(|w| w.contains("stands")), "rev's accept is of build's tip");
+        assert!(!asked_again(&ctx), "nothing was asked: {:?}", ctx.world().unwrap().jobs()["build"]);
+    }
+
+    /// Copilot on PR #69 (review.rs:306): a rejected builder that answers without a commit, and ends before the
+    /// review it answered is marked ended, ends on the tip that was rejected. It answered all the same: the
+    /// review's end asks for the re-review, or what waits on the chain stays at "re-review due" for ever.
+    #[test]
+    fn a_reject_answered_on_the_same_tip_before_the_review_ended_is_judged_again() {
+        use crate::bus::{DispatchEvent, Outcome, QueueEvent};
+        let dir = crate::config::tempdir::Dir::new();
+        let ctx = project(&dir);
+        let dispatched = |job: &str| {
+            json(DispatchEvent::Dispatched {
+                job: job.into(),
+                account: "c:w".into(),
+                model: None,
+                provider: String::new(),
+                runner_pid: 7,
+                runner_started: 1,
+            })
+        };
+        let ended = |job: &str, head: Option<&str>| {
+            let head = head.map(str::to_owned);
+            json(SessionEvent::Ended {
+                job: job.into(),
+                outcome: Outcome::Done,
+                cost_usd: 0.0,
+                turns: 1,
+                reason: None,
+                head,
+            })
+        };
+        let queued = r#"{"type":"queued","job":"build","task":"x","readonly":false,"effort":null,"budget_usd":1.0,"pinned":null}"#;
+        put(&ctx, "queue.ndjson", 1, serde_json::from_str(queued).unwrap());
+        put(&ctx, "dispatch.ndjson", 2, dispatched("build"));
+        put(&ctx, "session/build.1.1.ndjson", 3, ended("build", Some("c1")));
+        let review = r#"{"type":"queued","job":"rev","task":"x","readonly":true,"effort":null,"budget_usd":1.0,"pinned":null,"after":["build"],"acceptance":{"review-of":"build"}}"#;
+        put(&ctx, "queue.ndjson", 4, serde_json::from_str(review).unwrap());
+        put(&ctx, "dispatch.ndjson", 5, dispatched("rev"));
+        let reject = SessionEvent::Reviewed {
+            job: "rev".into(),
+            of: "build".into(),
+            commit: "c1".into(),
+            verdict: Verdict::Reject,
+            reason: Some(Reason::TestFailure),
+            family: None,
+            stale_head: None,
+        };
+        put(&ctx, "session/rev.4.1.ndjson", 6, json(reject));
+        let resumed = QueueEvent::Resumed {
+            job: "build".into(),
+            message: "findings".into(),
+            budget_usd: None,
+            models: std::collections::BTreeMap::new(),
+        };
+        put(&ctx, "queue.ndjson", 7, json(resumed));
+        put(&ctx, "dispatch.ndjson", 8, dispatched("build"));
+        // It answered with no commit: the same tip.
+        put(&ctx, "session/build.1.2.ndjson", 9, ended("build", Some("c1")));
+        rereview(&ctx, "build").unwrap();
+        assert!(!asked_again(&ctx), "the review is still running: its own end asks");
+        put(&ctx, "session/rev.4.1.ndjson", 10, ended("rev", None));
+        rereview_if_overtaken(&ctx, "rev").unwrap();
+        assert!(asked_again(&ctx), "the review's end: {:?}", ctx.world().unwrap().jobs()["build"]);
+    }
 
     #[test]
     fn a_verdict_is_read_from_the_final_section_only() {
@@ -277,12 +567,60 @@ mod tests {
             commit: "abc".into(),
             base: Some("def".into()),
         };
-        let p = preamble(&r);
+        let p = preamble(&r, Path::new("/in/builder-result.md"));
         assert!(
             p.contains("at commit abc")
                 && p.contains("git diff def..refs/relay/review/r")
-                && p.contains("exactly that commit"),
+                && p.contains("exactly that commit")
+                && p.contains("b's last result, its FINAL section and the summary above it as of this start, is in `/in/builder-result.md`"),
             "{p}"
         );
+    }
+
+    #[test]
+    fn the_builders_result_is_handed_over_as_it_is_and_its_absence_is_said() {
+        let with = builder_result("b", Some("Did the parser.\n\nFINAL\nstatus: done\n"), "FINAL");
+        assert!(
+            with.contains("its FINAL section and what it wrote above it")
+                && with.contains("Did the parser.\n\nFINAL\nstatus: done"),
+            "{with}"
+        );
+        let without = builder_result("b", Some("I ran out of turns."), "FINAL");
+        assert!(
+            without.contains("ended without a FINAL section") && without.contains("I ran out of turns."),
+            "{without}"
+        );
+        for none in [None, Some("  \n")] {
+            let none = builder_result("b", none, "FINAL");
+            assert!(none.contains("left no final message, so there is no FINAL section"), "{none}");
+        }
+        // Copilot on PR #69: a summary past the bound must not take the final section with it.
+        let section = "FINAL\nstatus: done\nnotes: all of it";
+        let summary = "é".repeat(BUILDER_RESULT_MAX);
+        let big = builder_result("b", Some(&format!("{summary}\n{section}")), "FINAL");
+        assert!(
+            big.contains("its FINAL section and what it wrote above it") && big.ends_with(&format!("{section}\n")),
+            "kept"
+        );
+        assert!(
+            big.len() < BUILDER_RESULT_MAX + 512 && big.contains("earlier bytes left out)\néé"),
+            "the summary's end"
+        );
+        let whole = format!("FINAL\n{}", "y".repeat(BUILDER_RESULT_MAX + 10));
+        let huge = builder_result("b", Some(&format!("summary\n{whole}")), "FINAL");
+        assert!(
+            huge.ends_with(&format!("{whole}\n")) && !huge.contains("summary\n"),
+            "a final section past the bound is whole"
+        );
+        // Copilot on PR #69 (review.rs:111): with `session.final_marker = ""` any nonempty answer is the
+        // report, as the run's verdict and the review's own verdict read it; so it is handed over as one.
+        let unmarked = builder_result("b", Some("Did the parser.\nstatus: done"), "");
+        assert!(
+            unmarked.contains("its final report.") && unmarked.contains("Did the parser.\nstatus: done"),
+            "{unmarked}"
+        );
+        assert!(!unmarked.contains("do not take it for a report"), "{unmarked}");
+        let long = builder_result("b", Some(&"x".repeat(BUILDER_RESULT_MAX + 10)), "FINAL");
+        assert!(long.len() < BUILDER_RESULT_MAX + 512 && long.contains("(10 more bytes)"), "bounded");
     }
 }

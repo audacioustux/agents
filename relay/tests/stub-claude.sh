@@ -20,10 +20,12 @@
 #   cargo    appended to with every session's CARGO_INCREMENTAL (`unset` when it has none)
 #   env      the session's whole environment, sorted, written by a brief containing [env]
 #   once     only the first session turn there commits (it writes once.done); later ones, resumes too, commit nothing
+#   builder-results  appended to (then `--`) by every review whose prompt names its builder's result file: that file as the session reads it
 # A brief containing [idle] makes no commit; one containing [status-done] reports status: done;
 # [verdict-accept] and [verdict-reject] also give a review's verdict; [wake] writes the report in a wake-up turn; [uncommitted] leaves a changed tracked
 # file and an untracked one behind after its commit; [filter] leaves a clean filter in the clone's own configuration
 # plus diff.external and a textconv driver (and a .gitattributes using them) that touch $acct/filter-ran if anything on the host ever runs it.
+# [hold-after] touches $acct/hold once it has answered, so the next sessions there wait until the test removes it.
 # [plant-check] plants, like a hostile session, symlinks in every relay job directory it can write: where the
 # acceptance check's output went (check.out, to $acct/victim) and its /tmp (check-tmp, to $HOME).
 # [plant-config] tries to create, in its own account, config the host would obey: a settings.json with a hook and a hooks/ script.
@@ -113,6 +115,10 @@ case "$prompt" in
 *"Judge its branch again"*) final="FINAL\\nstatus: done\\nverdict: $(cat "$acct/rereview" 2>/dev/null || echo accept)" ;;
 esac
 printf '%s\n--\n' "$prompt" >>"$acct/prompts"
+case "$prompt" in *"builder-result.md"*)
+  path=$(printf '%s\n' "$prompt" | sed -n 's/.*is in `\([^`]*builder-result\.md\)`.*/\1/p' | head -n 1)
+  { cat "$path" 2>/dev/null || echo "unreadable: $path"; echo "--"; } >>"$acct/builder-results" ;;
+esac
 case "$prompt" in *"[env]"*) env | sort >"$acct/env" ;; esac
 case "$prompt" in *"[idle]"*) ;; *)
 if [ -w . ] && [ -e .git ] && [ ! -f "$acct/once.done" ]; then
@@ -155,5 +161,6 @@ case "$prompt" in *"[wake]"*)
   printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"%s","origin":{"kind":"task-notification"},"num_turns":2,"total_cost_usd":%s}\n' "$sid" "$final" "$cost"
   exit 0 ;;
 esac
+case "$prompt" in *"[hold-after]"*) : >"$acct/hold" ;; esac
 # printf, not echo: dash's echo turns \n into a real newline and splits the JSON line.
 printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"ran on %s with %s transcript turns\\n%s","num_turns":1,"total_cost_usd":%s}\n' "$sid" "$(basename "$acct")" "$turns" "$final" "$cost"

@@ -8,15 +8,22 @@ GitHub plan; jobs run here instead of drawing on the hosted-runner quota.
 
 | Service | Scope | Label | Replicas |
 |---|---|---|---|
-| `runner-tickify-nonprod` | repo `stage-crew/tickify` | `dokploy-tickify-nonprod` | 2 (10 CPUs each) |
-| `runner-tickify` | repo `stage-crew/tickify` | `dokploy-tickify` only | 1 (4 CPUs, 8 GB) |
-| `runner-optics` | repo `nobinalo/Optics` | `dokploy-optics` | 2 (4 CPUs each, idle cores only) |
+| `runner-tickify-nonprod` | org `stage-crew` | `dokploy-tickify-nonprod` | 2 (10 CPUs each) |
+| `runner-tickify` | org `stage-crew` | `dokploy-tickify` only | 1 (4 CPUs, 8 GB) |
+| `runner-optics` | org `nobinalo` | `dokploy-optics` | 2 (4 CPUs each, idle cores only) |
 
 A runner registers to exactly one scope, so each pool is its own service;
 scaling is its `deploy.replicas`. A TheGrid pool was tried and retired:
 that workspace's kernel-adjacent surface (io_uring, O_DIRECT, seccomp
 prctl) keeps colliding with container confinement, so its CI stays on
 hosted runners. Add pools only for repos whose jobs are container-clean.
+
+Org scope means a pool's runners are offered to every repository of that
+organisation, not just the one the pool was built for. The labels are what
+keep the pools apart: only a job asking for `dokploy-tickify-nonprod` can
+take the nonprod pool. A runner group restricted to selected repositories
+would narrow the scope further, at the cost of managing the group by hand
+alongside the labels.
 
 ## Files
 
@@ -30,13 +37,15 @@ hosted runners. Add pools only for repos whose jobs are container-clean.
 3. Use `compose.yml` as the Compose file.
 4. Set the variables from `.env.example` in Dokploy env, every one of them:
    a missing token fails the whole deploy, and the running pools stay as
-   they are. Each pool reads `<POOL>_REPO_URL` and `<POOL>_ACCESS_TOKEN`
-   (`TICKIFY_…`, `OPTICS_…`). A deployment set up before these names has
+   they are. Each pool reads `<POOL>_ORG_ACCESS_TOKEN`
+   (`TICKIFY_…`, `NOBINALO_…`). A deployment set up before these names has
    tickify's as `REPO_URL` and `ACCESS_TOKEN`: rename them
    `TICKIFY_REPO_URL` and `TICKIFY_ACCESS_TOKEN`, and add
-   `OPTICS_REPO_URL` and `OPTICS_ACCESS_TOKEN`, before redeploying.
-5. Deploy. Runners appear under each repo's Settings → Actions → Runners,
-   named `dokploy-tickify-nonprod-…`, `dokploy-tickify-…` and
+   `OPTICS_REPO_URL` and `OPTICS_ACCESS_TOKEN`, before redeploying. The
+   current names replace that set with one org-scoped token per organisation;
+   `TICKIFY_REPO_URL` and `OPTICS_REPO_URL` are no longer read and can go.
+5. Deploy. Runners appear under each organisation's Settings → Actions →
+   Runners, named `dokploy-tickify-nonprod-…`, `dokploy-tickify-…` and
    `dokploy-optics-…`.
 
 ## Runtime
@@ -47,10 +56,10 @@ hosted runners. Add pools only for repos whose jobs are container-clean.
   workflow `services:` containers (Tickify's CI runs postgres:18 and
   redis:8) run as siblings on the host daemon. Optics' jobs start no
   containers, so its pool has neither, and runs on the stack's own network.
-- Secrets: each pool is given only its own repo's token. The image
+- Secrets: each pool is given only its own organisation's token. The image
   un-exports `ACCESS_TOKEN`, but any other variable reaches every job, so a
-  shared `.env` would hand each pool's `<POOL>_ACCESS_TOKEN` to the other's
-  jobs. A pool's own token stays readable by its root jobs
+  shared `.env` would hand each pool's `<POOL>_ORG_ACCESS_TOKEN` to the
+  other's jobs. A pool's own token stays readable by its root jobs
   (`/proc/1/environ`).
 - CPU: tickify's two replicas hold the host's 20 cores. Optics' replicas
   borrow idle ones at a small weight (`cpu_shares: 64` each against

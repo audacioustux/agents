@@ -33,7 +33,8 @@ pub struct Counts {
     pub paused: usize,
     /// Failed jobs.
     pub failed: usize,
-    /// Jobs only a human moves on: the failed, and the queued that are blocked.
+    /// Jobs only a human moves on: the failed, and those blocked behind a dependency that ended
+    /// unfinished, queued or held by the disk floor (the latter are also in `paused`).
     pub need_human: usize,
     /// `limits.max_running` of the project these are the counts of, when there is one.
     pub max_running: Option<usize>,
@@ -45,27 +46,27 @@ impl Counts {
     pub fn of<'a>(jobs: impl IntoIterator<Item = (&'a Project, &'a Job)>, cfg: &Config, room: &Room, now: u64) -> Self {
         let mut c = Self::default();
         for (p, j) in jobs {
-            match j.status {
-                Status::Running => c.running += 1,
-                Status::Checking => c.checking += 1,
-                Status::Failed => {
-                    c.failed += 1;
-                    c.need_human += 1;
-                }
-                Status::Stopped if j.held => c.paused += 1,
-                Status::Stopped | Status::Done => {}
-                Status::Queued => {
+            let (bucket, human) = classify(p, j, cfg, room, now);
+            c.need_human += usize::from(human);
+            match bucket {
+                Bucket::Running => c.running += 1,
+                Bucket::Checking => c.checking += 1,
+                Bucket::Failed => c.failed += 1,
+                Bucket::Paused => c.paused += 1,
+                Bucket::Ended => {}
+                Bucket::Blocked => {
                     c.queued += 1;
-                    let waits = p.world.waits(j);
-                    if waits.iter().any(|w| w.blocked) {
-                        c.blocked += 1;
-                        c.need_human += 1;
-                    } else if !waits.is_empty() {
-                        c.waiting_on_job += 1;
-                    } else if let Some(h) = p.own.then(|| room.hold(cfg, j, now)).flatten() {
-                        *c.held.entry(name_of(h.cause, j)).or_default() += 1;
-                    }
+                    c.blocked += 1;
                 }
+                Bucket::WaitingOnJob => {
+                    c.queued += 1;
+                    c.waiting_on_job += 1;
+                }
+                Bucket::Held(by) => {
+                    c.queued += 1;
+                    *c.held.entry(by).or_default() += 1;
+                }
+                Bucket::Next => c.queued += 1,
             }
         }
         c
@@ -150,5 +151,85 @@ fn name_of(cause: Cause, j: &Job) -> String {
         Cause::Disk => "disk floor".into(),
         Cause::Setup => "dev shell".into(),
         Cause::Accounts => "account limits".into(),
+    }
+}
+
+/// The one count a job belongs to.
+#[derive(Debug, PartialEq, Eq)]
+enum Bucket {
+    Running,
+    Checking,
+    Failed,
+    /// Stopped by the disk floor, to resume by itself.
+    Paused,
+    /// Done, or stopped by a person: counted nowhere.
+    Ended,
+    /// Queued, behind a dependency that ended unfinished.
+    Blocked,
+    /// Queued, behind a dependency still live.
+    WaitingOnJob,
+    /// Queued, held by this named cause.
+    Held(String),
+    /// Queued and next in line.
+    Next,
+}
+
+/// A job's one bucket and whether only a human moves it on, decided together here and nowhere else, so
+/// no path can count a job's need of a human differently from the bucket it is in. A human is needed
+/// when the job failed or can never start on its own ([`crate::world::World::blocked`]): a queued job
+/// and a disk-held stopped one alike, whatever bucket the latter is counted in.
+fn classify(p: &Project, j: &Job, cfg: &Config, room: &Room, now: u64) -> (Bucket, bool) {
+    let human = j.status == Status::Failed || p.world.blocked(j);
+    let bucket = match j.status {
+        Status::Running => Bucket::Running,
+        Status::Checking => Bucket::Checking,
+        Status::Failed => Bucket::Failed,
+        Status::Stopped if j.held => Bucket::Paused,
+        Status::Stopped | Status::Done => Bucket::Ended,
+        Status::Queued if human => Bucket::Blocked,
+        Status::Queued if !p.world.waits(j).is_empty() => Bucket::WaitingOnJob,
+        Status::Queued => {
+            p.own.then(|| room.hold(cfg, j, now)).flatten().map_or(Bucket::Next, |h| Bucket::Held(name_of(h.cause, j)))
+        }
+    };
+    (bucket, human)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::World;
+
+    /// A job the disk floor stopped, whose prerequisite then failed, can never be resumed by the
+    /// dispatcher: it needs a human, whichever bucket it is counted in.
+    #[test]
+    fn a_disk_held_job_behind_a_failed_one_needs_a_human() {
+        let dir = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let cfg = Config::parse("name = \"demo\"\n", dir.path()).unwrap();
+        let job = |name: &str, status, after: &[&str], held| Job {
+            name: name.into(),
+            status,
+            held,
+            after: after.iter().map(|a| (*a).to_owned()).collect(),
+            ..Job::default()
+        };
+        let mut world = World::default();
+        for j in [
+            job("base", Status::Failed, &[], false),
+            job("paused-ok", Status::Stopped, &[], true),
+            job("paused-blocked", Status::Stopped, &["base"], true),
+            job("stopped-by-hand", Status::Stopped, &["base"], false),
+            job("queued-blocked", Status::Queued, &["base"], false),
+        ] {
+            world.jobs_mut().insert(j.name.clone(), j);
+        }
+        let p = Project { name: "demo".into(), jobs: dir.path().into(), world, own: true };
+        let jobs: Vec<_> = p.world.jobs().values().map(|j| (&p, j)).collect();
+        let c = Counts::of(jobs, &cfg, &Room::default(), 0);
+        // One count each: the failed base, the two paused, the blocked queued one.
+        assert_eq!((c.failed, c.paused, c.queued, c.blocked), (1, 2, 1, 1), "{c:?}");
+        assert_eq!(c.need_human, 3, "base, paused-blocked, queued-blocked: {c:?}");
+        assert!(c.line().contains("3 need a human"), "{}", c.line());
     }
 }

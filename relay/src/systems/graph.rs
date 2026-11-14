@@ -84,7 +84,8 @@ impl<'a> Change<'a> {
 /// The first job `event` names that `world` has not recorded and the event does not itself create: `None`
 /// when it can be published now. A queued job names its `--after` jobs (the acceptance gate is no job), the
 /// job it forks, its parent and the build it reviews; an `unchained` names the review that replaced it; a
-/// halt names its review; a verdict the build it judged; every other event its own job.
+/// halt names its review; a verdict the build it judged; every other event its own job. A release names its
+/// job but not the prerequisites it drops: taking a name away leaves nothing pointing at what is not there.
 pub fn unpublished(world: &World, event: &Event) -> Option<String> {
     let mut named: Vec<&str> = Vec::new();
     match event {
@@ -98,12 +99,10 @@ pub fn unpublished(world: &World, event: &Event) -> Option<String> {
             named.extend([Some(job.as_str()), by.as_deref()].into_iter().flatten());
         }
         Event::Queue(QueueEvent::ReviewHalted { job, review, .. }) => named.extend([job.as_str(), review.as_str()]),
-        Event::Queue(QueueEvent::Released { job, from }) => {
-            named.push(job);
-            named.extend(from.iter().map(String::as_str));
-        }
+        // A release only takes names away: the prerequisites it drops may be gone (cleaned away) already.
         Event::Queue(
-            QueueEvent::Resumed { job, .. }
+            QueueEvent::Released { job, .. }
+            | QueueEvent::Resumed { job, .. }
             | QueueEvent::Rerouted { job, .. }
             | QueueEvent::Forced { job }
             | QueueEvent::Dequeued { job }
@@ -150,7 +149,7 @@ mod tests {
             format!(r#"{{{QUEUED},"job":"new","parent":"{{n}}"}}"#),
             r#"{"type":"unchained","job":"rev","by":"{n}"}"#.to_owned(),
             r#"{"type":"resumed","job":"{n}","message":"m","budget_usd":null}"#.to_owned(),
-            r#"{"type":"released","job":"next","from":["{n}"]}"#.to_owned(),
+            r#"{"type":"released","job":"{n}","from":["build"]}"#.to_owned(),
             r#"{"type":"review-halted","job":"build","review":"{n}","why":"w"}"#.to_owned(),
             r#"{"type":"review-briefed","job":"{n}","brief":"b"}"#.to_owned(),
             r#"{"type":"dequeued","job":"{n}"}"#.to_owned(),
@@ -162,6 +161,9 @@ mod tests {
             assert_eq!(unpublished(&world, &ev(kind, "ghost")).as_deref(), Some("ghost"), "{kind}: a job not there");
             assert_eq!(unpublished(&world, &ev(kind, "build")), None, "{kind}: one that is");
         }
+        // Copilot on PR #69 (graph.rs:103): a release may drop a prerequisite that was cleaned away.
+        let gone = ev(r#"{"type":"released","job":"next","from":["{n}"]}"#, "ghost");
+        assert_eq!(unpublished(&world, &gone), None, "a release from a job that is gone takes a name away");
         let new = ev(&format!(r#"{{{QUEUED},"job":"{{n}}"}}"#), "ghost");
         assert_eq!(unpublished(&world, &new), None, "a job queued is created by its own event");
     }

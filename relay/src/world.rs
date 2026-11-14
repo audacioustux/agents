@@ -2449,20 +2449,22 @@ mod tests {
         assert_eq!(World::fold(&[run_by(1, "nobody", (7, 1))]).claims.len(), 0);
     }
 
+    /// Each `FOLD_VERSION` with the digest of the fold of the fixed bus it was recorded at (see below).
+    const PINNED: &[(u32, u64)] = &[
+        (13, 0x1d75_bf1b_971c_dfd9),
+        (14, 0x0599_7a27_1a95_7bbd),
+        (15, 0x5351_e6de_0d8d_bfd8),
+        (16, 0x5351_e6de_0d8d_bfd8),
+        (17, 0x2132_12e7_f06d_d32d),
+        (18, 0x4bb9_80c4_5c80_027a),
+        (19, 0xff2a_3110_25d7_0f54),
+        (20, 0xff2a_3110_25d7_0f54),
+        (21, 0xff2a_3110_25d7_0f54),
+        (22, 0xff2a_3110_25d7_0f54),
+    ];
+
     #[test]
     fn the_fold_version_moves_with_the_fold() {
-        const PINNED: &[(u32, u64)] = &[
-            (13, 0x1d75_bf1b_971c_dfd9),
-            (14, 0x0599_7a27_1a95_7bbd),
-            (15, 0x5351_e6de_0d8d_bfd8),
-            (16, 0x5351_e6de_0d8d_bfd8),
-            (17, 0x2132_12e7_f06d_d32d),
-            (18, 0x4bb9_80c4_5c80_027a),
-            (19, 0xff2a_3110_25d7_0f54),
-            (20, 0xff2a_3110_25d7_0f54),
-            (21, 0xff2a_3110_25d7_0f54),
-            (22, 0xff2a_3110_25d7_0f54),
-        ];
         let dispatched = |t, model: Option<&str>, runner_pid| {
             st(
                 t,

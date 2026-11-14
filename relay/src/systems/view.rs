@@ -672,10 +672,10 @@ fn ended(ctx: &Ctx, name: &str) -> Result<Job> {
         }
         if !world.moves_on_its_own(&j) {
             let why = Wait::summary(&world.waits(&j)).unwrap_or_else(|| "cannot start on its own".into());
-            fail!(
-                Conflict,
-                "{name} {why}, so it will not end on its own: queue that job again, or relay queue release {name}"
-            );
+            let release = crate::systems::hint::Cmd::new(name, crate::systems::hint::Step::Release(Vec::new()));
+            let or =
+                crate::systems::hint::hint(&world, &[vec![release]]).map_or_else(String::new, |h| format!(", or {h}"));
+            fail!(Conflict, "{name} {why}, so it will not end on its own: queue that job again{or}");
         }
         if quiet {
             ctx.wake_dispatch()?;

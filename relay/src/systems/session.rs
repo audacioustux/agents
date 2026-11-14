@@ -383,8 +383,21 @@ fn seat<'a>(ctx: &Ctx, job: &Job, found: &'a [Home]) -> Step<Seat<'a>> {
 fn workspace(ctx: &Ctx, job: &Job) -> Result<Step<Workspace>> {
     let (mut clone_dir, mut base) = (job.workdir.clone(), job.base.clone());
     if !job.readonly() && clone_dir.is_none() {
-        let bases = bases(&ctx.world()?, job);
-        let (dir, branch, made) = match clone(ctx, &job.name, &bases, job.session_id.is_some()) {
+        let world = ctx.world()?;
+        let bases = bases(&world, job);
+        // What a person can do about a base that is gone, as the job will be once refused: failed.
+        let mut failed = world.clone();
+        if let Some(j) = failed.jobs_mut().get_mut(&job.name) {
+            j.status = crate::world::Status::Failed;
+        }
+        let recover = crate::systems::hint::hint(
+            &failed,
+            &[vec![
+                crate::systems::hint::Cmd::new(&job.name, crate::systems::hint::Step::Release(bases.gone.clone())),
+                crate::systems::hint::Cmd::new(&job.name, crate::systems::hint::Step::Resume),
+            ]],
+        );
+        let (dir, branch, made) = match clone(ctx, &job.name, &bases, job.session_id.is_some(), recover.as_deref()) {
             Ok(made) => made,
             Err(e) => return Ok(ControlFlow::Break((Outcome::Failed, Some(format!("{e:#}"))))),
         };
@@ -1381,7 +1394,13 @@ pub fn pick_base(
 /// A build job with `bases` starts from the newest of their branch tips (`pick_base`).
 /// A job that has run (`ran`) and lost its clone to gc starts from its own work in
 /// the repository instead: the rescue ref gc made, else its branch as fetched.
-fn clone(ctx: &Ctx, name: &str, bases: &Bases, ran: bool) -> Result<(SessionRepo, String, Option<String>)> {
+fn clone(
+    ctx: &Ctx,
+    name: &str,
+    bases: &Bases,
+    ran: bool,
+    recover: Option<&str>,
+) -> Result<(SessionRepo, String, Option<String>)> {
     // Relay's own until the session starts, so plain git; from then on the session's (`SessionRepo`).
     let dir = ctx.clones.join(name);
     let branch = format!("{}{name}", ctx.cfg.session.branch_prefix);
@@ -1402,10 +1421,10 @@ fn clone(ctx: &Ctx, name: &str, bases: &Bases, ran: bool) -> Result<(SessionRepo
             .find(|r| ran && checkpoint_rev(&ctx.cfg.repo, r).is_some());
         // With no work of its own to go on from, it starts from its bases: all of them, or not at all.
         if own.is_none() && !bases.gone.is_empty() {
+            let recover = recover.map_or_else(String::new, |h| format!("; to start it without that work: {h}"));
             bail!(
                 "not started: the branch of {} it starts from is gone (cleaned away, or its clone collected by gc), \
-                 and starting from the repository's HEAD would leave that work out; queue it after a job whose \
-                 branch is there, or release it from that one (relay queue release {name} --from ...)",
+                 and starting from the repository's HEAD would leave that work out{recover}",
                 bases.gone.join(", ")
             );
         }

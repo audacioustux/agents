@@ -1165,6 +1165,92 @@ fn a_job_whose_dependency_failed_is_blocked_until_released() {
     assert_eq!(out.status.code(), Some(4), "nothing left to release");
 }
 
+/// Runs every command of a hint relay printed (`relay a ..., then relay b ...`), each of which must be accepted.
+fn run_hint(env: &Env, printed: &str) {
+    for step in printed.split(", then ") {
+        let args: Vec<&str> = step.trim().trim_start_matches("relay ").split_whitespace().collect();
+        ok(&relay(env, &args), &format!("the printed hint `{step}`"));
+    }
+}
+
+/// The hint that follows `after` in `text`, to the end of its sentence.
+fn hint_after<'t>(text: &'t str, after: &str) -> &'t str {
+    let at = text.find(after).unwrap_or_else(|| panic!("no `{after}` in: {text}")) + after.len();
+    text[at..].split(['\n', ';']).next().unwrap_or_default().trim().trim_end_matches('.')
+}
+
+/// Copilot on PR #69 (graph.rs:103): next's failed base is cleaned away while next is dequeued; resumed,
+/// next waits for a job that is gone. Releasing it from that job takes the name away and lets it run.
+#[test]
+fn a_job_can_be_released_from_a_prerequisite_that_was_cleaned_away() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("release-gone", false);
+    claude_account(&env.home, "a", 10, false);
+    let fail = env.home.join(".claude.a/fail");
+    std::fs::write(&fail, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "base", "--text", "One.", "--readonly"]), "queue base");
+    ok(&relay(&env, &["queue", "add", "next", "--text", "Two.", "--readonly", "--after", "base"]), "queue next");
+    until(&env, "base", "failed");
+    std::fs::remove_file(&fail).unwrap();
+    ok(&relay(&env, &["queue", "dequeue", "next"]), "dequeue next");
+    ok(&relay(&env, &["land", "clean", "base"]), "nothing waits on base now");
+    ok(&relay(&env, &["queue", "resume", "next", "--message", "Again."]), "resume next");
+    assert!(board(&env).contains("waits for base (gone)"), "{}", board(&env));
+    ok(&relay(&env, &["queue", "release", "next", "--from", "base"]), "release next from the job that is gone");
+    assert_eq!(job(&env, "next")["after"], serde_json::json!([]));
+    assert_eq!(wait_for(&env, "next")["status"], "done");
+}
+
+/// Copilot on PR #69 (session.rs:1389): the hint printed with a refusal is a command the job's state accepts.
+/// next's base clone was collected, so next fails; the hint printed with it is run as printed, and works.
+#[test]
+fn the_hint_printed_when_a_base_is_gone_works_on_the_failed_job() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("hint-base", false);
+    configure(&env, "", "[gc]\nclones_after_days = 0\n");
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    ok(&relay(&env, &["land", "gc"]), "gc");
+    let next = build(&env, "next", &["--after", "build"]);
+    assert_eq!(next["status"], "failed", "{next}");
+    let reason = next["reason"].as_str().unwrap_or_default().to_owned();
+    let printed = hint_after(&reason, "to start it without that work: ");
+    assert_eq!(
+        printed, "relay queue release next --from build, then relay queue resume next --message continue",
+        "{reason}"
+    );
+    run_hint(&env, printed);
+    assert_eq!(wait_for(&env, "next")["status"], "done", "{}", board(&env));
+}
+
+/// Copilot on PR #69: the hint `queue add` prints for a name in use frees it, by the job's state: a queued
+/// job is dequeued (it never started), not cleaned (which a live job refuses).
+#[test]
+fn the_hint_printed_for_a_name_in_use_frees_it() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("hint-name", false);
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "slow", "--text", "Take your time."]), "queue slow");
+    wait_status(&env, "slow", "running");
+    ok(&relay(&env, &["queue", "add", "x", "--text", "One.", "--after", "slow"]), "queue x");
+    let out = relay(&env, &["queue", "add", "x", "--text", "Two."]);
+    assert_eq!(out.status.code(), Some(4), "{}", out_of(&out));
+    let said = stderr(&out);
+    let printed = hint_after(&said, "pick another name, or: ");
+    assert_eq!(printed, "relay queue dequeue x", "{said}");
+    run_hint(&env, printed);
+    ok(&relay(&env, &["queue", "add", "x", "--text", "Two."]), "the name is free");
+    std::fs::remove_file(&hold).unwrap();
+}
+
 #[test]
 fn after_names_only_jobs_that_exist() {
     let env = setup("unknown", false);

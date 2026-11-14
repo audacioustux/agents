@@ -75,6 +75,9 @@ the dispatcher awake. So does every job queued behind it, however deep the chain
 than wait forever. Queue the dependency again (or `queue resume` it), or
 `relay queue release NAME [--from a]`, which **starts the job now** (once a seat is free): it
 drops the waits and does not cancel anything. To withdraw the job instead, `relay queue dequeue NAME`.
+Every command relay suggests for a job (in a refusal, a failure's reason or a wait that
+cannot end) is one that job's state accepts as printed, step by step: the suggestion
+and the command's own check are the same check.
 Only existing jobs can be named. A dependency that is reviewed counts as done only
 once its review accepts ([below](#reviews)), so a review adds waits no `--after`
 names. relay computes **one dependency graph** from the event log, and everything
@@ -156,7 +159,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay queue unreview JOB` | Detach the review chained to JOB, with no replacement: it no longer re-reviews or resumes JOB (exit 4 when none is chained) |
 | `relay queue add NAME ... --fork JOB` | Start as a fork of JOB's session, from its branch when it is a build job ([forks](#what-a-job-is)) |
 | `relay decide list [--wait [--timeout S]]` / `relay decide answer ID --action A ...` | Decisions waiting for the orchestrator / answer one ([hooks](#hooks)) |
-| `relay queue release NAME [--from A,...]` | Start a queued job now, without waiting for some or all of its `--after` jobs to finish (not a cancel: `dequeue` withdraws it). A job the [disk floor](#disk) holds is freed of those jobs too, and starts when there is room |
+| `relay queue release NAME [--from A,...]` | Start a queued job now, without waiting for some or all of its `--after` jobs to finish (not a cancel: `dequeue` withdraws it). A job the [disk floor](#disk) holds is freed of those jobs too, and starts when there is room; a job that ended without being done (failed, stopped) is freed of them for its next `queue resume`. A job named may be gone (cleaned away): releasing only takes the name away |
 | `relay queue dequeue NAME` / `relay queue stop NAME` | Withdraw a queued job / end a running one (or a job the [disk floor](#disk) holds, which then stays stopped). A dequeued job never started, so its name is free: adding it again replaces every file of the old job (brief, logs, decision requests), and the event log keeps the history |
 | `relay view status [--all] [--everywhere]` | Jobs, decisions waiting and accounts. `--everywhere` lists every project on this machine, each job with its project; outside a project that is what it shows. With `--json`, the whole folded state (every project's, by name, with `--everywhere`) |
 | `relay view result NAME [--wait]` | Final report, status, cost, branch, log path; `--wait` first blocks until the job ends and its runner has exited (it may re-review or wake the dispatcher after the end), and exits 4 at once for a job that never will on its own (`waits for a (failed)`) |

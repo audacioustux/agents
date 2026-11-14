@@ -1602,6 +1602,30 @@ impl World {
         }
     }
 
+    /// A person continues a job with a new instruction (`queue resume`).
+    fn resume(&mut self, t: u64, job: &str, message: &str, budget_usd: Option<f64>, models: &BTreeMap<String, String>) {
+        self.chain_moves(job);
+        if let Some(j) = self.jobs.get_mut(job) {
+            // Resumed by hand during its check: the checking runner no longer speaks for it.
+            // Its process is not stopped by this, and its claim on the machine is not the
+            // job's to drop: that stands until the process is recorded gone (`claims`).
+            if j.status == Status::Checking {
+                j.runner = None;
+            }
+            j.requeue(t);
+            j.message = Some(message.to_owned());
+            j.reason = None;
+            j.stop_requested = false;
+            j.held = false;
+            // A person took it over: it no longer settles as the dispatcher's resume.
+            j.unheld_at = None;
+            j.follow_ups = 0;
+            j.reruns = 0;
+            j.budget_usd = budget_usd.unwrap_or(j.budget_usd);
+            j.models.extend(models.clone());
+        }
+    }
+
     fn apply_queue(&mut self, t: u64, e: &QueueEvent) {
         match e {
             QueueEvent::Queued {
@@ -1652,26 +1676,7 @@ impl World {
                 }
             }
             QueueEvent::Resumed { job, message, budget_usd, models } => {
-                self.chain_moves(job);
-                if let Some(j) = self.jobs.get_mut(job) {
-                    // Resumed by hand during its check: the checking runner no longer speaks for it.
-                    // Its process is not stopped by this, and its claim on the machine is not the
-                    // job's to drop: that stands until the process is recorded gone (`claims`).
-                    if j.status == Status::Checking {
-                        j.runner = None;
-                    }
-                    j.requeue(t);
-                    j.message = Some(message.clone());
-                    j.reason = None;
-                    j.stop_requested = false;
-                    j.held = false;
-                    // A person took it over: it no longer settles as the dispatcher's resume.
-                    j.unheld_at = None;
-                    j.follow_ups = 0;
-                    j.reruns = 0;
-                    j.budget_usd = budget_usd.unwrap_or(j.budget_usd);
-                    j.models.extend(models.clone());
-                }
+                self.resume(t, job, message, *budget_usd, models);
             }
             QueueEvent::Rerouted { job, harnesses, models, profile } => {
                 if let Some(j) = self.jobs.get_mut(job) {
@@ -1804,7 +1809,7 @@ impl World {
                     j.unheld_at = Some(t);
                     j.settle_us = *settle_us;
                     j.budget_usd = budget_usd.unwrap_or(j.budget_usd);
-                    j.message = Some(message.clone());
+                    j.message = Some(message.to_owned());
                     j.reason = None;
                     j.held = false;
                     j.follow_ups = 0;
@@ -1945,7 +1950,7 @@ impl World {
             }
             SessionEvent::FollowUp { job, message, budget_usd } => {
                 if let Some(j) = self.jobs.get_mut(job) {
-                    j.message = Some(message.clone());
+                    j.message = Some(message.to_owned());
                     j.follow_ups += 1;
                     j.budget_usd = budget_usd.unwrap_or(j.budget_usd);
                 }

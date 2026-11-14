@@ -316,6 +316,7 @@ impl<'a> Probe<'a> {
             sandbox::farm::IN_CLONE,
             &self.ctx.session_copies,
             &rels,
+            None,
         );
         marks.copy = copy?;
         // No walk copies a marker (it is relay's own file), so the copy gets its own.
@@ -544,6 +545,7 @@ mod tests {
             sandbox::farm::IN_CLONE,
             &ctx.session_copies,
             std::slice::from_ref(rel),
+            None,
         )
         .unwrap();
         assert!(!marks.copy.as_ref().unwrap().path().join(rel).join(cache_marker()).exists(), "copied with the cache");

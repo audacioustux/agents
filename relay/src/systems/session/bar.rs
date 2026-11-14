@@ -448,7 +448,7 @@ fn exec(ctx: &Ctx, home: &Home, command: &str, tree: &Path, phase: Phase, place:
         // back to the check pool when it ends (the check's sandbox has ended whole by then: the supervisor
         // exits with a code only once it has reaped its whole tree).
         let rels = crate::sandbox::linkable(ctx, &crate::accounts::home(), &mounts);
-        let caches = crate::sandbox::own_caches(ctx, place.work, "caches", &ctx.check_copies, &rels)
+        let caches = crate::sandbox::own_caches(ctx, place.work, "caches", &ctx.check_copies, &rels, None)
             .context("removing a copy of the caches left in the check's directory")?;
         let mounts = Mounts { caches: caches.as_ref().map(crate::sandbox::farm::Farm::path), ..mounts };
         // Under the supervisor, as the session was: whatever the check starts (the compilers under

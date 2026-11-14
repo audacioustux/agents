@@ -467,7 +467,7 @@ fn launch(
     let rels = sandbox::linkable(ctx, &accounts::home(), &mounts);
     // A copy an interrupted run left there goes even when this run links nothing; it must, or no session starts.
     let caches = match work.clone.as_ref().and_then(|c| sandbox::farm::clone_git(c.path())) {
-        Some(git) => sandbox::own_caches(ctx, &git, sandbox::farm::IN_CLONE, &ctx.session_copies, &rels)
+        Some(git) => sandbox::own_caches(ctx, &git, sandbox::farm::IN_CLONE, &ctx.session_copies, &rels, None)
             .context("removing the copy of the caches an interrupted run left in the clone")?,
         None => None,
     };

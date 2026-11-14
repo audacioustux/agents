@@ -75,7 +75,7 @@ impl Farm {
     /// `.git` reached from one without following a link): the copy a run that never ended left there,
     /// else the idle one given back last to `pool`, else a new, empty one; then cuts it down to `rels`.
     /// Fails, leaving none, when it cannot be cut down.
-    pub fn take(parent: &Path, name: &str, pool: &Path, rels: &[CachePath]) -> io::Result<Self> {
+    pub fn take(parent: &Path, name: &str, pool: &Path, rels: &[CachePath], _left: Option<Ended>) -> io::Result<Self> {
         let parent_fd = open_path(parent)?;
         let cname = CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         let root = if let Ok(root) = open_dir(&parent_fd, &cname) {
@@ -440,8 +440,9 @@ mod tests {
         Place { _d: d, job, pool }
     }
 
+    /// With proof that whatever run left a copy in place has ended: it may be used again.
     fn take(p: &Place) -> Farm {
-        Farm::take(&p.job, "f", &p.pool, &rels()).unwrap()
+        Farm::take(&p.job, "f", &p.pool, &rels(), Some(ended())).unwrap()
     }
 
     /// What only supervision makes outside tests: the proof a copy's sandbox ended.
@@ -469,7 +470,7 @@ mod tests {
         let farm = take(&p);
         assert_eq!(std::fs::read_to_string(farm.path().join(".cache/bun/pkg/index.js")).unwrap(), "x");
         assert_eq!(pooled(&p), 0, "taken from the pool");
-        let other = Farm::take(&p.job, "g", &p.pool, &rels()).unwrap();
+        let other = Farm::take(&p.job, "g", &p.pool, &rels(), Some(ended())).unwrap();
         assert_eq!(std::fs::read_dir(other.path().join(".cache")).unwrap().count(), 0, "none idle: a new one");
         farm.give_back(ended());
         other.give_back(ended());
@@ -525,7 +526,7 @@ mod tests {
         std::fs::create_dir_all(farm.path().join(".cargo/registry/secret")).unwrap();
         std::fs::write(farm.path().join("stray"), "x").unwrap();
         farm.give_back(ended());
-        let farm = Farm::take(&p.job, "f", &p.pool, &[cache(".cache")]).unwrap();
+        let farm = Farm::take(&p.job, "f", &p.pool, &[cache(".cache")], Some(ended())).unwrap();
         assert!(farm.path().join(".cache").is_dir());
         assert!(!farm.path().join(".cargo").exists() && !farm.path().join("stray").exists(), "not purged");
     }
@@ -608,12 +609,12 @@ mod tests {
         if let Some(dir) = std::env::var_os("RELAY_FARM_INNER_DEEP") {
             let job = PathBuf::from(dir);
             let pool = job.with_file_name("farms");
-            let farm = Farm::take(&job, "f", &pool, &rels()).unwrap();
+            let farm = Farm::take(&job, "f", &pool, &rels(), Some(ended())).unwrap();
             let deep: PathBuf = std::iter::repeat_n("d", 600).collect();
             std::fs::create_dir_all(farm.path().join("stray").join(&deep)).unwrap();
             std::fs::create_dir_all(farm.path().join(".cache/pkg").join(&deep)).unwrap();
             std::mem::forget(farm);
-            let farm = Farm::take(&job, "f", &pool, &[cache(".cargo/registry")]).unwrap();
+            let farm = Farm::take(&job, "f", &pool, &[cache(".cargo/registry")], Some(ended())).unwrap();
             assert!(!farm.path().join("stray").exists() && !farm.path().join(".cache").exists(), "not cut");
             drop(farm);
             for (name, _) in idle(&pool).into_iter().chain(abandoned(&pool).into_iter().map(|n| (n, 0))) {
@@ -671,6 +672,27 @@ mod tests {
         std::fs::remove_dir_all(shared.join(".cache")).unwrap();
         std::os::unix::fs::symlink(d.path(), shared.join(".cache")).unwrap();
         assert!(open_cache_dir(&shared, &rel).is_err(), "a link in a cache's place was followed");
+    }
+
+    /// Copilot at a6b6099: a copy a killed runner left in its clone was used again by the job's next run
+    /// whatever had become of the first run's sandbox, and went back to the pool on the proof of the second
+    /// run's end alone: another job could take it while the first tree still wrote in it. A copy left in
+    /// place is used again only with proof that the run that left it has ended; without, it is retired
+    /// and the run takes another.
+    #[test]
+    fn a_copy_left_in_place_by_a_run_not_seen_to_end_is_retired() {
+        let p = place();
+        let farm = take(&p);
+        std::fs::write(farm.path().join(".cache/left"), "x").unwrap();
+        std::mem::forget(farm);
+        let farm = Farm::take(&p.job, "f", &p.pool, &rels(), None).unwrap();
+        assert!(!farm.path().join(".cache/left").exists(), "used again, its first run's tree unaccounted for");
+        assert!(farm.path().join(".cache").is_dir() && farm.path().join(".cargo/registry").is_dir());
+        assert_eq!(abandoned(&p.pool).len(), 1, "retired, for gc");
+        farm.give_back(ended());
+        let idle = idle(&p.pool);
+        assert_eq!(idle.len(), 1, "only the copy this run took goes to another");
+        assert!(!p.pool.join(&idle[0].0).join(".cache/left").exists());
     }
 
     /// A copy left by a run relay never saw end is used again in place, and nothing it held is lost.

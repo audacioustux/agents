@@ -313,12 +313,13 @@ pub fn own_caches(
     name: &str,
     pool: &Path,
     rels: &[CachePath],
+    left: Option<farm::Ended>,
 ) -> std::io::Result<Option<farm::Farm>> {
     if !ctx.cfg.sandbox.enabled {
         return Ok(None);
     }
     if !rels.is_empty() {
-        match farm::Farm::take(parent, name, pool, rels) {
+        match farm::Farm::take(parent, name, pool, rels, left) {
             Ok(copy) => return Ok(Some(copy)),
             Err(e) => eprintln!(
                 "relay: the linked caches stay binds for this run (a package manager there copies instead of \
@@ -835,7 +836,7 @@ mod tests {
         // A copy in the pool from before the rule, holding what it now hides, stays there.
         let pool = root.join("pool");
         std::fs::create_dir_all(pool.join(format!("idle-{}/.cargo/git/secret", uuid::Uuid::now_v7()))).unwrap();
-        let copy = own_caches(&ctx, &clone.join(".git"), farm::IN_CLONE, &pool, &rels).unwrap();
+        let copy = own_caches(&ctx, &clone.join(".git"), farm::IN_CLONE, &pool, &rels, None).unwrap();
         assert!(copy.is_none() && !clone.join(".git/relay-caches").exists(), "the pooled copy was taken");
     }
 
@@ -882,12 +883,12 @@ mod tests {
         let git = d.path().join("clone/.git");
         std::fs::create_dir_all(git.join("relay-caches/.cargo/git/secret")).unwrap();
         std::fs::write(git.join("relay-caches/.cargo/git/secret/key"), "k").unwrap();
-        let _ = own_caches(&ctx, &git, farm::IN_CLONE, &d.path().join("farms"), &[]);
+        let _ = own_caches(&ctx, &git, farm::IN_CLONE, &d.path().join("farms"), &[], None);
         assert!(!git.join("relay-caches").exists(), "the abandoned copy is still in the clone");
         // One that cannot be removed (its directory is not writable here) stops the job from starting.
         std::fs::create_dir_all(git.join("relay-caches/.cargo")).unwrap();
         std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let refused = own_caches(&ctx, &git, farm::IN_CLONE, &d.path().join("farms"), &[]);
+        let refused = own_caches(&ctx, &git, farm::IN_CLONE, &d.path().join("farms"), &[], None);
         std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(refused.is_err(), "a copy left in place that cannot go must refuse the launch");
     }

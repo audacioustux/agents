@@ -635,6 +635,29 @@ fn gc_says_freed_only_what_no_kept_tree_still_links() {
     assert!(freed < 1 << 20, "a package a kept tree still links was said to be freed: {report}");
 }
 
+/// Copilot at 7fe4805: with a package linked in two copies a pass removes and in a tree that stays, the
+/// first removal lowered the link count the second measurement read, and the first copy's link was counted
+/// against it again: the second copy was said to free the package. A removed link counts once.
+#[test]
+fn gc_counts_a_link_it_really_removed_once() {
+    let env = setup("gc-links-twice", false);
+    let pool = env.root.join("data/relay/flow/copies-for-sessions");
+    let (one, two) = (pool.join("gone-one"), pool.join("gone-two"));
+    let kept = env.root.join("data/relay/flow/kept-tree");
+    for dir in [&one, &two, &kept] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(one.join("pkg"), vec![1u8; 1 << 20]).unwrap();
+    std::fs::hard_link(one.join("pkg"), two.join("pkg")).unwrap();
+    std::fs::hard_link(one.join("pkg"), kept.join("pkg")).unwrap();
+    let pass = relay(&env, &["land", "gc", "--json"]);
+    ok(&pass, "gc");
+    let report: serde_json::Value = serde_json::from_slice(&pass.stdout).unwrap();
+    assert!(!one.exists() && !two.exists() && kept.join("pkg").exists(), "{report}");
+    let freed = report["freed_bytes"].as_u64().unwrap();
+    assert!(freed < 1 << 20, "a package a kept tree still links was said to be freed: {report}");
+}
+
 /// Audit finding 4: protected config an account does not have yet was not mounted at all, so its
 /// session could create it: a `settings.json` with a hook, a `hooks/` script, or a new omp profile that
 /// relay would then discover as an account. Each now gets a read-only placeholder.

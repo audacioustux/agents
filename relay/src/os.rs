@@ -427,6 +427,33 @@ mod tests {
         assert!(freed.by_removing(&kept, within).0 >= 1 << 20, "and so does the last of the other");
     }
 
+    /// Copilot at 7fe4805: a real removal already lowers the link count the next measurement reads, and the
+    /// removed links were counted against it a second time: with a package linked in two collected trees
+    /// and one that stays, the second tree was said to free it. A link counts once, removed for real or not.
+    #[test]
+    fn a_link_really_removed_is_not_counted_twice() {
+        let d = Dir::new();
+        let (first, second, kept) = (d.path().join("first"), d.path().join("second"), d.path().join("kept"));
+        for dir in [&first, &second, &kept] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(first.join("pkg"), vec![1u8; 1 << 20]).unwrap();
+        std::fs::hard_link(first.join("pkg"), second.join("pkg")).unwrap();
+        std::fs::hard_link(first.join("pkg"), kept.join("pkg")).unwrap();
+        let within = Duration::from_secs(10);
+        for really in [false, true] {
+            let mut freed = Freed::default();
+            let (bytes, _, links) = freed.by_removing(&first, within);
+            assert!(bytes < 1 << 20, "two other trees link it: {bytes}");
+            if really {
+                std::fs::remove_dir_all(&first).unwrap();
+            }
+            freed.removed(links);
+            let bytes = freed.by_removing(&second, within).0;
+            assert!(bytes < 1 << 20, "a kept tree still links it (removed for real: {really}): {bytes}");
+        }
+    }
+
     /// Copilot at a6b6099: every directory a running job is measured by was sized as a clone, so a
     /// `.git/relay-caches` in its `/tmp` was left out too: work written there never counted against
     /// `limits.job_disk_gb`. Only the clone has a copy of the caches; its `/tmp` is counted whole.

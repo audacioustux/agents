@@ -85,12 +85,18 @@ env_shell = []
 # ($RELAY_POLICY, else ~/.config/relay/policy.toml) can hold the same
 # [session] banned_models and [profiles.*]; this file overrides it field by
 # field, and its banned_models add to the policy's (see the README).
+# The policy alone holds the machine-wide caps, over every project (never this file):
+#   [machine]
+#   max_compiling = 2      # compiling jobs at once, over every project
+#   min_free_mem_gb = 4    # no session or check starts with less memory available (GiB)
+#   min_free_disk_gb = 30  # the least min_free_disk_gb of any project; this file may raise it
 # [profiles.bug-hunt]
 # harness = "omp"
 # model = "openai-codex/gpt-6.1-sol"
 # effort = "high"
 # budget = 5.0
 # readonly = true
+# compiles = false       # only for work that builds and tests nothing: such a job is outside the machine's max_compiling (default: true)
 # max_running = 1
 # max_per_day = 3
 # note = "second-family review of critical code; costly"

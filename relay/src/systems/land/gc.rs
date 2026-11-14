@@ -432,7 +432,9 @@ pub fn run(ctx: &Ctx, dry_run: bool) -> Result<()> {
         if dry_run && item.kind == Kind::Clone {
             a.rescued = rescue_needed(ctx, item).map(|r| format!("{r} would be made"));
         }
-        // Gone (or, in a dry run, would be): its links no longer hold their files. A log is gzipped, not removed.
+        // Gone (or, in a dry run, would be): its links no longer hold their files, each counted once against
+        // how many its file had before (a real removal lowers what the inode says, a dry run does not). A
+        // log is gzipped, not removed.
         if a.kept.is_none() && item.kind != Kind::Log {
             freed_so_far.removed(links);
         }

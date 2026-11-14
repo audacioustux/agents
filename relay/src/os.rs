@@ -270,15 +270,21 @@ pub fn dirs_size(paths: &[std::path::PathBuf], apart: Option<&Path>, within: Dur
 /// and removing the copy frees nothing of it while such a tree stays (nor does removing the tree while
 /// the copy stays). So a file with several links counts once every one of them is among what was
 /// removed, with the place that held the last. What gc counts.
+///
+/// A file's links are counted against how many it had when a place holding one was first removed, never
+/// against what its inode says later: a real removal has lowered that count by then and a dry run has
+/// not, and a link is counted once either way.
 #[derive(Debug, Default)]
 pub struct Freed {
-    /// The links already removed of each file that has several, by device and inode.
-    gone: std::collections::HashMap<(u64, u64), u64>,
+    /// Of each file with several links that a removed place held one of, by device and inode: how many
+    /// links it had before any was removed, and how many of them are removed.
+    gone: std::collections::HashMap<(u64, u64), (u64, u64)>,
 }
 
-/// The links a place holds of each file that has several: what [`Freed::removed`] is told once it is gone.
+/// The links a place holds of each file that has several, with how many the file had when it was looked
+/// at: what [`Freed::removed`] is told once the place is gone.
 #[derive(Debug, Default)]
-pub struct Links(std::collections::HashMap<(u64, u64), u64>);
+pub struct Links(std::collections::HashMap<(u64, u64), (u64, u64)>);
 
 impl Freed {
     /// The bytes removing `path` frees, after every place [`Freed::removed`] before it: a tree walked
@@ -293,18 +299,26 @@ impl Freed {
                 return true;
             }
             let id = (meta.dev(), meta.ino());
-            let here = links.0.entry(id).or_insert(0);
-            *here += 1;
-            self.gone.get(&id).copied().unwrap_or(0) + *here == meta.nlink()
+            // Had a removed place held a link of it, how many it had then is on record; if none did, none
+            // of its links is removed yet, and what its inode says now is all of them.
+            let (all, gone) = self.gone.get(&id).copied().unwrap_or((meta.nlink(), 0));
+            let here = links.0.entry(id).or_insert((all, 0));
+            here.1 += 1;
+            gone + here.1 == all
         };
         let (bytes, whole) = walk(path, within, None, &mut last);
         (bytes, whole, links)
     }
 
-    /// The place those `links` were counted in is gone.
+    /// The place those `links` were counted in is gone (or, in a dry run, would be).
     pub fn removed(&mut self, links: Links) {
-        for (id, n) in links.0 {
-            *self.gone.entry(id).or_insert(0) += n;
+        for (id, (all, here)) in links.0 {
+            let (all, gone) = self.gone.entry(id).or_insert((all, 0));
+            *gone += here;
+            // Its last link went: the inode is free to be another file's.
+            if *gone >= *all {
+                self.gone.remove(&id);
+            }
         }
     }
 }

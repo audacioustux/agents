@@ -1039,7 +1039,7 @@ mod tests {
         assert_eq!(
             header,
             "jobs: 1 running of at most 2 · 4 queued (1 waiting on another job, 1 held by account limits, \
-             1 held by hunt cap) · 2 need a human"
+             1 held by profile hunt running cap) · 2 need a human"
         );
         // And the rows say the same: one running row, four queued, one failed, none counted twice.
         let rows =
@@ -1055,11 +1055,11 @@ mod tests {
         let head: Vec<&str> = every.lines().take(2).collect();
         assert_eq!(
             head[0],
-            "jobs in every project: 1 running · 4 queued (1 waiting on another job, 1 held by account limits, 1 held by hunt cap) · 2 need a human"
+            "jobs in every project: 1 running · 4 queued (1 waiting on another job, 1 held by account limits, 1 held by profile hunt running cap) · 2 need a human"
         );
         assert_eq!(
             head[1],
-            "  demo: 1 running of at most 2 · 4 queued (1 waiting on another job, 1 held by account limits, 1 held by hunt cap) · 2 need a human"
+            "  demo: 1 running of at most 2 · 4 queued (1 waiting on another job, 1 held by account limits, 1 held by profile hunt running cap) · 2 need a human"
         );
     }
 }

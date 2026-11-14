@@ -26,7 +26,7 @@ pub struct Counts {
     pub waiting_on_job: usize,
     /// Of the queued: those whose dependency ended unfinished, so they never start on their own.
     pub blocked: usize,
-    /// Of the queued: those held by one named cause (`w2-build cap`, `disk floor`, ...), each once.
+    /// Of the queued: those held by one named cause (`profile w2-build running cap`, `disk floor`, ...), each once.
     /// Only the project relay runs in can be judged, so only its jobs appear here.
     pub held: BTreeMap<String, usize>,
     /// Stopped jobs the disk floor paused; they resume by themselves.
@@ -85,7 +85,7 @@ impl Counts {
     }
 
     /// The line a status board states: `10 running of at most 10 · 19 queued (4 waiting on another job,
-    /// 3 held by w2-build cap) · 2 need a human`.
+    /// 3 held by profile w2-build running cap) · 2 need a human`.
     pub fn line(&self) -> String {
         let mut parts = vec![match self.max_running {
             Some(max) => format!("{} running of at most {max}", self.running),
@@ -145,15 +145,17 @@ impl Counts {
 }
 
 /// What a held job is said to be held by: the constraint that binds it ([`crate::systems::dispatch::Hold::by`]),
-/// the one concept dispatch names a hold by, so every cap, gate and pool has a bucket of its own.
+/// the one concept dispatch names a hold by, so every cap, gate and pool has a bucket of its own. A label is
+/// unambiguous by construction: those of a profile's limits all begin `profile ` and end with the kind of limit
+/// (`running cap`, `daily cap`), and no other begins so, whatever the profile is called.
 fn name_of(by: &Constraint, j: &Job) -> String {
-    let profile = j.profile.as_deref().unwrap_or("profile");
+    let profile = j.profile.as_deref().unwrap_or("?");
     match by {
-        Constraint::Pool(Pool::Running) => "project cap".into(),
-        Constraint::Pool(Pool::Profile(name)) => format!("{name} cap"),
+        Constraint::Pool(Pool::Running) => "project running cap".into(),
+        Constraint::Pool(Pool::Profile(name)) => format!("profile {name} running cap"),
+        Constraint::PerDay => format!("profile {profile} daily cap"),
         Constraint::Pool(Pool::Compiling) => "machine compiling cap".into(),
         Constraint::Pool(Pool::Seat(..)) => "account seats".into(),
-        Constraint::PerDay => format!("{profile} daily cap"),
         Constraint::Load => "load gate".into(),
         Constraint::Memory => "memory gate".into(),
         Constraint::Uncounted => "unread project".into(),
@@ -186,10 +188,11 @@ enum Bucket {
 
 /// A job's one bucket and whether only a human moves it on, decided together here and nowhere else, so
 /// no path can count a job's need of a human differently from the bucket it is in. A human is needed
-/// when the job failed or can never start on its own ([`crate::world::World::blocked`]): a queued job
-/// and a disk-held stopped one alike, whatever bucket the latter is counted in.
+/// when the job failed, can never start on its own ([`crate::world::World::blocked`]: a queued job
+/// and a disk-held stopped one alike), or is stopped for a reason that needs a person
+/// ([`Job::needs_person`], from the stop cause the fold records), whatever bucket it is counted in.
 fn classify(p: &Project, j: &Job, cfg: &Config, room: &Room, now: u64) -> (Bucket, bool) {
-    let human = j.status == Status::Failed || p.world.blocked(j);
+    let human = j.status == Status::Failed || p.world.blocked(j) || j.needs_person();
     let bucket = match j.status {
         Status::Running => Bucket::Running,
         Status::Checking => Bucket::Checking,
@@ -265,7 +268,10 @@ mod tests {
         let counts = |room: &Room| Counts::of(p.world.jobs().values().map(|j| (&p, j)), &cfg, room, 0);
         let room = Room::of(Vec::new(), BTreeMap::new(), &p.world, &[], true);
         let c = counts(&room);
-        assert_eq!((c.running, c.queued, c.held.clone()), (1, 1, BTreeMap::from([("project cap".to_owned(), 1)])));
+        assert_eq!(
+            (c.running, c.queued, c.held.clone()),
+            (1, 1, BTreeMap::from([("project running cap".to_owned(), 1)]))
+        );
         // Below the project's cap, the machine's compiling pool (here with no unit at all) is next.
         let roomy = Config::parse("name = \"demo\"\n", dir.path()).unwrap();
         let machine = Machine { max_compiling: Some(0), ..Machine::default() };
@@ -285,5 +291,66 @@ mod tests {
         assert_eq!(named(Constraint::Memory), "memory gate");
         assert_eq!(named(Constraint::Load), "load gate");
         assert_eq!(named(Constraint::Uncounted), "unread project");
+    }
+
+    /// A profile named like a limit of the project's is another hold, not the same one: every label
+    /// names its kind, so the two are counted apart.
+    #[test]
+    fn a_profile_named_project_is_not_the_projects_cap() {
+        let dir = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let toml = "name = \"demo\"\n[limits]\nmax_running = 1\n[profiles.project]\nmax_running = 1\n";
+        let cfg = Config::parse(toml, dir.path()).unwrap();
+        let job = |name: &str, status, profile: Option<&str>| Job {
+            name: name.into(),
+            status,
+            profile: profile.map(str::to_owned),
+            ..Job::default()
+        };
+        let p = project(
+            &dir,
+            &[
+                job("run", Status::Running, Some("project")),
+                job("by-profile", Status::Queued, Some("project")),
+                job("by-project", Status::Queued, None),
+            ],
+        );
+        let room = Room::of(Vec::new(), BTreeMap::new(), &p.world, &[], true);
+        let c = Counts::of(p.world.jobs().values().map(|j| (&p, j)), &cfg, &room, 0);
+        let want =
+            BTreeMap::from([("profile project running cap".to_owned(), 1), ("project running cap".to_owned(), 1)]);
+        assert_eq!(c.held, want, "{c:?}");
+        assert!(
+            c.line().contains("1 held by project running cap")
+                && c.line().contains("1 held by profile project running cap")
+        );
+    }
+
+    /// A job stopped for a reason that needs a person is counted as needing one, by the cause the fold
+    /// recorded; a person's own stop and the disk floor's are not, and none adds to the queued.
+    #[test]
+    fn a_job_stopped_for_a_reason_that_needs_a_person_is_counted_so() {
+        use crate::world::StopCause;
+        let dir = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let cfg = Config::parse("name = \"demo\"\n", dir.path()).unwrap();
+        let stopped = |name: &str, held, cause| Job {
+            name: name.into(),
+            status: Status::Stopped,
+            held,
+            stopped_for: Some(cause),
+            ..Job::default()
+        };
+        let p = project(
+            &dir,
+            &[
+                stopped("ceiling-spent", false, StopCause::Stuck),
+                stopped("by-hand", false, StopCause::Person),
+                stopped("floor", true, StopCause::Floor),
+            ],
+        );
+        let room = Room::of(Vec::new(), BTreeMap::new(), &p.world, &[], true);
+        let c = Counts::of(p.world.jobs().values().map(|j| (&p, j)), &cfg, &room, 0);
+        assert_eq!((c.need_human, c.paused, c.queued, c.failed), (1, 1, 0, 0), "{c:?}");
     }
 }

@@ -158,47 +158,48 @@ enum Stand {
 /// The linked caches (`sandbox.linked_caches`) a job with a tree gets as a symlink into its own copy, each
 /// with where its symlink stands. The one judge of it: the copy holds these caches and nothing else
 /// ([`linkable`], [`farm::Farm::take`]), and the plan links these and nothing else. A cache is left a bind
-/// (and so never copied) when its path is not there on the host; when its path, or a directory on its way
-/// under the home, is a symlink (the rules compare paths as written); when a mount's path runs through a
-/// symlink to the cache's real path, or into or around it; when another cache is nested in it or
-/// around it (a bind around it would cover the symlink's directory, and a job could reach the way to it
-/// through either); when anything is mounted at or under its path (a hidden path among them: copied, it
-/// would show in the job's tree); when a later layer covers its path or a directory around it (the
-/// symlink would be hidden, the copy not); and when what holds its directory is a mount other than a
-/// hidden one.
+/// (and so never copied) when its path is not there on the host; when its path, or any directory on its
+/// whole way (the home and what is above it included), is a symlink (a tmpfs cannot be mounted on one, and
+/// a hide rule naming where it leads would mask a bind but not the copy); when a mount's path, by any of
+/// its [`ways`], leads into or around it; when another declared cache does, or leads to the same place (a
+/// bind around it would cover the symlink's directory, one onto it would land on the symlink, and a job
+/// could reach the way to it through either); when anything is mounted at or under its path (a hidden
+/// path among them: copied, it would show in the job's tree); when a later layer covers its path or a
+/// directory around it (the symlink would be hidden, the copy not); and when what holds its directory is
+/// a mount other than a hidden one.
 fn linking(cfg: &crate::config::Config, user_home: &Path, before: &Layer, after: &Layer) -> Vec<(CachePath, Stand)> {
     let paths: Vec<PathBuf> = cfg.sandbox.caches.iter().map(|r| user_home.join(r)).collect();
-    let real_paths: Vec<PathBuf> = paths.iter().map(|p| real(p)).collect();
-    let real_layer = |layer: &Layer| layer.iter().map(|(q, k)| (real(q), k.clone())).collect::<Vec<_>>();
-    let (real_before, real_after) = (real_layer(before), real_layer(after));
+    let cache_ways: Vec<Vec<PathBuf>> = paths.iter().map(|p| ways(p)).collect();
+    let ways_of = |layer: &Layer| layer.iter().map(|(q, k)| (ways(q), k.clone())).collect::<Vec<_>>();
+    let (before, after) = (ways_of(before), ways_of(after));
+    // Whether a path, by any of its ways, is `of` or leads into it; and whether it is `of` or a directory around it.
+    let within = |q: &[PathBuf], of: &Path| q.iter().any(|w| w.starts_with(of));
+    let around = |q: &[PathBuf], of: &Path| q.iter().any(|w| of.starts_with(w));
     let mut out = Vec::new();
-    for (r, p) in cfg.sandbox.caches.iter().zip(&paths) {
+    for (i, (r, p)) in cfg.sandbox.caches.iter().zip(&paths).enumerate() {
         let Some(parent) = p.parent() else { continue };
         if !cfg.sandbox.linked_caches.contains(r) || !p.exists() {
             continue;
         }
-        // Every rule here compares paths as written, so the path must be the directory itself: with a
-        // symlink on it (the cache, or a directory on its way under the home), a hide rule naming where it
-        // leads would mask a bind but not the copy. Such a cache stays a bind.
-        let mut way = user_home.to_path_buf();
-        let symlinked = r.components().any(|c| {
-            way.push(c);
-            way.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())
-        });
-        if symlinked {
+        // The path must be the directory itself, all the way from the root: its directory is rebuilt at the
+        // path as written (bubblewrap mounts no tmpfs on a symlink), and with a symlink on it a hide rule
+        // naming where it leads would mask a bind but not the copy. Such a cache stays a bind.
+        if p.ancestors().any(|a| a.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())) {
             continue;
         }
-        // Every comparison below is between real paths, both sides through [`real`]: an alias on either side
-        // (a symlinked home, a hide rule written by a symlink or by the real path) cannot hide an overlap.
+        // With no symlink on it, the cache's path is its real one; every other path is compared by each of
+        // its ways, so an alias on it at any depth (a hide rule written by a symlink or by the real path, one
+        // that is itself a symlink leading out of the cache) cannot hide an overlap.
         let (real_p, real_parent) = (real(p), real(parent));
-        let nested = real_paths.iter().any(|q| *q != real_p && (q.starts_with(&real_p) || real_p.starts_with(q)));
-        let under = real_before.iter().chain(&real_after).any(|(q, _)| q.starts_with(&real_p));
-        let covered = real_after.iter().any(|(q, _)| real_p.starts_with(q));
+        // Every other entry, by its place in the list: one that leads to this same directory is another cache.
+        let nested = cache_ways.iter().enumerate().any(|(j, q)| j != i && (within(q, &real_p) || around(q, &real_p)));
+        let under = before.iter().chain(&after).any(|(q, _)| within(q, &real_p));
+        let covered = after.iter().any(|(q, _)| around(q, &real_p));
         if nested || under || covered {
             continue;
         }
         // What the cache path's directory is, once the layers before the caches are mounted.
-        match real_before.iter().rev().find(|(q, _)| real_parent.starts_with(q)).map(|(_, k)| k) {
+        match before.iter().rev().find(|(q, _)| around(q, &real_parent)).map(|(_, k)| k) {
             None => out.push((r.clone(), Stand::Rebuilt(parent.to_path_buf()))),
             Some(Mount::Hidden) => out.push((r.clone(), Stand::Hidden)),
             Some(_) => {}
@@ -208,7 +209,7 @@ fn linking(cfg: &crate::config::Config, user_home: &Path, before: &Layer, after:
 }
 
 /// Where `p` leads, every symlink on it resolved: its longest existing part made real, the rest (not there
-/// yet) appended as written. The one form every overlap between a cache and a mount is judged in.
+/// yet) appended as written.
 fn real(p: &Path) -> PathBuf {
     let mut missing = Vec::new();
     let mut at = p;
@@ -224,6 +225,23 @@ fn real(p: &Path) -> PathBuf {
             _ => return p.to_path_buf(),
         }
     }
+}
+
+/// Every place `p` names: itself as written, and, for each directory on its way, that directory made
+/// [`real`] with the rest as written. So it is where `p` leads, and also each name it passes through:
+/// `~/.cargo/git/secret`, a symlink to elsewhere, is both elsewhere and the entry `secret` in the real
+/// `~/.cargo/git`. The one form every overlap between a cache and another path is judged in: a mount
+/// lands where its path leads, and what a bind shows under a name is masked by that name.
+fn ways(p: &Path) -> Vec<PathBuf> {
+    let mut out = vec![p.to_path_buf()];
+    for a in p.ancestors() {
+        let rest = p.strip_prefix(a).unwrap_or(Path::new(""));
+        let way = real(a).join(rest);
+        if !out.contains(&way) {
+            out.push(way);
+        }
+    }
+    out
 }
 
 /// The linked caches the plan would link for these mounts, whatever their `caches` says: what a job's copy

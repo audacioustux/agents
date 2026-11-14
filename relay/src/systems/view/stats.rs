@@ -500,6 +500,7 @@ mod tests {
                 parent: None,
                 depth: 0,
                 acceptance: crate::bus::Acceptance::None,
+                compiles: true,
             })
         };
         let dispatched = |job: &str| {

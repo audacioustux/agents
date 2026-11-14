@@ -85,6 +85,10 @@ pub struct Add {
     /// Make a build job even when the profile says read-only.
     #[arg(long, conflicts_with = "readonly")]
     no_readonly: bool,
+    /// Whether the job compiles (builds, or runs tests): `false` puts this one job outside the
+    /// machine's cap on compiling jobs. Default: the profile's `compiles`, else true.
+    #[arg(long, value_name = "true|false", action = clap::ArgAction::Set)]
+    compiles: Option<bool>,
     /// Run only on these harnesses (repeat, or comma-separate). Default: any enabled harness.
     #[arg(long = "harness", value_delimiter = ',')]
     harnesses: Vec<String>,
@@ -323,6 +327,11 @@ impl Add {
                 std::fs::metadata(ctx.job_file(job, "result.md")).is_ok_and(|m| m.len() > 0)
             })?;
         }
+        // The line's `--compiles` for this one job, else its profile's; unset, a job compiles.
+        let compiles = self.compiles.or(profile.and_then(|p| p.compiles)).unwrap_or(true);
+        if !compiles && declared.acceptance.command().is_some() {
+            fail!(Refused, "--compiles false with an acceptance check: a check builds, so its job compiles");
+        }
         // The brief reaches the session on stdin or as a file, never in argv (/proc/<pid>/cmdline is public).
         // A name whose job was dequeued starts clean: its files are the old job's, and the logs append.
         ctx.wipe_job_files(&name)?;
@@ -345,6 +354,7 @@ impl Add {
             parent: None,
             depth: 0,
             acceptance: declared.acceptance,
+            compiles,
         })
     }
 }
@@ -394,6 +404,7 @@ pub fn follow_up(change: &mut Change<'_>, parent: &Job, f: FollowUp) -> Result<S
         profile: f.profile.or_else(|| parent.profile.clone()),
         readonly: false,
         no_readonly: false,
+        compiles: None,
         harnesses: Vec::new(),
         account: None,
         models: Vec::new(),
@@ -781,6 +792,7 @@ mod tests {
                     parent: None,
                     depth: 0,
                     acceptance: crate::bus::Acceptance::None,
+                    compiles: true,
                 }),
             });
             if let Some(outcome) = outcome {

@@ -692,6 +692,376 @@ fn the_board_shows_every_project_with_everywhere_and_outside_any_project() {
     assert!(text.contains("our task") && text.contains("their task"), "every project: {text}");
 }
 
+/// A second project, `other`, on the same machine as `flow`: its own config and state, the same
+/// accounts and the same owner's policy. Returns how to run relay in it.
+fn other_project(env: &Env) -> impl Fn(&[&str]) -> Output + '_ {
+    let conf = std::fs::read_to_string(env.repo.join("relay.toml")).unwrap();
+    std::fs::write(env.repo.join("other.toml"), conf.replace("name = \"flow\"", "name = \"other\"")).unwrap();
+    let state = env.root.join("state/relay/other");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&state).unwrap();
+    std::fs::write(state.join("gc.last"), "").unwrap();
+    move |args: &[&str]| relay(env, &[&["--config", "other.toml"], args].concat())
+}
+
+/// The job `name` as the project `run` runs relay in has it.
+fn job_in(run: &impl Fn(&[&str]) -> Output, name: &str) -> serde_json::Value {
+    let world: serde_json::Value = serde_json::from_slice(&run(&["view", "status", "--json"]).stdout).unwrap();
+    world["jobs"][name].clone()
+}
+
+/// Waits, for at most `seconds`, until the job `name` of that project is `want`.
+fn until_in(run: &impl Fn(&[&str]) -> Output, name: &str, want: &str, seconds: u64) {
+    for _ in 0..seconds * 10 {
+        if job_in(run, name)["status"] == want {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("{name} never became {want}: {}", job_in(run, name));
+}
+
+/// Two projects under the owner's machine-wide caps: one account with seats for all, and one
+/// compiling job at a time over both projects. A `review` compiles, as every job does unless its
+/// profile says otherwise; a `design` says it compiles nothing.
+fn two_projects_one_compiling(tag: &str) -> Env {
+    let env = setup(tag, false);
+    env.write_policy(
+        "[machine]\nmax_compiling = 1\n\
+         [profiles.review]\nreadonly = true\n\
+         [profiles.design]\nreadonly = true\ncompiles = false\n",
+    );
+    configure(&env, "per_account = 8\nmax_running = 8\n", "");
+    claude_account(&env.home, "a", 10, false);
+    std::fs::write(env.home.join(".claude.a/hold"), "").unwrap();
+    env
+}
+
+/// The owner's rulings of 2026-11-13: compiling jobs are capped machine-wide, over every project's
+/// relay, and what compiles is declared, not read off the read-only flag. With `max_compiling = 1`,
+/// a second project's review (read-only, and it compiles: it rebuilds the branch and runs its tests)
+/// is held, with a reason that names the machine cap, while the first project's build runs, and
+/// starts when it ends. A job whose profile says `compiles = false`, or queued with
+/// `--compiles false`, starts in either project regardless.
+#[test]
+fn a_second_projects_review_waits_for_the_machines_one_compiling_unit() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = two_projects_one_compiling("machine-cap");
+    let other = other_project(&env);
+    ok(&relay(&env, &["queue", "add", "first", "--text", "Make a change."]), "flow queues its build");
+    until(&env, "first", "running");
+    ok(&other(&["queue", "add", "second", "--text", "Review it.", "--profile", "review"]), "other queues a review");
+    ok(
+        &relay(&env, &["queue", "add", "sketch", "--text", "Design it.", "--profile", "design"]),
+        "flow queues a design",
+    );
+    let ask = ["queue", "add", "ask", "--text", "Look around.", "--readonly", "--compiles", "false"];
+    ok(&other(&ask), "other queues an ask that builds nothing");
+    until(&env, "sketch", "running");
+    until_in(&other, "ask", "running", 30);
+    let second = job_in(&other, "second");
+    assert_eq!(second["status"], "queued", "the machine's one unit is the first project's: {second}");
+    assert_eq!((&second["readonly"], &second["compiles"]), (&true.into(), &true.into()), "a review compiles");
+    assert_eq!(job(&env, "sketch")["compiles"], false, "its profile says so");
+    assert_eq!(job_in(&other, "ask")["compiles"], false, "its line says so");
+    assert_eq!(job(&env, "first")["compiles"], true);
+    let board = String::from_utf8_lossy(&other(&["view", "status"]).stdout).into_owned();
+    let why = "1 of 1 compiling on this machine, over every project (machine.max_compiling in the owner's policy)";
+    assert!(board.contains(why), "the reason names the machine cap: {board}");
+    assert!(board.contains("compiles nothing"), "the board says which job is outside the cap: {board}");
+    // Its dispatcher put it in line, for the other projects' dispatchers to see.
+    let line = env.root.join("state/relay/other/bus/dispatch.ndjson");
+    let in_line = || std::fs::read_to_string(&line).unwrap_or_default().contains("\"in-line\"");
+    for _ in 0..100 {
+        if in_line() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(in_line(), "no in-line event in {}", line.display());
+    assert_eq!(job_in(&other, "second")["status"], "queued", "still held while the first runs");
+    // `relay profiles` shows what each profile declares, resolved.
+    let profiles: serde_json::Value = serde_json::from_slice(&relay(&env, &["profiles", "--json"]).stdout).unwrap();
+    let compiles = |name: &str| profiles["profiles"][name]["compiles"].clone();
+    assert_eq!((compiles("review"), compiles("design")), (true.into(), false.into()), "{profiles}");
+    let listed = String::from_utf8_lossy(&relay(&env, &["profiles"]).stdout).into_owned();
+    let row = |name: &str| listed.lines().find(|l| l.starts_with(name)).unwrap_or_default().to_owned();
+    assert!(row("design").contains("no compile") && !row("review").contains("no compile"), "{listed}");
+
+    std::fs::remove_file(env.home.join(".claude.a/hold")).unwrap();
+    assert_eq!(wait_for(&env, "first")["status"], "done");
+    // The first project's end rings every dispatcher's doorbell: the unit goes to the second's review.
+    until_in(&other, "second", "done", 90);
+    assert_eq!(wait_for(&env, "sketch")["status"], "done");
+    until_in(&other, "ask", "done", 30);
+}
+
+/// The parent of the process `pid`, and its command line.
+fn parent_of(pid: u64) -> (u64, String) {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let after = &stat[stat.rfind(')').unwrap() + 2..];
+    let parent: u64 = after.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let cmdline = std::fs::read(format!("/proc/{parent}/cmdline")).unwrap_or_default();
+    (parent, String::from_utf8_lossy(&cmdline).replace('\0', " "))
+}
+
+/// A runner that dies holding the machine's one compiling unit gives it back, by the evidence the
+/// seats use: every other project counts a unit only while the runner that holds it lives. Here
+/// the first project's dispatcher is dead too, so nobody reaps its job, its fold says `running`
+/// for good, and no event announces anything: the second project's dispatcher looks again within
+/// a minute, finds the unit's runner gone, and starts its own build.
+#[test]
+fn a_dead_runners_compiling_unit_comes_back_to_the_other_project() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = two_projects_one_compiling("machine-cap-dead");
+    let other = other_project(&env);
+    ok(&relay(&env, &["queue", "add", "first", "--text", "Make a change."]), "flow queues its build");
+    until(&env, "first", "running");
+    ok(&other(&["queue", "add", "second", "--text", "Make a change."]), "other queues its build");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(job_in(&other, "second")["status"], "queued", "held by the machine cap");
+    let runner = job(&env, "first")["runner"].clone();
+    let (pid, started) = (runner[0].as_u64().unwrap(), runner[1].as_u64().unwrap());
+    // The first project's dispatcher goes first, so that nothing of that project reaps the runner.
+    let (dispatcher, cmdline) = parent_of(pid);
+    assert!(cmdline.contains("dispatch serve"), "the runner's parent is its dispatcher: {cmdline}");
+    let kill = |pid: u64| Command::new("kill").args(["-9", &pid.to_string()]).status().unwrap().success();
+    assert!(kill(dispatcher));
+    let lock = env.root.join("state/relay/flow/dispatch.lock");
+    for _ in 0..100 {
+        if !locked(&lock) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!locked(&lock), "the first project's dispatcher did not die");
+    assert!(alive(pid, started), "its runner outlives it, still holding the unit");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(job_in(&other, "second")["status"], "queued", "a live runner keeps its unit, dispatcher or none");
+    assert!(kill(pid));
+    dies(pid, started);
+    until_in(&other, "second", "running", 90);
+    assert_eq!(job(&env, "first")["status"], "running", "nobody reaped it: its dead runner alone freed the unit");
+    std::fs::remove_file(env.home.join(".claude.a/hold")).unwrap();
+    until_in(&other, "second", "done", 90);
+}
+
+/// Waits, for at most a minute, until the job's runner says its acceptance check waits for the
+/// memory gate, or the job is no longer running; returns whether it said so.
+fn check_waits_for_memory(env: &Env, name: &str) -> bool {
+    let log = records(env, name, "runner.log");
+    let waits = || std::fs::read_to_string(&log).unwrap_or_default().contains("its acceptance check waits");
+    for _ in 0..600 {
+        if waits() || job(env, name)["status"] != "running" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    waits()
+}
+
+/// More memory than any machine has free, in GiB: a floor that holds whatever the machine reads.
+const NO_MEMORY: &str = "[machine]\nmin_free_mem_gb = 1000000000\n";
+
+/// Copilot review of PR #70, finding 1: a project whose state another project's dispatcher cannot
+/// read was left out of the machine's count of compiling jobs, in silence. Under a cap on compiling
+/// it holds what compiles instead, with a reason that names it, until it can be read again; a job
+/// that compiles nothing needs no count and starts.
+#[test]
+fn a_project_that_cannot_be_read_holds_what_compiles_under_the_machines_cap() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = two_projects_one_compiling("machine-cap-unread");
+    std::fs::remove_file(env.home.join(".claude.a/hold")).unwrap();
+    let shut = env.root.join("state/relay/shut");
+    std::fs::create_dir_all(shut.join("bus")).unwrap();
+    let mode = |m: u32| std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o000);
+    if std::fs::metadata(shut.join("bus")).is_ok() {
+        mode(0o700);
+        eprintln!("SKIPPED: this user reads through any permission, so no project is unreadable to it");
+        return;
+    }
+    ok(&relay(&env, &["queue", "add", "first", "--text", "Make a change."]), "queue a build");
+    ok(&relay(&env, &["queue", "add", "sketch", "--text", "Design it.", "--profile", "design"]), "queue a design");
+    let sketch = wait_for(&env, "sketch");
+    let (first, board) = (job(&env, "first"), board(&env));
+    mode(0o700);
+    assert_eq!(sketch["status"], "done", "what compiles nothing needs no count");
+    assert_eq!(first["status"], "queued", "the machine's compiling jobs cannot be counted: {first}");
+    let why = "the compiling jobs on this machine cannot be counted: the state of project shut cannot be read";
+    assert!(board.contains(why), "the reason names the project: {board}");
+    // Readable again, and any event has the dispatcher look: the count is whole, and the build starts.
+    ok(&relay(&env, &["queue", "add", "again", "--text", "Design it.", "--profile", "design"]), "ring the doorbell");
+    assert_eq!(wait_for(&env, "first")["status"], "done");
+}
+
+/// Copilot review of PR #70, finding 5: a runner keeps the config it loaded when its session began,
+/// so a memory floor the owner set while the session ran did not hold its acceptance check. The
+/// floor is read from the policy at every admission point: the check waits, and starts once the
+/// owner lifts the floor again.
+#[test]
+fn a_memory_floor_set_while_a_session_runs_holds_its_check() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("machine-mem-late", false);
+    env.write_policy("[machine]\n");
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    let add = ["queue", "add", "late", "--text", "[status-done] Make a change.", "--check", "true"];
+    ok(&relay(&env, &add), "queue");
+    until(&env, "late", "running");
+    // Its session has started, so its runner loaded its config, with no floor in the policy, long ago.
+    appears(&env.home.join(".claude.a/pids"));
+    env.write_policy(NO_MEMORY);
+    std::fs::remove_file(&hold).unwrap();
+    assert!(check_waits_for_memory(&env, "late"), "the check ran under the floor: {}", job(&env, "late"));
+    let j = job(&env, "late");
+    assert_eq!((j["status"].as_str(), j["bars"].as_array().map(Vec::len)), (Some("running"), Some(0)), "{j}");
+    env.write_policy("[machine]\n");
+    let j = wait_for(&env, "late");
+    assert_eq!((j["status"].as_str(), j["bars"][0]["result"].as_str()), (Some("done"), Some("pass")), "{j}");
+}
+
+/// Copilot review of PR #70, finding 4: the memory gate stood before the tip run of a check only, so
+/// its run at the base commit started under the floor. The gate is where a check command is
+/// launched: here the floor is set while the tip run is under way, and the base run waits for it.
+#[test]
+fn a_checks_run_at_the_base_commit_waits_for_the_memory_gate_too() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("machine-mem-base", false);
+    env.write_policy("[machine]\n");
+    configure(&env, "job_ceiling_usd = 100.0\n", "");
+    claude_account(&env.home, "a", 10, false);
+    // Green on the branch after a while, red at the base (no output file yet): a revert control,
+    // whose base run follows its tip run. It leaves a mark in its checkout as it starts.
+    let check = "touch check-began; sleep 5; test -f relay-output.txt";
+    let add =
+        ["queue", "add", "based", "--text", "[status-done] Make a change.", "--check", check, "--check-red-first"];
+    ok(&relay(&env, &add), "queue");
+    let began = || {
+        let found = Command::new("find").arg(&env.root).args(["-name", "check-began"]).output().unwrap();
+        !found.stdout.is_empty()
+    };
+    for _ in 0..600 {
+        if began() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(began(), "the tip run never started: {}", job(&env, "based"));
+    env.write_policy(NO_MEMORY);
+    assert!(check_waits_for_memory(&env, "based"), "the base run started under the floor: {}", job(&env, "based"));
+    let j = job(&env, "based");
+    assert_eq!((j["status"].as_str(), j["bars"].as_array().map(Vec::len)), (Some("running"), Some(0)), "{j}");
+    env.write_policy("[machine]\n");
+    let j = wait_for(&env, "based");
+    assert_eq!((j["status"].as_str(), j["bars"][0]["base_exit"].as_i64()), (Some("done"), Some(1)), "{j}");
+}
+
+/// Copilot review of PR #70 (second round), finding 2: an acceptance check ran as a plain child of
+/// its runner. With the sandbox off nothing ties it to the runner, so a runner killed outright left
+/// the check, and whatever compiles under it, running with no claim on the machine. A check runs
+/// under the supervisor as the session does: it ends with its runner.
+#[test]
+fn a_killed_runners_check_ends_with_it_when_the_sandbox_is_off() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("check-orphan", false);
+    configure(&env, "job_ceiling_usd = 100.0\n", "[sandbox]\nenabled = false\n");
+    claude_account(&env.home, "a", 10, false);
+    let pid_file = env.root.join("check.pid");
+    let check = format!("echo $$ > {}; exec sleep 300", pid_file.display());
+    let add = ["queue", "add", "orphan", "--text", "[status-done] Make a change.", "--check", check.as_str()];
+    ok(&relay(&env, &add), "queue");
+    appears(&pid_file);
+    let mut check_pid = String::new();
+    for _ in 0..50 {
+        check_pid = std::fs::read_to_string(&pid_file).unwrap_or_default().trim().to_owned();
+        if !check_pid.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!gone_within(&check_pid, 1), "the check is running: {check_pid:?}");
+    let runner = job(&env, "orphan")["runner"].clone();
+    let (pid, started) = (runner[0].as_u64().unwrap(), runner[1].as_u64().unwrap());
+    assert!(Command::new("kill").args(["-9", &pid.to_string()]).status().unwrap().success());
+    dies(pid, started);
+    let gone = gone_within(&check_pid, 50);
+    if !gone {
+        let _ = Command::new("kill").args(["-9", &check_pid]).status();
+    }
+    assert!(gone, "the check (pid {check_pid}) outlived its killed runner");
+    until(&env, "orphan", "failed");
+}
+
+/// Copilot review of PR #70 (second round), finding 4: the machine's disk floor was copied into a
+/// process's limits when it loaded its config, so a session already running went on by the floor of
+/// when it began. The floor is taken at each disk decision: the owner raises it mid-session and the
+/// session is held at its next sample, and resumed once the owner lowers it again.
+#[test]
+fn a_disk_floor_the_owner_raises_while_a_session_runs_holds_it() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("machine-disk-late", false);
+    env.write_policy("[machine]\n");
+    configure(&env, "disk_sample_minutes = 0.02\nper_account = 4\n", "");
+    claude_account(&env.home, "a", 10, false);
+    let hold = env.home.join(".claude.a/hold");
+    std::fs::write(&hold, "").unwrap();
+    ok(&relay(&env, &["queue", "add", "long", "--text", "Look around.", "--readonly"]), "queue");
+    until(&env, "long", "running");
+    // Its session has started, so its runner loaded its config, with no floor anywhere, long ago.
+    appears(&env.home.join(".claude.a/pids"));
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(job(&env, "long")["status"], "running", "no floor, no hold");
+    env.write_policy("[machine]\nmin_free_disk_gb = 1000000000\n");
+    let j = poll_job(&env, "long", |j| j["status"] == "stopped");
+    assert_eq!(j["held"], true, "stopped by the machine's floor, so held: {j}");
+    let why = j["reason"].as_str().unwrap();
+    assert!(why.starts_with("disk: ") && why.contains(" free, under "), "{why}");
+    // The owner lowers it again: any event has the dispatcher look, and the held job is resumed.
+    env.write_policy("[machine]\n");
+    nudge(&env);
+    poll_job(&env, "long", |j| j["status"] == "running");
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(wait_for(&env, "long")["status"], "done");
+}
+
+/// Copilot review of PR #70 (third round): a project's `limits.min_free_disk_gb = nan` loaded, and
+/// NaN compares false with everything, so the machine's floor was discarded and the floor read as
+/// off. A quantity that is not a finite number, zero or more, is a config error naming its key, in a
+/// project's config and in the owner's policy alike, and nothing runs under it.
+#[test]
+fn a_quantity_that_is_not_a_finite_number_is_refused_with_its_key_in_a_project_and_in_the_policy() {
+    let env = setup("nan-floor", false);
+    env.write_policy("[machine]\nmin_free_disk_gb = 30\n");
+    set_floor(&env, "nan", "0");
+    let out = relay(&env, &["config", "show"]);
+    assert!(!out.status.success(), "a NaN floor was taken: {}", out_of(&out));
+    assert!(stderr(&out).contains("limits.min_free_disk_gb must be a finite number"), "{}", stderr(&out));
+    let queued = relay(&env, &["queue", "add", "j", "--text", "Make a change."]);
+    assert!(!queued.status.success(), "a job was queued under a floor that is no number");
+    set_floor(&env, "0", "0");
+    ok(&relay(&env, &["config", "show"]), "a valid floor loads");
+    env.write_policy("[machine]\nmin_free_mem_gb = inf\n");
+    let out = relay(&env, &["config", "show"]);
+    assert!(!out.status.success(), "an infinite floor was taken: {}", out_of(&out));
+    assert!(stderr(&out).contains("machine.min_free_mem_gb must be a finite number"), "{}", stderr(&out));
+}
+
 /// Audit finding 6: a second checkout whose relay.toml has the same `name` would share the first's
 /// state directory, and the first's dispatcher would run its jobs from the first's repository. It is
 /// refused, naming both repositories, and the first's queue is untouched.

@@ -474,6 +474,18 @@ mod tests {
         assert!(!final_status_done("FINAL\nstatus: partial", "FINAL"));
         assert!(!final_status_done("status: done\nno marker", "FINAL"));
         assert_eq!(Final::of("no marker", "FINAL"), Final::Missing);
+        // A last line whose seventh byte ends inside a character, where `status:` would end: never a panic.
+        assert!(final_status_done("FINAL\nstatus: done\n🏁完", "FINAL"));
+        assert!(final_status_done("работа 🏁\nFINAL\n完了: да\nstatus: done — 完成\n🏁完\nverdict完: x", "FINAL"));
+        assert_eq!(Final::of("FINAL\nstätus: done\n🏁完", "FINAL"), Final::Status(String::new()));
+        assert_eq!(
+            review::verdict("FINAL\nverdict: accept\n🏁完完", "FINAL"),
+            Some((crate::bus::Verdict::Accept, None))
+        );
+        assert_eq!(
+            review::verdict("FINAL\nverdict: reject\nreason🏁完: x", "FINAL"),
+            Some((crate::bus::Verdict::Reject, Some(crate::bus::Reason::Other)))
+        );
         assert_eq!(Final::of("FINAL\nnotes: x", "FINAL"), Final::Status(String::new()));
     }
 

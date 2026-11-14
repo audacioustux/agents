@@ -108,13 +108,12 @@ pub(super) fn final_section<'a>(answer: &'a str, marker: &str) -> Option<&'a str
 
 /// A field of a report's final section, `name: value` (a list bullet allowed before it), the last one
 /// given, its value trimmed and lowercased. The one parser of a report: a review's verdict and a run's
-/// `status:` are both read by it.
+/// `status:` are both read by it. A line is split at its first `:`, never cut at a byte count, so no
+/// text in a report (a multibyte character where the name would end) can make it panic.
 pub(super) fn final_field(section: &str, name: &str) -> Option<String> {
     section.lines().rev().find_map(|l| {
-        let l = l.trim().trim_start_matches(['-', '*', ' ']);
-        l.get(..name.len() + 1)
-            .filter(|h| h[..name.len()].eq_ignore_ascii_case(name) && h.ends_with(':'))
-            .map(|_| l[name.len() + 1..].trim().to_ascii_lowercase())
+        let (key, value) = l.trim().trim_start_matches(['-', '*', ' ']).split_once(':')?;
+        key.eq_ignore_ascii_case(name).then(|| value.trim().to_ascii_lowercase())
     })
 }
 

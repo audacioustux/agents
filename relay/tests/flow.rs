@@ -1153,6 +1153,16 @@ fn a_job_starts_when_what_it_waits_for_is_done() {
     assert_eq!(second["pending"][0]["job"], "first");
     assert_eq!(second["pending"][0]["state"], "running");
     assert!(board(&env).contains("[after first]"), "{}", board(&env));
+    // The header states the counts the rows hold, and `--json` carries them as fields.
+    let text = board(&env);
+    assert!(
+        text.contains("jobs: 1 running of at most 2 · 1 queued (1 waiting on another job)"),
+        "the header counts the rows: {text}"
+    );
+    let status: serde_json::Value = serde_json::from_slice(&relay(&env, &["view", "status", "--json"]).stdout).unwrap();
+    let counts = &status["counts"];
+    assert_eq!((&counts["running"], &counts["queued"], &counts["waiting_on_job"]), (&1.into(), &1.into(), &1.into()));
+    assert_eq!(counts["max_running"], 2, "{counts}");
 
     std::fs::remove_file(&hold).unwrap();
     assert_eq!(wait_for(&env, "first")["status"], "done");

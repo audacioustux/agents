@@ -28,7 +28,10 @@
 //!   with evidence that everything its sandbox started has ended ([`Ended`], [`Farm::give_back`]): its
 //!   supervisor's, the one witness of a whole tree's end, for a session, a check and the probe alike. Dropped
 //!   any other way (an error, a panic, a sandbox killed from outside), it is retired: renamed into the
-//!   pool as gone, for gc, never taken again; so is one that cannot be cut down for its next run.
+//!   pool as gone, for gc, never taken again; so is one that cannot be cut down for its next run. One a
+//!   killed runner left in its clone is used again by the job's next run only with the same proof of the
+//!   run that left it ([`Ended::earlier_runs`]), and is retired otherwise: this run's end says nothing
+//!   of that one's tree.
 
 use std::ffi::{CStr, CString, OsStr};
 use std::io;
@@ -55,6 +58,15 @@ impl Ended {
     pub fn reaped(supervisor: &crate::supervised::Supervised) -> Option<Self> {
         supervisor.tree_ended().then_some(Self(()))
     }
+
+    /// Everything the earlier runs of `job` started has ended: of the runners' `claims`, none for this
+    /// job but `me`'s own still stands. A claim stands while its runner lives or a supervisor it started
+    /// holds its lock, which a supervisor lets go only as it exits, its whole tree reaped
+    /// ([`crate::world::Claim::live`]): what a killed runner's sandbox is still seen by. The proof a copy
+    /// an earlier run left in place is used again with ([`Farm::take`]).
+    pub fn earlier_runs(claims: &[crate::world::Claim], job: &str, me: (u32, u64)) -> Option<Self> {
+        claims.iter().all(|c| c.job != job || c.runner == me || !c.live()).then_some(Self(()))
+    }
 }
 
 /// A job's copy of the linked caches, in place. Given back to its pool for another run only with [`Ended`];
@@ -72,17 +84,23 @@ pub struct Farm {
 
 impl Farm {
     /// Puts a copy of the linked caches `rels` at `name` in `parent` (a directory only relay writes, or a
-    /// `.git` reached from one without following a link): the copy a run that never ended left there,
-    /// else the idle one given back last to `pool`, else a new, empty one; then cuts it down to `rels`.
-    /// Fails, leaving none, when it cannot be cut down.
-    pub fn take(parent: &Path, name: &str, pool: &Path, rels: &[CachePath], _left: Option<Ended>) -> io::Result<Self> {
+    /// `.git` reached from one without following a link): the copy a run that never gave it back left
+    /// there, when `left` proves that run has ended; else the idle one given back last to `pool`, else a
+    /// new, empty one; then cuts it down to `rels`. Fails, leaving none, when it cannot be cut down.
+    ///
+    /// A copy is left in place only by a run whose runner ended before it could give it back or retire
+    /// it, and what that run started may outlive its runner for a while. Used again without `left`, the
+    /// copy would go back to the pool on the proof of this run's end alone, for another job to take
+    /// while the first tree still wrote in it: so without it the copy is retired, and this run takes another.
+    pub fn take(parent: &Path, name: &str, pool: &Path, rels: &[CachePath], left: Option<Ended>) -> io::Result<Self> {
         let parent_fd = open_path(parent)?;
         let cname = CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-        let root = if let Ok(root) = open_dir(&parent_fd, &cname) {
+        let root = if let Some(root) = left.and_then(|_: Ended| open_dir(&parent_fd, &cname).ok()) {
             root
         } else {
-            // Not a directory (a link left in its place): it goes.
-            let _ = rustix::fs::unlinkat(&parent_fd, &cname, AtFlags::empty());
+            // Whatever is there goes: a copy with no proof its run ended, or no directory at all (a link
+            // left in its place).
+            vacate(&parent_fd, &cname, pool, &parent.join(name))?;
             if !from_pool(pool, &parent_fd, &cname) {
                 rustix::fs::mkdirat(&parent_fd, &cname, Mode::from_raw_mode(0o700))?;
             }
@@ -290,17 +308,23 @@ pub fn clear(parent: &Path, name: &str, pool: &Path) -> io::Result<()> {
         Err(e) => return Err(e),
     };
     let cname = CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    match rustix::fs::statat(&parent_fd, &cname, AtFlags::SYMLINK_NOFOLLOW) {
+    vacate(&parent_fd, &cname, pool, &parent.join(name))
+}
+
+/// Takes whatever is at `name` in `parent` out of it: retired into `pool`, else removed ([`clear`]). `at`
+/// is its path, for the error when it is still there after both.
+fn vacate(parent: &OwnedFd, name: &CStr, pool: &Path, at: &Path) -> io::Result<()> {
+    match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
         Err(Errno::NOENT) => return Ok(()),
         Err(e) => return Err(e.into()),
         Ok(_) => {}
     }
-    if !to_pool(pool, &parent_fd, &cname, GONE) {
-        let _ = crate::hostdir::remove_beneath(parent_fd.as_fd(), &cname);
+    if !to_pool(pool, parent, name, GONE) {
+        let _ = crate::hostdir::remove_beneath(parent.as_fd(), name);
     }
-    match rustix::fs::statat(&parent_fd, &cname, AtFlags::SYMLINK_NOFOLLOW) {
+    match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
         Err(Errno::NOENT) => Ok(()),
-        _ => Err(io::Error::other(format!("{} could not be removed", parent.join(name).display()))),
+        _ => Err(io::Error::other(format!("{} could not be removed", at.display()))),
     }
 }
 
@@ -693,6 +717,24 @@ mod tests {
         let idle = idle(&p.pool);
         assert_eq!(idle.len(), 1, "only the copy this run took goes to another");
         assert!(!p.pool.join(&idle[0].0).join(".cache/left").exists());
+    }
+
+    /// The proof for a copy left in place: no other runner's claim for the job stands. Another job's
+    /// claim, this runner's own, and one whose runner is gone with its lock free do not hold it back; one
+    /// whose runner lives does.
+    #[test]
+    fn a_copy_left_in_place_waits_for_every_earlier_runner_of_its_job() {
+        use crate::world::Claim;
+        let me = std::process::id();
+        let live = (me, crate::os::start_time(me).unwrap());
+        // No process has this pid and start time, and no supervisor holds a lock named for it.
+        let dead = (999_999_999, 1);
+        let claim = |job: &str, runner| Claim { job: job.into(), runner, no_compile: false };
+        let this = (1, 0);
+        assert!(Ended::earlier_runs(&[], "a", this).is_some());
+        assert!(Ended::earlier_runs(&[claim("a", dead), claim("b", live), claim("a", this)], "a", this).is_some());
+        assert!(Ended::earlier_runs(&[claim("a", dead), claim("a", live)], "a", this).is_none(), "its runner lives");
+        assert!(Ended::earlier_runs(&[claim("a", live)], "a", live).is_some(), "this runner's own claim");
     }
 
     /// A copy left by a run relay never saw end is used again in place, and nothing it held is lost.

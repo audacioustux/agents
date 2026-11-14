@@ -302,7 +302,9 @@ pub fn plan(ctx: &Ctx, user_home: &Path, m: &Mounts<'_>) -> Vec<(PathBuf, Mount)
 
 /// The job's own copy of the caches ([`farm::Farm`]), put at `name` in `parent`, a directory in the mount
 /// that holds its tree, from the idle copies in `pool` (beside it, on its filesystem), of the caches
-/// `rels`: what [`linkable`] says for the job's mounts, and nothing else. None without the sandbox, with
+/// `rels`: what [`linkable`] says for the job's mounts, and nothing else. A copy an interrupted run left
+/// at `name` is used again only with `left`, the proof that run has ended, and retired without
+/// ([`farm::Farm::take`]). None without the sandbox, with
 /// none, or when it cannot be taken (said on stderr, since the job then installs by copying): then each
 /// cache is a bind of the project's caches, as for a job with no tree, and a copy an interrupted run left at `name`
 /// is removed, since it would still be in the job's tree (with what a hide rule added since covers). An

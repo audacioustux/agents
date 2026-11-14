@@ -467,8 +467,15 @@ fn launch(
     let rels = sandbox::linkable(ctx, &accounts::home(), &mounts);
     // A copy an interrupted run left there goes even when this run links nothing; it must, or no session starts.
     let caches = match work.clone.as_ref().and_then(|c| sandbox::farm::clone_git(c.path())) {
-        Some(git) => sandbox::own_caches(ctx, &git, sandbox::farm::IN_CLONE, &ctx.session_copies, &rels, None)
-            .context("removing the copy of the caches an interrupted run left in the clone")?,
+        Some(git) => {
+            // It is used again only once nothing an earlier runner of this job started is left: a killed
+            // runner's sandbox may still write in it, and this run's end would not say when that stopped.
+            let me = std::process::id();
+            let me = (me, os::start_time(me).unwrap_or(0));
+            let left = sandbox::farm::Ended::earlier_runs(&ctx.world()?.claims, &job.name, me);
+            sandbox::own_caches(ctx, &git, sandbox::farm::IN_CLONE, &ctx.session_copies, &rels, left)
+                .context("removing the copy of the caches an interrupted run left in the clone")?
+        }
         None => None,
     };
     let mounts = Mounts { caches: caches.as_ref().map(sandbox::farm::Farm::path), ..mounts };

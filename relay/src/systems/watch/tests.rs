@@ -152,7 +152,7 @@ fn the_board_fits_80x24_and_120x40_with_headings_keys_and_a_zoned_clock() {
         let b = f.board(&ui, 2);
         ui.sync(&b);
         let fr = frame(&b, &mut ui, w, h);
-        assert!(fr[0].contains("demo · 1 running"), "{w}x{h}: {}", fr[0]);
+        assert!(fr[0].contains("demo · 1/2 running"), "{w}x{h}: {}", fr[0]);
         let zone = crate::os::local(jiff::Timestamp::now()).strftime("%Z").to_string();
         assert!(
             fr[0].trim_end_matches(['┓', '┐']).trim_end().ends_with(&zone),
@@ -219,10 +219,43 @@ fn every_project_adds_a_column_and_each_projects_counts() {
     let b = f.board(&ui, 1);
     ui.sync(&b);
     let fr = frame(&b, &mut ui, 120, 40);
-    assert!(fr[0].contains("every project · demo 1 running · other 0 running, 1 queued"), "{}", fr[0]);
+    assert!(
+        fr[0].contains("every project · 1 running, 1 queued · demo 1/2 running, 0 queued · other 0 running, 1 queued"),
+        "{}",
+        fr[0]
+    );
     assert!(fr[1].contains("project"), "{}", fr[1]);
     assert!(fr[row_of(&fr, "Their task") as usize].contains("other"));
     assert!(fr.iter().any(|l| l.contains("demo/build")), "the job pane names the project");
+}
+
+/// The title states what the rows hold, at 80 columns, and follows the world as it changes.
+#[test]
+fn the_title_counts_running_queued_and_waiting_jobs_at_80_columns() {
+    let mut f = fixture(
+        &[
+            job("r1", Status::Running, 100, "one"),
+            job("r2", Status::Running, 90, "two"),
+            Job { after: vec!["r1".into()], ..job("after", Status::Queued, 80, "later") },
+            job("held", Status::Queued, 70, "no seat"),
+            job("broke", Status::Failed, 60, "failed"),
+            job("done", Status::Done, 50, "fine"),
+        ],
+        &[],
+    );
+    let mut ui = Ui::new(false, false, true);
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    let fr = frame(&b, &mut ui, 80, 24);
+    assert!(fr[0].contains("demo · 2/2 running, 2 queued (1 after, 1 held), 1 need a human"), "{}", fr[0]);
+    assert_eq!(fr[0].chars().count(), 80, "one title line");
+    // A job ends: the next read's title says so.
+    let own = f.machine.projects.iter_mut().find(|p| p.own).unwrap();
+    own.world.jobs_mut().get_mut("r1").unwrap().status = Status::Done;
+    let b = f.board(&ui, 1);
+    ui.sync(&b);
+    let fr = frame(&b, &mut ui, 80, 24);
+    assert!(fr[0].contains("demo · 1/2 running, 2 queued (2 held), 1 need a human"), "{}", fr[0]);
 }
 
 #[test]
@@ -500,7 +533,7 @@ fn a_read_failure_shows_before_the_counts_a_narrow_title_cuts() {
     assert!(fr[0].contains("every project · read failed"), "{}", fr[0]);
     let fr = frame(&b, &mut ui, 200, 24);
     assert!(fr[0].contains("unreadable: broken"), "{}", fr[0]);
-    assert!(fr[0].find("unreadable").unwrap() < fr[0].find("demo 1 running").unwrap(), "{}", fr[0]);
+    assert!(fr[0].find("unreadable").unwrap() < fr[0].find("demo 1/2 running").unwrap(), "{}", fr[0]);
 }
 
 #[test]
@@ -780,7 +813,7 @@ fn u_switches_to_the_chart_and_back_and_the_chart_answers_to_few_keys() {
     assert_eq!(ui.action(&key(KeyCode::Char('u'))), Some(Action::Chart));
     ui.apply(Action::Chart, &b);
     let fr = frame(&b, &mut ui, 120, 40);
-    assert!(fr[0].contains("demo · 1 running"), "back on the board: {}", fr[0]);
+    assert!(fr[0].contains("demo · 1/2 running"), "back on the board: {}", fr[0]);
 }
 
 #[test]

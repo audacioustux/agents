@@ -55,6 +55,19 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
+/// Why a job is stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StopCause {
+    /// A person's stop, a dequeue, or a review dropped from its chain: deliberate.
+    Person,
+    /// The disk floor's, which the dispatcher resumes when space is back.
+    Floor,
+    /// Stopped for a reason only a person clears: a clone over its ceiling, or a hold that cannot
+    /// end in a resume (the job's ceiling is spent).
+    Stuck,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools, reason = "each is a fact of its own about the job, recorded by its own event")]
 pub struct Job {
@@ -115,6 +128,10 @@ pub struct Job {
     /// (`reason` says what it saw). A person's stop or resume clears it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held: bool,
+    /// Why it is stopped, as the event that stopped it recorded: what says whether a person is needed.
+    /// Cleared when the job runs, ends otherwise or is queued again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_for: Option<StopCause>,
     /// When the dispatcher last resumed it from that hold (bus time): the next held job waits while it is queued (an
     /// automatic requeue keeps this) or has run less than a disk sample. A hand resume clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -394,6 +411,13 @@ impl Job {
     /// Back in the queue at `t`: no account until a dispatch gives it one, and at the end of any line.
     fn requeue(&mut self, t: u64) {
         (self.status, self.queued_at, self.account, self.in_line) = (Status::Queued, t, None, None);
+        self.stopped_for = None;
+    }
+
+    /// Whether it is stopped for a reason that needs a person: nothing moves it on but a person's
+    /// resume. A person's own stop and the disk floor's (which resumes itself) do not.
+    pub fn needs_person(&self) -> bool {
+        self.status == Status::Stopped && self.stopped_for == Some(StopCause::Stuck)
     }
 
     /// Resumed by hand during its check: what its runner still says changes
@@ -687,9 +711,11 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// compiles (`no_compile`); every runner dispatched claims its place until its recorded exit
 /// (`claims`, `runner-exited`).
 /// 20: a review chain that stopped short of an accept (`review_halted`), for the jobs that wait on it.
-/// 21: a build job's tip as its run ended (`head`), which an accept must name.
+/// 21: a build job's tip as its run ended (`head`), which an accept must name. (On main, 21 was the
+/// last transition that stops a job recording its cause, `stopped_for`; 23 folds both lines.)
 /// 22: a verdict keeps when it came in (`Reviewed::at`), so a builder that answered it is told apart.
-const FOLD_VERSION: u32 = 22;
+/// 23: the review flow (20-22) and `stopped_for` on every stopping transition, together.
+const FOLD_VERSION: u32 = 23;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -1664,6 +1690,7 @@ impl World {
             QueueEvent::Dequeued { job } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     (j.status, j.reason, j.ended_at) = (Status::Stopped, Some("dequeued".into()), Some(t));
+                    j.stopped_for = Some(StopCause::Person);
                 }
             }
             QueueEvent::Unchained { job, by } => self.unchain(t, job, by.as_ref()),
@@ -1679,6 +1706,7 @@ impl World {
                     // A person stopping a held job takes it out of the floor's hands: it stays stopped.
                     if j.held {
                         (j.held, j.reason) = (false, Some("stopped by request".into()));
+                        j.stopped_for = Some(StopCause::Person);
                     }
                 }
             }
@@ -1722,6 +1750,7 @@ impl World {
             // A review that has not started, or waits for a re-review, never runs again.
             if j.status == Status::Queued {
                 (j.status, j.reason, j.ended_at) = (Status::Stopped, Some(left.summary()), Some(t));
+                j.stopped_for = Some(StopCause::Person);
             }
             j.unchained = Some(left);
         }
@@ -1747,6 +1776,7 @@ impl World {
                 }
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.status = Status::Running;
+                    j.stopped_for = None;
                     j.account = Some(account.clone());
                     (j.model, j.provider) = (model.clone(), provider.clone());
                     j.runner = Some((*runner_pid, *runner_started));
@@ -1784,6 +1814,7 @@ impl World {
             DispatchEvent::HoldEnded { job, why } => {
                 if let Some(j) = self.jobs.get_mut(job).filter(|j| j.held && j.status == Status::Stopped) {
                     (j.held, j.reason) = (false, Some(why.clone()));
+                    j.stopped_for = Some(StopCause::Stuck);
                 }
             }
             DispatchEvent::Reaped { job } => {
@@ -1795,6 +1826,7 @@ impl World {
                     } else {
                         (Status::Failed, Some("session runner died without reporting".into()))
                     };
+                    j.stopped_for = j.stop_requested.then_some(StopCause::Person);
                     j.ended_at = Some(t);
                 }
             }
@@ -1957,6 +1989,12 @@ impl World {
                         Outcome::Stopped | Outcome::Held => Status::Stopped,
                         Outcome::Retry | Outcome::Rerun => Status::Queued,
                     };
+                    j.stopped_for = match (j.status, outcome) {
+                        (Status::Stopped, _) if j.stop_requested => Some(StopCause::Person),
+                        (Status::Stopped, Outcome::Held) => Some(StopCause::Floor),
+                        (Status::Stopped, _) => Some(StopCause::Stuck),
+                        _ => None,
+                    };
                     if j.status == Status::Queued {
                         j.requeue(t);
                     }
@@ -1977,6 +2015,7 @@ impl World {
             SessionEvent::Checking { job, .. } => {
                 if let Some(j) = self.jobs.get_mut(job) {
                     j.status = Status::Checking;
+                    j.stopped_for = None;
                 }
             }
             SessionEvent::Checked { job, check } => {
@@ -2067,6 +2106,7 @@ impl World {
                     && !matches!(point, Point::Held | Point::Disk)
                 {
                     j.status = Status::Checking;
+                    j.stopped_for = None;
                 }
                 self.decisions.insert(
                     id.clone(),
@@ -2551,6 +2591,7 @@ mod tests {
         (20, 0xff2a_3110_25d7_0f54),
         (21, 0xff2a_3110_25d7_0f54),
         (22, 0xff2a_3110_25d7_0f54),
+        (23, 0xff2a_3110_25d7_0f54),
     ];
 
     #[test]
@@ -3505,6 +3546,69 @@ mod tests {
         let j = &w.jobs["a"];
         assert_eq!((j.status, j.held, j.reason.as_deref()), (Status::Stopped, false, Some("ceiling")));
         assert!(!w.moves_on_its_own(j), "it waits for a person now");
+    }
+
+    /// Why a job is stopped is recorded where it stops, so a reader never guesses it from the reason's
+    /// words: only a stop no one chose and nothing resumes needs a person.
+    #[test]
+    fn a_stop_records_whether_it_needs_a_person() {
+        let cause = |evs: Vec<Stamped>| {
+            let w = World::fold(&evs);
+            let j = &w.jobs["a"];
+            (j.status, j.stopped_for, j.needs_person())
+        };
+        let run = || vec![st(1, queued("a")), st(2, dispatched("a"))];
+        let with = |extra: Vec<Event>| -> Vec<Stamped> {
+            run().into_iter().chain(extra.into_iter().zip(3..).map(|(e, t)| st(t, e))).collect()
+        };
+        // The floor's hold resumes itself: no person.
+        let held = with(vec![ended_for("a", Outcome::Held, "disk")]);
+        assert_eq!(cause(held.clone()), (Status::Stopped, Some(StopCause::Floor), false));
+        // Its end, when the job's ceiling is spent, leaves it stopped for a person.
+        let ended = Event::Dispatch(DispatchEvent::HoldEnded { job: "a".into(), why: "ceiling".into() });
+        let mut spent = held.clone();
+        spent.push(st(9, ended));
+        assert_eq!(cause(spent.clone()), (Status::Stopped, Some(StopCause::Stuck), true));
+        // A clone over its ceiling is stopped, not held.
+        assert_eq!(
+            cause(with(vec![ended_for("a", Outcome::Stopped, "clone over ceiling")])),
+            (Status::Stopped, Some(StopCause::Stuck), true)
+        );
+        // A person's stop, however it ended, is deliberate, and a resume clears the cause.
+        let mut asked = with(vec![Event::Queue(QueueEvent::StopRequested { job: "a".into() })]);
+        asked.push(st(9, ended_for("a", Outcome::Stopped, "stopped by request")));
+        assert_eq!(cause(asked), (Status::Stopped, Some(StopCause::Person), false));
+        // A person's stop that takes over a job the floor holds is the last stop: no runner is left to
+        // end it again, so the stop itself records it. The same when the hold had given up on the ceiling.
+        let stop = || Event::Queue(QueueEvent::StopRequested { job: "a".into() });
+        let mut taken = held.clone();
+        taken.push(st(9, stop()));
+        assert_eq!(cause(taken), (Status::Stopped, Some(StopCause::Person), false), "not left as the floor's");
+        let mut stuck_then_stopped = spent.clone();
+        stuck_then_stopped.push(st(10, stop()));
+        assert_eq!(
+            cause(stuck_then_stopped),
+            (Status::Stopped, Some(StopCause::Stuck), true),
+            "no transition: still stuck"
+        );
+        let mut dequeued_after = spent.clone();
+        dequeued_after.push(st(10, Event::Queue(QueueEvent::Dequeued { job: "a".into() })));
+        assert_eq!(cause(dequeued_after), (Status::Stopped, Some(StopCause::Person), false), "the last stop speaks");
+        // A job that runs again is not stopped for anything.
+        let mut ran = held.clone();
+        ran.push(st(9, dispatched("a")));
+        assert_eq!(cause(ran), (Status::Running, None, false));
+        let dequeued = vec![st(1, queued("a")), st(2, Event::Queue(QueueEvent::Dequeued { job: "a".into() }))];
+        assert_eq!(cause(dequeued), (Status::Stopped, Some(StopCause::Person), false));
+        let again = Event::Dispatch(DispatchEvent::Unheld {
+            job: "a".into(),
+            message: "m".into(),
+            settle_us: 1,
+            budget_usd: None,
+        });
+        let mut resumed = held;
+        resumed.push(st(9, again));
+        assert_eq!(cause(resumed), (Status::Queued, None, false));
     }
 
     #[test]

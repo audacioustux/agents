@@ -11,7 +11,7 @@ use crate::systems::dispatch::Room;
 use crate::systems::quota::AccountsView;
 use crate::systems::quota::gauge::{self, Gauge};
 use crate::systems::view::machine::{Machine, Project};
-use crate::systems::view::{self, decision_cells, listed, row_cells};
+use crate::systems::view::{self, Counts, decision_cells, listed, row_cells};
 use crate::world::{Decision, Job, Status};
 
 use super::pane::Column;
@@ -161,7 +161,7 @@ impl Board {
             } else {
                 shown.first().map_or_else(String::new, |p| p.name.clone())
             },
-            counts: counts(&shown, everywhere, now),
+            counts: counts(cfg, room, &shown, all, everywhere, now),
             everywhere,
             decisions: decision_cells(shown.iter().copied(), everywhere, now),
             no_jobs: no_jobs(!all && older > 0, older, elsewhere),
@@ -279,25 +279,26 @@ fn runs_as(cfg: Option<&Config>, j: &Job) -> Option<String> {
     (!parts.is_empty()).then(|| format!("as {}", parts.join(" · ")))
 }
 
-/// `2 running, 1 queued`, or for every project each one's counts after its name.
-fn counts(shown: &[&Project], everywhere: bool, now: u64) -> String {
-    let counts = |p: &Project| {
-        let n = |s: Status| p.world.jobs().values().filter(|j| j.status == s).count();
-        let mut c = vec![format!("{} running", n(Status::Running))];
-        if n(Status::Queued) > 0 {
-            c.push(format!("{} queued", n(Status::Queued)));
-        }
-        c.join(", ")
+/// `2/2 running, 3 queued (1 after, 1 held), 1 need a human`, and for every project the machine's
+/// total, then each project's with jobs listed after its name. Counted from the listed jobs, as
+/// `relay view status` does, so the two agree.
+fn counts(cfg: &Config, room: &Room, shown: &[&Project], all: bool, everywhere: bool, now: u64) -> String {
+    let jobs = listed(shown.iter().copied(), all, now);
+    let of = |on: &dyn Fn(&Project) -> bool| {
+        Counts::of(jobs.iter().filter(|(p, _)| on(p)).map(|&(p, j)| (p, j)), cfg, room, now)
     };
     if !everywhere {
-        return shown.first().map_or_else(String::new, |p| counts(p));
+        return of(&|_| true).capped(cfg.limits.max_running).short();
     }
-    let busy: Vec<String> = shown
-        .iter()
-        .filter(|p| p.world.jobs().values().any(|j| view::recent(j, now)))
-        .map(|p| format!("{} {}", p.name, counts(p)))
-        .collect();
-    if busy.is_empty() { "nothing recent".to_owned() } else { busy.join(" · ") }
+    if jobs.is_empty() {
+        return "nothing recent".to_owned();
+    }
+    let mut parts = vec![of(&|_| true).short()];
+    for p in shown.iter().filter(|p| jobs.iter().any(|(q, _)| q.name == p.name)) {
+        let c = of(&|q| q.name == p.name);
+        parts.push(format!("{} {}", p.name, if p.own { c.capped(cfg.limits.max_running) } else { c }.short()));
+    }
+    parts.join(" · ")
 }
 
 /// What an empty jobs list says: what is hidden, and the key that shows it.

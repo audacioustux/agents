@@ -1404,8 +1404,8 @@ impl World {
 
     /// Whether `name` may be cleaned away: the jobs that wait on it, directly or through others, by any edge
     /// of the graph (a review replaced since, a builder requeued behind its review), none when it may.
-    /// Removing it would take the verdicts or the branch they wait on with it, and a forgotten job that was
-    /// done counts as waited for: they would start on work no review accepted.
+    /// Removing it would take the verdicts or the branch they wait on with it, and leave them waiting for a
+    /// job that is gone (only a wait it had met is dropped with it: [`Graph::met`]).
     pub fn waiters(&self, name: &str) -> Vec<String> {
         self.graph().waiters(name)
     }

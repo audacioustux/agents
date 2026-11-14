@@ -147,12 +147,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     let mut added: Option<Candidate> = None;
     let (event, runner) = match cmd {
         Cmd::Add(add) => {
-            // A job that ended before it ever started (dequeued) has nothing to keep:
-            // its name is free again.
-            if hint::accepts(&world, &hint::Cmd::new(&name, Step::Add)).is_err() {
-                let free = hint::free_name(&world, &name).map_or_else(String::new, |h| format!(", or: {h}"));
-                fail!(Conflict, "job {name} exists; pick another name{free}");
-            }
+            name_free(&world, &name, add.declare.review_of())?;
             let replaced = add.declare.review_of().map(|b| chain(world.jobs(), b)).unwrap_or_default();
             let candidate = add.queued(ctx, world.jobs())?;
             let queued = candidate.event.clone();
@@ -231,6 +226,27 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
     }
     ctx.wake_dispatch()?;
     ctx.reply(&serde_json::json!({ "job": name, "recorded": recorded }), &format!("{name}: recorded"))
+}
+
+/// Whether `queue add` may give `name` to a new job, a review of `review_of` when that is named. A job that
+/// ended before it ever started (dequeued) has nothing to keep, so its name is free again
+/// ([`hint::accepts`]); but a review that never ran is still its build's review, and what was queued after
+/// it waits, by its name, for that build's accept: only another review of the same build takes its place.
+fn name_free(world: &crate::world::World, name: &str, review_of: Option<&str>) -> Result<()> {
+    if hint::accepts(world, &hint::Cmd::new(name, Step::Add)).is_err() {
+        let free = hint::free_name(world, name).map_or_else(String::new, |h| format!(", or: {h}"));
+        fail!(Conflict, "job {name} exists; pick another name{free}");
+    }
+    if let Some(b) = world.jobs().get(name).and_then(Job::review_of).filter(|b| review_of != Some(*b)) {
+        let clean = hint::hint(world, &[vec![hint::Cmd::new(name, Step::Clean)]])
+            .map_or_else(String::new, |h| format!(", or: {h}"));
+        fail!(
+            Conflict,
+            "job {name} exists, a review of {b}: what waits on it waits for that review's accept, so only \
+             another review of {b} takes its name; pick another name{clean}"
+        );
+    }
+    Ok(())
 }
 
 /// Ends a running job's runner with a TERM, sent only while the recorded pid is still the recorded

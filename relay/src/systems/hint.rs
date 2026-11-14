@@ -287,6 +287,64 @@ mod tests {
         assert_eq!(release_from(&w, next, "unrelated"), None, "nothing leads there: no release");
     }
 
+    fn review(name: &str, of: &str, status: Status, after: &[&str]) -> Job {
+        Job {
+            name: name.into(),
+            status,
+            kind: crate::bus::Kind::Review,
+            acceptance: crate::bus::Acceptance::ReviewOf(of.into()),
+            after: after.iter().map(|a| (*a).to_owned()).collect(),
+            ..Job::default()
+        }
+    }
+
+    /// Copilot on PR #69 (hint.rs:148): a resume is refused when it would close a cycle, so a plan that resumes
+    /// is offered only where the graph takes it. next failed `--after a,b` (b is gone), and ra reviews a
+    /// `--after next`: resumed, next waits on a's chain, ra, which waits on next, whatever it is released from.
+    #[test]
+    fn a_plan_whose_resume_would_close_a_cycle_is_not_offered() {
+        let a = Job { name: "a".into(), status: Status::Done, attempts: 1, ..Job::default() };
+        let next = Job {
+            name: "next".into(),
+            status: Status::Failed,
+            attempts: 1,
+            after: vec!["a".into(), "b".into()],
+            ..Job::default()
+        };
+        let plan = [Cmd::new("next", Step::Release(vec!["b".into()])), Cmd::new("next", Step::Resume)];
+        let free = world(vec![a.clone(), next.clone()]);
+        assert_eq!(
+            hint(&free, &[plan.to_vec()]).as_deref(),
+            Some("relay queue release next --from b, then relay queue resume next --message continue")
+        );
+        let w = world(vec![a, next, review("ra", "a", Status::Queued, &["a", "next"])]);
+        let refused = accepts(&w, &Cmd::new("next", Step::Resume)).expect_err("the resume closes next → ra → next");
+        assert!(refused.msg.contains("next → ra → next"), "{}", refused.msg);
+        assert!(!works(&w, &plan), "so no plan that ends in it works");
+        assert_eq!(hint(&w, &[plan.to_vec()]), None);
+    }
+
+    /// Copilot on PR #69 (hint.rs:65): a review that left its chain keeps its name until it is cleaned away,
+    /// which what waits through it refuses. r1 was replaced by r2 before it ran (stopped, no attempts) and next
+    /// is queued `--after r1`, so it needs r2's accept: `queue add r1` must not put another job in r1's place.
+    #[test]
+    fn a_review_that_left_its_chain_keeps_its_name_until_it_is_cleaned() {
+        let build = Job { name: "build".into(), status: Status::Done, attempts: 1, ..Job::default() };
+        let r1 = Job {
+            unchained: Some(crate::world::Unchained { by: Some("r2".into()) }),
+            ..review("r1", "build", Status::Stopped, &["build"])
+        };
+        let r2 = review("r2", "build", Status::Queued, &["build"]);
+        let next = Job { name: "next".into(), status: Status::Queued, after: vec!["r1".into()], ..Job::default() };
+        let waited = world(vec![build.clone(), r1.clone(), r2.clone(), next]);
+        let add = Cmd::new("r1", Step::Add);
+        assert!(accepts(&waited, &add).is_err(), "next waits on r2's accept through r1");
+        assert_eq!(free_name(&waited, "r1"), None, "and cleaning it is refused: no command frees the name");
+        let free = world(vec![build, r1, r2]);
+        assert!(accepts(&free, &add).is_err(), "its name is its record's until that is cleaned");
+        assert_eq!(free_name(&free, "r1").as_deref(), Some("relay land clean r1"));
+    }
+
     /// Copilot on PR #69 (hint.rs:129): `queue stop` asks a running job's runner to end and returns; the job is
     /// still running when the next command runs, so `land clean` would refuse it. No such plan is offered.
     #[test]

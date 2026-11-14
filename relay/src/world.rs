@@ -3054,6 +3054,69 @@ mod tests {
         assert_eq!(cycle.as_deref(), Some("b → ra → b (b waits for a, which ra reviews)"), "rb's reject resuming b");
     }
 
+    /// Copilot on PR #69 (world.rs, `Forgotten`): a job cleaned away is dropped from the waits it had satisfied,
+    /// and from no other. rev rejected build and the chain halted: next, queued `--after rev`, holds rev's
+    /// record; once next has failed nothing waits and rev may be cleaned, but next's wait on it was never met,
+    /// so next resumed waits for it still (gone, until a person releases it), never free onto the rejected tip.
+    #[test]
+    fn a_job_cleaned_away_is_dropped_only_from_the_waits_it_had_satisfied() {
+        use bus::Verdict::{Accept, Reject};
+        let chain = |verdict| {
+            vec![
+                st(1, queued("build")),
+                st(2, ended("build", Outcome::Done)),
+                st(3, queued_review("rev", "build")),
+                st(4, reviewed("rev", "build", verdict)),
+                st(5, ended("rev", Outcome::Done)),
+                st(6, queued_after("next", &["rev"])),
+            ]
+        };
+        let forgotten = |job: &str| Event::Land(LandEvent::Forgotten { job: job.into() });
+        let rejected = chain(Reject);
+        assert_eq!(World::fold(&rejected).waiters("rev"), ["next"], "queued, next holds rev's record");
+        let cleaned =
+            [&rejected[..], &[st(7, ended("next", Outcome::Failed)), st(8, forgotten("rev")), st(9, resumed("next"))]]
+                .concat();
+        let w = World::fold(&cleaned);
+        assert_eq!(w.jobs["next"].after, ["rev"], "the reject released nothing");
+        assert_eq!(Wait::summary(&w.waits(&w.jobs["next"])).as_deref(), Some("waits for rev (gone)"));
+
+        let accepted = [
+            &chain(Accept)[..],
+            &[st(7, ended("next", Outcome::Failed)), st(8, forgotten("rev")), st(9, resumed("next"))],
+        ]
+        .concat();
+        let w = World::fold(&accepted);
+        assert!(w.jobs["next"].after.is_empty() && w.startable(&w.jobs["next"]), "an accept had released it");
+    }
+
+    /// Copilot on PR #69 (world.rs:1013): a replaced review is kept for what waits through it (cleanup), but no
+    /// job waits for it: readiness goes on to its replacement. r, a review of b `--after o`, was replaced by r2;
+    /// ro reviews o `--after r`, so it needs r2's accept. r resumed waits on o's chain, ro, which waits on r2:
+    /// no cycle, and the resume is not refused for one.
+    #[test]
+    fn a_replaced_review_is_kept_for_cleanup_and_closes_no_cycle() {
+        let mut w = World::fold(&[
+            st(1, queued("b")),
+            st(2, ended("b", Outcome::Done)),
+            st(3, queued("o")),
+            st(4, ended("o", Outcome::Done)),
+            st(5, queued_review("r", "b")),
+            st(6, ended("r", Outcome::Done)),
+            st(7, queued_review("r2", "b")),
+            st(8, unchained("r", "r2")),
+            st(9, queued_review("ro", "o")),
+        ]);
+        // r is queued `--review-of b --after o`, ro `--review-of o --after r`.
+        w.jobs_mut().get_mut("r").unwrap().after.push("o".into());
+        w.jobs_mut().get_mut("ro").unwrap().after.push("r".into());
+        assert_eq!(w.waiters("r"), ["ro"], "ro's wait goes through r: its record is kept");
+        assert_eq!(w.closes_cycle([resumed("r")], "r"), None, "ro waits on r2's accept, not on r");
+        w.apply(&st(10, resumed("r")));
+        assert!(!w.blocked(&w.jobs()["r"]) && !w.blocked(&w.jobs()["ro"]), "readiness says the same");
+        assert!(!w.graph().reaches("ro", "r"), "nothing holds ro for r");
+    }
+
     #[test]
     fn a_dependency_that_ended_otherwise_or_vanished_blocks() {
         let events = [

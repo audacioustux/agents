@@ -1558,6 +1558,41 @@ mod base_tests {
         assert_eq!(b.found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["one"], "what is there is still found");
     }
 
+    /// Copilot on PR #69 (session.rs:1369): a job after a replaced review starts from what the review that
+    /// releases it waited for. rev1 (`--after build,other`) was replaced by rev2 (`--after build`), whose accept
+    /// releases next: next starts from build, and other, which has no clone yet, is no base of it.
+    #[test]
+    fn a_build_after_a_replaced_review_starts_from_what_its_replacement_waited_for() {
+        let clones = crate::config::tempdir::Dir::new();
+        std::fs::create_dir_all(clones.path().join("build")).unwrap();
+        let job = |n: &str, after: &[&str]| Job {
+            name: n.into(),
+            after: after.iter().map(|a| (*a).to_owned()).collect(),
+            ..Job::default()
+        };
+        let review = |n: &str, after: &[&str]| Job {
+            kind: crate::bus::Kind::Review,
+            acceptance: crate::bus::Acceptance::ReviewOf("build".into()),
+            ..job(n, after)
+        };
+        let build = Job {
+            workdir: Some(SessionRepo::new(clones.path().join("build"))),
+            branch: Some("job/build".into()),
+            ..job("build", &[])
+        };
+        let rev1 = Job {
+            unchained: Some(crate::world::Unchained { by: Some("rev2".into()) }),
+            ..review("rev1", &["build", "other"])
+        };
+        let mut w = World::default();
+        for j in [build, job("other", &[]), rev1, review("rev2", &["build"])] {
+            w.jobs_mut().insert(j.name.clone(), j);
+        }
+        let b = bases(&w, &job("next", &["rev1"]));
+        assert_eq!(b.gone, [""; 0], "other is no base: rev2, which releases next, never waited for it");
+        assert_eq!(b.found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["build"]);
+    }
+
     #[test]
     fn a_build_starts_from_the_newest_of_its_bases_or_fails_when_they_diverge() {
         let tips = |ts: &[&str]| ts.iter().map(|t| ((*t).to_uppercase(), (*t).to_owned())).collect::<Vec<_>>();

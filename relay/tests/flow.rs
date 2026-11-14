@@ -4134,6 +4134,36 @@ fn a_build_whose_base_clone_is_gone_is_refused_not_started_from_head() {
     assert!(reason.contains("the branch of build it starts from is gone"), "{reason}");
 }
 
+/// Copilot on PR #69 (session.rs:407): the recovery a missing base is refused with names the job's own
+/// `--after` entries that lead to it. rev accepted build, whose clone gc then collected; next, queued
+/// `--after rev`, is refused for build's branch, and is told to be released from rev, which it does wait for.
+#[test]
+fn a_base_gone_behind_a_review_names_the_entry_to_be_released_from() {
+    if !have_bwrap() {
+        return;
+    }
+    let env = setup("base-gone-review", false);
+    configure(
+        &env,
+        "job_ceiling_usd = 100.0
+",
+        "[gc]\nclones_after_days = 0\n",
+    );
+    claude_account(&env.home, "a", 10, false);
+    build(&env, "build", &[]);
+    ok(&relay(&env, &["queue", "add", "rev", "--review-of", "build", "--text", "[verdict-accept] Review."]), "rev");
+    assert_eq!(wait_for(&env, "rev")["status"], "done");
+    ok(&relay(&env, &["land", "gc"]), "gc");
+    assert_eq!(job(&env, "build")["collected"], "clone");
+    let next = build(&env, "next", &["--after", "rev"]);
+    assert_eq!(next["status"], "failed", "{next}");
+    let reason = next["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("the branch of build it starts from is gone"), "{reason}");
+    let hint = "relay queue release next --from rev, then relay queue resume next --message continue";
+    assert!(reason.contains(hint), "{reason}");
+    ok(&relay(&env, &["queue", "release", "next", "--from", "rev"]), "the release it names");
+}
+
 #[test]
 fn a_profile_that_asks_for_an_independent_family_refuses_a_same_family_reviewer() {
     if !have_bwrap() {

@@ -539,6 +539,20 @@ mod tests {
         assert_eq!(due(&w, &w.jobs()["free"], &gc, 10 * DAY), Due { outputs: true, clone: true });
     }
 
+    /// Copilot on PR #69 (world.rs:905): gc keeps every clone a waiting job starts from, as base discovery
+    /// finds them (`session::bases`), not only those an edge of its own ends at. next waits `--after look,gate`;
+    /// look, read-only and done, was queued after build: next starts from build's branch, so its clone stays.
+    #[test]
+    fn a_clone_a_waiting_job_starts_from_through_a_read_only_job_is_kept() {
+        let gc = Gc { outputs_after_hours: 0.0, clones_after_days: 0.0, waiting_retain_days: 0.0, ..Gc::default() };
+        let build = job("build", Status::Done, Some(1));
+        let look =
+            Job { kind: crate::bus::Kind::Read, after: vec!["build".into()], ..job("look", Status::Done, Some(1)) };
+        let next = Job { after: vec!["look".into(), "gate".into()], ..job("next", Status::Queued, None) };
+        let w = world(vec![build.clone(), look, job("gate", Status::Queued, None), next]);
+        assert_eq!(due(&w, &build, &gc, 10 * DAY), Due::default(), "next starts from build through look");
+    }
+
     #[test]
     fn a_job_the_disk_floor_holds_keeps_its_clone_and_scratch_for_its_resume() {
         let gc = Gc { outputs_after_hours: 0.0, clones_after_days: 0.0, waiting_retain_days: 0.0, ..Gc::default() };

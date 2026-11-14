@@ -433,6 +433,62 @@ mod tests {
         assert!(asked_again(&ctx), "the review's end: {:?}", ctx.world().unwrap().jobs()["build"]);
     }
 
+    /// Copilot on PR #69 (queue.rs:492): whether a re-review is due is decided under the jobs lock, on the world
+    /// as it is then. The builder's end and the review's both found rev due; one resumed it, and it accepted the
+    /// new tip and ended before the other took the lock: that one asks for nothing, the accept stands.
+    #[test]
+    fn a_re_review_another_end_already_got_is_not_asked_for_again() {
+        use crate::bus::{DispatchEvent, Outcome, QueueEvent};
+        let dir = crate::config::tempdir::Dir::new();
+        let ctx = project(&dir);
+        accepted_then_overtaken(&ctx);
+        let ended = SessionEvent::Ended {
+            job: "rev".into(),
+            outcome: Outcome::Done,
+            cost_usd: 0.0,
+            turns: 1,
+            reason: None,
+            head: None,
+        };
+        put(&ctx, "session/rev.4.1.ndjson", 10, json(ended.clone()));
+        // The first end's resume, and the run it started: an accept of c2, the builder's tip.
+        let resumed = QueueEvent::Resumed {
+            job: "rev".into(),
+            message: "again".into(),
+            budget_usd: None,
+            models: std::collections::BTreeMap::new(),
+        };
+        put(&ctx, "queue.ndjson", 11, json(resumed));
+        let dispatched = DispatchEvent::Dispatched {
+            job: "rev".into(),
+            account: "c:w".into(),
+            model: None,
+            provider: String::new(),
+            runner_pid: 7,
+            runner_started: 1,
+        };
+        put(&ctx, "dispatch.ndjson", 12, json(dispatched));
+        let accept = SessionEvent::Reviewed {
+            job: "rev".into(),
+            of: "build".into(),
+            commit: "c2".into(),
+            verdict: Verdict::Accept,
+            reason: None,
+            family: None,
+            stale_head: None,
+        };
+        put(&ctx, "session/rev.4.2.ndjson", 13, json(accept));
+        put(&ctx, "session/rev.4.2.ndjson", 14, json(ended));
+        let world = ctx.world().unwrap();
+        let last = world.jobs()["build"].verdicts.last().unwrap();
+        assert_eq!((last.commit.as_str(), world.jobs()["rev"].status), ("c2", crate::world::Status::Done));
+
+        // The second end, which chose rev before that run: it asks under the lock, and is told no.
+        let why = crate::systems::queue::resume_reviewer(&ctx, "rev", "build", "judge again".into()).unwrap();
+        assert!(why.is_some_and(|w| w.contains("stands")), "rev's accept is of build's tip");
+        assert!(!asked_again(&ctx), "nothing was asked: {:?}", ctx.world().unwrap().jobs()["build"]);
+    }
+
     /// Copilot on PR #69 (review.rs:306): a rejected builder that answers without a commit, and ends before the
     /// review it answered is marked ended, ends on the tip that was rejected. It answered all the same: the
     /// review's end asks for the re-review, or what waits on the chain stays at "re-review due" for ever.

@@ -276,29 +276,24 @@ pub(super) fn rereview_if_overtaken(ctx: &Ctx, reviewer: &str) -> Result<Vec<Str
 }
 
 /// The reviewers of `builder` (just `only`, when named) whose last verdict does not stand for what it ended
-/// with ([`crate::world::Reviewed::due_again`]), and can be asked again.
+/// with ([`crate::world::World::rereview_due`]), and can be asked again.
 fn resume_rejecting(ctx: &Ctx, builder: &str, only: Option<&str>) -> Result<Vec<String>> {
     let world = ctx.world()?;
-    let Some(b) = world.jobs().get(builder) else { return Ok(Vec::new()) };
-    let rejecting: Vec<&str> = world
+    // The builder's end and the review's ask by the same test (`World::rereview_due`), so neither order of the
+    // two loses it; the resume is recorded by that test again under the jobs lock, so neither asks twice.
+    let rejecting: Vec<(&str, &crate::world::Reviewed)> = world
         .jobs()
         .values()
-        .filter(|r| r.review_of() == Some(builder) && r.unchained.is_none() && only.is_none_or(|o| o == r.name))
-        .filter(|r| {
-            let last = b.verdicts.iter().rev().find(|v| v.reviewer == r.name);
-            // The builder's end and the review's ask by the same test, so neither order of the two loses it.
-            last.is_some_and(|v| v.due_again(b))
-        })
-        .map(|r| r.name.as_str())
+        .filter(|r| only.is_none_or(|o| o == r.name))
+        .filter_map(|r| Some((r.name.as_str(), world.rereview_due(builder, &r.name)?)))
         .collect();
     let mut resumed = Vec::new();
-    for reviewer in rejecting {
-        let last = b.verdicts.iter().rev().find(|v| v.reviewer == reviewer);
-        let why = match last {
-            Some(v) if v.stale_head.is_some() => {
+    for (reviewer, v) in rejecting {
+        let why = match v {
+            v if v.stale_head.is_some() => {
                 format!("{builder}'s branch moved while you were judging it, so that verdict is not for its head.")
             }
-            Some(v) if !v.wants_again() => format!(
+            v if !v.wants_again() => format!(
                 "{builder} worked on after you accepted {}, so your accept is not for its tip.",
                 v.commit.get(..12).unwrap_or(&v.commit)
             ),

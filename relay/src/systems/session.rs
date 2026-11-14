@@ -401,13 +401,15 @@ fn workspace(ctx: &Ctx, job: &Job) -> Result<Step<Workspace>> {
         if let Some(j) = failed.jobs_mut().get_mut(&job.name) {
             j.status = crate::world::Status::Failed;
         }
-        let recover = crate::systems::hint::hint(
-            &failed,
-            &[vec![
-                crate::systems::hint::Cmd::new(&job.name, crate::systems::hint::Step::Release(bases.gone.clone())),
+        // Released from its own entries that lead to the bases that are gone (never from the bases by name:
+        // it may wait for them only through a review), it starts without them.
+        let plan = bases.release().map(|from| {
+            vec![
+                crate::systems::hint::Cmd::new(&job.name, crate::systems::hint::Step::Release(from)),
                 crate::systems::hint::Cmd::new(&job.name, crate::systems::hint::Step::Resume),
-            ]],
-        );
+            ]
+        });
+        let recover = crate::systems::hint::hint(&failed, plan.as_slice());
         let (dir, branch, made) = match clone(ctx, &job.name, &bases, job.session_id.is_some(), recover.as_deref()) {
             Ok(made) => made,
             Err(e) => return Ok(ControlFlow::Break((Outcome::Failed, Some(format!("{e:#}"))))),
@@ -1346,31 +1348,30 @@ fn drive(
     Ok((reader.report().clone(), ending, disk))
 }
 
-/// The build jobs whose branches a build job starts from: those it waits for, through any read-only job
-/// between (build, review, build), and the one it forks, each with its clone and branch (`found`, by name);
-/// and those whose branch relay can no longer read (`gone`: cleaned away, or its clone collected). A base
-/// that is gone is never left out silently, which would start the job from the repository's `HEAD`.
+/// The build jobs whose branches a build job starts from, as the dependency graph names them
+/// ([`crate::world::Graph::bases`]: those it waits for, through any read-only job between, and the one it
+/// forks), each with its clone and branch (`found`, by name); and those whose branch relay can no longer read
+/// (`gone`: cleaned away, or its clone collected). A base that is gone is never left out silently, which would
+/// start the job from the repository's `HEAD`.
 pub fn bases(world: &World, job: &Job) -> Bases {
-    let mut todo: Vec<&String> = job.after.iter().collect();
-    todo.extend(job.fork.as_ref().map(|f| &f.job));
-    let mut seen: Vec<&String> = Vec::new();
     let mut out = Bases::default();
-    while let Some(n) = todo.pop() {
-        if seen.contains(&n) {
-            continue;
-        }
-        seen.push(n);
-        let Some(j) = world.jobs().get(n) else {
-            out.gone.push(n.clone());
-            continue;
-        };
-        if j.readonly() {
-            todo.extend(&j.after);
-            continue;
-        }
-        match (j.workdir.as_ref().filter(|d| d.path().exists()), &j.branch) {
-            (Some(dir), Some(branch)) => out.found.push((n.clone(), dir.path().to_path_buf(), branch.clone())),
-            _ => out.gone.push(n.clone()),
+    for base in world.graph().bases(job) {
+        let read = world.jobs().get(&base.job).and_then(|j| {
+            Some((j.workdir.as_ref().filter(|d| d.path().exists())?.path().to_path_buf(), j.branch.clone()?))
+        });
+        match read {
+            Some((dir, branch)) if !out.found.iter().any(|f| f.0 == base.job) => {
+                out.found.push((base.job, dir, branch));
+            }
+            Some(_) => {}
+            None => {
+                if !out.gone.contains(&base.job) {
+                    out.gone.push(base.job);
+                }
+                if !out.gone_by.contains(&base.after) {
+                    out.gone_by.push(base.after);
+                }
+            }
         }
     }
     out.found.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1383,6 +1384,18 @@ pub fn bases(world: &World, job: &Job) -> Bases {
 pub struct Bases {
     pub found: Vec<(String, PathBuf, String)>,
     pub gone: Vec<String>,
+    /// How the job comes to each base that is gone: its own `--after` entry that leads there (a review of the
+    /// base, as often as the base itself), or none for the job it forks.
+    gone_by: Vec<Option<String>>,
+}
+
+impl Bases {
+    /// The job's own `--after` entries to release it from so that it starts without the bases that are gone:
+    /// every entry that leads to one, which is what `queue release --from` takes. `None` when no release does
+    /// it: a base that is gone is the job it forks.
+    pub fn release(&self) -> Option<Vec<String>> {
+        self.gone_by.iter().cloned().collect()
+    }
 }
 
 /// Of the base branches' tips, the one every other is an ancestor of, or why

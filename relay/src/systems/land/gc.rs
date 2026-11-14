@@ -67,7 +67,7 @@ fn micros(secs: f64) -> u64 {
 
 /// Whether a job that waits still needs `name`'s branch: an edge of the dependency graph ends at it (as
 /// readiness and cleanup read it: through a review and its builder, a replaced review, a requeued builder),
-/// or a queued job forks it.
+/// it starts from it (as base discovery reads it: through a read-only job between), or a queued job forks it.
 fn waited_for(world: &World, name: &str) -> bool {
     world.needed(name)
 }

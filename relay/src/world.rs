@@ -838,6 +838,14 @@ pub enum Need {
     Replaced,
 }
 
+/// A build job another job starts from ([`Graph::bases`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Base {
+    /// The `--after` entry of the job that leads to it; none when the job forks it.
+    pub after: Option<String>,
+    pub job: String,
+}
+
 /// How a wait reached the review it needs an accept from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Via {
@@ -886,17 +894,8 @@ impl<'w> Graph<'w> {
                 continue;
             };
             if let Some(builder) = d.review_of() {
-                let mut at = d;
-                // A chain of replacements is as long as the reviews of one job: bounded by the jobs.
-                for _ in 0..self.jobs.len() {
-                    match at.unchained.as_ref().and_then(|u| u.by.as_ref()).and_then(|n| self.jobs.get(n)) {
-                        Some(n) => {
-                            out.push(dep(a, &at.name, Need::Replaced));
-                            at = n;
-                        }
-                        None => break,
-                    }
-                }
+                let (replaced, at) = self.replaced(d);
+                out.extend(replaced.into_iter().map(|r| dep(a, &r.name, Need::Replaced)));
                 let via = if at.name == *a { Via::Direct } else { Via::Superseded };
                 out.push(dep(a, &at.name, Need::Accept { builder: builder.to_owned(), via }));
                 // The builder, through the review's whole life: an accept is of its tip, so the wait needs it
@@ -917,6 +916,65 @@ impl<'w> Graph<'w> {
             }
         }
         out
+    }
+
+    /// The reviews that `r` and its replacements were replaced by, as two answers: each one replaced, from `r`
+    /// on, and the one the replacements end at (`r` itself when none replaced it, or the one that did is gone).
+    fn replaced(&self, r: &'w Job) -> (Vec<&'w Job>, &'w Job) {
+        let (mut replaced, mut at) = (Vec::new(), r);
+        // A chain of replacements is as long as the reviews of one job: bounded by the jobs.
+        for _ in 0..self.jobs.len() {
+            match at.unchained.as_ref().and_then(|u| u.by.as_ref()).and_then(|n| self.jobs.get(n)) {
+                Some(n) => {
+                    replaced.push(at);
+                    at = n;
+                }
+                None => break,
+            }
+        }
+        (replaced, at)
+    }
+
+    /// The edges of `j` that hold it: what readiness waits for, and so what a cycle is made of. A replaced
+    /// review is an edge kept for cleanup ([`Need::Replaced`]) that holds nothing: the wait went on to its
+    /// replacement.
+    pub fn holds(&self, j: &Job) -> Vec<Dep> {
+        self.deps(j).into_iter().filter(|d| d.need != Need::Replaced).collect()
+    }
+
+    /// The build jobs whose branches `j` starts from, each with the `--after` entry of `j` that leads to it
+    /// (none for the job it forks): those it waits for, through any read-only job between (build, review,
+    /// build). A review stands for the one its replacements end at, as readiness reads it, and always for its
+    /// builder. A name no job has is listed like a build job: a base that is gone. The one answer that base
+    /// discovery starts a job from (`session::bases`) and that gc keeps the clones of ([`Graph::needed`]).
+    pub fn bases(&self, j: &Job) -> Vec<Base> {
+        let hops = j.after.iter().map(|a| (Some(a), a)).chain(j.fork.as_ref().map(|f| (None, &f.job)));
+        let mut out = Vec::new();
+        for (after, first) in hops {
+            let mut seen = std::collections::HashSet::new();
+            let mut todo: Vec<&str> = vec![first];
+            while let Some(n) = todo.pop() {
+                if !seen.insert(n) {
+                    continue;
+                }
+                match self.jobs.get(n) {
+                    Some(d) if d.readonly() => {
+                        let (_, at) = self.replaced(d);
+                        todo.extend(at.after.iter().map(String::as_str).chain(at.review_of()));
+                    }
+                    _ => out.push(Base { after: after.cloned(), job: n.to_owned() }),
+                }
+            }
+        }
+        out
+    }
+
+    /// The jobs whose `--after name` is met: every edge that entry gives them is done (`name` done, and for a
+    /// review or a reviewed build its chain's accept). What cleaning `name` away may drop the entry from.
+    pub fn met(&self, name: &str) -> std::collections::HashSet<String> {
+        let met =
+            |j: &&Job| self.deps(j).iter().filter(|d| d.after == name).all(|d| matches!(self.state(d), Edge::Done));
+        self.jobs.values().filter(|j| j.after.iter().any(|a| a == name)).filter(met).map(|j| j.name.clone()).collect()
     }
 
     /// The last verdict of the review `r` on its builder, and the builder.
@@ -1003,14 +1061,14 @@ impl<'w> Graph<'w> {
         }
     }
 
-    /// A shortest cycle through `start` among the edges of jobs that wait: each step `(job, why)`, `why` saying
+    /// A shortest cycle through `start` among the edges that hold jobs that wait ([`Graph::holds`]): each step `(job, why)`, `why` saying
     /// how the step before waits on it when that is not by name. `None` when there is none.
     pub fn cycle_through(&self, start: &str) -> Option<Vec<(String, Option<String>)>> {
         let mut parent: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
         let mut queue = std::collections::VecDeque::from([start.to_owned()]);
         while let Some(at) = queue.pop_front() {
             let Some(j) = self.jobs.get(&at).filter(|j| self.waiting(j)) else { continue };
-            for d in self.deps(j) {
+            for d in self.holds(j) {
                 let why = Self::why(&at, &d);
                 if d.on == start {
                     let mut steps = vec![(start.to_owned(), why)];
@@ -1047,13 +1105,13 @@ impl<'w> Graph<'w> {
         }
     }
 
-    /// Whether `from` waits on `to` through the edges of waiting jobs, one hop or more.
+    /// Whether `from` waits on `to` through the edges that hold waiting jobs ([`Graph::holds`]), one hop or more.
     pub fn reaches(&self, from: &str, to: &str) -> bool {
         let mut seen = std::collections::HashSet::new();
         let mut todo = vec![from.to_owned()];
         while let Some(at) = todo.pop() {
             let Some(j) = self.jobs.get(&at).filter(|j| self.waiting(j)) else { continue };
-            for d in self.deps(j) {
+            for d in self.holds(j) {
                 if d.on == to {
                     return true;
                 }
@@ -1065,12 +1123,15 @@ impl<'w> Graph<'w> {
         false
     }
 
-    /// What the jobs that wait need kept: every job an edge of theirs ends at ([`Graph::deps`]), and every job a
-    /// queued one forks. gc keeps their clones, as cleanup keeps their records ([`Graph::waiters`]).
+    /// What the jobs that wait need kept: every job an edge of theirs ends at ([`Graph::deps`]), every build
+    /// job they start from ([`Graph::bases`]: through a read-only job too, which no edge of theirs goes past),
+    /// and every job a queued one forks. gc keeps their clones, as cleanup keeps their records
+    /// ([`Graph::waiters`]).
     pub fn needed(&self) -> std::collections::HashSet<String> {
         let mut out = std::collections::HashSet::new();
         for j in self.jobs.values().filter(|j| self.waiting(j)) {
             out.extend(self.deps(j).into_iter().map(|d| d.on));
+            out.extend(self.bases(j).into_iter().map(|b| b.job));
             out.extend(j.fork.as_ref().map(|f| f.job.clone()));
         }
         out
@@ -1327,6 +1388,15 @@ impl World {
         Graph::new(&self.jobs)
     }
 
+    /// The verdict by which `reviewer`, a review in `builder`'s chain, is to judge it again now
+    /// ([`Reviewed::due_again`]); none when nothing is due. The one test of a re-review: an end that asks for
+    /// one chooses by it, and the resume is recorded by it, under the jobs lock.
+    pub fn rereview_due(&self, builder: &str, reviewer: &str) -> Option<&Reviewed> {
+        let b = self.jobs.get(builder)?;
+        self.jobs.get(reviewer).filter(|r| r.review_of() == Some(builder) && r.unchained.is_none())?;
+        b.verdicts.iter().rev().find(|v| v.reviewer == reviewer).filter(|v| v.due_again(b))
+    }
+
     /// Whether a job that waits needs `name` kept ([`Graph::needed`]): built once per state of the jobs.
     pub fn needed(&self, name: &str) -> bool {
         self.deps.1.get_or_init(|| self.graph().needed()).contains(name)
@@ -1484,10 +1554,12 @@ impl World {
             Event::DevShell(e) => self.apply_devshell(s.t, e),
             Event::Land(LandEvent::Forgotten { job }) => {
                 self.decisions.retain(|_, d| d.job != *job);
-                // A job cleaned away after it finished has been waited for.
-                if self.jobs.remove(job).is_some_and(|j| j.status == Status::Done) {
-                    self.jobs.values_mut().for_each(|j| j.after.retain(|a| a != job));
-                }
+                // A job cleaned away has been waited for by the waits it had met, and is dropped from those
+                // alone: a wait it never met (a review that had not accepted, a job that had not finished)
+                // stands, for a job gone, until a person releases it.
+                let met = Graph::new(&self.jobs).met(job);
+                self.jobs.remove(job);
+                self.jobs.values_mut().filter(|j| met.contains(&j.name)).for_each(|j| j.after.retain(|a| a != job));
             }
             Event::Land(LandEvent::Collected { job, what, .. }) => {
                 if let Some(j) = self.jobs.get_mut(job) {

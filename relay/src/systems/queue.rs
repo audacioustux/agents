@@ -483,7 +483,9 @@ fn halted(
 }
 
 /// Resumes the reviewer `reviewer` of a branch whose builder has answered its reject, so its verdict is
-/// for the new tip. Held to the same bounds as the builder's resume: at most `hooks.max_decisions` rejects
+/// for the new tip, when that is still due under the lock ([`crate::world::World::rereview_due`]: two ends
+/// can ask for the same re-review, and the second must not buy it twice). Held to the same bounds as the
+/// builder's resume: at most `hooks.max_decisions` rejects
 /// by this reviewer already, a reviewer that can no longer have a decision act on it, the job's ceiling,
 /// and a banned model. `None` when resumed, else why not. Takes the jobs lock: never call it holding one.
 pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String) -> Result<Option<String>> {
@@ -496,6 +498,13 @@ pub fn resume_reviewer(ctx: &Ctx, reviewer: &str, builder: &str, message: String
     // A review of a branch that is still being worked on would judge a head that moves under it.
     if world.jobs().get(builder).is_some_and(|b| b.status.is_live()) {
         return Ok(Some(format!("{builder} is at work again; its end asks for the review")));
+    }
+    // Whoever asked chose this review on a world read before the lock: another end may have got the re-review
+    // since, and its verdict be in. Whether one is due is decided here, on the world as it is now.
+    if world.rereview_due(builder, reviewer).is_none() {
+        return Ok(Some(format!(
+            "no re-review by {reviewer} is due: its last verdict stands for what {builder} ended with"
+        )));
     }
     // A run that could not record its verdict (the cap on decisions per job) would leave the stale one.
     if !crate::systems::decide::can_decide(&ctx.cfg, world, &j) {

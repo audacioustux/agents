@@ -3,6 +3,7 @@
 //! hint ([`hint`]) names a plan only when every step of it is accepted, each on the state the step before
 //! leaves: so a hint relay prints is never refused by the job it names.
 
+use crate::bus::{Event, LandEvent, QueueEvent, Stamped};
 use crate::reply::{Fail, Kind};
 use crate::world::{Job, Status, World};
 
@@ -61,8 +62,10 @@ pub fn accepts(world: &World, cmd: &Cmd) -> Result<(), Fail> {
     let job = world.jobs().get(name);
     if cmd.step == Step::Add {
         // A job that ended before it ever started (dequeued) has nothing to keep: its name is free again.
+        // Not a review that left its chain: what was queued after it waits through its record for the review
+        // that replaced it, so the record stays until it is cleaned away (which what waits on it refuses).
         return match job {
-            Some(j) if j.status.is_live() || j.attempts > 0 => {
+            Some(j) if j.status.is_live() || j.attempts > 0 || j.unchained.is_some() => {
                 Err(refuse(Kind::Conflict, format!("job {name} exists")))
             }
             _ => Ok(()),
@@ -72,7 +75,16 @@ pub fn accepts(world: &World, cmd: &Cmd) -> Result<(), Fail> {
     let state = || refuse(Kind::Conflict, format!("{name} is {}", j.status.as_str()));
     match &cmd.step {
         Step::Add => Ok(()),
-        Step::Resume if !j.status.is_live() || j.status == Status::Checking => Ok(()),
+        // Back in the queue it waits for its prerequisites again, and must not come to wait for itself.
+        Step::Resume if !j.status.is_live() || j.status == Status::Checking => {
+            match world.closes_cycle(records(world, cmd), name) {
+                Some(cycle) => Err(refuse(
+                    Kind::Conflict,
+                    format!("resuming {name} would make it wait for itself: {cycle}, so none of them would ever start"),
+                )),
+                None => Ok(()),
+            }
+        }
         Step::Release(from) => {
             // A queued job, or one the disk floor holds, waits for its prerequisites; one that ended without
             // being done waits for them again when it is resumed.
@@ -105,35 +117,42 @@ pub fn accepts(world: &World, cmd: &Cmd) -> Result<(), Fail> {
     }
 }
 
-/// `world` as `cmd`, accepted, leaves it: enough of each command's effect to judge the next step of a plan.
+/// What `cmd`, accepted, records: the events the command itself writes, as far as the jobs' graph and
+/// states go (a resume's message and a new job's brief are the person's to give).
+fn records(world: &World, cmd: &Cmd) -> Vec<Event> {
+    let job = cmd.job.clone();
+    let queue = |e| vec![Event::Queue(e)];
+    match &cmd.step {
+        Step::Add => Vec::new(),
+        Step::Resume => queue(QueueEvent::Resumed {
+            job,
+            message: String::new(),
+            budget_usd: None,
+            models: std::collections::BTreeMap::new(),
+        }),
+        Step::Release(from) => queue(QueueEvent::Released { job, from: from.clone() }),
+        Step::Dequeue => queue(QueueEvent::Dequeued { job }),
+        // A stop of a running job is a request: its runner ends when it has passed the TERM on, so the job is
+        // still running when the person types the next command. Only a job the disk floor holds (no runner)
+        // is stopped by the record itself.
+        Step::Stop => queue(QueueEvent::StopRequested { job }),
+        Step::Clean => vec![Event::Land(LandEvent::Forgotten { job })],
+        Step::Unreview => world
+            .jobs()
+            .values()
+            .filter(|r| r.review_of() == Some(job.as_str()) && r.unchained.is_none())
+            .map(|r| Event::Queue(QueueEvent::Unchained { job: r.name.clone(), by: None }))
+            .collect(),
+    }
+}
+
+/// `world` as `cmd`, accepted, leaves it: the fold of what the command records ([`records`]), so the next
+/// step of a plan is judged on the state the command itself would leave, never on a second account of it.
 fn after(world: &World, cmd: &Cmd) -> World {
     let mut next = world.clone();
-    let jobs = next.jobs_mut();
-    let name = &cmd.job;
-    match &cmd.step {
-        Step::Add => {}
-        Step::Clean => {
-            jobs.remove(name);
-        }
-        Step::Unreview => {
-            for r in jobs.values_mut().filter(|r| r.review_of() == Some(name) && r.unchained.is_none()) {
-                r.unchained = Some(crate::world::Unchained { by: None });
-            }
-        }
-        step => {
-            let Some(j) = jobs.get_mut(name) else { return next };
-            match step {
-                Step::Resume => (j.status, j.held) = (Status::Queued, false),
-                Step::Release(from) => j.after.retain(|a| !from.is_empty() && !from.contains(a)),
-                Step::Dequeue => (j.status, j.reason) = (Status::Stopped, Some("dequeued".into())),
-                // A stop of a running job is a request: its runner ends when it has passed the TERM on, so
-                // the job is still running when the person types the next command. Only a job the disk floor
-                // holds (no runner) is stopped by the record itself.
-                Step::Stop if j.status == Status::Running => j.stop_requested = true,
-                Step::Stop => (j.status, j.held) = (Status::Stopped, false),
-                _ => {}
-            }
-        }
+    let t = crate::bus::now_micros();
+    for event in records(world, cmd) {
+        next.apply(&Stamped { t, event, from: None });
     }
     next
 }

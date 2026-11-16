@@ -70,6 +70,7 @@ relay queue add fix-parser-review --review-of fix-parser --profile review --prom
 relay queue add audit --text "Review src/auth for races." --readonly --harness omp
 relay view status          # jobs, and every account's room (--everywhere: every project)
 relay view result fix-parser --wait --json   # blocks until it ends: no polling
+relay view cost            # API-equivalent cost of every Claude account, by day (--by week); never runs claude
 relay land fetch fix-parser
 ```
 

@@ -143,6 +143,7 @@ prepend it to your briefs, or have each brief point to it.
 | `relay view events` | The merged event log |
 | `relay view stats [--since DURATION]` | Per profile and model: jobs by outcome, spend, retries, decisions, checks, reviews, waits, and each account's share ([stats](#stats)) |
 | `relay view usage [--meter NAME] [--account H:L] [--harness H] [--since DURATION] [--chart] [--watch]` | Each account's quota as a row: gauge, sparkline, pace, and what the pace comes to by the reset ([usage](#usage)); `--chart` the line chart over time instead; inside a project, its accounts from every project's readings; outside one, every account. `--watch` opens `view watch` on the rows, redrawn as readings land |
+| `relay view cost [--by day\|week] [--since DURATION] [--account LABEL] [--project NAME] [--model ID] [--split account\|project\|model]` | API-equivalent cost of every Claude account on this machine, at the list prices in the policy's `[prices]` (the accounts are subscriptions): today, this week and a row per day or week, from the transcripts, never from `claude` ([cost](#cost)) |
 | `relay quota show` / `refresh` / `enable L` / `disable L` | Account room for the configured model, with a `for <model>` sub-row for each other model a queued or running job asks of it, judged as the dispatcher judges it (a full account is `busy`, not `ready`); `show` starts a reading of each stale account and says `refreshing`. A fresh reading (one under way anywhere on the machine is waited for); switches |
 | `relay land fetch NAME` / `land clean NAME` | Copy the job's branch into your repository (no checkout), noting when no review has accepted its tip / delete its clone and records |
 | `relay land gc [--dry-run]` | Remove what finished jobs no longer need: build outputs, old clones, old logs ([disk](#disk)) |
@@ -283,6 +284,10 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   and it reads the buses and nothing else: no reading is started (the board's accounts pane
   does that), and nothing is written. `relay view usage --watch` opens on the rows,
   `--watch --chart` on the chart. A window too short for every row says how many it leaves out.
+- **Cost.** Under the accounts pane, on its bottom border: the API-equivalent cost of today and
+  this week, and this week's top model family ([`view cost`](#cost)). A thread of its own refreshes
+  the cost index at most once a minute (it only stats the transcripts when none changed), so a
+  redraw never waits on it.
 - **What stays put.** A read never scrolls the jobs list, nor does a decisions pane that
   comes or goes with it: only keys, the wheel, clicks and a resize of the terminal (which
   keeps the selection in view) do. A selection you chose follows its job by name as rows move, even out of
@@ -821,6 +826,42 @@ already on the bus (it writes none). It counts the jobs queued within the window
 A review is counted for the job it judged, so a profile's reject rate is how often
 its work was sent back. Spend is the runs' and the decisions'; an account's spend is
 its runs' alone.
+
+## Cost
+
+`relay view cost` is the **API-equivalent cost** of every Claude account on this machine: the
+accounts are subscriptions, so it says what the same tokens would cost at list prices. It runs
+anywhere (it is machine-wide) and never runs `claude`.
+
+- **Source.** The transcripts every Claude home already writes: each `~/.claude` and
+  `~/.claude.<label>` with a `projects/` dir, signed in or not (a signed-out account's past spend
+  still counts), every `*.jsonl` below it, subagents included. The real counts are in
+  `usage.iterations[]` (the top-level fields can be 0 beside them; a line without iterations uses
+  them); each iteration is priced at its own `model` (an advisor's), else the response's. `<synthetic>`
+  lines are skipped.
+- **Counted once.** One response is written as several lines, forks and resumes copy lines into new
+  files, and twin homes may both hold one: each (message id, request id) counts once, machine-wide.
+  Copies that disagree (a streamed line before the response's output was complete) keep the
+  largest output; `--json` says how many disagreed.
+- **The index.** `$XDG_STATE_HOME/relay/cost/index.bin`: token totals (never dollars, so a price
+  change needs no re-index) per UTC hour × home × project (with the job, for a relay clone) × model ×
+  speed × token class, each transcript's identity and how far it was read, and a 64-bit hash per
+  response counted. Each run reads only what the transcripts gained since, up to their last whole
+  line (a file that shrank or was replaced is read again from 0, which the dedup makes safe); one
+  that changed nothing only stats them. The totals outlive the transcripts Claude cleans up. One
+  writer at a time (`lock`); a reader never waits, it reads the last snapshot, written whole and
+  renamed into place.
+- **Project.** From each line's `cwd`: a relay clone (`~/.local/share/relay/<project>/clones/<job>`)
+  is its project and job; anything else is its directory's name.
+- **Prices.** Declared in the policy (`[prices]`, see `relay.example.toml`), USD per million tokens
+  per model id, with a `fast` factor and `web_search_per_1000`. A model without a row is shown as
+  `+ N unpriced tokens (models: …)` and left out of the totals: it is never guessed.
+- **Rows.** Today, this week (from Monday) and a row per day (default 7) or `--by week` (8), in the
+  local zone, each with its total and a column per model family; `--split` adds a line per account
+  (home label), project or model. Hours are bucketed in UTC, exact for zones a whole number of hours
+  from it; any other zone is told so. `--json` has the rows, tokens per class, the unpriced models,
+  the dedup counts, each relay job's cost (to compare with `view stats`), and when the index last
+  changed.
 
 ## Usage
 
@@ -1568,7 +1609,7 @@ own process, and owns one output port:
 | quota | account readings and switches | reading, unreadable, signed-out, account-enabled |
 | land | brings branches back; cleans up, and gc | forgotten, collected |
 | devshell | enters the project's development environment once, under a lock, and records it for every session | warming, warmed, warm-failed |
-| view, probe | read-only (`view stats` folds the bus; it writes nothing). Showing the accounts may start a quota reading, which quota writes | — |
+| view, probe | read-only (`view stats` folds the bus; it writes nothing; `view cost` writes only its index under `$XDG_STATE_HOME/relay/cost`). Showing the accounts may start a quota reading, which quota writes | — |
 
 A runner is identified by its pid together with its start time, so a reused
 pid is never mistaken for it or signalled. It starts behind a gate (a pipe on

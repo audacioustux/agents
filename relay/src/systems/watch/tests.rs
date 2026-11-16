@@ -1047,3 +1047,25 @@ fn a_decision_pane_arriving_keeps_the_jobs_list_top_row() {
     assert_eq!(ui.pane(Id::Jobs).offset, 0, "the list keeps its top row");
     assert_eq!(ui.index, last_shown, "and its selection, now out of view");
 }
+
+/// The cost line sits on the accounts pane's bottom border at 80x24 and 120x40, cut at the border
+/// where the window is narrow, and the pane's rows stay where they were.
+#[test]
+fn the_cost_line_sits_under_the_accounts() {
+    let f = two_jobs();
+    for (w, h) in [(80, 24), (120, 40)] {
+        let mut ui = Ui::new(false, false, true);
+        let b = f.board(&ui, 2);
+        ui.sync(&b);
+        let without = frame(&b, &mut ui, w, h);
+        ui.cost = Some("API-equivalent cost: today $12.34 · week $56.78 · top opus $40.00".into());
+        let fr = frame(&b, &mut ui, w, h);
+        let bottom = &fr[usize::from(h) - 2];
+        assert!(bottom.starts_with('└') && bottom.contains("today $12.34 · week $56.78"), "{w}x{h}: {bottom}");
+        if w == 120 {
+            assert!(bottom.contains("top opus $40.00"), "{w}x{h}: {bottom}");
+        }
+        // The first row holds the clock, which may tick between the two frames.
+        assert_eq!(fr[1..usize::from(h) - 2], without[1..usize::from(h) - 2], "{w}x{h}: only the border changes");
+    }
+}

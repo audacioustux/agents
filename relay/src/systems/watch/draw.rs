@@ -84,7 +84,13 @@ pub fn draw(f: &mut Frame<'_>, b: &Board, ui: &mut Ui) {
         empty: &b.no_accounts,
         gauge: Some(&gauge),
     };
-    table_pane(f, ui.pane_mut(Id::Accounts), accounts, frame(Id::Accounts, title), &t);
+    // The cost line sits on the pane's bottom border, left, clear of its position on the right.
+    let block = frame(Id::Accounts, title);
+    let block = match &ui.cost {
+        Some(c) => block.title_bottom(Line::from(format!(" {c} ")).dim()),
+        None => block,
+    };
+    table_pane(f, ui.pane_mut(Id::Accounts), accounts, block, &t);
 
     ui.keys = key_line(f, keys, ui);
     if ui.help {
@@ -296,6 +302,7 @@ const HELP: &[&str] = &[
     "Accounts: green ready; ▸ the account the next start takes.",
     "Meters: │ is the floor, bold decides; yellow near the floor, red at it.",
     "since: how long a job has run, been queued, or been over.",
+    "Under the accounts: API-equivalent cost today and this week (relay view cost).",
 ];
 
 pub(super) fn help(f: &mut Frame<'_>, area: Rect) {

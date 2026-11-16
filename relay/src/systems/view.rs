@@ -1,5 +1,6 @@
 //! view: read-only. Who is working on what, and what each session said.
 
+pub mod cost;
 mod counts;
 pub mod machine;
 mod stats;
@@ -79,12 +80,52 @@ pub enum Cmd {
         #[arg(long)]
         chart: bool,
     },
+    /// API-equivalent cost of every Claude account on this machine: what the tokens in the transcripts
+    /// would cost at the list prices declared in the policy's `[prices]` (the accounts are subscriptions).
+    /// Today, this week (from Monday) and a row per day or week, in the local zone. Folded from the
+    /// transcripts every Claude home writes, through an incremental index; it never runs `claude`.
+    /// Each response is counted once, machine-wide. Runs anywhere.
+    Cost {
+        /// A row per day (the last 7) or per week (the last 8, from Monday).
+        #[arg(long, value_enum, default_value = "day")]
+        by: cost::By,
+        /// How far back the rows go (`14d`, `2w`, `12h`). Default: 7 days, or 8 weeks.
+        #[arg(long)]
+        since: Option<String>,
+        /// Only this account (its home's label: `default` for `~/.claude`, `work` for `~/.claude.work`); repeatable.
+        #[arg(long = "account", value_name = "LABEL")]
+        accounts: Vec<String>,
+        /// Only this project (a relay clone counts as its project); repeatable.
+        #[arg(long = "project", value_name = "NAME")]
+        projects: Vec<String>,
+        /// Only this model (`claude-opus-5-5`, or its short form `opus-5.5`); repeatable.
+        #[arg(long = "model", value_name = "ID")]
+        models: Vec<String>,
+        /// A line per account, project or model under each row.
+        #[arg(long, value_enum)]
+        split: Option<cost::Split>,
+    },
+}
+
+impl Cmd {
+    /// `view cost`'s arguments, when it is that.
+    fn cost(&self) -> Option<cost::Args> {
+        match self {
+            Self::Cost { by, since, accounts, projects, models, split } => Some(cost::Args {
+                by: *by,
+                since: since.clone(),
+                filter: cost::Filter { accounts: accounts.clone(), projects: projects.clone(), models: models.clone() },
+                split: *split,
+            }),
+            _ => None,
+        }
+    }
 }
 
 impl Cmd {
     /// The boards and the usage chart run outside a project too, over every project on this machine.
     pub fn runs_anywhere(&self) -> bool {
-        matches!(self, Self::Status { .. } | Self::Watch { .. } | Self::Usage { .. })
+        matches!(self, Self::Status { .. } | Self::Watch { .. } | Self::Usage { .. } | Self::Cost { .. })
     }
 }
 
@@ -95,6 +136,7 @@ pub fn run(ctx: &Ctx, cmd: Cmd) -> Result<()> {
         Cmd::Watch { all, everywhere } => crate::systems::watch::run(scope, all, everywhere, None),
         Cmd::Result { name, wait } => result(ctx, &name, wait),
         Cmd::Stats { since } => stats::run(ctx, since.as_deref()),
+        c @ Cmd::Cost { .. } => cost::run(ctx.json, &c.cost().expect("view cost")),
         Cmd::Usage { meter, accounts, harnesses, since, watch, chart } => usage::run(
             scope,
             ctx.json,
@@ -124,6 +166,10 @@ pub fn ago(now_us: u64, then_us: u64) -> String {
 /// A board outside any project (`cmd` is one that [`Cmd::runs_anywhere`]): every project on
 /// this machine, judged by the owner's policy alone.
 pub fn outside(json: bool, cmd: &Cmd) -> Result<()> {
+    // Machine-wide, from the transcripts and the policy alone: no project or config is read.
+    if let Some(args) = cmd.cost() {
+        return cost::run(json, &args);
+    }
     let cfg = Config::policy_only()?;
     let root = crate::ctx::state_root();
     let scope = Scope { cfg: &cfg, home: None, root: &root };

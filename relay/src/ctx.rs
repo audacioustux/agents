@@ -147,6 +147,11 @@ pub fn state_root() -> PathBuf {
     xdg("XDG_STATE_HOME", ".local/state").join("relay")
 }
 
+/// `$XDG_DATA_HOME/relay`: every project's clones, caches and scratch, by name.
+pub fn data_root() -> PathBuf {
+    xdg("XDG_DATA_HOME", ".local/share").join("relay")
+}
+
 /// Every project's state directory under `root`: each one with a bus. A listing that fails is
 /// none; for a reader that must tell the two apart, [`try_project_dirs`].
 pub fn project_dirs(root: &Path) -> impl Iterator<Item = PathBuf> {
@@ -244,7 +249,7 @@ pub fn log_in(jobs: &Path, job: &str, ext: &str) -> PathBuf {
 impl Ctx {
     pub fn new(cfg: Config, cfg_path: PathBuf, json: bool) -> Result<Self> {
         let state_root = state_root();
-        let data_root = xdg("XDG_DATA_HOME", ".local/share").join("relay");
+        let data_root = data_root();
         let state = state_root.join(&cfg.name);
         let data = data_root.join(&cfg.name);
         // Briefs, answers and resume messages are private: owner-only from the project directory down.

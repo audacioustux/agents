@@ -188,6 +188,51 @@ pub struct Policy {
     session: PolicySession,
     profiles: BTreeMap<String, Profile>,
     machine: Machine,
+    prices: Prices,
+}
+
+/// List prices, for `relay view cost`'s API-equivalent cost (`[prices]` in the policy file). The
+/// accounts are subscriptions: these say what the same tokens would cost on the API. Declared here,
+/// never guessed: a model without a row is shown as unpriced and left out of every total.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Prices {
+    /// USD per 1000 web searches, whatever the model.
+    pub web_search_per_1000: Option<f64>,
+    /// One row per full model id (`claude-opus-5-5`).
+    pub models: BTreeMap<String, ModelPrice>,
+}
+
+/// A model's list prices, in USD per million tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelPrice {
+    pub input: f64,
+    pub output: f64,
+    pub cache_write_5m: f64,
+    pub cache_write_1h: f64,
+    pub cache_read: f64,
+    /// What fast mode (`usage.speed = "fast"`) multiplies every token price by; 1 when the model has none.
+    #[serde(default = "ModelPrice::no_fast")]
+    pub fast: f64,
+}
+
+impl ModelPrice {
+    const fn no_fast() -> f64 {
+        1.0
+    }
+}
+
+impl Prices {
+    fn validate(&self) -> Result<()> {
+        let ok = |x: f64| x.is_finite() && x >= 0.0;
+        ensure!(self.web_search_per_1000.is_none_or(ok), "prices.web_search_per_1000 must be zero or more");
+        for (m, p) in &self.models {
+            let all = [p.input, p.output, p.cache_write_5m, p.cache_write_1h, p.cache_read, p.fast];
+            ensure!(all.into_iter().all(ok), "prices.models.{m}: every price must be a number, zero or more");
+        }
+        Ok(())
+    }
 }
 
 /// The owner's caps on what every project's relay on this machine does together (`[machine]` in the
@@ -397,7 +442,14 @@ const POLICY_FILE: &str = ".config/relay/policy.toml";
 impl Policy {
     pub fn parse(text: &str) -> Result<Self> {
         finite_quantities(text)?;
-        Ok(toml::from_str(text)?)
+        let policy: Self = toml::from_str(text)?;
+        policy.prices.validate()?;
+        Ok(policy)
+    }
+
+    /// The declared list prices (`[prices]`).
+    pub fn prices(&self) -> &Prices {
+        &self.prices
     }
 
     /// Where the policy is read from, and whether `$RELAY_POLICY` names it

@@ -117,3 +117,27 @@ fn filters_and_splits() {
     assert_eq!(v["usd"], 60.0);
     assert_eq!(v["split"][0]["key"], "other");
 }
+
+#[test]
+fn an_index_in_the_old_place_is_renamed_into_the_new_one_and_a_project_named_cost_keeps_its_directory() {
+    let d = crate::config::tempdir::Dir::new();
+    let state = d.path();
+    let old = state.join("cost");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("index.bin"), b"the index").unwrap();
+    std::fs::write(old.join("lock"), b"").unwrap();
+    migrate(state).unwrap();
+    assert_eq!(std::fs::read(index_dir_in(state).join("index.bin")).unwrap(), b"the index");
+    assert!(!old.exists(), "nothing of the index is left behind");
+    // Again, and with nothing to move: no change.
+    migrate(state).unwrap();
+    assert_eq!(std::fs::read(index_dir_in(state).join("index.bin")).unwrap(), b"the index");
+    // A project named `cost` (its bus, its files) is not the index's directory, and is left as it is.
+    std::fs::create_dir_all(old.join("bus")).unwrap();
+    std::fs::write(old.join("index.bin"), b"older").unwrap();
+    migrate(state).unwrap();
+    assert_eq!(std::fs::read(index_dir_in(state).join("index.bin")).unwrap(), b"the index", "one already there wins");
+    assert!(old.join("bus").is_dir() && old.join("index.bin").is_file());
+    assert!(!index_dir_in(state).starts_with(&old));
+    assert!(!crate::config::valid_name(".machine"), "a project cannot be named so");
+}

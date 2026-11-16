@@ -162,9 +162,15 @@ fn refold(scope: Scope<'_>, ui: &mut Ui, now: u64) {
     }
 }
 
+/// How often the cost feed looks at every transcript, not only the new and the lately written.
+const COST_FULL_SWEEP: Duration = Duration::from_mins(30);
+
 /// The cost line, from a thread of its own: the board never waits on the transcripts. Once a minute
-/// it refreshes the cost index ([`crate::systems::view::cost::index::refresh`]), which only stats the
-/// transcripts and reads nothing when none changed, and sends today's and this week's dollars.
+/// it refreshes the cost index ([`crate::systems::view::cost::index::refresh`]) and sends today's and
+/// this week's dollars. Only directories whose time moved are listed and only the transcripts written
+/// in the last ten minutes are looked at again, so a minute with nothing new costs a few hundred
+/// `stat`s; the first refresh and one every half hour look at every transcript, which catches an
+/// old session resumed in place (an append changes no directory's time).
 fn cost_feed() -> mpsc::Receiver<String> {
     use crate::systems::view::cost;
     let (tx, rx) = mpsc::channel();
@@ -172,10 +178,23 @@ fn cost_feed() -> mpsc::Receiver<String> {
         if tx.send("API-equivalent cost: reading the transcripts…".into()).is_err() {
             return;
         }
+        let mut full_at: Option<Instant> = None;
+        let mut kept = None;
         loop {
             let prices = crate::config::Policy::load().map(|p| p.map(|(p, _)| p.prices().clone()).unwrap_or_default());
-            let line = match (cost::refresh(), prices) {
-                (Ok((index, _)), Ok(prices)) => cost::summary(&index, &prices),
+            let full = full_at.is_none_or(|t| t.elapsed() >= COST_FULL_SWEEP);
+            if full {
+                full_at = Some(Instant::now());
+            }
+            let sweep = if full { cost::Sweep::Full } else { cost::Sweep::Changed };
+            // The last index is kept (without its dedup keys) so that a minute with nothing new reads no file.
+            let line = match (cost::refresh(sweep, kept.take()), prices) {
+                (Ok((mut index, _)), Ok(prices)) => {
+                    let line = cost::summary(&index, &prices);
+                    index.release_keys();
+                    kept = Some(index);
+                    line
+                }
                 (Err(e), _) | (_, Err(e)) => format!("API-equivalent cost: {e:#}"),
             };
             if tx.send(line).is_err() {

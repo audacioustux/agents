@@ -7,12 +7,13 @@ pub mod index;
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use serde_json::json;
 
 use crate::config::{Policy, Prices};
+pub use index::Sweep;
 use index::{CLASSES, Dims, Index, Refreshed, Tokens, WEB_FETCH, WEB_SEARCH};
 
 /// How rows are grouped in time.
@@ -206,15 +207,39 @@ fn whole_hours(tz: &TimeZone, now: jiff::Timestamp) -> bool {
     tz.to_offset(now).seconds() % 3600 == 0
 }
 
-/// Where the index lives: `$XDG_STATE_HOME/relay/cost`.
+/// Where the index lives: `$XDG_STATE_HOME/relay/.machine/cost`. A project's state directory is
+/// `$XDG_STATE_HOME/relay/<name>` and a name starts with a letter or a digit, so no project can reach it.
 pub fn index_dir() -> std::path::PathBuf {
-    crate::ctx::state_root().join("cost")
+    index_dir_in(&crate::ctx::state_root())
 }
 
-/// Refreshes the machine's index from every Claude home under the user's home.
-pub fn refresh() -> Result<(Index, Refreshed)> {
+fn index_dir_in(state_root: &std::path::Path) -> std::path::PathBuf {
+    state_root.join(".machine/cost")
+}
+
+/// Moves an index an earlier version wrote to `<state_root>/cost/index.bin` (a place a project named
+/// `cost` shares) to where it lives now, by renaming it: nothing is read again. Only that one file is
+/// taken, and the old directory is removed when that leaves it empty.
+fn migrate(state_root: &std::path::Path) -> Result<()> {
+    let (old, new) = (state_root.join("cost/index.bin"), index_dir_in(state_root));
+    if !old.is_file() || new.join("index.bin").exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&new).with_context(|| format!("creating {}", new.display()))?;
+    std::fs::rename(&old, new.join("index.bin")).with_context(|| format!("moving {}", old.display()))?;
+    // The old lock was the index's own; a directory with anything else in it is not ours to remove.
+    let _ = std::fs::remove_file(state_root.join("cost/lock"));
+    let _ = std::fs::remove_dir(state_root.join("cost"));
+    Ok(())
+}
+
+/// Refreshes the machine's index from every Claude home under the user's home, looking at what
+/// `sweep` says. `prev` is the index an earlier call returned: kept when no one has written the
+/// index since, instead of reading it again.
+pub fn refresh(sweep: Sweep, prev: Option<Index>) -> Result<(Index, Refreshed)> {
     let homes = index::homes(&crate::accounts::home());
-    index::refresh(&index_dir(), &homes, &crate::ctx::data_root())
+    migrate(&crate::ctx::state_root())?;
+    index::refresh(&index_dir(), &homes, &crate::ctx::data_root(), sweep, prev)
 }
 
 /// What the watch shows: today and this week, and this week's top family, at list prices.
@@ -252,7 +277,7 @@ pub fn run(json: bool, args: &Args) -> Result<()> {
         },
     };
     let prices = Policy::load()?.map(|(p, _)| p.prices().clone()).unwrap_or_default();
-    let (index, refreshed) = refresh()?;
+    let (index, refreshed) = refresh(Sweep::Full, None)?;
     let tz = TimeZone::system();
     let now = jiff::Timestamp::now();
     let today = now.to_zoned(tz.clone()).date();

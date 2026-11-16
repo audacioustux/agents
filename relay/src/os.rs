@@ -36,6 +36,15 @@ impl Role {
         Ok(Self(f))
     }
 
+    /// Gives the role up now, whatever else holds a copy of the descriptor. A process that forks while
+    /// the role is held (any other thread's `Command`) has a copy until its `exec` closes it, and the
+    /// kernel keeps the lock for as long as one copy lives: a role dropped and taken again at once can
+    /// find itself held. Not for a role whose work is shared with a child ([`Role::share`]).
+    pub fn release(&self) {
+        // A lock the kernel has already dropped, or a descriptor that is gone, is released enough.
+        let _ = flock(&self.0, FlockOperation::Unlock);
+    }
+
     /// A copy of the role for one child to inherit as its stdin (an empty file, read as at its end).
     /// The role is then held until that child, and everything that inherits its stdin, has ended,
     /// even past this process: a role whose work runs in a process tree is that tree's.

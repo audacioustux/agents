@@ -16,7 +16,7 @@ use rustix::process::{Pid, Signal, kill_process_group};
 /// An exclusive role, such as "the dispatcher". The kernel drops it when the
 /// holder dies, and the descriptor is close-on-exec, so children never inherit it.
 #[derive(Debug)]
-pub struct Role(#[allow(dead_code)] File);
+pub struct Role(#[cfg_attr(not(test), allow(dead_code))] File);
 
 impl Role {
     /// `None` if another live process holds the role.
@@ -52,6 +52,8 @@ impl Role {
         Ok(self.0.try_clone().context("sharing a role")?.into())
     }
 
+    /// Opens (creating) a lock file. std opens every file close-on-exec; the flag is named here too, so
+    /// that no lock descriptor ever outlives an exec, whatever opens it.
     fn open(path: &Path) -> Result<File> {
         File::options()
             .create(true)
@@ -59,6 +61,7 @@ impl Role {
             .read(true)
             .write(true)
             .mode(0o600)
+            .custom_flags(rustix::fs::OFlags::CLOEXEC.bits().cast_signed())
             .open(path)
             .with_context(|| format!("opening {}", path.display()))
     }
@@ -69,7 +72,7 @@ impl Role {
 /// which ends only once every process of the session's tree has (`supervised::supervise`), so the
 /// seat stays taken until then, however the booker ends.
 #[derive(Debug)]
-pub struct SeatHold(#[allow(dead_code)] File);
+pub struct SeatHold(#[cfg_attr(not(test), allow(dead_code))] File);
 
 impl SeatHold {
     /// Creates `path` if need be and holds it, shared (waiting out a [`seat_held`] look's moment).
@@ -82,7 +85,12 @@ impl SeatHold {
 
 /// Whether a live process holds the seat lock `path` ([`SeatHold`]). A missing file is held by nobody.
 pub fn seat_held(path: &Path) -> bool {
-    let Ok(f) = File::options().read(true).write(true).open(path) else { return false };
+    let opened = File::options()
+        .read(true)
+        .write(true)
+        .custom_flags(rustix::fs::OFlags::CLOEXEC.bits().cast_signed())
+        .open(path);
+    let Ok(f) = opened else { return false };
     matches!(flock(&f, FlockOperation::NonBlockingLockExclusive), Err(rustix::io::Errno::WOULDBLOCK))
 }
 
@@ -345,6 +353,24 @@ mod tests {
             }
         });
         assert!(freed, "the role is free once its holder is dropped");
+    }
+
+    /// Whether `fd` is close-on-exec.
+    fn cloexec(fd: impl std::os::fd::AsFd) -> bool {
+        rustix::io::fcntl_getfd(fd).unwrap().contains(rustix::io::FdFlags::CLOEXEC)
+    }
+
+    /// Every lock descriptor is opened close-on-exec: no exec'd child keeps one.
+    #[test]
+    fn every_lock_descriptor_is_close_on_exec() {
+        let d = Dir::new();
+        let role = Role::try_take(&d.path().join("a.lock")).unwrap().unwrap();
+        assert!(cloexec(&role.0), "try_take");
+        assert!(cloexec(&Role::take(&d.path().join("b.lock")).unwrap().0), "take");
+        assert!(cloexec(&SeatHold::take(&d.path().join("c.lock")).unwrap().0), "a seat hold");
+        assert!(!seat_held(&d.path().join("a.lock").with_extension("none")));
+        let looked = File::options().read(true).write(true).open(d.path().join("a.lock")).unwrap();
+        assert!(cloexec(&looked), "std's open, as seat_held's look uses");
     }
 
     #[test]

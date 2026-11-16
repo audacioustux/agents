@@ -72,7 +72,9 @@ impl Machine {
     }
 
     pub fn sweep_from(&self, sweep: Sweep, prev: Option<Index>) -> (Index, Refreshed) {
-        refresh(&self.index_dir(), &homes(&self.user()), &self.data_root(), sweep, prev).unwrap()
+        let (index, done) = refresh(&self.index_dir(), &homes(&self.user()), &self.data_root(), sweep, prev).unwrap();
+        assert!(!done.busy, "the lock was held by someone else: {done:?}");
+        (index, done)
     }
 }
 
@@ -209,7 +211,7 @@ fn a_busy_index_is_read_as_last_written() {
     let (first, _) = m.refresh();
     let _held = crate::os::Role::try_take(&m.index_dir().join("lock")).unwrap().unwrap();
     m.append(".claude", "-work-demo/s1.jsonl", "\n");
-    let (read, done) = m.refresh();
+    let (read, done) = refresh(&m.index_dir(), &homes(&m.user()), &m.data_root(), Sweep::Full, None).unwrap();
     assert!(done.busy);
     assert_eq!(read.counters(), first.counters());
 }
@@ -428,4 +430,82 @@ fn a_kept_index_is_not_read_again_until_another_process_writes_it_and_its_keys_a
     assert_eq!(after.sizes().1, keys + 1);
     // The snapshot on disk is whole: a fresh load has the same totals.
     assert_eq!(Index::load(&m.index_dir()).unwrap().counters(), after.counters());
+}
+
+#[test]
+fn the_refresh_lock_is_given_up_even_while_a_forked_child_holds_a_copy_of_it() {
+    let m = Machine::new();
+    std::fs::create_dir_all(m.index_dir()).unwrap();
+    let path = m.index_dir().join("lock");
+    // A child forked in the middle of a refresh holds a copy of the descriptor until it execs; a copy is that.
+    let role = crate::os::Role::try_take(&path).unwrap().unwrap();
+    let child_copy = role.share().unwrap();
+    drop(role);
+    assert!(crate::os::Role::try_take(&path).unwrap().is_none(), "a plain drop leaves it held by the copy");
+    drop(child_copy);
+    let held = Unlock(crate::os::Role::try_take(&path).unwrap().unwrap());
+    let _child_copy = held.0.share().unwrap();
+    drop(held);
+    assert!(crate::os::Role::try_take(&path).unwrap().is_some(), "released for everyone");
+}
+
+/// The modification time of `path`, and a way to set it back exactly.
+fn mtime(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path).unwrap().modified().unwrap()
+}
+
+fn set_mtime(path: &Path, t: std::time::SystemTime) {
+    File::open(path).unwrap().set_modified(t).unwrap();
+}
+
+#[test]
+fn a_directory_changed_in_the_instant_it_was_recorded_is_listed_again_whatever_its_time_says() {
+    let m = Machine::new();
+    fixture(&m);
+    let dir = m.user().join(".claude/projects/-work-demo");
+    // The racily clean case: a directory last changed just now is recorded, then gains a file in the same
+    // clock tick, which leaves its time as it was. The time is forced here, not waited for.
+    let now = std::time::SystemTime::now();
+    set_mtime(&dir, now);
+    m.refresh();
+    let new = line("racy", "racy", "claude-opus-5-5", TS, "/work/demo", &usage(1000, 1, 0, 0, 0));
+    std::fs::write(dir.join("s9.jsonl"), new).unwrap();
+    set_mtime(&dir, now);
+    let (seen, done) = m.sweep(Sweep::Changed);
+    assert!(done.listed >= 1 && done.read == 1, "{done:?}");
+    assert_eq!(seen.sizes().0, 5);
+    // An old directory is not in doubt, and one whose time is put back to what it was is a change nobody
+    // can see: the full sweep, which lists everything, does.
+    age(&m);
+    m.refresh();
+    let then = mtime(&dir);
+    std::fs::write(
+        dir.join("s10.jsonl"),
+        line("old", "old", "claude-opus-5-5", TS, "/work/demo", &usage(1, 1, 0, 0, 0)),
+    )
+    .unwrap();
+    set_mtime(&dir, then);
+    let (missed, done) = m.sweep(Sweep::Changed);
+    assert_eq!((done.listed, done.read, missed.sizes().0), (0, 0, 5), "{done:?}");
+    let (caught, done) = m.refresh();
+    assert_eq!((done.read, caught.sizes().0), (1, 6), "{done:?}");
+}
+
+#[test]
+fn a_live_transcript_appended_in_the_instant_it_was_looked_at_is_read_whatever_its_time_says() {
+    let m = Machine::new();
+    fixture(&m);
+    let s2 = m.file(".claude", "-work-demo/s2.jsonl");
+    m.refresh();
+    let then = mtime(&s2);
+    // The append leaves the modification time as it was (the same clock tick), the size moves.
+    m.append(
+        ".claude",
+        "-work-demo/s2.jsonl",
+        &line("live", "live", "claude-opus-5-5", TS, "/work/demo", &usage(1000, 1, 0, 0, 0)),
+    );
+    set_mtime(&s2, then);
+    let (index, done) = m.sweep(Sweep::Changed);
+    assert_eq!(done.read, 1, "{done:?}");
+    assert_eq!(by_model(&index)[&("claude-opus-5-5".into(), false)][0], 15 + 1000);
 }

@@ -703,6 +703,15 @@ fn walk(root: &Path, old: &BTreeMap<PathBuf, i64>, full: bool, now_ns: i64) -> W
     w
 }
 
+/// The refresh's lock, released when the refresh ends even if a forked child still holds a copy of it.
+struct Unlock(crate::os::Role);
+
+impl Drop for Unlock {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 /// Brings the index in `dir` up to date with every home's transcripts, when no other process is
 /// writing it, and returns it with what was done. A busy index is read as last written.
 ///
@@ -716,7 +725,7 @@ pub fn refresh(
     prev: Option<Index>,
 ) -> Result<(Index, Refreshed)> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let Some(_lock) = crate::os::Role::try_take(&dir.join("lock"))? else {
+    let Some(_lock) = crate::os::Role::try_take(&dir.join("lock"))?.map(Unlock) else {
         return Ok((Index::load(dir)?, Refreshed { busy: true, ..Refreshed::default() }));
     };
     let mut index = match prev {

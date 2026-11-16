@@ -352,12 +352,38 @@ fn a_later_larger_copy_adds_each_iterations_growth_to_that_iterations_model() {
     assert_eq!((t[&(opus.into(), false)][OUTPUT], t[&(fable.into(), false)][OUTPUT]), (12, 30), "{t:?}");
     assert_eq!(third.counters().messages, 1);
     assert_eq!(third.counters().copies_dropped, 2);
-    // A response seen with one iteration, then with the advisor's too: the advisor's output is its model's.
+    // A response seen with one iteration, then with the advisor's too: which iteration grew cannot be told
+    // (an index of an earlier version keeps no iterations), so the total's growth goes to the first row.
     m.write(".claude", "-work-demo/d.jsonl", &advised("m2", opus, &[(opus, 7)]));
     m.write(".claude", "-work-demo/e.jsonl", &advised("m2", opus, &[(opus, 9), (fable, 4)]));
     let (fourth, _) = m.refresh();
     let t = by_model(&fourth);
-    assert_eq!((t[&(opus.into(), false)][OUTPUT], t[&(fable.into(), false)][OUTPUT]), (12 + 9, 30 + 4), "{t:?}");
+    assert_eq!((t[&(opus.into(), false)][OUTPUT], t[&(fable.into(), false)][OUTPUT]), (12 + 13, 30), "{t:?}");
+}
+
+#[test]
+fn an_index_of_an_earlier_version_keeps_no_iterations_and_a_copy_never_counts_one_twice() {
+    let m = Machine::new();
+    let (opus, fable) = ("claude-opus-5-5", "claude-fable-5-2");
+    m.write(".claude", "-work-demo/a.jsonl", &advised("m1", opus, &[(opus, 10), (fable, 5)]));
+    m.refresh();
+    // As the earlier version saved it: the response's total output, no iterations.
+    let mut old = Index::load(&m.index_dir()).unwrap();
+    old.need_keys(&m.index_dir()).unwrap();
+    old.meta.parts.clear();
+    old.save(&m.index_dir()).unwrap();
+    // An identical copy adds nothing: not the advisor's 5 again.
+    m.write(".claude", "-work-demo/b.jsonl", &advised("m1", opus, &[(opus, 10), (fable, 5)]));
+    let (same, _) = m.refresh();
+    let t = by_model(&same);
+    assert_eq!((t[&(opus.into(), false)][OUTPUT], t[&(fable.into(), false)][OUTPUT]), (10, 5), "{t:?}");
+    assert_eq!((t[&(opus.into(), false)][INPUT], t[&(fable.into(), false)][INPUT]), (100, 100));
+    // A larger one adds the difference of the totals, as that version did.
+    m.write(".claude", "-work-demo/c.jsonl", &advised("m1", opus, &[(opus, 10), (fable, 8)]));
+    let (more, _) = m.refresh();
+    let t = by_model(&more);
+    assert_eq!((t[&(opus.into(), false)][OUTPUT], t[&(fable.into(), false)][OUTPUT]), (13, 5), "{t:?}");
+    assert_eq!(more.counters().messages, 1);
 }
 
 #[test]

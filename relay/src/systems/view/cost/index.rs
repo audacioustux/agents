@@ -566,7 +566,21 @@ impl Index {
             }
             // The largest output of each iteration counts: what a later copy has more of goes where that
             // iteration's first copy went, to the iteration's own model (an advisor's is not the response's).
-            let mut had = self.meta.parts.get(&p.key).cloned().unwrap_or_else(|| vec![(seen.row, seen.output)]);
+            let stored = self.meta.parts.get(&p.key).cloned();
+            if stored.is_none() && p.parts.len() > 1 {
+                // No iterations kept for it: the first copy had one (a streamed line), or an index of an
+                // earlier version counted it, with its iterations' outputs in `seen.output` as one total.
+                // The two cannot be told apart, so the total is compared, as that version did, and the
+                // difference goes to the first copy's row: never an iteration counted a second time.
+                if output > seen.output {
+                    self.meta.rows[seen.row as usize].1[OUTPUT] += u64::from(output - seen.output);
+                    if let Some(s) = self.keys.get_mut(&p.key) {
+                        (s.output, s.print) = (output, fp);
+                    }
+                }
+                return;
+            }
+            let mut had = stored.unwrap_or_else(|| vec![(seen.row, seen.output)]);
             let mut grew = false;
             for (i, (model, t)) in p.parts.iter().enumerate() {
                 if i >= had.len() {
@@ -743,11 +757,13 @@ pub fn refresh(
     }
     done.gone = gone.len();
     // And what is new.
-    let new: Vec<(PathBuf, usize)> = walks
+    let mut new: Vec<(PathBuf, usize)> = walks
         .iter()
         .enumerate()
         .flat_map(|(i, w)| w.listed.iter().filter(|p| !index.meta.files.contains_key(*p)).map(move |p| (p.clone(), i)))
         .collect();
+    // In a fixed order, as the dedup's outcome can depend on which copy of a response comes first.
+    new.sort();
     for (path, i) in again.into_iter().chain(new) {
         done.statted += 1;
         let Ok(md) = std::fs::metadata(&path) else {

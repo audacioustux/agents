@@ -842,7 +842,8 @@ anywhere (it is machine-wide) and never runs `claude`.
 - **Counted once.** One response is written as several lines, forks and resumes copy lines into new
   files, and twin homes may both hold one: each (message id, request id) counts once, machine-wide.
   Copies that disagree (a streamed line before the response's output was complete) keep the
-  largest output; `--json` says how many disagreed.
+  largest output, each iteration's growth going to that iteration's own model; `--json` says how many
+  disagreed.
 - **The index.** `$XDG_STATE_HOME/relay/.machine/cost/index.bin` (a project's state directory is
   `$XDG_STATE_HOME/relay/<name>` and a name never starts with a dot; an index an earlier version wrote
   to `relay/cost/` is renamed into place): token totals (never dollars, so a price

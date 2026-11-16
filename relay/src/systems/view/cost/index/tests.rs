@@ -225,3 +225,48 @@ fn every_claude_home_with_projects_counts_signed_in_or_not() {
     let labels: Vec<String> = homes(&m.user()).into_iter().map(|h| h.label).collect();
     assert_eq!(labels, ["a", "default"]);
 }
+
+/// A response whose usage has `iterations` as (model, output) pairs, the first the response's own.
+fn advised(id: &str, own: &str, iterations: &[(&str, u64)]) -> String {
+    let its: Vec<_> = iterations
+        .iter()
+        .map(|(model, out)| {
+            serde_json::json!({
+                "type": "message", "model": model, "input_tokens": 100, "output_tokens": out,
+                "cache_read_input_tokens": 0, "cache_creation": { "ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0 },
+            })
+        })
+        .collect();
+    line(id, id, own, TS, "/work/demo", &serde_json::json!({ "iterations": its }))
+}
+
+#[test]
+fn a_later_larger_copy_adds_each_iterations_growth_to_that_iterations_model() {
+    let m = Machine::new();
+    let (opus, fable) = ("claude-opus-5-5", "claude-fable-5-2");
+    // The first copy, while streaming: the response's own iteration at 10, the advisor's at 5.
+    m.write(".claude", "-work-demo/a.jsonl", &advised("m1", opus, &[(opus, 10), (fable, 5)]));
+    let (first, _) = m.refresh();
+    let t = by_model(&first);
+    assert_eq!((t[&(opus.into(), false)][OUTPUT], t[&(fable.into(), false)][OUTPUT]), (10, 5));
+    // A copy in a fork, in a later refresh (the index is read back): the advisor's grew to 30, the own stayed.
+    m.write(".claude", "-work-demo/b.jsonl", &advised("m1", opus, &[(opus, 10), (fable, 30)]));
+    let (second, _) = m.refresh();
+    let t = by_model(&second);
+    assert_eq!((t[&(opus.into(), false)][OUTPUT], t[&(fable.into(), false)][OUTPUT]), (10, 30), "{t:?}");
+    // Inputs are counted once: 100 per iteration.
+    assert_eq!((t[&(opus.into(), false)][INPUT], t[&(fable.into(), false)][INPUT]), (100, 100));
+    // One that grew in both, and one that shrank in one: the largest of each, each at its own model.
+    m.write(".claude", "-work-demo/c.jsonl", &advised("m1", opus, &[(opus, 12), (fable, 20)]));
+    let (third, _) = m.refresh();
+    let t = by_model(&third);
+    assert_eq!((t[&(opus.into(), false)][OUTPUT], t[&(fable.into(), false)][OUTPUT]), (12, 30), "{t:?}");
+    assert_eq!(third.counters().messages, 1);
+    assert_eq!(third.counters().copies_dropped, 2);
+    // A response seen with one iteration, then with the advisor's too: the advisor's output is its model's.
+    m.write(".claude", "-work-demo/d.jsonl", &advised("m2", opus, &[(opus, 7)]));
+    m.write(".claude", "-work-demo/e.jsonl", &advised("m2", opus, &[(opus, 9), (fable, 4)]));
+    let (fourth, _) = m.refresh();
+    let t = by_model(&fourth);
+    assert_eq!((t[&(opus.into(), false)][OUTPUT], t[&(fable.into(), false)][OUTPUT]), (12 + 9, 30 + 4), "{t:?}");
+}

@@ -11,7 +11,8 @@
 //! One API response is written as several lines (one per content block), forks and resumes copy
 //! earlier lines into new files, and twin homes may both hold a copy: each (message id, request id)
 //! is counted once, by a 64-bit hash of the pair. A later copy whose output is larger adds the
-//! difference to the first copy's output; any copy whose usage differs is a disagreement, counted.
+//! difference to the first copy's output, iteration by iteration, each to its own model's row; any
+//! copy whose usage differs is a disagreement, counted.
 //!
 //! One writer at a time (`lock`); readers read the last snapshot (`index.bin`), written whole to a
 //! temporary file and renamed over it.
@@ -88,10 +89,14 @@ struct Meta {
     files: BTreeMap<PathBuf, Mark>,
     rows: Vec<(Dims, Tokens)>,
     counters: Counters,
+    /// The responses written with more than one iteration (an advisor's beside the model's own): the
+    /// row and the largest output counted for each of their iterations, in the order of the line's parts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    parts: BTreeMap<u64, Vec<(u32, u32)>>,
 }
 
 /// A counted response: its output total and a fingerprint of its whole usage, and the row its
-/// output went to (its own model's).
+/// output went to (its own model's). A response of several iterations has each one's in `Meta::parts`.
 #[derive(Debug, Clone, Copy)]
 struct Seen {
     output: u32,
@@ -454,25 +459,45 @@ impl Index {
             Read::Unreadable => return self.meta.counters.unreadable += 1,
             Read::Nothing => return,
         };
-        let output = u32::try_from(p.parts.iter().map(|(_, t)| t[OUTPUT]).sum::<u64>()).unwrap_or(u32::MAX);
+        let out_of = |t: &Tokens| u32::try_from(t[OUTPUT]).unwrap_or(u32::MAX);
+        let output = p.parts.iter().fold(0, |a: u32, (_, t)| a.saturating_add(out_of(t)));
         let fp = print(&p.parts);
         let c = &mut self.meta.counters;
-        if let Some(seen) = self.keys.get_mut(&p.key) {
+        if let Some(seen) = self.keys.get(&p.key).copied() {
             c.copies_dropped += 1;
             if seen.print != fp {
                 c.disagreements += 1;
             }
-            // The largest output counts: the difference goes where the first copy's output went.
-            if output > seen.output {
-                let (row, more) = (seen.row, u64::from(output - seen.output));
-                (seen.output, seen.print) = (output, fp);
-                self.meta.rows[row as usize].1[OUTPUT] += more;
+            // The largest output of each iteration counts: what a later copy has more of goes where that
+            // iteration's first copy went, to the iteration's own model (an advisor's is not the response's).
+            let mut had = self.meta.parts.get(&p.key).cloned().unwrap_or_else(|| vec![(seen.row, seen.output)]);
+            let mut grew = false;
+            for (i, (model, t)) in p.parts.iter().enumerate() {
+                if i >= had.len() {
+                    // An iteration the first copy did not have: a row of its model, in the first copy's hour and place.
+                    let mut d = self.meta.rows[seen.row as usize].0.clone();
+                    d.model.clone_from(model);
+                    had.push((self.row(d), 0));
+                }
+                let (row, was) = had[i];
+                if out_of(t) > was {
+                    self.meta.rows[row as usize].1[OUTPUT] += u64::from(out_of(t) - was);
+                    had[i].1 = out_of(t);
+                    grew = true;
+                }
+            }
+            if grew && let Some(s) = self.keys.get_mut(&p.key) {
+                s.output = had.iter().fold(0, |a: u32, (_, o)| a.saturating_add(*o));
+                s.print = fp;
+            }
+            if had.len() > 1 {
+                self.meta.parts.insert(p.key, had);
             }
             return;
         }
         c.messages += 1;
         let (project, job) = project_of(p.cwd.as_deref(), data_root);
-        let mut first = None;
+        let mut rows = Vec::with_capacity(p.parts.len());
         for (model, t) in &p.parts {
             let d = Dims {
                 hour: p.hour,
@@ -484,9 +509,12 @@ impl Index {
             };
             let row = self.row(d);
             self.add(row, t);
-            first.get_or_insert(row);
+            rows.push((row, out_of(t)));
         }
-        self.keys.insert(p.key, Seen { output, print: fp, row: first.unwrap_or(0) });
+        self.keys.insert(p.key, Seen { output, print: fp, row: rows.first().map_or(0, |r| r.0) });
+        if rows.len() > 1 {
+            self.meta.parts.insert(p.key, rows);
+        }
     }
 
     /// Reads `path` from `from` to its last complete line; returns the new offset and the bytes read.

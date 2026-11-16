@@ -1438,7 +1438,11 @@ mod tests {
         assert_eq!(cell(line("claude:studyac17"), five), '—', "no 5-hour meter: {table:#?}");
         assert_eq!(cell(line("claude:tj.pro "), month), '—');
         assert!(line("claude:studyac17").contains("28%*"), "the all-models week decides: {table:#?}");
-        let fable = line("└ Fable");
+        // tj.pro's streamed `seven_day_overage_included` is its Fable week, on a sub-row of its own.
+        let below = |name: &str| table[table.iter().position(|l| l.contains(name)).unwrap() + 1].as_str();
+        assert!(below("claude:tj.pro ").contains("└ Fable") && below("claude:tj.pro ").contains("13% "), "{table:#?}");
+        let fable = below("claude:studyac17");
+        assert!(fable.contains("└ Fable"), "{table:#?}");
         assert!(cell(fable, week) != ' ' && fable.contains("11% ") && !fable.contains('*'), "{table:#?}");
         assert_eq!((cell(fable, five), cell(fable, month)), (' ', ' '), "a sub-row says only its own");
         let gemini = line("└ Gemini");

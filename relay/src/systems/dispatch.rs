@@ -923,6 +923,30 @@ mod tests {
         only_opus_starts(&ours);
     }
 
+    /// 2026-11-16, the real bus: the rate event of the Fable run that found its Fable week full,
+    /// as the stream named it (`seven_day_overage_included`), with no limit recorded for the
+    /// account. The next Fable job is held, and an Opus job starts there.
+    #[test]
+    fn the_fable_week_as_streamed_holds_fable_jobs_alone() {
+        use crate::bus::{Event, SessionEvent, Stamped};
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let text = "name = \"demo\"\n[limits]\nmin_free_disk_gb = 0\nper_account = 2\n[harness.omp]\nenabled = false\n";
+        let cfg = Config::parse(text, d.path()).unwrap();
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":0.29,"resetsAt":1800003600},"seven_day":{"utilization":0.68,"resetsAt":1800300000},"seven_day_overage_included":{"utilization":1.0,"resetsAt":1800300000}}}}"#;
+        let meters = crate::harness::by_id("claude").unwrap().reader().line(line).unwrap();
+        let rate = Event::Session(SessionEvent::Rate { account: "claude:a".into(), meters });
+        let mut world = World::fold(&[Stamped { t: NOW_US - 1, event: rate, from: None }]);
+        for (i, (name, model)) in [("fable", "claude-fable-5-2"), ("opus", "claude-opus-5-5")].into_iter().enumerate() {
+            let models = BTreeMap::from([("claude".to_owned(), model.to_owned())]);
+            let j = Job { name: name.into(), status: Status::Queued, models, created_at: i as u64, ..Job::default() };
+            world.jobs_mut().insert(j.name.clone(), j);
+        }
+        let (starts, held) = plan_omp(&cfg, &world, &[home("claude", "a")]);
+        assert_eq!(starts, [("opus".to_owned(), "claude:a".to_owned())], "{:?}", held.0);
+        assert!(held.0[0].starts_with("fable: ") && held.0[0].contains("seven_day_overage_included"), "{:?}", held.0);
+    }
+
     /// The plan for `world` among `others`, and why the rest are held.
     fn plan_among(cfg: &Config, world: &World, others: &[&World], found: &[Home]) -> (Vec<(String, String)>, Held) {
         let mut held = Held::default();

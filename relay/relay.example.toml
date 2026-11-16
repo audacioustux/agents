@@ -90,6 +90,40 @@ env_shell = []
 #   max_compiling = 2      # compiling jobs at once, over every project
 #   min_free_mem_gb = 4    # no session or check starts with less memory available (GiB)
 #   min_free_disk_gb = 30  # the least min_free_disk_gb of any project; this file may raise it
+# and the list prices `relay view cost` turns tokens into dollars with. The accounts are
+# subscriptions: this is the API-equivalent cost, what the same tokens would cost on the API.
+# USD per million tokens, one row per full model id; a model without a row is shown as
+# unpriced and left out of every total, never guessed. `fast` multiplies a row's prices for
+# fast mode (absent: 1). Haiku 5.5 costs $0.50 / $2.50 above 100K prompt tokens: that tier is
+# not modelled. Its cache read price is unpublished: 0.01 is assumed (the usual 0.1x of input).
+#   [prices]
+#   web_search_per_1000 = 10.0
+#   [prices.models.claude-fable-5-2]
+#   input = 8.0
+#   output = 40.0
+#   cache_write_5m = 10.0
+#   cache_write_1h = 16.0
+#   cache_read = 0.20
+#   fast = 2.0
+#   [prices.models.claude-opus-5-5]
+#   input = 4.0
+#   output = 20.0
+#   cache_write_5m = 5.0
+#   cache_write_1h = 8.0
+#   cache_read = 0.20
+#   fast = 2.0
+#   [prices.models.claude-sonnet-5-5]
+#   input = 2.0
+#   output = 10.0
+#   cache_write_5m = 2.5
+#   cache_write_1h = 4.0
+#   cache_read = 0.10
+#   [prices.models.claude-haiku-5-5]
+#   input = 0.10
+#   output = 0.50
+#   cache_write_5m = 0.125
+#   cache_write_1h = 0.20
+#   cache_read = 0.01      # assumed: unpublished
 # [profiles.bug-hunt]
 # harness = "omp"
 # model = "openai-codex/gpt-6.1-sol"

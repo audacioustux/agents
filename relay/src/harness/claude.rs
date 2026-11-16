@@ -202,15 +202,24 @@ impl Account for ClaudeAccount {
 }
 
 /// The model families Claude meters a week of apart, as `/usage` names them (`Current week
-/// (Fable)`) and the API does after `seven_day_` (`seven_day_opus`). Only these are scopes: any
-/// other suffix (`overage_included`, `oauth_apps`) says how the account's week is counted, not
-/// whose it is, so that meter stays the whole account's.
+/// (Fable)`) and the API does after `seven_day_` (`seven_day_opus`), or under a name of its own
+/// ([`MODEL_WEEKS`]). Only these are scopes: any other suffix (`oauth_apps`) says how the
+/// account's week is counted, not whose it is, so that meter stays the whole account's.
 pub const MODELS: [&str; 4] = ["Opus", "Sonnet", "Haiku", "Fable"];
+
+/// The weeks of one model's own that Claude's API names apart from the model: `seven_day_<suffix>`
+/// is the week of the model paired with it. `overage_included` is the Fable week: only Fable
+/// sessions stream it (433 of 434 on the bus on 2026-11-16, against 1 of 1,048 Opus ones), it reads
+/// what `/usage` prints as `Current week (Fable)` within four points (950 readings minutes apart;
+/// median difference 0, where the all-models week differed by 14) and resets with it, and a run
+/// that found it full was told "You've hit your Fable limit".
+pub const MODEL_WEEKS: [(&str, &str); 1] = [("overage_included", "Fable")];
 
 /// What a meter named as Claude's API names its windows measures (`five_hour`, `seven_day`,
 /// `seven_day_opus`, `seven_day_overage_included`), and puku's, which uses the same names
-/// (`monthly`, `requests`). A `seven_day_<model>` of [`MODELS`] is that model's week alone, which
-/// governs only a job whose model names it ([`covers`]); every other week is the account's.
+/// (`monthly`, `requests`). A `seven_day_<model>` of [`MODELS`], or of a suffix of [`MODEL_WEEKS`],
+/// is that model's week alone, which governs only a job whose model names it ([`covers`]); every
+/// other week is the account's.
 pub fn window_of(name: &str) -> Meter {
     match name {
         "five_hour" => Meter::new(Window::FiveHours, 0.0, None),
@@ -219,8 +228,9 @@ pub fn window_of(name: &str) -> Meter {
         n => match n.strip_prefix("seven_day_").filter(|r| !r.is_empty()) {
             Some(rest) => {
                 let week = Meter::new(Window::Week, 0.0, None);
-                match MODELS.iter().find(|m| m.eq_ignore_ascii_case(rest)) {
-                    Some(model) => week.scope(*model),
+                let named = MODEL_WEEKS.iter().find(|(suffix, _)| suffix.eq_ignore_ascii_case(rest)).map(|w| w.1);
+                match named.or_else(|| MODELS.iter().find(|m| m.eq_ignore_ascii_case(rest)).copied()) {
+                    Some(model) => week.scope(model),
                     None => week,
                 }
             }
@@ -825,26 +835,51 @@ mod tests {
         assert_eq!(m["five_hour"].window, Window::FiveHours);
     }
 
-    /// Review of #66: only the suffixes that name a model are scopes. `overage_included` says how
-    /// the week is counted, not whose it is, so it stays the whole account's and governs every job.
+    /// 2026-11-16, on the real bus: a Fable job's run on an account whose all-models week stood at
+    /// 68% ended as this, and the account was held for every job until Nov 20. The Fable week the
+    /// stream names `seven_day_overage_included` was full, so the limit is the Fable week's: the
+    /// run's account stays open, and that meter refuses Fable jobs on it, not Opus ones.
+    #[test]
+    fn a_full_fable_week_as_streamed_is_fables_limit_not_the_accounts() {
+        let mut r = read(&[
+            r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":0.29,"resetsAt":1794760800},"seven_day":{"utilization":0.68,"resetsAt":1795183200},"seven_day_overage_included":{"utilization":1.0,"resetsAt":1795183200}}}}"#,
+            r#"{"type":"result","subtype":"error","is_error":true,"result":"You've hit your Fable limit · resets Nov 20, 2pm (UTC). Switch to another model to continue.","api_error_status":429}"#,
+        ]);
+        r.choose("FINAL");
+        let ok = Ending { exit_ok: true, ..Ending::default() };
+        let Verdict::ModelLimited(full) = verdict(&r, ok, "FINAL", false, 1_794_746_074) else {
+            panic!("{:?}", verdict(&r, ok, "FINAL", false, 1_794_746_074))
+        };
+        assert_eq!(full.keys().collect::<Vec<_>>(), ["seven_day_overage_included"]);
+        let governs = |model| !Claude.meters_for(model, &full).unwrap().is_empty();
+        assert!(governs(Some("claude-fable-5-2")));
+        assert!(!governs(Some("claude-opus-5-5")) && !governs(None));
+    }
+
+    /// Review of #66: only the suffixes that name a model, or a model's week of [`MODEL_WEEKS`], are
+    /// scopes. `oauth_apps` says how the week is counted, not whose it is, so it stays the whole
+    /// account's and governs every job. `overage_included`, once taken for such a suffix, is the
+    /// Fable week (2026-11-16, on the real bus), and governs Fable jobs alone.
     #[test]
     fn only_a_declared_models_week_is_scoped() {
         for (name, scope) in [
             ("seven_day_opus", Some("Opus")),
             ("seven_day_sonnet", Some("Sonnet")),
             ("seven_day_fable", Some("Fable")),
-            ("seven_day_overage_included", None),
+            ("seven_day_overage_included", Some("Fable")),
             ("seven_day_oauth_apps", None),
         ] {
             let m = window_of(name);
             assert_eq!((m.window, m.scope.as_deref()), (Window::Week, scope), "{name}");
         }
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"seven_day":{"utilization":0.3},"seven_day_overage_included":{"utilization":0.95}}}}"#;
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"seven_day":{"utilization":0.3},"seven_day_overage_included":{"utilization":0.95},"seven_day_oauth_apps":{"utilization":0.5}}}}"#;
         let m = Claude.reader().line(line).unwrap();
-        let overage = &m["seven_day_overage_included"];
+        let (overage, apps) = (&m["seven_day_overage_included"], &m["seven_day_oauth_apps"]);
         for model in [None, Some("claude-opus-5-5"), Some("fable")] {
             let governing = Claude.meters_for(model, &m).unwrap();
-            assert!(governing.iter().any(|g| std::ptr::eq(*g, overage)), "{model:?}: account-wide");
+            assert!(governing.iter().any(|g| std::ptr::eq(*g, apps)), "{model:?}: account-wide");
+            let fable = governing.iter().any(|g| std::ptr::eq(*g, overage));
+            assert_eq!(fable, model == Some("fable"), "{model:?}: the Fable week");
         }
         // `/usage` alike: a model it names is scoped, anything else in the brackets is not.
         let text = "Current week (all models): 20% used\nCurrent week (Sonnet): 5% used\nCurrent week (extra usage): 9% used\n";

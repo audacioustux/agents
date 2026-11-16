@@ -152,7 +152,7 @@ impl History {
     }
 
     /// What names each series, by account and meter: [`rows::Label`], and where two would read
-    /// alike (claude's `seven_day` and `seven_day_overage_included` are both `claude:a`), each with
+    /// alike (claude's `seven_day` and `seven_day_oauth_apps` are both `claude:a`), each with
     /// its meter's name. The one rule the rows, the chart's legend and the watch's chart all read.
     pub fn labels(&self) -> BTreeMap<(&str, &str), rows::Label> {
         let mut labels: BTreeMap<(&str, &str), rows::Label> = self
@@ -907,18 +907,14 @@ mod tests {
     }
 
     /// The text `history` prints as in `width` columns, without colour.
-    /// Review of #66: claude's `seven_day` and `seven_day_overage_included` are both the account's
+    /// Review of #66: claude's `seven_day` and `seven_day_oauth_apps` are both the account's
     /// week, so both would read `claude:a`. The rows, the chart's legend (which the watch chart
     /// draws too) and `--json` tell them apart the same way, by the meter's name.
     #[test]
     fn two_meters_that_would_read_alike_are_told_apart_everywhere() {
         let resets = i64::try_from(NOW / 1_000_000).unwrap() + 2 * 86_400;
         let b = [vec![
-            reading(
-                NOW - 2 * H,
-                "claude:a",
-                &[("seven_day", 0.30, resets), ("seven_day_overage_included", 0.12, resets)],
-            ),
+            reading(NOW - 2 * H, "claude:a", &[("seven_day", 0.30, resets), ("seven_day_oauth_apps", 0.12, resets)]),
             reading(NOW - H, "claude:b", &[("seven_day", 0.50, resets)]),
         ]];
         let h = History::fold(b.iter().map(Vec::as_slice), &week());
@@ -926,7 +922,7 @@ mod tests {
             printed(&h, Some(120)).lines().filter(|l| l.contains(" ━━ ")).map(str::to_owned).collect();
         let names: Vec<&str> =
             legend.iter().map(|l| l.split(" ━━ ").nth(1).unwrap().split("  ").next().unwrap()).collect();
-        assert_eq!(names, ["claude:a (seven_day)", "claude:a (seven_day_overage_included)", "claude:b"], "{legend:#?}");
+        assert_eq!(names, ["claude:a (seven_day)", "claude:a (seven_day_oauth_apps)", "claude:b"], "{legend:#?}");
         let (f, limits) = (week(), limits());
         let rows: Vec<String> = rows::rows(&h, &limits, f.since, NOW).iter().map(rows::Row::label).collect();
         for name in &names {

@@ -20,8 +20,8 @@ use crate::accounts::{self, harness_of};
 use crate::bus::{Action, Check, CheckVerdict, Outcome, Point, SessionEvent, now_micros, secs};
 use crate::config::HarnessConf;
 use crate::ctx::{Ctx, SessionRepo};
-use crate::harness::report::{Ending, Report, Verdict, verdict};
-use crate::harness::{Harness, Home, Invocation, Permissions, Reader, Session, Task};
+use crate::harness::report::{Ending, Report, UNSTATED_LIMIT_S, Verdict, verdict};
+use crate::harness::{Harness, Home, Invocation, Meters, Permissions, Reader, Session, Task};
 use crate::hostdir::HostDir;
 use crate::os;
 use crate::sandbox::{self, Mounts};
@@ -315,7 +315,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
         {
             let (spent_usd, cap_usd) = (job.cost_usd + report.cost_usd, job.budget_usd);
             port(ctx, job).emit(SessionEvent::Overran { job: job.name.clone(), spent_usd, cap_usd })?;
-            let (outcome, _) = conclude(ctx, job, &seat.key, Verdict::Done, now_s())?;
+            let (outcome, _) = conclude(ctx, job, &seat, Verdict::Done, now_s())?;
             let note = format!("finished ${spent_usd:.2} against a ${cap_usd:.2} budget");
             at_end(ctx, job, seat.home, &ran, (outcome, Some(note)), ending.silent)
         }
@@ -332,7 +332,7 @@ fn attempt(ctx: &Ctx, job: &Job, spend: &mut (f64, u32)) -> Result<Ended> {
             }
         },
         v => {
-            let ended = conclude(ctx, job, &seat.key, v, now_s())?;
+            let ended = conclude(ctx, job, &seat, v, now_s())?;
             at_end(ctx, job, seat.home, &ran, ended, ending.silent)
         }
     }
@@ -880,10 +880,27 @@ fn now_s() -> i64 {
     secs(now_micros())
 }
 
+/// Whether a limit of these meters of one model's own (`full`, from [`Verdict::ModelLimited`]) is
+/// the model's alone for a run of `model` on `harness`: one of them governs that model, so the
+/// meter, read in the run's own `rate` event, refuses the model's jobs on the account
+/// ([`accounts::fit`]) while every other model runs there. A run that none of them governs (on the
+/// home's default model, which relay cannot tell) would be sent straight back to the same limit,
+/// so its limit holds the account as an unexplained one does.
+fn models_own_limit(full: &Meters, harness: &dyn Harness, model: Option<&str>) -> bool {
+    harness.meters_for(model, full).is_ok_and(|governing| !governing.is_empty())
+}
+
 /// What a verdict means for the job, and what it tells the other systems.
-fn conclude(ctx: &Ctx, job: &Job, key: &str, v: Verdict, now_s: i64) -> Result<Ended> {
+fn conclude(ctx: &Ctx, job: &Job, seat: &Seat<'_>, v: Verdict, now_s: i64) -> Result<Ended> {
     let port = port(ctx, job);
     let s = &ctx.cfg.session;
+    let key = seat.key.as_str();
+    let limited = |until: Option<i64>| -> Result<Ended> {
+        // Two minutes after a stated reset; fifteen when none is stated (an overload or bare 429).
+        let until = until.map_or(now_s + UNSTATED_LIMIT_S, |u| u + 120);
+        port.emit(SessionEvent::Limited { account: key.to_owned(), until })?;
+        Ok((Outcome::Retry, Some(format!("{key} hit its limit; moving on"))))
+    };
     Ok(match v {
         Verdict::Done => (Outcome::Done, None),
         Verdict::FollowUp(message) if job.follow_ups == 0 => {
@@ -894,12 +911,13 @@ fn conclude(ctx: &Ctx, job: &Job, key: &str, v: Verdict, now_s: i64) -> Result<E
             (Outcome::Failed, Some("no verdict in the review's report after a follow-up".into()))
         }
         Verdict::FollowUp(_) => (Outcome::Done, Some(format!("no {} section after a follow-up", s.final_marker))),
-        Verdict::Limited { until } => {
-            // Two minutes after a stated reset; fifteen when none is stated (an overload or bare 429).
-            let until = until.map_or(now_s + 15 * 60, |u| u + 120);
-            port.emit(SessionEvent::Limited { account: key.to_owned(), until })?;
-            (Outcome::Retry, Some(format!("{key} hit its limit; moving on")))
+        Verdict::Limited { until } => limited(until)?,
+        // The account stays open: the full meter refuses only this model's jobs on it.
+        Verdict::ModelLimited(full) if models_own_limit(&full, seat.harness, seat.model.as_deref()) => {
+            let meters = full.keys().cloned().collect::<Vec<_>>().join(", ");
+            (Outcome::Retry, Some(format!("{key} hit the model's own limit ({meters}); moving on")))
         }
+        Verdict::ModelLimited(_) => limited(None)?,
         Verdict::SignedOut => {
             port.emit(SessionEvent::SignedOut { account: key.to_owned() })?;
             (Outcome::Retry, Some(format!("{key} is signed out; moving on")))
@@ -1436,6 +1454,25 @@ mod disk_tests {
         );
         let off = Limits { job_disk_gb: 0.0, min_free_disk_gb: 0.0.into(), ..l };
         assert_eq!(disk_reason(&off, gb(900), Some(0.1), true), None, "zero turns both off");
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::models_own_limit;
+    use crate::harness::{Meter, Meters, Window, by_id};
+
+    /// A limit of the Fable week alone holds no account for a Fable job: the meter refuses Fable
+    /// there. A run on the home's default model, which no scoped meter governs, would be sent straight back.
+    #[test]
+    fn a_models_own_limit_holds_the_account_only_for_a_model_it_does_not_govern() {
+        let claude = by_id("claude").unwrap();
+        let full: Meters =
+            [("seven_day_fable".to_owned(), Meter::new(Window::Week, 1.0, Some(9)).scope("Fable"))].into();
+        assert!(models_own_limit(&full, claude, Some("claude-fable-5-2")));
+        assert!(!models_own_limit(&full, claude, None), "the default model: the account is held");
+        assert!(!models_own_limit(&full, claude, Some("claude-opus-5-5")));
+        assert!(!models_own_limit(&Meters::new(), claude, Some("claude-fable-5-2")));
     }
 }
 

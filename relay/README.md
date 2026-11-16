@@ -1350,7 +1350,14 @@ file are over all projects ([the machine's caps](#the-machines-caps)).
 
 When a session hits a limit, its account is closed until two minutes after the
 stated reset (or for 15 minutes if none is stated), and the job goes back in
-the queue. A session whose sign-in has expired, or a `/usage` reading whose output
+the queue. The reset is that of the full meter of the whole account (`five_hour`,
+`seven_day`). When only a model's own meter is full (the Fable week: `seven_day_fable`
+as `/usage` reads it, `seven_day_overage_included` as a session streams it), the limit
+is that model's: the account stays open, and the meter refuses only jobs on that
+model until it resets (a job on the home's default model, which relay cannot tell,
+closes the account for 15 minutes instead). A quota reading taken at least 15
+minutes after a limit that finds every meter of the whole account below 100% ends
+the limit early. A session whose sign-in has expired, or a `/usage` reading whose output
 says the session is expired, unauthorised or not signed in, marks its account
 signed out (`signed out since <time>` on the board; no extra call is made, and
 it is asked again only when a reading would be stale). It is used again once a

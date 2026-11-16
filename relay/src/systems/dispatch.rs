@@ -649,7 +649,7 @@ mod tests {
     use super::*;
     use crate::accounts;
     use crate::config::{Machine, Quantity};
-    use crate::harness::Meter;
+    use crate::harness::{Meter, Window};
     use crate::world::Claim;
 
     fn home(harness: &'static str, label: &str) -> Home {
@@ -862,6 +862,89 @@ mod tests {
         let (starts, _) = plan_omp(&cfg, &world, &found);
         assert_eq!(starts[0], ("resume".to_owned(), "claude:b".to_owned()));
         assert_eq!(pick(&world), Some((Some(starts[0].0.clone()), starts[0].1.clone())));
+    }
+
+    /// 2026-11-16: an account whose Fable week is full, its all-models week at 72%, is not limited:
+    /// its full Fable week refuses the next Fable job there, and an Opus job starts. The Fable week
+    /// stays when an Opus session's rate event, which does not name it, comes after the reading, in
+    /// this project or another, so no Fable job is sent back to the limit.
+    #[test]
+    fn a_full_fable_week_holds_fable_jobs_and_starts_opus_ones() {
+        use crate::bus::{Event, QuotaEvent, SessionEvent, Stamped};
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let text = "name = \"demo\"\n[limits]\nmin_free_disk_gb = 0\nper_account = 2\n[harness.omp]\nenabled = false\n";
+        let cfg = Config::parse(text, d.path()).unwrap();
+        let now = i64::try_from(NOW_US / 1_000_000).unwrap();
+        let week = |utilization, days: i64| Meter::new(Window::Week, utilization, Some(now + days * 86_400));
+        let account = |all| -> crate::harness::Meters {
+            [
+                ("five_hour".to_owned(), Meter::new(Window::FiveHours, 0.1, Some(now + 3600))),
+                ("seven_day".to_owned(), week(all, 3)),
+            ]
+            .into()
+        };
+        let mut read = account(0.72);
+        read.insert("seven_day_fable".to_owned(), week(1.0, 4).scope("Fable"));
+        let reading = Event::Quota(QuotaEvent::Reading { account: "claude:a".into(), meters: read, sign_in: None });
+        let opus_rate = |all| Event::Session(SessionEvent::Rate { account: "claude:a".into(), meters: account(all) });
+        let at = |t, event| Stamped { t, event, from: None };
+        let jobs = |mut world: World| {
+            for (i, (name, model)) in
+                [("fable", "claude-fable-5-2"), ("opus", "claude-opus-5-5")].into_iter().enumerate()
+            {
+                let j = Job {
+                    name: name.into(),
+                    status: Status::Queued,
+                    models: BTreeMap::from([("claude".to_owned(), model.to_owned())]),
+                    created_at: i as u64,
+                    ..Job::default()
+                };
+                world.jobs_mut().insert(j.name.clone(), j);
+            }
+            world
+        };
+        let only_opus_starts = |world: &World| {
+            assert_eq!(world.accounts["claude:a"].limited_until, None);
+            let (starts, held) = plan_omp(&cfg, world, &[home("claude", "a")]);
+            assert_eq!(starts, [("opus".to_owned(), "claude:a".to_owned())], "{:?}", held.0);
+            assert_eq!(held.0.len(), 1);
+            assert!(held.0[0].starts_with("fable: ") && held.0[0].contains("100% seven_day_fable"), "{:?}", held.0);
+        };
+        let read_once = World::fold(&[at(NOW_US - 60_000_000, reading.clone())]);
+        only_opus_starts(&jobs(read_once.clone()));
+        // An Opus session's rate, after the reading, names no Fable week.
+        only_opus_starts(&jobs(World::fold(&[at(NOW_US - 60_000_000, reading), at(NOW_US - 1, opus_rate(0.73))])));
+        // Another project read the account later, from such a rate alone.
+        let theirs = World::fold(&[at(NOW_US - 1, opus_rate(0.73))]);
+        let mut ours = jobs(read_once);
+        ours.hear_accounts([&theirs]);
+        assert!((ours.accounts["claude:a"].meters["seven_day"].utilization - 0.73).abs() < 1e-9, "their later reading");
+        only_opus_starts(&ours);
+    }
+
+    /// 2026-11-16, the real bus: the rate event of the Fable run that found its Fable week full,
+    /// as the stream named it (`seven_day_overage_included`), with no limit recorded for the
+    /// account. The next Fable job is held, and an Opus job starts there.
+    #[test]
+    fn the_fable_week_as_streamed_holds_fable_jobs_alone() {
+        use crate::bus::{Event, SessionEvent, Stamped};
+        let d = crate::config::tempdir::Dir::new();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let text = "name = \"demo\"\n[limits]\nmin_free_disk_gb = 0\nper_account = 2\n[harness.omp]\nenabled = false\n";
+        let cfg = Config::parse(text, d.path()).unwrap();
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":0.29,"resetsAt":1800003600},"seven_day":{"utilization":0.68,"resetsAt":1800300000},"seven_day_overage_included":{"utilization":1.0,"resetsAt":1800300000}}}}"#;
+        let meters = crate::harness::by_id("claude").unwrap().reader().line(line).unwrap();
+        let rate = Event::Session(SessionEvent::Rate { account: "claude:a".into(), meters });
+        let mut world = World::fold(&[Stamped { t: NOW_US - 1, event: rate, from: None }]);
+        for (i, (name, model)) in [("fable", "claude-fable-5-2"), ("opus", "claude-opus-5-5")].into_iter().enumerate() {
+            let models = BTreeMap::from([("claude".to_owned(), model.to_owned())]);
+            let j = Job { name: name.into(), status: Status::Queued, models, created_at: i as u64, ..Job::default() };
+            world.jobs_mut().insert(j.name.clone(), j);
+        }
+        let (starts, held) = plan_omp(&cfg, &world, &[home("claude", "a")]);
+        assert_eq!(starts, [("opus".to_owned(), "claude:a".to_owned())], "{:?}", held.0);
+        assert!(held.0[0].starts_with("fable: ") && held.0[0].contains("seven_day_overage_included"), "{:?}", held.0);
     }
 
     /// The plan for `world` among `others`, and why the rest are held.

@@ -13,43 +13,64 @@ use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{FlockOperation, flock, inotify};
 use rustix::process::{Pid, Signal, kill_process_group};
 
-/// An exclusive role, such as "the dispatcher". The kernel drops it when the
-/// holder dies, and the descriptor is close-on-exec, so children never inherit it.
+/// An exclusive role, such as "the dispatcher". Its descriptor is opened close-on-exec, so no child
+/// that execs keeps it, and dropping the role unlocks it (`LOCK_UN`, [`Role::release`]) rather than
+/// only closing its descriptor: a flock lives as long as any copy of its descriptor does, and a child
+/// another thread is spawning holds a copy from its fork to its exec, so a role only closed could read
+/// as busy, or stay held, for that window. The kernel drops the lock too when the holder dies.
+///
+/// The one exception is a role shared with a child ([`Role::share`]): that child's process tree holds
+/// it on, and dropping the role then only closes this process's descriptor.
 #[derive(Debug)]
-pub struct Role(#[cfg_attr(not(test), allow(dead_code))] File);
+pub struct Role {
+    file: File,
+    shared: bool,
+}
 
 impl Role {
     /// `None` if another live process holds the role.
     pub fn try_take(path: &Path) -> Result<Option<Self>> {
-        let f = Self::open(path)?;
-        match flock(&f, FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => Ok(Some(Self(f))),
-            Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
-            Err(e) => Err(e).context("flock"),
-        }
+        Self::try_lock(Self::open(path)?)
     }
 
     /// Waits until the role is free, then takes it.
     pub fn take(path: &Path) -> Result<Self> {
         let f = Self::open(path)?;
         flock(&f, FlockOperation::LockExclusive).context("flock")?;
-        Ok(Self(f))
+        Ok(Self { file: f, shared: false })
+    }
+
+    fn try_lock(file: File) -> Result<Option<Self>> {
+        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(Some(Self { file, shared: false })),
+            Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
+            Err(e) => Err(e).context("flock"),
+        }
     }
 
     /// Gives the role up now, whatever else holds a copy of the descriptor. A process that forks while
     /// the role is held (any other thread's `Command`) has a copy until its `exec` closes it, and the
-    /// kernel keeps the lock for as long as one copy lives: a role dropped and taken again at once can
-    /// find itself held. Not for a role whose work is shared with a child ([`Role::share`]).
+    /// kernel keeps the lock for as long as one copy lives: a role only closed and taken again at once
+    /// can find itself held. Dropping a role does this; a role shared with a child ([`Role::share`]) is
+    /// that child's to give up, and dropping it does not.
     pub fn release(&self) {
-        // A lock the kernel has already dropped, or a descriptor that is gone, is released enough.
-        let _ = flock(&self.0, FlockOperation::Unlock);
+        unlock(&self.file);
     }
 
     /// A copy of the role for one child to inherit as its stdin (an empty file, read as at its end).
     /// The role is then held until that child, and everything that inherits its stdin, has ended,
-    /// even past this process: a role whose work runs in a process tree is that tree's.
-    pub fn share(&self) -> Result<std::process::Stdio> {
-        Ok(self.0.try_clone().context("sharing a role")?.into())
+    /// even past this process: a role whose work runs in a process tree is that tree's, and dropping
+    /// this one no longer unlocks it.
+    pub fn share(&mut self) -> Result<std::process::Stdio> {
+        let copy = self.file.try_clone().context("sharing a role")?;
+        self.shared = true;
+        Ok(copy.into())
+    }
+
+    /// A copy of the descriptor as a child forked (and not yet exec'd) by another thread has one.
+    #[cfg(test)]
+    pub(crate) fn forked_copy(&self) -> OwnedFd {
+        self.file.try_clone().unwrap().into()
     }
 
     /// Opens (creating) a lock file. std opens every file close-on-exec; the flag is named here too, so
@@ -67,12 +88,27 @@ impl Role {
     }
 }
 
+impl Drop for Role {
+    fn drop(&mut self) {
+        if !self.shared {
+            self.release();
+        }
+    }
+}
+
+/// Unlocks `f`'s lock for every copy of its descriptor. A lock the kernel has already dropped, or a
+/// descriptor that is gone, is released enough.
+fn unlock(f: &File) {
+    let _ = flock(f, FlockOperation::Unlock);
+}
+
 /// A shared hold on a seat's lock file ([`seat_held`]): the booker of a session that is no job's own
 /// run takes one before it records the seat, and the session's supervisor another for its whole life,
 /// which ends only once every process of the session's tree has (`supervised::supervise`), so the
-/// seat stays taken until then, however the booker ends.
+/// seat stays taken until then, however the booker ends. Opened close-on-exec as a [`Role`] is, and
+/// unlocked when dropped, so a dropped hold never reads as a taken seat through a forked child's copy.
 #[derive(Debug)]
-pub struct SeatHold(#[cfg_attr(not(test), allow(dead_code))] File);
+pub struct SeatHold(File);
 
 impl SeatHold {
     /// Creates `path` if need be and holds it, shared (waiting out a [`seat_held`] look's moment).
@@ -81,9 +117,22 @@ impl SeatHold {
         flock(&f, FlockOperation::LockShared).context("flock")?;
         Ok(Self(f))
     }
+
+    /// As [`Role::forked_copy`].
+    #[cfg(test)]
+    pub(crate) fn forked_copy(&self) -> OwnedFd {
+        self.0.try_clone().unwrap().into()
+    }
+}
+
+impl Drop for SeatHold {
+    fn drop(&mut self) {
+        unlock(&self.0);
+    }
 }
 
 /// Whether a live process holds the seat lock `path` ([`SeatHold`]). A missing file is held by nobody.
+/// The look takes the lock for a moment, as a [`Role`], so it is unlocked again however it ends.
 pub fn seat_held(path: &Path) -> bool {
     let opened = File::options()
         .read(true)
@@ -91,7 +140,7 @@ pub fn seat_held(path: &Path) -> bool {
         .custom_flags(rustix::fs::OFlags::CLOEXEC.bits().cast_signed())
         .open(path);
     let Ok(f) = opened else { return false };
-    matches!(flock(&f, FlockOperation::NonBlockingLockExclusive), Err(rustix::io::Errno::WOULDBLOCK))
+    matches!(Role::try_lock(f), Ok(None))
 }
 
 /// Rings when files in a directory are written or created.
@@ -345,14 +394,8 @@ mod tests {
         assert!(Role::try_take(&p).unwrap().is_none());
         drop(held);
         // Another test thread may be between fork and exec, its child briefly sharing the open file
-        // description (the descriptor is close-on-exec, so only until the exec): the lock frees then.
-        let freed = (0..200).any(|_| {
-            Role::try_take(&p).unwrap().is_some() || {
-                std::thread::sleep(Duration::from_millis(10));
-                false
-            }
-        });
-        assert!(freed, "the role is free once its holder is dropped");
+        // description: the drop unlocks it for every copy, so it is free at once.
+        assert!(Role::try_take(&p).unwrap().is_some(), "the role is free once its holder is dropped");
     }
 
     /// Whether `fd` is close-on-exec.
@@ -365,12 +408,68 @@ mod tests {
     fn every_lock_descriptor_is_close_on_exec() {
         let d = Dir::new();
         let role = Role::try_take(&d.path().join("a.lock")).unwrap().unwrap();
-        assert!(cloexec(&role.0), "try_take");
-        assert!(cloexec(&Role::take(&d.path().join("b.lock")).unwrap().0), "take");
+        assert!(cloexec(&role.file), "try_take");
+        assert!(cloexec(&Role::take(&d.path().join("b.lock")).unwrap().file), "take");
         assert!(cloexec(&SeatHold::take(&d.path().join("c.lock")).unwrap().0), "a seat hold");
         assert!(!seat_held(&d.path().join("a.lock").with_extension("none")));
         let looked = File::options().read(true).write(true).open(d.path().join("a.lock")).unwrap();
         assert!(cloexec(&looked), "std's open, as seat_held's look uses");
+    }
+
+    /// A role taken without waiting (the dispatcher's, the gc's, the quota drainer's, the cost index's,
+    /// a held job's, a seat file's last look): dropped while a forked child holds a copy, it is free.
+    #[test]
+    fn a_role_taken_at_once_is_free_once_dropped_though_a_forked_child_holds_a_copy() {
+        let d = Dir::new();
+        let p = d.path().join("dispatch.lock");
+        let role = Role::try_take(&p).unwrap().unwrap();
+        let child = role.forked_copy();
+        drop(role);
+        assert!(Role::try_take(&p).unwrap().is_some(), "free though the copy lives");
+        drop(child);
+    }
+
+    /// A role waited for (the jobs lock of queue, land, decide and dispatch; the seats lock; the quota
+    /// locks; the host's programs record): the same.
+    #[test]
+    fn a_role_waited_for_is_free_once_dropped_though_a_forked_child_holds_a_copy() {
+        let d = Dir::new();
+        let p = d.path().join("jobs.lock");
+        let role = Role::take(&p).unwrap();
+        let child = role.forked_copy();
+        drop(role);
+        assert!(Role::try_take(&p).unwrap().is_some(), "free though the copy lives");
+        drop(child);
+    }
+
+    /// A seat hold (a session's booker and its supervisor): once dropped, the seat is free, and the last
+    /// holder may remove its lock file, though a forked child holds a copy.
+    #[test]
+    fn a_seat_hold_is_free_once_dropped_though_a_forked_child_holds_a_copy() {
+        let d = Dir::new();
+        let p = d.path().join("claim.lock");
+        let hold = SeatHold::take(&p).unwrap();
+        let child = hold.forked_copy();
+        assert!(seat_held(&p));
+        drop(hold);
+        assert!(!seat_held(&p), "free though the copy lives");
+        // The look took the lock for a moment, and gave it up: a hold and a role are had at once.
+        assert!(Role::try_take(&p).unwrap().is_some());
+        drop(child);
+    }
+
+    /// The exception: a role shared with a child (a development-environment warm-up's) is that child's
+    /// tree's, and stays held past its owner's drop until the child's copy is gone.
+    #[test]
+    fn a_role_shared_with_a_child_is_held_until_the_child_lets_go() {
+        let d = Dir::new();
+        let p = d.path().join("devshell.lock");
+        let mut role = Role::try_take(&p).unwrap().unwrap();
+        let stdin = role.share().unwrap();
+        drop(role);
+        assert!(Role::try_take(&p).unwrap().is_none(), "the child holds it");
+        drop(stdin);
+        assert!(Role::try_take(&p).unwrap().is_some(), "free once the child's copy is gone");
     }
 
     #[test]

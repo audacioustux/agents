@@ -437,16 +437,13 @@ fn the_refresh_lock_is_given_up_even_while_a_forked_child_holds_a_copy_of_it() {
     let m = Machine::new();
     std::fs::create_dir_all(m.index_dir()).unwrap();
     let path = m.index_dir().join("lock");
-    // A child forked in the middle of a refresh holds a copy of the descriptor until it execs; a copy is that.
+    // A child forked in the middle of a refresh holds a copy of the descriptor until it execs.
     let role = crate::os::Role::try_take(&path).unwrap().unwrap();
-    let child_copy = role.share().unwrap();
+    let _child_copy = role.forked_copy();
     drop(role);
-    assert!(crate::os::Role::try_take(&path).unwrap().is_none(), "a plain drop leaves it held by the copy");
-    drop(child_copy);
-    let held = Unlock(crate::os::Role::try_take(&path).unwrap().unwrap());
-    let _child_copy = held.0.share().unwrap();
-    drop(held);
     assert!(crate::os::Role::try_take(&path).unwrap().is_some(), "released for everyone");
+    let (_, done) = m.refresh();
+    assert!(!done.busy, "a refresh after it finds the index free");
 }
 
 /// The modification time of `path`, and a way to set it back exactly.

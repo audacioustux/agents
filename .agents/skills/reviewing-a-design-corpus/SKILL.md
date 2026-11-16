@@ -1,6 +1,6 @@
 ---
 name: reviewing-a-design-corpus
-description: Use when reviewing a design document or a set of them — an architecture proposal, a migration plan, a multi-chapter spec — rather than code. Also when a document set has grown inconsistent, when a stated criterion cannot be evaluated, or when a measured claim in a document needs checking.
+description: Use when reviewing a design document or a set of them — an architecture proposal, a migration plan, a multi-chapter spec — rather than code. Also when a document set has grown inconsistent, when a stated criterion cannot be evaluated, when a measured claim in a document needs checking, or when asking whether a spec is self-contained enough to hand to someone new.
 uses:
   - name: requesting-code-review
     source: audacioustux/agents
@@ -16,6 +16,69 @@ internally coherent, well argued, and wrong in ways nothing mechanical will catc
 
 `requesting-code-review` and `receiving-code-review` cover the code case. This is
 the other one.
+
+## Have a reader with none of the author's context say it back
+
+The author knows more than the page says, and so do reviewers who sat in the
+same conversations. Both fill the gaps without noticing. The implementer who
+arrives later with the document and nothing else cannot, and careful reading by
+people who already know does not find what that reader will miss.
+
+Before anyone argues with the design, give the document to one reader who has
+none of that context and ask it to restate, in its own words, **what the
+document decides, why, and what it leaves open**, marking every guess as a
+guess. Then compare the restatement with what the author meant. This runs beside
+the numbers pass below, since neither needs anything from the other, and ahead
+of every pass that argues.
+
+The reader:
+
+- **Is a fresh session, never a fork** of the session that drafted or reviewed.
+  A fork restates the design correctly from memory, which is the failure under
+  test.
+- **Gets the document and the files it links, nothing else.** Not the drafting
+  conversation, not the author's notes, not a paragraph of orientation.
+- **Does not get the repository's agent instruction files** (`AGENTS.md`,
+  `CLAUDE.md` and their kin) unless the document links them. They hold the
+  team's vocabulary, so a reader who has them passes a document its real reader
+  fails. Starting a session fresh keeps the conversation out and often lets
+  these in, because many harnesses load them into every new session. Never tell
+  the reader to read them first, and have it list what it was given besides the
+  document, so that a term it could have taken from there is not counted as
+  understood.
+- **Restates and does not review.** Its opinion of the design belongs to later
+  passes, and asking for both thins the restatement.
+
+What counts as a finding:
+
+- The restatement is **wrong**. The document says something other than was
+  meant, or needs outside context to be read correctly.
+- The reader **guessed or could not say**: a term, a reason, a referent such as
+  "the old importer" or "the agreed threshold" that the document relies on and
+  does not contain.
+- The **open list differs**. Something the reader took as settled is still open
+  for the author, or the reverse.
+- The restatement **hands the document's phrase back** where an answer was due.
+  "Because of the vendor's limit", repeated as the reason, is a guess in the
+  document's words: ask which vendor and what limit.
+
+The reader is ignorant of the project, not of the trade: a general engineering
+term it happens not to know is not a finding, and neither is its view of whether
+the design is good. A restatement that matches with nothing guessed is a result.
+Record it and move on.
+
+The fix for each finding belongs in the document or in a file it links, and it
+says what the author meant: where the page was silent because nothing was
+decided, the fix is to say it is open. Explaining the gap to the reader fixes
+one reader, and that reader is then spent: after a substantial rewrite, use a
+new one. Where nobody who holds the author's intent is at hand, the guesses
+stand as findings on their own and the restatement goes to the author to
+compare.
+
+One reader is enough. A second finds mostly the same gaps at twice the cost,
+and this is a cheap first check, not a panel. A reviewer who has seen none of
+the context can be that reader, once, by writing the restatement before opening
+anything but the document and its links.
 
 ## Verify the numbers before arguing with the conclusions
 
@@ -124,6 +187,8 @@ and why, or the same mechanism is proposed again next round.
 
 ## Review checklist
 
+- Has one reader with none of the author's context, given only the document and
+  the files it links, restated what it decides, why, and what it leaves open?
 - Has every measured claim been verified against the current tree, in a pass of
   its own, before any design argument?
 - Does each measured number carry its date and the command that produced it?

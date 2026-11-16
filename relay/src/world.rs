@@ -13,7 +13,7 @@ use crate::bus::{
     self, Action, DecideEvent, DevShellEvent, DispatchEvent, Event, Fork, LandEvent, Meters, Offsets, Outcome, Point,
     QueueEvent, QuotaEvent, ReadFailure, SessionEvent, Stamped,
 };
-use crate::harness::report::reset_ahead_limit;
+use crate::harness::report::{UNSTATED_LIMIT_S, reset_ahead_limit};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -426,6 +426,48 @@ impl AccountState {
     pub fn failure(&self) -> Option<Failing> {
         self.failing.as_ref().and_then(|f| f.after(self.read_at))
     }
+
+    /// This state with [`AccountState::settle_limit`] applied.
+    #[must_use]
+    fn settled(mut self) -> Self {
+        self.settle_limit();
+        self
+    }
+
+    /// Ends a limit that a quota reading taken since says is over: one at `roomy_at` found room on
+    /// every meter of the whole account at least [`UNSTATED_LIMIT_S`] after the limit was recorded.
+    /// A limit of the whole account shows as a full meter of it, so no such reading comes while it
+    /// lasts; a limit no meter explains (an overload, a bare 429) runs out within that hold first,
+    /// so a reading never cuts its back-off short. What every path that brings a reading or a limit
+    /// in asks (a quota reading, another project's account, a twin home's), so they agree.
+    pub fn settle_limit(&mut self) {
+        let hold = u64::try_from(UNSTATED_LIMIT_S).unwrap_or(0) * 1_000_000;
+        let recorded = self.limited_at.unwrap_or(0);
+        if self.limited_until.is_some() && self.roomy_at.is_some_and(|r| r >= recorded.saturating_add(hold)) {
+            (self.limited_until, self.limited_at) = (None, None);
+        }
+    }
+}
+
+/// `newer` meters, with each meter of one model's own in `older` that `newer` does not name. A
+/// session's rate event names only the meters its own model draws on, and the newer of two
+/// projects' readings may be one: an Opus session's says nothing of the Fable week, which must go on
+/// refusing Fable jobs, as nothing else on the account does. A kept meter reads no higher than
+/// the truth (a meter only rises until it resets) and governs nothing past its reset; a quota reading,
+/// which reads every meter, replaces them all.
+pub fn keeping_models_own(mut newer: Meters, older: &Meters) -> Meters {
+    for (name, m) in older.iter().filter(|(_, m)| m.scope.is_some()) {
+        newer.entry(name.clone()).or_insert_with(|| m.clone());
+    }
+    newer
+}
+
+/// Whether a quota reading shows room on the whole account: it has a meter of the whole account
+/// (no model's own) and none of those is full. A model's own meter, full, refuses only that model's
+/// jobs ([`crate::harness::claude::covers`]), so it says nothing of the account's limit.
+pub fn has_room(meters: &Meters) -> bool {
+    let mut whole = meters.values().filter(|m| m.scope.is_none()).peekable();
+    whole.peek().is_some() && whole.all(|m| m.utilization < 1.0)
 }
 
 impl Failing {
@@ -466,6 +508,13 @@ pub struct AccountState {
     pub failing: Option<Failing>,
     /// Unix seconds until which the account refuses sessions.
     pub limited_until: Option<i64>,
+    /// Unix microseconds of the event that recorded `limited_until`.
+    #[serde(default)]
+    pub limited_at: Option<u64>,
+    /// Unix microseconds of the latest quota reading that showed room on the whole account
+    /// ([`has_room`]), which ends a limit recorded long enough before it ([`AccountState::settle_limit`]).
+    #[serde(default)]
+    pub roomy_at: Option<u64>,
     /// The home's sign-in (`Identity::stamp`) when it was last read or found
     /// signed out. A different one on disk means someone signed in again.
     #[serde(default)]
@@ -487,6 +536,8 @@ impl Default for AccountState {
             unreadable_at: None,
             failing: None,
             limited_until: None,
+            limited_at: None,
+            roomy_at: None,
             sign_in: None,
             unsigned: false,
         }
@@ -687,7 +738,9 @@ pub const DAY_MICROS: u64 = 24 * 3600 * 1_000_000;
 /// 19: a queued job is in line for a machine-wide pool (`in-line`, `out-of-line`) and says whether it
 /// compiles (`no_compile`); every runner dispatched claims its place until its recorded exit
 /// (`claims`, `runner-exited`).
-const FOLD_VERSION: u32 = 21;
+/// 22: a limit records when it came (`limited_at`), and a quota reading with room on the whole
+/// account a hold after it ends it (`roomy_at`); a rate event keeps a model's own meter it does not name.
+const FOLD_VERSION: u32 = 22;
 
 fn fold_version() -> String {
     format!("{}+fold{FOLD_VERSION}", env!("CARGO_PKG_VERSION"))
@@ -743,11 +796,13 @@ impl Checkpoint {
 }
 
 /// One account as two projects know it together: the later reading, the later
-/// failed read, the later end of a limit, and signed out if either saw it.
+/// failed read, the later end of a limit unless a reading either took ends it, and signed out
+/// if either saw it.
 /// Whether relay may use it at all (`enabled`) is each project's own switch.
 pub fn merge_account(ours: &AccountState, theirs: &AccountState) -> AccountState {
-    let newer = if theirs.read_at > ours.read_at { theirs } else { ours };
-    let (meters, read_at, sign_in) = (newer.meters.clone(), newer.read_at, newer.sign_in.clone());
+    let (newer, older) = if theirs.read_at > ours.read_at { (theirs, ours) } else { (ours, theirs) };
+    let meters = keeping_models_own(newer.meters.clone(), &older.meters);
+    let (read_at, sign_in) = (newer.read_at, newer.sign_in.clone());
     // A sign-out stands until someone enables the account again, in any project.
     let latest = if theirs.signed_at > ours.signed_at { theirs } else { ours };
     AccountState {
@@ -764,9 +819,12 @@ pub fn merge_account(ours: &AccountState, theirs: &AccountState) -> AccountState
         }
         .and_then(|f| f.after(read_at)),
         limited_until: ours.limited_until.max(theirs.limited_until),
+        limited_at: ours.limited_at.max(theirs.limited_at),
+        roomy_at: ours.roomy_at.max(theirs.roomy_at),
         sign_in,
         unsigned: ours.unsigned,
     }
+    .settled()
 }
 
 /// Writes `bytes` to `path` whole or not at all, readable by its owner only.
@@ -1373,6 +1431,12 @@ impl World {
                 a.read_at = Some(t);
                 a.failing = None;
                 a.sign_in.clone_from(sign_in);
+                // The quota command reads every meter; a session's rate event names only some, so
+                // it is no evidence that the account has room.
+                if has_room(&a.meters) {
+                    a.roomy_at = Some(t);
+                    a.settle_limit();
+                }
                 // A reading that works is a session that works.
                 if a.signed_out {
                     (a.signed_out, a.signed_at) = (false, Some(t));
@@ -1574,12 +1638,13 @@ impl World {
         match e {
             SessionEvent::Rate { account, meters } => {
                 let a = self.account(account);
-                a.meters = in_reach(meters, t);
+                a.meters = keeping_models_own(in_reach(meters, t), &a.meters);
                 a.read_at = Some(t);
             }
             SessionEvent::Limited { account, until } => {
                 let a = self.account(account);
                 a.limited_until = Some(a.limited_until.map_or(*until, |u| u.max(*until)));
+                a.limited_at = Some(t);
             }
             SessionEvent::SignedOut { account } => {
                 let a = self.account(account);
@@ -2075,6 +2140,7 @@ mod tests {
         (19, 0xff2a_3110_25d7_0f54),
         (20, 0xff2a_3110_25d7_0f54),
         (21, 0xff2a_3110_25d7_0f54),
+        (22, 0x8fa6_5a3f_dbae_5b5d),
     ];
 
     #[test]
@@ -3164,6 +3230,55 @@ mod tests {
         assert!(!w.accounts["x"].signed_out);
     }
 
+    /// A quota reading of an account, its all-models week at `all`, its five hours at `five` and
+    /// its Fable week full.
+    fn reading_of(account: &str, all: f64, five: f64) -> Event {
+        use crate::harness::{Meter, Window};
+        let meters = [
+            ("five_hour".to_owned(), Meter::new(Window::FiveHours, five, None)),
+            ("seven_day".to_owned(), Meter::new(Window::Week, all, None)),
+            ("seven_day_fable".to_owned(), Meter::new(Window::Week, 1.0, None).scope("Fable")),
+        ]
+        .into();
+        Event::Quota(QuotaEvent::Reading { account: account.into(), meters, sign_in: None })
+    }
+
+    const MIN: u64 = 60 * 1_000_000;
+
+    /// 2026-11-16: accounts held for every job by an older rule, which took a full Fable week for
+    /// the account's limit, are freed by the next quota reading, and a real limit of the account
+    /// is not.
+    #[test]
+    fn a_reading_with_room_on_the_whole_account_ends_a_limit_recorded_a_hold_before() {
+        let t0 = 1_800_000_000 * 1_000_000;
+        let limited = st(t0, Event::Session(SessionEvent::Limited { account: "x".into(), until: 1_800_400_000 }));
+        let limit_after =
+            |events: &[Stamped]| World::fold(&[&[limited.clone()][..], events].concat()).accounts["x"].limited_until;
+        let held = Some(1_800_400_000);
+        // Room on every meter of the whole account, the Fable week full: the limit is over.
+        assert_eq!(limit_after(&[st(t0 + 16 * MIN, reading_of("x", 0.72, 0.1))]), None);
+        assert_eq!(limit_after(&[st(t0 + 15 * MIN, reading_of("x", 0.72, 0.1))]), None, "the hold's edge");
+        // A full meter of the whole account: the limit stands.
+        assert_eq!(limit_after(&[st(t0 + 16 * MIN, reading_of("x", 0.72, 1.0))]), held);
+        assert_eq!(limit_after(&[st(t0 + 16 * MIN, reading_of("x", 1.0, 0.1))]), held);
+        // Within the hold a reading never cuts a limit short: a bare 429's back-off runs its course.
+        assert_eq!(limit_after(&[st(t0 + MIN, reading_of("x", 0.72, 0.1))]), held);
+        // A session's rate event names only some meters: no evidence the account has room.
+        let Event::Quota(QuotaEvent::Reading { meters, .. }) = reading_of("x", 0.72, 0.1) else { unreachable!() };
+        let rate = Event::Session(SessionEvent::Rate { account: "x".into(), meters });
+        assert_eq!(limit_after(&[st(t0 + 16 * MIN, rate)]), held);
+        // A reading with no meter of the whole account in it says nothing of it.
+        let empty = Event::Quota(QuotaEvent::Reading { account: "x".into(), meters: Meters::new(), sign_in: None });
+        assert_eq!(limit_after(&[st(t0 + 16 * MIN, empty)]), held);
+        // A limit recorded after the reading is a new one: the reading before it does not end it.
+        let w = World::fold(&[
+            st(t0 - 60 * MIN, reading_of("x", 0.72, 0.1)),
+            limited.clone(),
+            st(t0 + MIN, reading_of("x", 0.72, 0.1)),
+        ]);
+        assert_eq!(w.accounts["x"].limited_until, held);
+    }
+
     /// PR #39 sixth review, issue 3: a `held` decision of a queued job asks about it until the job is
     /// forgotten; then it asks about nothing, not even a new job of the same name.
     #[test]
@@ -3262,6 +3377,22 @@ mod tests {
             assert_eq!(merge_account(&until(Some(100)), &until(Some(200))).limited_until, Some(200));
             assert_eq!(merge_account(&until(Some(200)), &until(Some(100))).limited_until, Some(200));
             assert_eq!(merge_account(&until(Some(100)), &until(None)).limited_until, Some(100));
+        }
+
+        /// A reading one project took ends a limit another project recorded before it, so the
+        /// project that never saw the reading does not hold the account on its own copy.
+        #[test]
+        fn a_reading_anywhere_ends_a_limit_recorded_a_hold_before_it() {
+            let hold = u64::try_from(crate::harness::report::UNSTATED_LIMIT_S).unwrap() * 1_000_000;
+            let limited =
+                |at| AccountState { limited_until: Some(500), limited_at: Some(at), ..AccountState::default() };
+            let roomy = AccountState { roomy_at: Some(1_000 + hold), ..AccountState::default() };
+            for (a, b) in [(&limited(1_000), &roomy), (&roomy, &limited(1_000))] {
+                let m = merge_account(a, b);
+                assert_eq!((m.limited_until, m.limited_at), (None, None));
+            }
+            let later = merge_account(&roomy, &limited(1_001));
+            assert_eq!(later.limited_until, Some(500), "recorded within the hold before the reading");
         }
 
         #[test]

@@ -84,10 +84,14 @@ pub enum Verdict {
     Done,
     /// Ask once more on the same session, for example for the missing final report.
     FollowUp(String),
-    /// Out of quota until `until` (unix seconds), if stated.
+    /// Out of quota until `until` (unix seconds), if stated: a limit of the whole account.
     Limited {
         until: Option<i64>,
     },
+    /// Out of one model's own quota: no meter of the whole account was full, only these meters of
+    /// one model's own (`seven_day_fable`). The limit is that model's, not the account's, for a job
+    /// whose model they govern.
+    ModelLimited(Meters),
     SignedOut,
     /// Nothing usable came out. Worth one more attempt.
     NoOutput,
@@ -129,10 +133,18 @@ pub fn verdict(r: &Report, end: Ending, final_marker: &str, readonly: bool, now_
     if r.is_error {
         let head: String = r.error_text.chars().take(400).collect();
         if LIMIT.is_match(&head) || r.api_status == Some(429) {
-            let until = r
-                .meters
-                .as_ref()
-                .and_then(|m| m.values().filter(|w| w.utilization >= 1.0).filter_map(|w| w.resets_at).max())
+            // A limit is the account's only when a meter of the whole account is full. When only a
+            // model's own meters are, the limit is that model's, and so is any reset its message states.
+            let full = r.meters.iter().flatten().filter(|(_, w)| w.utilization >= 1.0);
+            let (account, model): (Meters, Meters) =
+                full.map(|(k, w)| (k.clone(), w.clone())).partition(|(_, w)| w.scope.is_none());
+            if account.is_empty() && !model.is_empty() {
+                return Verdict::ModelLimited(model);
+            }
+            let until = account
+                .values()
+                .filter_map(|w| w.resets_at)
+                .max()
                 .or_else(|| parse_reset_in(&head, now_s, r.zone.as_ref().unwrap_or(&TimeZone::system()), None));
             return Verdict::Limited { until };
         }
@@ -166,6 +178,12 @@ static RESET: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)resets\s+(?:(?P<mon>[A-Z][a-z]{2})\s+(?P<day>\d{1,2}),?\s+)?(?:at\s+)?(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>am|pm)\s*(?:\((?P<tz>[^)]+)\))?").expect("regex")
 });
 static RESETS_IN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"resets in\s+((?:\d+[dhms])+)").expect("regex"));
+
+/// How long relay holds an account after a limit no full meter explains and no reset is stated
+/// for (an overload, a bare 429), and the least time any limit stands before a quota reading
+/// with room on every meter of the whole account can lift it (`world::AccountState`): a reading
+/// never cuts that hold short. The one place it is declared.
+pub const UNSTATED_LIMIT_S: i64 = 15 * 60;
 
 /// How far behind `now` a meter's reset time may be and still be read as this meter's own: the
 /// CLI keeps printing the reset that just passed for a while. The one place the grace is declared.
@@ -262,6 +280,7 @@ fn month_number(m: &str) -> Option<i8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::Meter;
 
     // 2026-11-02T15:00:00Z
     const NOW: i64 = 1_793_631_600;
@@ -318,6 +337,41 @@ mod tests {
         assert_eq!(verdict(&Report::default(), OK, "FINAL", false, NOW), Verdict::NoOutput);
         let over = Ending { over_budget: true, ..OK };
         assert_eq!(verdict(&done("FINAL"), over, "FINAL", false, NOW), Verdict::Budget);
+    }
+
+    /// 2026-11-16, on the real bus: three accounts whose Fable week was full and whose all-models
+    /// week stood at 68-76% were held for every job until the Fable week's reset, days away.
+    #[test]
+    fn a_full_meter_of_one_models_own_is_that_models_limit_not_the_accounts() {
+        let (week, fable_reset) = (NOW + 3 * 86_400, NOW + 4 * 86_400);
+        let reading = |all: f64| -> Meters {
+            [
+                ("five_hour".to_owned(), Meter::new(Window::FiveHours, 0.1, Some(NOW + 3600))),
+                ("seven_day".to_owned(), Meter::new(Window::Week, all, Some(week))),
+                ("seven_day_fable".to_owned(), Meter::new(Window::Week, 1.0, Some(fable_reset)).scope("Fable")),
+            ]
+            .into()
+        };
+        // The CLI's own words, as the real run printed them, with the status that classed them.
+        let said = "You've hit your Fable limit · resets Nov 6, 3pm (UTC). Switch to another model to continue.";
+        let limit = |all| Report { meters: Some(reading(all)), api_status: Some(429), ..error(said) };
+        let Verdict::ModelLimited(full) = verdict(&limit(0.72), OK, "FINAL", false, NOW) else {
+            panic!("{:?}", verdict(&limit(0.72), OK, "FINAL", false, NOW))
+        };
+        assert_eq!(
+            full.keys().collect::<Vec<_>>(),
+            ["seven_day_fable"],
+            "only the full meter, and no reset of the message"
+        );
+        // A full meter of the whole account makes it the account's, until that meter resets,
+        // whatever a model's own meter says.
+        assert_eq!(verdict(&limit(1.0), OK, "FINAL", false, NOW), Verdict::Limited { until: Some(week) });
+        // With no meter full, the message's reset, as before.
+        let unexplained = Report {
+            meters: Some([("seven_day".to_owned(), Meter::new(Window::Week, 0.5, Some(week)))].into()),
+            ..error("You've hit your limit · resets 4pm (UTC)")
+        };
+        assert_eq!(verdict(&unexplained, OK, "FINAL", false, NOW), Verdict::Limited { until: Some(NOW + 3600) });
     }
 
     #[test]

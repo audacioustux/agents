@@ -121,7 +121,8 @@ pub fn draws(model: Option<&str>, provider: &str, harness: &str) -> Draws {
 /// say now (call it after `hear_accounts`). A home with no sign-in is marked
 /// so; one whose sign-in changed since it was last read is read again, and is
 /// no longer taken for signed out. Twins share the newest reading and the
-/// longest limit, so a reading or a limit on one is a reading or a limit on both.
+/// longest limit, so a reading or a limit on one is a reading or a limit on both, and a reading
+/// with room on either ends a limit recorded long enough before it ([`AccountState::settle_limit`]).
 pub fn settle(world: &mut World, found: &[Home]) {
     for home in found {
         let key = home.key();
@@ -136,13 +137,16 @@ pub fn settle(world: &mut World, found: &[Home]) {
     }
     for (twin, first) in twins(found) {
         let (Some(a), Some(b)) = (world.accounts.get(&twin), world.accounts.get(&first)) else { continue };
-        let newer = if a.read_at > b.read_at { a } else { b };
-        let (meters, read_at) = (newer.meters.clone(), newer.read_at);
-        let limited_until = a.limited_until.max(b.limited_until);
+        let (newer, older) = if a.read_at > b.read_at { (a, b) } else { (b, a) };
+        let meters = crate::world::keeping_models_own(newer.meters.clone(), &older.meters);
+        let read_at = newer.read_at;
+        let limited = (a.limited_until.max(b.limited_until), a.limited_at.max(b.limited_at));
+        let roomy_at = a.roomy_at.max(b.roomy_at);
         for key in [&twin, &first] {
             if let Some(s) = world.accounts.get_mut(key) {
                 s.meters.clone_from(&meters);
-                (s.read_at, s.limited_until) = (read_at, limited_until);
+                (s.read_at, (s.limited_until, s.limited_at), s.roomy_at) = (read_at, limited, roomy_at);
+                s.settle_limit();
             }
         }
     }
@@ -402,6 +406,24 @@ mod tests {
         assert_eq!(fit(&claude("a"), Some(&limited), None, &Limits::default(), now_us), Err(Refusal::Limited));
     }
 
+    /// A full Fable week refuses a Fable job on the account and no other: the account is not limited.
+    #[test]
+    fn a_full_meter_of_one_models_own_refuses_that_model_alone() {
+        let now_us = 1_000 * 1_000_000;
+        let now = secs(now_us);
+        let mut st = AccountState { read_at: Some(now_us - 1), ..Default::default() };
+        st.meters.insert("five_hour".into(), m(0.1, Some(now + 3600)));
+        st.meters.insert("seven_day".into(), m(0.72, Some(now + 3 * 86_400)));
+        let fable = Meter { scope: Some("Fable".into()), ..m(1.0, Some(now + 4 * 86_400)) };
+        st.meters.insert("seven_day_fable".into(), fable);
+        let fit = |model| fit(&claude("a"), Some(&st), model, &Limits::default(), now_us);
+        let held = fit(Some("claude-fable-5-2")).unwrap_err().describe();
+        assert!(held.starts_with("at floor: 100% seven_day_fable"), "{held}");
+        assert!(fit(Some("claude-opus-5-5")).is_ok());
+        assert!(fit(None).is_ok(), "the home's default model is judged by the account's meters");
+        assert_eq!(account_refusal(harness_of(&claude("a")), Some(&st), now), None);
+    }
+
     #[test]
     fn a_meter_about_to_reset_has_its_own_floor() {
         use crate::config::NearReset;
@@ -451,6 +473,12 @@ mod tests {
         settle(&mut w, &found);
         assert_eq!((w.accounts["claude:b"].read_at, w.accounts["claude:b"].limited_until), (Some(5), Some(9)));
         assert!(w.accounts["claude:d"].unsigned && !w.accounts["claude:c"].unsigned);
+        // A reading with room on a twin, a hold after the limit, ends it on both.
+        let hold = u64::try_from(crate::harness::report::UNSTATED_LIMIT_S).unwrap() * 1_000_000;
+        w.accounts.get_mut("claude:a").unwrap().limited_at = Some(5);
+        w.accounts.get_mut("claude:b").unwrap().roomy_at = Some(5 + hold);
+        settle(&mut w, &found);
+        assert_eq!((w.accounts["claude:a"].limited_until, w.accounts["claude:b"].limited_until), (None, None));
 
         let SignIn::As(id) = sign_in(&found[2]) else { panic!("signed in") };
         let out = AccountState { read_at: Some(5), signed_out: true, sign_in: Some(id.stamp), ..Default::default() };

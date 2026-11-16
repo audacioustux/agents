@@ -472,6 +472,59 @@ mod tests {
         assert!(Role::try_take(&p).unwrap().is_some(), "free once the child's copy is gone");
     }
 
+    /// Threads that take and drop every kind of role while others spawn children (each forking with a
+    /// copy of every descriptor until its exec) never find a role busy after its owner dropped it.
+    #[test]
+    fn roles_dropped_while_other_threads_spawn_children_are_never_busy() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        const TAKERS: usize = 4;
+        const SPAWNERS: usize = 4;
+        const ROUNDS: usize = 300;
+        /// Stops the spawners however the takers end, a panic too, so the scope never waits on them.
+        struct Stop<'a>(&'a AtomicBool);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let d = Dir::new();
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let _stop = Stop(&stop);
+            for _ in 0..SPAWNERS {
+                s.spawn(|| {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = std::process::Command::new("true")
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                    }
+                });
+            }
+            let takers: Vec<_> = (0..TAKERS)
+                .map(|t| {
+                    let p = d.path().join(format!("{t}.lock"));
+                    s.spawn(move || {
+                        // Nobody else takes this thread's role: busy is only ever a dropped owner's lock.
+                        let mut busy = 0;
+                        for round in 0..ROUNDS {
+                            match round % 3 {
+                                0 => busy += usize::from(Role::try_take(&p).unwrap().is_none()),
+                                1 => drop(Role::take(&p).unwrap()),
+                                _ => drop(SeatHold::take(&p).unwrap()),
+                            }
+                            busy += usize::from(Role::try_take(&p).unwrap().is_none());
+                        }
+                        busy
+                    })
+                })
+                .collect();
+            let busy: usize = takers.into_iter().map(|t| t.join().unwrap()).sum();
+            assert_eq!(busy, 0, "a role read as busy after its owner dropped it");
+        });
+    }
+
     #[test]
     fn doorbell_rings_on_append() {
         let d = Dir::new();

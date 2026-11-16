@@ -342,7 +342,7 @@ pub fn tend(ctx: &Ctx, world: &World, gate: Option<&Gate>) -> Result<()> {
 /// it did (`warm`, `entered`, `failed: ...`); a failure to start it is on the bus, not an error.
 pub(crate) fn warm(ctx: &Ctx) -> Result<String> {
     let Some(key) = key(&ctx.cfg) else { return Ok("no session.env_shell: nothing to enter".into()) };
-    let Some(role) = Role::try_take(&lock_file(ctx))? else {
+    let Some(mut role) = Role::try_take(&lock_file(ctx))? else {
         fail!(Conflict, "a warm-up of the development environment is already running")
     };
     // Recorded for this key and still whole; a record whose paths were collected is entered again.
@@ -580,7 +580,7 @@ pub(crate) mod tests {
     fn the_lock_is_held_until_the_attempt_has_ended_even_without_its_warmer() {
         let d = Dir::new();
         let ctx = project(&d, &[&script(&d, 2, true)]);
-        let role = Role::try_take(&lock_file(&ctx)).unwrap().unwrap();
+        let mut role = Role::try_take(&lock_file(&ctx)).unwrap().unwrap();
         let stdin = role.share().unwrap();
         let (relay, deny) = (ctx.relay_env(), regex::Regex::new("TOKEN").unwrap());
         let (shell, repo, err) = (ctx.cfg.session.env_shell.clone(), ctx.cfg.repo.clone(), stderr_file(&ctx));
@@ -672,7 +672,7 @@ pub(crate) mod tests {
         let started = std::time::Instant::now();
         // A hook that leaves a child behind, then enters as asked: done at once.
         let hook = strings(&["sh", "-c", "sleep 60 & export DEV_TOOL=x; exec \"$@\"", "s"]);
-        let role = Role::try_take(&lock_file(&ctx)).unwrap().unwrap();
+        let mut role = Role::try_take(&lock_file(&ctx)).unwrap().unwrap();
         let env = enter(&relay, role.share().unwrap(), &hook, &deny, Path::new("/"), &err, 30).unwrap();
         assert!(env.iter().any(|(k, _)| k == "DEV_TOOL"));
         assert!(started.elapsed().as_secs() < 10, "done when the shell is: {:?}", started.elapsed());

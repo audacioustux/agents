@@ -2,7 +2,9 @@
 //! `view status` reads, for this project or every project on the machine, and
 //! draws its panes to fit the window: the jobs, any decisions waiting, the
 //! selected job, and the accounts. Each pane scrolls on its own; `?` lists the
-//! keys. `u` swaps the board for the quota chart of `view usage`, refolded as readings land. It writes no state. A reinstalled relay takes over the window on its
+//! keys. `u` swaps the board for the quota chart of `view usage`, refolded as readings land. Under the
+//! accounts, the API-equivalent cost of today and this week (`view cost`), from a thread of its own
+//! that refreshes the cost index at most once a minute. It writes no state but that index. A reinstalled relay takes over the window on its
 //! own, so nothing needs to restart the board after an upgrade.
 
 mod board;
@@ -63,6 +65,7 @@ pub fn run(scope: Scope<'_>, all: bool, everywhere: bool, chart: Option<ChartSpe
     let (tx, rang) = mpsc::channel();
     std::thread::spawn(move || while tx.send(bell.wait(Duration::from_secs(60))).is_ok() {});
     let handoff = restore_on_signals()?;
+    let cost = cost_feed();
     let close = ratatui::run(|terminal| {
         let _mouse = Mouse::capture()?;
         let mut ui = Ui::new(all, everywhere, scope.home.is_some());
@@ -70,7 +73,7 @@ pub fn run(scope: Scope<'_>, all: bool, everywhere: bool, chart: Option<ChartSpe
         if let Some(spec) = chart {
             (ui.usage, ui.view) = (spec, View::Usage);
         }
-        board_loop(terminal, scope, &mut ui, &rang, &handoff)
+        board_loop(terminal, scope, &mut ui, (&rang, &cost), &handoff)
     })?;
     match close {
         Close::Quit => Ok(()),
@@ -159,11 +162,36 @@ fn refold(scope: Scope<'_>, ui: &mut Ui, now: u64) {
     }
 }
 
+/// The cost line, from a thread of its own: the board never waits on the transcripts. Once a minute
+/// it refreshes the cost index ([`crate::systems::view::cost::index::refresh`]), which only stats the
+/// transcripts and reads nothing when none changed, and sends today's and this week's dollars.
+fn cost_feed() -> mpsc::Receiver<String> {
+    use crate::systems::view::cost;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        if tx.send("API-equivalent cost: reading the transcripts…".into()).is_err() {
+            return;
+        }
+        loop {
+            let prices = crate::config::Policy::load().map(|p| p.map(|(p, _)| p.prices().clone()).unwrap_or_default());
+            let line = match (cost::refresh(), prices) {
+                (Ok((index, _)), Ok(prices)) => cost::summary(&index, &prices),
+                (Err(e), _) | (_, Err(e)) => format!("API-equivalent cost: {e:#}"),
+            };
+            if tx.send(line).is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    });
+    rx
+}
+
 fn board_loop(
     terminal: &mut DefaultTerminal,
     scope: Scope<'_>,
     ui: &mut Ui,
-    rang: &mpsc::Receiver<bool>,
+    (rang, cost): (&mpsc::Receiver<bool>, &mpsc::Receiver<String>),
     handoff: &Handoff,
 ) -> Result<Close> {
     let version = crate::os::binary_version();
@@ -192,6 +220,9 @@ fn board_loop(
                 ui.sync(&board);
             }
             (read_at, changed) = (Instant::now(), true);
+        }
+        if let Some(line) = cost.try_iter().last() {
+            (ui.cost, changed) = (Some(line), true);
         }
         // Drawn on a change, else once a second for the clock: an idle board stays quiet.
         let second = jiff::Timestamp::now().as_second();

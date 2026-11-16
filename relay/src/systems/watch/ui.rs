@@ -94,6 +94,8 @@ pub struct Ui {
     pub keys: Vec<(Rect, Action)>,
     /// Why the last read failed: the board shown is the last good one.
     pub error: Option<String>,
+    /// The API-equivalent cost line (`view cost`'s today and this week), as its thread last sent it.
+    pub cost: Option<String>,
     /// Counts the board's reads, so the job pane knows when to read the job's files again.
     generation: u64,
     detail: Option<Detail>,
@@ -116,6 +118,7 @@ impl Ui {
             screen: Rect::default(),
             keys: Vec::new(),
             error: None,
+            cost: None,
             generation: 0,
             detail: None,
         }

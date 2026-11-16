@@ -84,6 +84,8 @@ fn claude_account(home: &Path, label: &str, usage_pct: u32, limited: bool) {
 /// What a fixture home's `.claude.json` says it is signed in as. Both strings
 /// must never appear in anything relay prints.
 const SECRET_EMAIL: &str = "owner.secret@test.invalid";
+/// What a view shows of [`SECRET_EMAIL`].
+const MASKED_EMAIL: &str = "ow..t@t.invalid";
 
 /// Signs the home `dir` in as the account `uuid`.
 fn sign_in(dir: &Path, label: &str, uuid: &str) {
@@ -1621,7 +1623,11 @@ fn an_accounts_email_never_reaches_relays_state_or_events() {
             eprintln!("SKIPPED (no pseudo-terminal from /usr/bin/script): the views never showed the email");
             break;
         };
-        assert!(shown.contains(SECRET_EMAIL), "{args:?} shows the email on a terminal:\n{shown}");
+        assert!(shown.contains(MASKED_EMAIL), "{args:?} shows the masked email on a terminal:\n{shown}");
+        assert!(
+            !shown.contains(SECRET_EMAIL) && !shown.contains("owner.secret"),
+            "{args:?} never the whole address:\n{shown}"
+        );
     }
     let (state, data) = (env.root.join("state"), env.root.join("data"));
     assert!(state.join("relay/flow/bus/quota.ndjson").exists(), "the reading is in the events");

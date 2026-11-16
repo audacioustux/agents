@@ -713,7 +713,7 @@ fn an_80_column_board_with_three_windows_keeps_every_reset_time() {
 fn an_accounts_email_shows_beside_it_and_gives_way_first() {
     let mut v = gauged();
     v.json = serde_json::json!({ "accounts": [
-        { "account": "claude:ifty", "email": "ifty@fixture.invalid" },
+        { "account": "claude:ifty", "email": "if..y@f.invalid" },
         { "account": "claude:tj" },
     ] });
     let row = |w: u16| {
@@ -722,12 +722,12 @@ fn an_accounts_email_shows_beside_it_and_gives_way_first() {
         (head, fr[usize::from(row_of(&fr, "claude:ifty  "))].clone(), fr[usize::from(row_of(&fr, "claude:tj"))].clone())
     };
     let (head, ifty, tj) = row(120);
-    assert!(head.starts_with("│account        email                 5 hours"), "{head}");
-    assert!(ifty.starts_with("│▸ claude:ifty  ifty@fixture.invalid  —  "), "{ifty}");
-    assert!(tj.starts_with("│  claude:tj                          ███"), "nothing shown: {tj}");
+    assert!(head.starts_with("│account        email            5 hours"), "{head}");
+    assert!(ifty.starts_with("│▸ claude:ifty  if..y@f.invalid  —  "), "{ifty}");
+    assert!(tj.starts_with("│  claude:tj                     ███"), "nothing shown: {tj}");
     assert_eq!(bars(&ifty), [12], "{ifty}");
     let (_, ifty, _) = row(100);
-    assert!(ifty.contains("ifty@") && ifty.contains("…  —"), "the email gives way first: {ifty}");
+    assert!(ifty.contains("if..") && ifty.contains("…  —"), "the email gives way first: {ifty}");
     assert_eq!(bars(&ifty), [12], "the gauge whole: {ifty}");
     let (_, ifty, _) = row(80);
     assert!(ifty.starts_with("│▸ claude:ifty  …  —  "), "{ifty}");

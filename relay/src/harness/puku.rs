@@ -331,7 +331,7 @@ mod tests {
         let h = Home { harness: "puku", label: "default".into(), dir: d.0.join(".puku-cli") };
         session(&d.0, "pukucode", "fake-refresh", "user-76de9d00", 1);
         assert!(matches!(Puku.sign_in(&h), SignIn::As(_)), "signed in");
-        assert_eq!(Puku.email(&h), None, "its user.email stays unread");
+        assert_eq!(Puku.email_hint(&h), None, "its user.email stays unread");
     }
 
     #[test]

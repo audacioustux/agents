@@ -659,7 +659,7 @@ impl AccountsView {
         for row in rows {
             let key = row.get("account").and_then(serde_json::Value::as_str);
             let home = found.iter().find(|h| key == Some(h.key().as_str()));
-            if let Some(email) = home.and_then(|h| harness_of(h).email(h)) {
+            if let Some(email) = home.and_then(|h| harness_of(h).email_hint(h)) {
                 row["email"] = email.into();
             }
         }
@@ -1169,7 +1169,7 @@ mod tests {
     /// The owner's ask of 2026-11-11: each Claude account's email beside its name, read from its
     /// home when shown, and only then; a home with none shows nothing.
     #[test]
-    fn an_account_shows_its_email_beside_its_name_only_when_shown() {
+    fn an_account_shows_its_masked_email_beside_its_name_only_when_shown() {
         let (dir, cfg) = cfg("minimax-code/MiniMax-M3.1-Flash");
         let home = |label: &str, json: &str| {
             let dir = dir.path().join(label);
@@ -1196,16 +1196,19 @@ mod tests {
             let rows = v.json["accounts"].as_array().unwrap();
             rows.iter().find(|r| r["account"] == key).and_then(|r| r.get("email")).cloned()
         };
-        assert_eq!(email("claude:study"), Some("ada@fixture.invalid".into()), "{}", v.json);
-        assert_eq!(email("claude:work"), Some("grace.long.name@fixture.invalid".into()));
+        assert_eq!(email("claude:study"), Some("a..@f.invalid".into()), "{}", v.json);
+        assert_eq!(email("claude:work"), Some("gr..e@f.invalid".into()));
+        for whole in ["ada@", "grace", "gone@", "fixture"] {
+            assert!(!v.json.to_string().contains(whole) && !v.text().contains(whole), "{whole}: only the mask");
+        }
         assert_eq!((email("claude:out"), email("omp:default")), (None, None), "signed out, and omp: nothing");
         let table = v.table(gauge::BAR);
         let line = |key: &str| table.iter().find(|l| l.contains(&format!("{key} "))).unwrap().clone();
         assert!(table[0].trim_start().starts_with("email  "), "{}", table[0]);
         let column = |l: &str, word: &str| l.find(word).map(|b| l[..b].chars().count());
         let (study, work) = (line("claude:study"), line("claude:work"));
-        assert_eq!(column(&study, "ada@"), column(&table[0], "email"), "{table:#?}");
-        assert_eq!(column(&work, "grace.long.name@fixture.invalid  "), column(&table[0], "email"), "{table:#?}");
+        assert_eq!(column(&study, "a..@"), column(&table[0], "email"), "{table:#?}");
+        assert_eq!(column(&work, "gr..e@f.invalid  "), column(&table[0], "email"), "{table:#?}");
         assert!(!line("claude:out").contains('@') && !line("omp:default").contains('@'), "{table:#?}");
         let lines = |t: Vec<String>| std::iter::once(v.head.clone()).chain(t.into_iter().map(|l| format!("  {l}")));
         let wide = v.text_in(Some(200));

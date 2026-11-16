@@ -53,8 +53,8 @@ pub trait Account: Sync + fmt::Debug {
     /// within hours, so it is not offered.
     fn can_refresh(&self, home: &Home) -> bool;
     fn sign_in(&self, home: &Home) -> SignIn;
-    /// The address the home is signed in as, read for a view alone ([`Harness::email`]).
-    fn email(&self, _home: &Home) -> Option<String> {
+    /// The masked address the home is signed in as, read for a view alone ([`Harness::email_hint`]).
+    fn email_hint(&self, _home: &Home) -> Option<String> {
         None
     }
     fn lapsed(&self, text: &str) -> bool;
@@ -142,13 +142,14 @@ impl Account for ClaudeAccount {
         SignIn::As(Identity { plan, id: digest(uuid)[..6].to_owned(), stamp: stamp[..12].to_owned() })
     }
 
-    /// `oauthAccount.emailAddress`, when the home is signed in ([`Account::sign_in`] reads an account).
-    fn email(&self, home: &Home) -> Option<String> {
+    /// `oauthAccount.emailAddress`, masked ([`crate::harness::mask_email`]) as it is read and only when
+    /// the home is signed in ([`Account::sign_in`] reads an account); the full address is not returned.
+    fn email_hint(&self, home: &Home) -> Option<String> {
         let file = read_json(&home.dir.join(".claude.json"))?;
         let account = file.get("oauthAccount")?;
         let field = |k: &str| account.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
         field("accountUuid")?;
-        field("emailAddress").map(crate::harness::printable)
+        field("emailAddress").map(crate::harness::mask_email)
     }
 
     fn lapsed(&self, text: &str) -> bool {
@@ -357,8 +358,8 @@ impl Harness for ClaudeCode {
         self.account.sign_in(home)
     }
 
-    fn email(&self, home: &Home) -> Option<String> {
-        self.account.email(home)
+    fn email_hint(&self, home: &Home) -> Option<String> {
+        self.account.email_hint(home)
     }
 
     fn lapsed(&self, text: &str) -> bool {
@@ -882,23 +883,27 @@ mod tests {
     }
 
     #[test]
-    fn the_email_is_read_for_a_view_only_when_the_home_is_signed_in() {
+    fn the_email_is_read_masked_for_a_view_only_when_the_home_is_signed_in() {
         let d = std::env::temp_dir().join(format!("hb-email-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let h = Home { dir: d.clone(), ..home("claude", "w") };
-        assert_eq!(Claude.email(&h), None, "no .claude.json");
+        assert_eq!(Claude.email_hint(&h), None, "no .claude.json");
         std::fs::write(d.join(".claude.json"), "not json").unwrap();
-        assert_eq!(Claude.email(&h), None, "an unreadable file is no error");
+        assert_eq!(Claude.email_hint(&h), None, "an unreadable file is no error");
         std::fs::write(d.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"x@y.invalid"}}"#).unwrap();
-        assert_eq!(Claude.email(&h), None, "signed out: no accountUuid");
+        assert_eq!(Claude.email_hint(&h), None, "signed out: no accountUuid");
         std::fs::write(d.join(".claude.json"), r#"{"oauthAccount":{"accountUuid":"u-1","emailAddress":""}}"#).unwrap();
-        assert_eq!(Claude.email(&h), None, "no address");
+        assert_eq!(Claude.email_hint(&h), None, "no address");
         let file = r#"{"oauthAccount":{"accountUuid":"u-1","emailAddress":"x@y.invalid\u001b[2J"}}"#;
         std::fs::write(d.join(".claude.json"), file).unwrap();
-        assert_eq!(Claude.email(&h).as_deref(), Some("x@y.invalid [2J"), "no terminal escape gets through");
+        assert_eq!(
+            Claude.email_hint(&h).as_deref(),
+            Some("x..@y.invalid [2J"),
+            "masked, and no terminal escape gets through"
+        );
         let file = r#"{"oauthAccount":{"accountUuid":"u-1","emailAddress":"x@y.invalid\u009b2J"}}"#;
         std::fs::write(d.join(".claude.json"), file).unwrap();
-        assert_eq!(Claude.email(&h).as_deref(), Some("x@y.invalid 2J"), "nor a one-character CSI (C1)");
+        assert_eq!(Claude.email_hint(&h).as_deref(), Some("x..@y.invalid 2J"), "nor a one-character CSI (C1)");
         std::fs::remove_dir_all(&d).unwrap();
     }
 

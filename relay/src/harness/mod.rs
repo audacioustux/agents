@@ -426,11 +426,12 @@ pub trait Harness: Sync + fmt::Debug {
     fn sign_in(&self, _home: &Home) -> SignIn {
         SignIn::Unknown
     }
-    /// The address the home is signed in as, for a view to show its owner beside the account's name.
-    /// Read from the home's files when the view is drawn and never kept: not in [`SignIn`], the
-    /// state, the events or anything a run is given. None when the harness keeps none this crate
-    /// reads, or the home is signed out.
-    fn email(&self, _home: &Home) -> Option<String> {
+    /// A masked hint of the address the home is signed in as ([`mask_email`], `so..e@e.com`), for a
+    /// view to show its owner beside the account's name. The full address never leaves the
+    /// implementation: only the mask is returned. Read from the home's files when the view is drawn
+    /// and never kept: not in [`SignIn`], the state, the events or anything a run is given. None
+    /// when the harness keeps none this crate reads, or the home is signed out.
+    fn email_hint(&self, _home: &Home) -> Option<String> {
         None
     }
     /// Whether the quota command's output says the session is expired,
@@ -478,6 +479,29 @@ pub fn printable(s: &str) -> String {
     s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
+/// An email address reduced to a hint of whose it is, `xx..x@x.xxx`: the local part's first two
+/// characters, `..`, its last character; `@`; the domain's first character, `.` and its last label (the
+/// top-level domain). A local part of 3 characters or fewer shows only its first character before the
+/// `..` and no last one. An address without `@`, or with an empty part, is just `..`. Characters are
+/// counted, not bytes. Control characters go first ([`printable`]).
+pub fn mask_email(address: &str) -> String {
+    let address = printable(address);
+    let Some((local, domain)) = address.trim().rsplit_once('@') else { return "..".into() };
+    let tld = domain.rsplit('.').next().unwrap_or_default();
+    let (Some(first), Some(initial)) = (local.chars().next(), domain.chars().next()) else { return "..".into() };
+    if tld.is_empty() {
+        return "..".into();
+    }
+    let n = local.chars().count();
+    let head = if n <= 3 {
+        format!("{first}..")
+    } else {
+        let two: String = local.chars().take(2).collect();
+        format!("{two}..{}", local.chars().last().unwrap_or(first))
+    };
+    format!("{head}@{initial}.{tld}")
+}
+
 fn read_json(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
@@ -515,6 +539,35 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The owner's ask of 2026-11-16: an address is shown as `xx..x@x.xxx`, never whole.
+    #[test]
+    fn an_email_is_masked_to_its_first_letters_and_its_top_level_domain() {
+        for (address, masked) in [
+            ("someone.name@example.invalid", "so..e@e.invalid"),
+            ("abcd@x.invalid", "ab..d@x.invalid"),
+            ("abc@x.invalid", "a..@x.invalid"),
+            ("ab@x.invalid", "a..@x.invalid"),
+            ("a@x.invalid", "a..@x.invalid"),
+            ("someone@a.b.example.co.uk", "so..e@a.uk"),
+            ("someone@localhost", "so..e@l.localhost"),
+            ("someone.example.invalid", ".."),
+            ("", ".."),
+            ("@example.invalid", ".."),
+            ("someone@", ".."),
+            ("someone@example.", ".."),
+            ("zoë.østergård@ünï.invalid", "zo..d@ü.invalid"),
+            ("日本語名前@例え.invalid", "日本..前@例.invalid"),
+            ("x@y.invalid\u{1b}[2J", "x..@y.invalid [2J"),
+            ("some\u{1b}[2Jone@y.invalid", "so..e@y.invalid"),
+            ("some\u{9b}2Jone@y.invalid", "so..e@y.invalid"),
+        ] {
+            assert_eq!(mask_email(address), masked, "{address:?}");
+        }
+        for address in ["someone.name@example.invalid", "x@y.invalid\u{1b}[2J"] {
+            assert!(!mask_email(address).chars().any(char::is_control), "{address:?}");
+        }
+    }
 
     /// Readings on the bus from before meters said what they measure fold as their harness reads
     /// them now; a reading that says keeps what it says.

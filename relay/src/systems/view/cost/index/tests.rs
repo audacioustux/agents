@@ -64,7 +64,15 @@ impl Machine {
     }
 
     pub fn refresh(&self) -> (Index, Refreshed) {
-        refresh(&self.index_dir(), &homes(&self.user()), &self.data_root()).unwrap()
+        self.sweep(Sweep::Full)
+    }
+
+    pub fn sweep(&self, sweep: Sweep) -> (Index, Refreshed) {
+        self.sweep_from(sweep, None)
+    }
+
+    pub fn sweep_from(&self, sweep: Sweep, prev: Option<Index>) -> (Index, Refreshed) {
+        refresh(&self.index_dir(), &homes(&self.user()), &self.data_root(), sweep, prev).unwrap()
     }
 }
 
@@ -226,6 +234,87 @@ fn every_claude_home_with_projects_counts_signed_in_or_not() {
     assert_eq!(labels, ["a", "default"]);
 }
 
+/// Sets the modification time of everything under the machine's user dir an hour back: files, then
+/// directories below to above (writing a file changes its directory's time, not the one above).
+fn age(m: &Machine) {
+    fn all(d: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(d).unwrap().flatten() {
+            let p = e.path();
+            if e.file_type().unwrap().is_dir() {
+                all(&p, out);
+            }
+            out.push(p);
+        }
+    }
+    let mut paths = Vec::new();
+    all(&m.user(), &mut paths);
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    // Children come before their directory, so a directory is set after what is in it.
+    for p in paths.iter().chain([&m.user()]) {
+        File::open(p).unwrap().set_modified(hour_ago).unwrap();
+    }
+}
+
+#[test]
+fn a_changed_only_refresh_lists_only_moved_directories_and_looks_only_at_new_and_lately_written_transcripts() {
+    let m = Machine::new();
+    fixture(&m);
+    let (first, full) = m.refresh();
+    assert!(full.full && full.statted == 4 && full.listed == full.dirs, "{full:?}");
+    // Directories changed this second cannot be told from ones changed again in it: listed again.
+    let (_, fresh) = m.sweep(Sweep::Changed);
+    assert!(fresh.listed > 0 && fresh.statted > 0, "{fresh:?}");
+    // Everything old: a changed-only refresh lists and looks at nothing, and writes nothing.
+    age(&m);
+    m.refresh();
+    let (same, none) = m.sweep(Sweep::Changed);
+    assert_eq!((none.listed, none.statted, none.read, none.written), (0, 0, 0, false), "{none:?}");
+    assert!(none.dirs >= 4, "its directories are still looked at: {none:?}");
+    assert_eq!((same.counters(), same.sizes()), (first.counters(), first.sizes()));
+    let opus = |i: &Index| by_model(i)[&("claude-opus-5-5".into(), false)][0];
+    // An old transcript written in place changes no directory's time: not seen until a full sweep.
+    let more = |id: &str| line(id, id, "claude-opus-5-5", TS, "/work/demo", &usage(1000, 1, 0, 0, 0));
+    let before = opus(&first);
+    m.append(".claude", "-work-demo/s2.jsonl", &more("late1"));
+    let (missed, done) = m.sweep(Sweep::Changed);
+    assert_eq!(done.read, 0, "{done:?}");
+    assert_eq!(opus(&missed), before);
+    let (caught, done) = m.refresh();
+    assert_eq!(done.read, 1, "{done:?}");
+    assert_eq!(opus(&caught), before + 1000);
+    // It is now lately written: every refresh looks at it, and nothing else.
+    m.append(".claude", "-work-demo/s2.jsonl", &more("late2"));
+    let (live, done) = m.sweep(Sweep::Changed);
+    assert_eq!((done.statted, done.read), (1, 1), "{done:?}");
+    assert_eq!(opus(&live), before + 2000);
+    // A new transcript changes its directory's time: that directory is listed and the file read.
+    age(&m);
+    m.refresh();
+    m.write(".claude", "-work-demo/s5.jsonl", &more("new1"));
+    let (grown, done) = m.sweep(Sweep::Changed);
+    assert_eq!((done.listed, done.read, done.files), (1, 1, 5), "{done:?}");
+    assert_eq!(opus(&grown), before + 3000);
+    // So does one in a directory made after: a subagent's, below a session directory.
+    age(&m);
+    m.refresh();
+    m.write(".claude.work", "-clone/s4/subagents/agent-2.jsonl", &more("new2"));
+    let (deeper, done) = m.sweep(Sweep::Changed);
+    assert_eq!((done.read, done.files), (1, 6), "{done:?}");
+    assert_eq!(opus(&deeper), before + 4000);
+    // One deleted: gone from the index, its totals stay.
+    age(&m);
+    m.refresh();
+    std::fs::remove_file(m.file(".claude", "-work-demo/s5.jsonl")).unwrap();
+    let (less, done) = m.sweep(Sweep::Changed);
+    assert_eq!((done.gone, done.files, done.written), (1, 5, true), "{done:?}");
+    assert_eq!(opus(&less), opus(&deeper));
+    // The index on disk has the directories: the next process lists nothing either.
+    age(&m);
+    m.refresh();
+    let (_, none) = m.sweep(Sweep::Changed);
+    assert_eq!((none.listed, none.statted), (0, 0), "{none:?}");
+}
+
 /// A response whose usage has `iterations` as (model, output) pairs, the first the response's own.
 fn advised(id: &str, own: &str, iterations: &[(&str, u64)]) -> String {
     let its: Vec<_> = iterations
@@ -269,4 +358,48 @@ fn a_later_larger_copy_adds_each_iterations_growth_to_that_iterations_model() {
     let (fourth, _) = m.refresh();
     let t = by_model(&fourth);
     assert_eq!((t[&(opus.into(), false)][OUTPUT], t[&(fable.into(), false)][OUTPUT]), (12 + 9, 30 + 4), "{t:?}");
+}
+
+#[test]
+fn a_kept_index_is_not_read_again_until_another_process_writes_it_and_its_keys_are_read_only_when_needed() {
+    let m = Machine::new();
+    fixture(&m);
+    age(&m);
+    let (mut a, _) = m.refresh();
+    let keys = a.sizes().1;
+    assert!(keys > 0);
+    a.release_keys();
+    assert_eq!(a.sizes(), (4, keys), "released, still counted");
+    let stamp = a.stamp;
+    // Nothing new: the kept index is the one returned, and no key is read.
+    let (same, done) = m.sweep_from(Sweep::Changed, Some(a));
+    assert_eq!((done.read, done.written, same.stamp), (0, false, stamp), "{done:?}");
+    assert!(!same.keys_loaded, "a refresh that found nothing never reads the keys");
+    // Another process writes the index: the kept one is dropped for it.
+    let mut kept = same;
+    kept.release_keys();
+    m.append(
+        ".claude",
+        "-work-demo/s2.jsonl",
+        &line("x", "x", "claude-opus-5-5", TS, "/work/demo", &usage(1, 1, 0, 0, 0)),
+    );
+    let (other, _) = m.refresh();
+    let (seen, done) = m.sweep_from(Sweep::Changed, Some(kept));
+    assert_eq!(done.read, 0, "read by the other one already: {done:?}");
+    assert_eq!(seen.counters(), other.counters());
+    assert_eq!(seen.counters().messages, 7);
+    // A line that repeats one counted before the keys were released is found a copy: they are read for it.
+    let mut kept = seen;
+    kept.release_keys();
+    m.append(
+        ".claude",
+        "-work-demo/s2.jsonl",
+        &line("x", "x", "claude-opus-5-5", TS, "/work/demo", &usage(1, 1, 0, 0, 0)),
+    );
+    let (after, done) = m.sweep_from(Sweep::Full, Some(kept));
+    assert_eq!(done.read, 1, "{done:?}");
+    assert_eq!((after.counters().messages, after.counters().copies_dropped), (7, other.counters().copies_dropped + 1));
+    assert_eq!(after.sizes().1, keys + 1);
+    // The snapshot on disk is whole: a fresh load has the same totals.
+    assert_eq!(Index::load(&m.index_dir()).unwrap().counters(), after.counters());
 }

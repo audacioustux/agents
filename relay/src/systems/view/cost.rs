@@ -13,6 +13,7 @@ use jiff::tz::TimeZone;
 use serde_json::json;
 
 use crate::config::{Policy, Prices};
+pub use index::Sweep;
 use index::{CLASSES, Dims, Index, Refreshed, Tokens, WEB_FETCH, WEB_SEARCH};
 
 /// How rows are grouped in time.
@@ -232,11 +233,13 @@ fn migrate(state_root: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Refreshes the machine's index from every Claude home under the user's home.
-pub fn refresh() -> Result<(Index, Refreshed)> {
+/// Refreshes the machine's index from every Claude home under the user's home, looking at what
+/// `sweep` says. `prev` is the index an earlier call returned: kept when no one has written the
+/// index since, instead of reading it again.
+pub fn refresh(sweep: Sweep, prev: Option<Index>) -> Result<(Index, Refreshed)> {
     let homes = index::homes(&crate::accounts::home());
     migrate(&crate::ctx::state_root())?;
-    index::refresh(&index_dir(), &homes, &crate::ctx::data_root())
+    index::refresh(&index_dir(), &homes, &crate::ctx::data_root(), sweep, prev)
 }
 
 /// What the watch shows: today and this week, and this week's top family, at list prices.
@@ -274,7 +277,7 @@ pub fn run(json: bool, args: &Args) -> Result<()> {
         },
     };
     let prices = Policy::load()?.map(|(p, _)| p.prices().clone()).unwrap_or_default();
-    let (index, refreshed) = refresh()?;
+    let (index, refreshed) = refresh(Sweep::Full, None)?;
     let tz = TimeZone::system();
     let now = jiff::Timestamp::now();
     let today = now.to_zoned(tz.clone()).date();

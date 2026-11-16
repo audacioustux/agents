@@ -286,8 +286,8 @@ project: the jobs, any decisions waiting, the selected job, and the accounts.
   `--watch --chart` on the chart. A window too short for every row says how many it leaves out.
 - **Cost.** Under the accounts pane, on its bottom border: the API-equivalent cost of today and
   this week, and this week's top model family ([`view cost`](#cost)). A thread of its own refreshes
-  the cost index at most once a minute (it only stats the transcripts when none changed), so a
-  redraw never waits on it.
+  the cost index at most once a minute, so a redraw never waits on it. A minute with nothing new
+  lists no directory and looks at no transcript but the live ones (see the index, below).
 - **What stays put.** A read never scrolls the jobs list, nor does a decisions pane that
   comes or goes with it: only keys, the wheel, clicks and a resize of the terminal (which
   keeps the selection in view) do. A selection you chose follows its job by name as rows move, even out of
@@ -850,10 +850,20 @@ anywhere (it is machine-wide) and never runs `claude`.
   change needs no re-index) per UTC hour × home × project (with the job, for a relay clone) × model ×
   speed × token class, each transcript's identity and how far it was read, and a 64-bit hash per
   response counted. Each run reads only what the transcripts gained since, up to their last whole
-  line (a file that shrank or was replaced is read again from 0, which the dedup makes safe); one
-  that changed nothing only stats them. The totals outlive the transcripts Claude cleans up. One
-  writer at a time (`lock`); a reader never waits, it reads the last snapshot, written whole and
-  renamed into place.
+  line (a file that shrank or was replaced is read again from 0, which the dedup makes safe). The
+  totals outlive the transcripts Claude cleans up. One writer at a time (`lock`); a reader never
+  waits, it reads the last snapshot, written whole and renamed into place.
+- **What a refresh looks at.** `view cost` lists every directory and looks at every transcript. The
+  watch's refresh, every minute, does it only for what can have changed: the index keeps each
+  directory's modification time (each home's `projects/`, each project's, each session's subagent
+  dir), and only a directory whose time moved is listed again (a new transcript moves its
+  directory's); of the transcripts it knows, only those last written in the last ten minutes (the
+  live sessions) are looked at again, as an append in place moves no directory's time. A transcript
+  older than that, appended to in place, is therefore caught by the watch's next full sweep, the
+  first refresh and then one every half hour, or by the next `view cost`. A directory changed in
+  the last two seconds is listed again next time, whatever its time then. The watch also keeps the
+  index it last read (without its per-response keys, which are read only when a line needs them)
+  and reads the file again only when another process has written it.
 - **Project.** From each line's `cwd`: a relay clone (`~/.local/share/relay/<project>/clones/<job>`)
   is its project and job; anything else is its directory's name.
 - **Prices.** Declared in the policy (`[prices]`, see `relay.example.toml`), USD per million tokens

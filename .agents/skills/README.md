@@ -168,6 +168,7 @@ Design and domain ownership boundaries:
 | `evolving-shared-contracts` | Changing a shape more than one party depends on |
 | `weighing-quality-dimensions` | The 26 quality dimensions: what a decision moves, the reviewer's sweep, gates for measurable claims |
 | `running-design-salons` | Exploring an open design with several agent sessions: lenses, rounds, the fresh adversary, recording as proposed |
+| `reviewing-a-design-corpus` | Reviewing design documents rather than code: a context-free restatement, numbers first, consistency, drift from the code |
 
 ```mermaid
 flowchart TD

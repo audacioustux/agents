@@ -1,6 +1,6 @@
 ---
 name: reviewing-a-design-corpus
-description: Use when reviewing a design document or a set of them — an architecture proposal, a migration plan, a multi-chapter spec — rather than code. Also when a document set has grown inconsistent, when a stated criterion cannot be evaluated, when a measured claim in a document needs checking, or when asking whether a spec is self-contained enough to hand to someone new.
+description: Use when reviewing a design document or a set of them — an architecture proposal, a migration plan, a multi-chapter spec — rather than code. Also when a document set has grown inconsistent, when a stated criterion cannot be evaluated, when a measured claim in a document needs checking, when asking whether a spec is self-contained enough to hand to someone new, or whether shipped design documents still match the code.
 uses:
   - name: requesting-code-review
     source: audacioustux/agents
@@ -145,6 +145,40 @@ these defects are visible from inside the document that contains them, so no
 amount of careful per-document review finds them — they accumulate until a
 reader acts on the stale half.
 
+## A shipped corpus drifts from the code
+
+The numbers pass checks a document when it is written. Once the design ships,
+the code keeps moving and the document does not: a function is renamed, a
+constraint is dropped "for now", a second writer appears. The document still
+reads as authoritative, and the next proposal is built on it.
+
+Run a drift pass before building on a shipped document, before showing one to
+anyone who will rely on it, and whenever the consistency pass above runs:
+
+1. **List every statement the document makes about the code**, not only its
+   numbers: names (functions, tables, files, flags, events), invariants ("the
+   only writer", "never negative", "the store enforces it"), flows ("through the
+   outbox", "never reads the primary") and counts.
+2. **Check each against the tree**, with the command recorded and the result
+   set beside the document's own date, as the provenance rule above asks. Check
+   an invariant by searching for its violation: "nothing calls billing
+   directly" is tested by looking for callers, and finding the path the document
+   describes proves nothing. A search bounds where you looked, not what exists:
+   a write made through a helper does not match a search for the SQL.
+3. **Report each mismatch as "the document says X, the code does Y, since
+   `<commit>`".** The commit that made the difference carries its date and its
+   stated reason, which is most of what the decision needs.
+4. **Decide the fix per finding, never for the batch.** A rename amends the
+   document. A constraint the document decided and the code dropped may be the
+   bug. Neither "the code is in production" nor "the document was approved"
+   settles which: the first says the code is current, the second that the
+   document was true once. A measured statement is corrected by measuring again.
+   A decided one changes only by a ruling, so until someone rules, the document
+   keeps the ruling and says where the code departs from it.
+
+Report which statements held and which were not checked, so that "no drift" can
+be told from "not looked at".
+
 ## Check that a gate can be evaluated
 
 Design documents state criteria: thresholds to meet, conditions to satisfy before
@@ -196,6 +230,9 @@ and why, or the same mechanism is proposed again next round.
 - Does any concept have two names, or any name two concepts?
 - Does every cross-reference resolve, and does it name what it points at?
 - Is any fact stated authoritatively in two places?
+- Where the design has shipped: has each statement about the code been checked
+  against the tree, and does each mismatch name its commit and carry its own
+  decision, amend the document or fix the code?
 - Is every stated criterion actually evaluable?
 - Does any finding about one branch of a parallel design assume the other behaves
   the same way?

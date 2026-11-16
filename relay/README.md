@@ -843,7 +843,9 @@ anywhere (it is machine-wide) and never runs `claude`.
   files, and twin homes may both hold one: each (message id, request id) counts once, machine-wide.
   Copies that disagree (a streamed line before the response's output was complete) keep the
   largest output; `--json` says how many disagreed.
-- **The index.** `$XDG_STATE_HOME/relay/cost/index.bin`: token totals (never dollars, so a price
+- **The index.** `$XDG_STATE_HOME/relay/.machine/cost/index.bin` (a project's state directory is
+  `$XDG_STATE_HOME/relay/<name>` and a name never starts with a dot; an index an earlier version wrote
+  to `relay/cost/` is renamed into place): token totals (never dollars, so a price
   change needs no re-index) per UTC hour × home × project (with the job, for a relay clone) × model ×
   speed × token class, each transcript's identity and how far it was read, and a 64-bit hash per
   response counted. Each run reads only what the transcripts gained since, up to their last whole
@@ -1609,7 +1611,7 @@ own process, and owns one output port:
 | quota | account readings and switches | reading, unreadable, signed-out, account-enabled |
 | land | brings branches back; cleans up, and gc | forgotten, collected |
 | devshell | enters the project's development environment once, under a lock, and records it for every session | warming, warmed, warm-failed |
-| view, probe | read-only (`view stats` folds the bus; it writes nothing; `view cost` writes only its index under `$XDG_STATE_HOME/relay/cost`). Showing the accounts may start a quota reading, which quota writes | — |
+| view, probe | read-only (`view stats` folds the bus; it writes nothing; `view cost` writes only its index under `$XDG_STATE_HOME/relay/.machine/cost`). Showing the accounts may start a quota reading, which quota writes | — |
 
 A runner is identified by its pid together with its start time, so a reused
 pid is never mistaken for it or signalled. It starts behind a gate (a pipe on

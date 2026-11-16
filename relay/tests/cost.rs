@@ -62,7 +62,7 @@ fn view_cost_reads_the_transcripts_and_never_runs_claude() {
     assert_eq!(v["unpriced"][0]["tokens"], 10);
     assert_eq!(v["tokens"]["input"], 1_000_007);
     assert!(v["index"]["changed_at"].is_string());
-    assert!(h.join(".local/state/relay/cost/index.bin").is_file(), "the index is machine-wide");
+    assert!(h.join(".local/state/relay/.machine/cost/index.bin").is_file(), "the index is machine-wide");
     let text = run(&["view", "cost", "--by", "week", "--split", "account"]);
     assert!(text.starts_with("API-equivalent cost"), "{text}");
     assert!(text.contains("week of") && text.contains("+ 10 unpriced tokens (models: claude-mystery-1)"), "{text}");
